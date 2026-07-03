@@ -12389,6 +12389,131 @@ fn resolve_tile_bg_token_static_image_override() {
     );
 }
 
+/// hud-991cj regression: a pure scroll (and a steady-state re-render) must
+/// re-shape ZERO text buffers, because `prepare_text_items` now reuses a shaped
+/// `Buffer` keyed by a scroll-invariant `ShapeKey` (content+geometry+font+runs,
+/// NOT offset). A content append re-shapes exactly the one changed item.
+///
+/// This was the flicker source: the output pane is a full-content `Clip` node,
+/// so before the cache every scroll frame rebuilt+shaped the whole transcript
+/// through `shape_until_scroll`. Measured over a small and a ~64KiB transcript
+/// so the win is visible at both sizes. GPU builds the compositor;
+/// `render_frame_headless` is used (no pixel readback → no llvmpipe deadlock).
+#[tokio::test]
+async fn scroll_reshape_bench_hud991cj() {
+    use std::time::Instant;
+    use tze_hud_scene::types::{
+        FontFamily, NodeData, Rect, TextAlign, TextMarkdownNode, TextOverflow,
+    };
+
+    let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+    let line = "The quick brown fox jumps over the lazy dog.\n"; // 45 bytes
+    let white = tze_hud_scene::types::Rgba {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+        a: 1.0,
+    };
+
+    // A small transcript and a ~64KiB transcript (45 B/line × 1440 ≈ 63 KiB, just under MAX_MARKDOWN_BYTES).
+    for (label, repeat) in [("small", 12usize), ("64KiB", 1440usize)] {
+        let content = line.repeat(repeat);
+        let content_bytes = content.len();
+        // Laid out far taller than the 256px tile so the pane is scrollable
+        // (windowed by offset, not truncated).
+        let make_node = |text: String| Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: text,
+                bounds: Rect::new(0.0, 0.0, 240.0, repeat as f32 * 20.0 + 200.0),
+                font_size_px: 14.0,
+                font_family: FontFamily::SystemMonospace,
+                color: white,
+                background: None,
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Clip,
+                color_runs: Box::default(),
+            }),
+        };
+
+        let mut scene = scene_with_node(make_node(content.clone()));
+        let tile_id = *scene.tiles.keys().next().unwrap();
+        scene
+            .register_tile_scroll_config(
+                tile_id,
+                tze_hud_scene::types::TileScrollConfig::vertical(),
+            )
+            .unwrap();
+
+        compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
+
+        // Warm frame establishes the initial shape.
+        let _ = compositor.render_frame_headless(&mut scene, &surface);
+
+        // ── REST: re-render the identical scene; shaped buffer is reused. ──
+        const REST_FRAMES: u64 = 30;
+        let before_rest = compositor.text_shape_call_count();
+        let rest_start = Instant::now();
+        for _ in 0..REST_FRAMES {
+            let _ = compositor.render_frame_headless(&mut scene, &surface);
+        }
+        let rest_elapsed = rest_start.elapsed();
+        let rest_reshapes = compositor.text_shape_call_count() - before_rest;
+
+        // ── SCROLL: bump the offset each frame; shape inputs unchanged. ──
+        const SCROLL_FRAMES: u64 = 30;
+        let before_scroll = compositor.text_shape_call_count();
+        let scroll_start = Instant::now();
+        for i in 1..=SCROLL_FRAMES {
+            scene
+                .set_tile_scroll_offset_local(tile_id, 0.0, i as f32 * 40.0)
+                .unwrap();
+            let _ = compositor.render_frame_headless(&mut scene, &surface);
+        }
+        let scroll_elapsed = scroll_start.elapsed();
+        let scroll_reshapes = compositor.text_shape_call_count() - before_scroll;
+
+        // ── APPEND: change content once → exactly one re-shape (one item). ──
+        let appended = format!("{content}Appended tail line for hud-991cj.\n");
+        scene.set_tile_root(tile_id, make_node(appended)).unwrap();
+        compositor.prime_markdown_cache(&scene);
+        compositor.prime_truncation_cache(&scene);
+        let before_append = compositor.text_shape_call_count();
+        let _ = compositor.render_frame_headless(&mut scene, &surface);
+        let append_reshapes = compositor.text_shape_call_count() - before_append;
+
+        eprintln!(
+            "hud-991cj bench [{label}] bytes={content_bytes} | \
+             rest: {rest_reshapes} reshapes {:.3} ms/frame | \
+             scroll: {scroll_reshapes} reshapes {:.3} ms/frame | \
+             append: {append_reshapes} reshape ({:?} rest, {:?} scroll)",
+            rest_elapsed.as_secs_f64() * 1000.0 / REST_FRAMES as f64,
+            scroll_elapsed.as_secs_f64() * 1000.0 / SCROLL_FRAMES as f64,
+            rest_elapsed,
+            scroll_elapsed,
+        );
+
+        // Steady-state (rest) and pure scroll reuse the shaped buffer: 0 re-shapes.
+        assert_eq!(
+            rest_reshapes, 0,
+            "[{label}] steady-state re-render must reuse shaped buffers (0 re-shapes), got {rest_reshapes}"
+        );
+        assert_eq!(
+            scroll_reshapes, 0,
+            "[{label}] pure scroll must reuse shaped buffers (0 re-shapes), got {scroll_reshapes} over {SCROLL_FRAMES} frames"
+        );
+        // A content change re-shapes exactly the one changed text item.
+        assert_eq!(
+            append_reshapes, 1,
+            "[{label}] a content append must re-shape exactly the one changed item, got {append_reshapes}"
+        );
+    }
+}
+
 /// Token override: `color.tile.background.default` overrides the fallback.
 ///
 /// Uses pure green (#00FF00) — clearly distinct from the default blue-dark.
