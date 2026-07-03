@@ -394,12 +394,12 @@ pub static CANONICAL_TOKENS: &[CanonicalToken] = &[
     CanonicalToken {
         key: "portal.divider.color",
         description: "Transcript turn separator (divider) color (RGBA hex)",
-        default_value: "#2A3344",
+        default_value: "#46536E",
     },
     CanonicalToken {
         key: "portal.divider.thickness_px",
         description: "Transcript turn separator (divider) thickness in pixels",
-        default_value: "1",
+        default_value: "2",
     },
 ];
 

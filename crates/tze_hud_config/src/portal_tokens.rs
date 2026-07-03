@@ -224,7 +224,7 @@ mod defaults {
     /// (like an editor's gutter indicator) without crowding the transcript text.
     pub const LIFECYCLE_ACCENT_WIDTH_PX: &str = "4";
 
-    pub const DIVIDER_COLOR: &str = "#2A3344";
+    pub const DIVIDER_COLOR: &str = "#46536E";
 
     pub const COLLAPSED_BACKGROUND: &str = "#1A1F28";
     pub const COLLAPSED_TEXT_COLOR: &str = "#C8D6E8";
