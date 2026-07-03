@@ -1298,7 +1298,13 @@ fn visible_transcript_markdown(units: &[TranscriptUnit]) -> String {
     let mut result = String::new();
     for (index, unit) in units.iter().enumerate() {
         if index > 0 {
-            result.push('\n');
+            // Turn separator between adjacent transcript entries (hud-nx7yq.4): a
+            // thematic break on its own line, which the compositor renders as a
+            // token-styled divider (`portal.divider.color`). This re-encodes the
+            // `Vec<TranscriptUnit>` boundary — lost in the single-`\n` flatten —
+            // so the history reads as discrete turns. Content-free geometry: under
+            // redaction `units` is emptied upstream, so no separators are emitted.
+            result.push_str("\n---\n");
         }
         result.push_str(clamp_utf8(&unit.output_text, 4_096));
     }
@@ -1929,9 +1935,12 @@ mod tests {
 
         let markdown = visible_transcript_markdown(&units);
 
-        assert!(markdown.starts_with("first\n"));
+        // First entry, then a turn separator, then the clamped second entry.
+        assert!(markdown.starts_with("first\n---\n"));
         assert!(markdown.is_char_boundary(markdown.len()));
-        assert!(markdown.len() <= "first\n".len() + 4_096);
+        // Each unit is still clamped to 4096 bytes; the separator adds a bounded
+        // constant between entries.
+        assert!(markdown.len() <= "first".len() + "\n---\n".len() + 4_096);
     }
 
     // ── §2/§3 disconnect + stale-content treatment ───────────────────────────

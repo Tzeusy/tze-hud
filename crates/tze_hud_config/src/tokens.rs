@@ -388,6 +388,19 @@ pub static CANONICAL_TOKENS: &[CanonicalToken] = &[
         description: "Large corner radius in pixels",
         default_value: "16",
     },
+    // Portal transcript turn separator (hud-nx7yq.4). Consumed by the compositor
+    // markdown path to render a token-styled divider on thematic-break (`---`)
+    // lines between transcript entries.
+    CanonicalToken {
+        key: "portal.divider.color",
+        description: "Transcript turn separator (divider) color (RGBA hex)",
+        default_value: "#2A3344",
+    },
+    CanonicalToken {
+        key: "portal.divider.thickness_px",
+        description: "Transcript turn separator (divider) thickness in pixels",
+        default_value: "1",
+    },
 ];
 
 // ─── Token resolution ─────────────────────────────────────────────────────────
