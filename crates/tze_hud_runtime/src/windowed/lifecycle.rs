@@ -1267,6 +1267,8 @@ impl WinitApp {
             // Broadcast one geometry event per constituent surface of the portal
             // — a resize scales the whole portal as a unit (hud-fb3en), so every
             // member's new bounds must reach adapters/subscribers.
+            let mut member_bounds: Vec<(tze_hud_scene::SceneId, tze_hud_scene::types::Rect)> =
+                Vec::with_capacity(outcome.members.len());
             for member in &outcome.members {
                 dispatch_portal_geometry_event(
                     &self.state.element_repositioned_tx,
@@ -1282,6 +1284,26 @@ impl WinitApp {
                 self.state
                     .portal_projection_driver
                     .push_geometry_snapshot_for_tile(member.tile_id, member.snapshot);
+                let r = member.snapshot.rect;
+                member_bounds.push((
+                    member.tile_id,
+                    tze_hud_scene::types::Rect::new(r.x, r.y, r.width, r.height),
+                ));
+            }
+            // Durably record every member's post-resize geometry as an id-keyed
+            // override (hud-8vejp) so `list_elements` reports has_user_override
+            // for all members — not just the drag-release one — and the override
+            // survives a restart (authoritative at the publish ingress) rather
+            // than relying solely on the transient in-session lock. Only the
+            // final (PointerUp) step carries `persist`; intermediate move steps
+            // set it false so the disk write fires once per gesture, not per
+            // pointer-move frame.
+            if outcome.persist {
+                self.persist_portal_member_overrides(
+                    &member_bounds,
+                    outcome.display_w,
+                    outcome.display_h,
+                );
             }
         }
 

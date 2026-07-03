@@ -202,6 +202,7 @@ pub fn bootstrap_scene_element_store_with_path(
 
     let now_ms = now_wall_ms();
     let changed = reconcile_scene_ids(scene, &mut store, now_ms);
+    relock_tiles_with_durable_override(scene, &store);
     if changed || !existed {
         if let Err(err) = persist_element_store_to_path(&store, &path) {
             tracing::warn!(
@@ -213,6 +214,28 @@ pub fn bootstrap_scene_element_store_with_path(
     }
 
     ElementStoreBootstrap { path, store }
+}
+
+/// Re-establish viewer geometry authority for every tile that loaded with a
+/// durable user geometry override (hud-8vejp).
+///
+/// The `viewer_geometry_locked` set is ephemeral (serde-skip), so a runtime
+/// restart drops it. Without re-locking, an adapter `UpdateTileBounds`
+/// republish after restart could reposition a portal member whose whole-group
+/// resize/move the viewer had already committed — fracturing the group until
+/// the next viewer gesture re-took the lock. The durable per-member override in
+/// the element store is the source of truth for "the viewer owns this member's
+/// geometry", so any tile entry carrying one is re-locked at startup.
+///
+/// Locking a scene id that has no live tile yet is harmless: the lock is a set
+/// membership check consulted by `SceneGraph::update_tile_bounds`, and if a
+/// tile with that id is later reconstructed the authority is already in force.
+fn relock_tiles_with_durable_override(scene: &mut SceneGraph, store: &ElementStore) {
+    for (id, entry) in &store.entries {
+        if entry.element_type == ElementType::Tile && entry.geometry_override.is_some() {
+            scene.lock_viewer_geometry(*id);
+        }
+    }
 }
 
 /// Reconcile persisted IDs with startup-registered zones and widgets.
@@ -624,5 +647,86 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(path);
+    }
+
+    /// hud-8vejp: the `viewer_geometry_locked` set is serde-skip (dropped on
+    /// restart), so bootstrap must re-establish the lock for every tile that
+    /// loaded a durable geometry override — otherwise an adapter republish could
+    /// reposition a portal member post-restart. A tile without an override, and
+    /// a non-Tile entry with one, must not be locked.
+    #[test]
+    fn bootstrap_relocks_tiles_that_load_a_durable_override() {
+        use tze_hud_scene::{Capability, Rect};
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("main", 0).expect("tab");
+        let lease = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let locked_tile = scene
+            .create_tile(tab_id, "agent", lease, Rect::new(0.0, 0.0, 100.0, 80.0), 1)
+            .expect("locked tile");
+        let unlocked_tile = scene
+            .create_tile(
+                tab_id,
+                "agent",
+                lease,
+                Rect::new(200.0, 0.0, 100.0, 80.0),
+                1,
+            )
+            .expect("unlocked tile");
+
+        let override_policy = GeometryPolicy::Relative {
+            x_pct: 0.1,
+            y_pct: 0.1,
+            width_pct: 0.2,
+            height_pct: 0.2,
+        };
+        let mut store = ElementStore::default();
+        store.entries.insert(
+            locked_tile,
+            ElementStoreEntry {
+                element_type: ElementType::Tile,
+                namespace: "portal".to_string(),
+                created_at: 1,
+                last_published_at: 1,
+                geometry_override: Some(override_policy),
+            },
+        );
+        store.entries.insert(
+            unlocked_tile,
+            ElementStoreEntry {
+                element_type: ElementType::Tile,
+                namespace: "portal".to_string(),
+                created_at: 1,
+                last_published_at: 1,
+                geometry_override: None,
+            },
+        );
+        // A non-Tile entry carrying an override must NOT re-lock (widgets/zones
+        // resolve geometry through their registries, not the tile-bounds lock).
+        store.entries.insert(
+            SceneId::new(),
+            ElementStoreEntry {
+                element_type: ElementType::Widget,
+                namespace: "gauge".to_string(),
+                created_at: 1,
+                last_published_at: 1,
+                geometry_override: Some(override_policy),
+            },
+        );
+
+        relock_tiles_with_durable_override(&mut scene, &store);
+
+        assert!(
+            scene.is_viewer_geometry_locked(locked_tile),
+            "a tile loaded with a durable override must be re-locked at startup"
+        );
+        assert!(
+            !scene.is_viewer_geometry_locked(unlocked_tile),
+            "a tile with no override must not be locked"
+        );
     }
 }
