@@ -20,6 +20,7 @@
 //! - `publish_to_element`→ `handle_publish_to_element`
 
 use crate::{error::McpError, types::McpResult};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -36,7 +37,7 @@ use tze_hud_scene::{
 // ─── create_tab ─────────────────────────────────────────────────────────────
 
 /// Parameters for `create_tab`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct CreateTabParams {
     /// Human-readable name for the tab.
     pub name: String,
@@ -94,7 +95,7 @@ pub fn handle_create_tab(params: Value, scene: &mut SceneGraph) -> McpResult<Cre
 // ─── create_tile ────────────────────────────────────────────────────────────
 
 /// Parameters for `create_tile`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct CreateTileParams {
     /// ID of the tab to place the tile in. If omitted, uses the active tab.
     pub tab_id: Option<String>,
@@ -111,7 +112,7 @@ pub struct CreateTileParams {
 }
 
 /// Bounds as a plain JSON sub-object.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct BoundsParams {
     pub x: f32,
     pub y: f32,
@@ -192,7 +193,7 @@ pub fn handle_create_tile(params: Value, scene: &mut SceneGraph) -> McpResult<Cr
 // ─── set_content ─────────────────────────────────────────────────────────────
 
 /// Parameters for `set_content`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetContentParams {
     /// ID of the tile to set content on.
     pub tile_id: String,
@@ -212,7 +213,7 @@ pub struct SetContentParams {
 }
 
 /// RGBA color as individual channels in [0.0, 1.0].
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ColorParams {
     pub r: f32,
     pub g: f32,
@@ -325,7 +326,7 @@ pub fn handle_set_content(params: Value, scene: &mut SceneGraph) -> McpResult<Se
 // ─── dismiss ─────────────────────────────────────────────────────────────────
 
 /// Parameters for `dismiss`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct DismissParams {
     /// ID of the tile to delete. The tile's lease is revoked and the tile
     /// (plus all its nodes) is removed from the scene.
@@ -365,7 +366,7 @@ pub fn handle_dismiss(params: Value, scene: &mut SceneGraph) -> McpResult<Dismis
 // ─── publish_to_zone ─────────────────────────────────────────────────────────
 
 /// Parameters for `publish_to_zone`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct PublishToZoneParams {
     /// Name of the target zone (must exist in the zone registry).
     pub zone_name: String,
@@ -695,7 +696,7 @@ pub fn handle_publish_to_zone(
 // ─── list_zones ──────────────────────────────────────────────────────────────
 
 /// Parameters for `list_zones` — no required fields.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, JsonSchema)]
 pub struct ListZonesParams {}
 
 /// A single zone entry in the list response.
@@ -793,7 +794,7 @@ pub fn handle_list_zones(params: Value, scene: &SceneGraph) -> McpResult<ListZon
 // ─── list_scene ──────────────────────────────────────────────────────────────
 
 /// Parameters for `list_scene` — no required fields.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, JsonSchema)]
 pub struct ListSceneParams {}
 
 /// A single tab entry in the list_scene response.
@@ -854,7 +855,7 @@ pub fn handle_list_scene(params: Value, scene: &SceneGraph) -> McpResult<ListSce
 // ─── list_elements ──────────────────────────────────────────────────────────
 
 /// Parameters for `list_elements`.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, JsonSchema)]
 pub struct ListElementsParams {
     /// Optional namespace prefix filter.
     #[serde(default)]
@@ -1107,7 +1108,7 @@ fn resolve_element_target_by_id(scene: &SceneGraph, element_id: SceneId) -> Opti
 }
 
 /// Parameters for `publish_to_element`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct PublishToElementParams {
     /// Stable element UUID.
     pub element_id: String,
@@ -1346,7 +1347,7 @@ impl WidgetAssetRegistry {
 }
 
 /// Parameters for `register_widget_asset`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct RegisterWidgetAssetParams {
     /// Widget type id to associate with this SVG asset.
     pub widget_type_id: String,
@@ -1531,7 +1532,7 @@ pub fn handle_register_widget_asset(
 }
 
 /// Parameters for `publish_to_widget`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct PublishToWidgetParams {
     /// Widget instance name (instance_id or widget_type_name for single-instance).
     pub widget_name: String,
@@ -1763,7 +1764,7 @@ pub fn handle_publish_to_widget(
 // ─── list_widgets ─────────────────────────────────────────────────────────────
 
 /// Parameters for `list_widgets` — no required fields.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, JsonSchema)]
 pub struct ListWidgetsParams {}
 
 /// A parameter declaration entry in the list_widgets response.
@@ -1937,7 +1938,7 @@ pub fn handle_list_widgets(params: Value, scene: &SceneGraph) -> McpResult<ListW
 // ─── clear_widget ─────────────────────────────────────────────────────────────
 
 /// Parameters for `clear_widget`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ClearWidgetParams {
     /// Widget instance name (addressing key).
     pub widget_name: String,
@@ -2130,7 +2131,7 @@ fn parse_scene_id(s: &str) -> McpResult<SceneId> {
 // ─── inject_composer_paste ────────────────────────────────────────────────────
 
 /// Parameters for `inject_composer_paste`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct InjectComposerPasteParams {
     /// Text to inject into the active composer draft buffer.
     ///
@@ -2186,7 +2187,7 @@ pub fn handle_inject_composer_paste(
 // ─── portal_projection_attach ────────────────────────────────────────────────
 
 /// Parameters for `portal_projection_attach`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionAttachParams {
     /// Caller-assigned identifier for this projection session (max 128 bytes).
     ///
@@ -2305,7 +2306,7 @@ pub async fn handle_portal_projection_attach(
 // ─── portal_projection_publish ───────────────────────────────────────────────
 
 /// Parameters for `portal_projection_publish`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionPublishParams {
     /// Projection identifier from a prior `portal_projection_attach` call.
     pub projection_id: String,
@@ -2428,7 +2429,7 @@ pub async fn handle_portal_projection_publish(
 // ─── portal_projection_publish_status ────────────────────────────────────────
 
 /// Parameters for `portal_projection_publish_status`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionPublishStatusParams {
     /// Projection identifier from a prior `portal_projection_attach` call.
     pub projection_id: String,
@@ -2544,7 +2545,7 @@ pub async fn handle_portal_projection_publish_status(
 // ─── portal_projection_get_pending_input ─────────────────────────────────────
 
 /// Parameters for `portal_projection_get_pending_input`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionGetPendingInputParams {
     /// Projection identifier from a prior `portal_projection_attach` call.
     pub projection_id: String,
@@ -2683,7 +2684,7 @@ pub async fn handle_portal_projection_get_pending_input(
 // ─── portal_projection_acknowledge_input ─────────────────────────────────────
 
 /// Parameters for `portal_projection_acknowledge_input`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionAcknowledgeInputParams {
     /// Projection identifier from a prior `portal_projection_attach` call.
     pub projection_id: String,
@@ -2789,7 +2790,7 @@ pub async fn handle_portal_projection_acknowledge_input(
 // ─── portal_projection_detach ────────────────────────────────────────────────
 
 /// Parameters for `portal_projection_detach`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionDetachParams {
     /// Projection identifier from a prior `portal_projection_attach` call.
     pub projection_id: String,
@@ -2875,7 +2876,7 @@ pub async fn handle_portal_projection_detach(
 // ─── portal_projection_cleanup ───────────────────────────────────────────────
 
 /// Parameters for `portal_projection_cleanup`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionCleanupParams {
     /// Projection identifier from a prior `portal_projection_attach` call.
     pub projection_id: String,
