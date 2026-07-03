@@ -342,6 +342,7 @@ fn ensure_entry(
                     namespace,
                     created_at: now_ms,
                     last_published_at: now_ms,
+                    z_order: 0,
                     geometry_override: None,
                 },
             );
@@ -461,6 +462,7 @@ mod tests {
                 namespace: "subtitle".to_string(),
                 created_at: now,
                 last_published_at: now,
+                z_order: 0,
                 geometry_override: None,
             },
         );
@@ -471,6 +473,7 @@ mod tests {
                 namespace: "gauge-main".to_string(),
                 created_at: now + 1,
                 last_published_at: now + 1,
+                z_order: 0,
                 geometry_override: Some(GeometryPolicy::Relative {
                     x_pct: 0.1,
                     y_pct: 0.2,
@@ -516,6 +519,7 @@ mod tests {
                 namespace: "agent.weather".to_string(),
                 created_at: 7,
                 last_published_at: 8,
+                z_order: 0,
                 geometry_override: None,
             },
         );
@@ -598,6 +602,7 @@ mod tests {
                 namespace: "subtitle".to_string(),
                 created_at: 100,
                 last_published_at: 200,
+                z_order: 0,
                 geometry_override: None,
             },
         );
@@ -608,6 +613,7 @@ mod tests {
                 namespace: "gauge-main".to_string(),
                 created_at: 100,
                 last_published_at: 200,
+                z_order: 0,
                 geometry_override: None,
             },
         );
@@ -692,6 +698,7 @@ mod tests {
                 namespace: "portal".to_string(),
                 created_at: 1,
                 last_published_at: 1,
+                z_order: 0,
                 geometry_override: Some(override_policy),
             },
         );
@@ -702,6 +709,7 @@ mod tests {
                 namespace: "portal".to_string(),
                 created_at: 1,
                 last_published_at: 1,
+                z_order: 0,
                 geometry_override: None,
             },
         );
@@ -714,6 +722,7 @@ mod tests {
                 namespace: "gauge".to_string(),
                 created_at: 1,
                 last_published_at: 1,
+                z_order: 0,
                 geometry_override: Some(override_policy),
             },
         );
