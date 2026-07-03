@@ -20,7 +20,7 @@ use super::token_colors::{
     NOTIFICATION_DISMISS_FONT_SIZE_PX, NOTIFICATION_DISMISS_FONT_WEIGHT,
     NOTIFICATION_DISMISS_GAP_PX, NOTIFICATION_ICON_GAP_PX, NOTIFICATION_ICON_SIZE_PX,
     NOTIFICATION_INTER_LINE_GAP, NOTIFICATION_TITLE_WEIGHT, is_alert_banner_zone,
-    notification_dismiss_bounds, resolve_composer_overlay_tokens,
+    notification_dismiss_bounds, resolve_composer_overlay_tokens, resolve_viewer_echo_tokens,
 };
 
 /// Default line-height multiplier (`font_size_px × 1.4 = line_height_px`).
@@ -1001,6 +1001,24 @@ impl super::Compositor {
                     // Only the first matching tile renders the composer (focus is exclusive).
                     break;
                 }
+            }
+        }
+
+        // ── Viewer reply echo (hud-nx7yq.3) ──────────────────────────────────
+        // Inject kind-distinct viewer history lines above the composer strip for
+        // any portal tile with retained runtime-authored echoes. Unlike the
+        // composer (single focused tile), echoes may exist on multiple tiles, so
+        // every visible tile is checked. No-op when the store is empty.
+        if !self.viewer_echoes.is_empty() {
+            let viewer_tokens = resolve_viewer_echo_tokens(&self.token_map);
+            for tile in &Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene) {
+                items.extend(self.collect_viewer_echo_text_items(
+                    tile,
+                    scene,
+                    sw,
+                    sh,
+                    &viewer_tokens,
+                ));
             }
         }
 

@@ -834,6 +834,113 @@ impl Compositor {
         })
     }
 
+    /// Depth-first search for the first composer-input `HitRegionNode` reachable
+    /// from the tile root (a `HitRegionNode` with `accepts_composer_input`).
+    ///
+    /// Used to place the viewer reply echo relative to the composer even when no
+    /// draft is active (post-submit `local_composer` is `None`), so history lines
+    /// can render above the composer strip.
+    fn find_composer_node_in_tile(tile: &Tile, scene: &SceneGraph) -> Option<SceneId> {
+        fn dfs(node_id: SceneId, scene: &SceneGraph) -> Option<SceneId> {
+            let node = scene.nodes.get(&node_id)?;
+            if let NodeData::HitRegion(hr) = &node.data {
+                if hr.accepts_composer_input {
+                    return Some(node_id);
+                }
+            }
+            for child in &node.children {
+                if let Some(found) = dfs(*child, scene) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        dfs(tile.root_node?, scene)
+    }
+
+    /// Collect kind-distinct `TextItem`s for the runtime-authored viewer reply
+    /// echo (hud-nx7yq.3), stacked upward from just above the composer input
+    /// strip — newest reply nearest the composer.
+    ///
+    /// Returns an empty vec when the tile has no retained viewer echoes, no
+    /// composer node to anchor to, or the text rasterizer is unavailable. Lines
+    /// that would land above the composer region are dropped (bounded window).
+    /// Each line fades with the tile's effective opacity so the echo redacts /
+    /// hides in lockstep with the surface it belongs to.
+    pub(super) fn collect_viewer_echo_text_items(
+        &self,
+        tile: &Tile,
+        scene: &SceneGraph,
+        sw: f32,
+        sh: f32,
+        tokens: &super::token_colors::ViewerEchoTokens,
+    ) -> Vec<crate::text::TextItem> {
+        let _ = (sw, sh); // retained for API symmetry with sibling collect helpers
+        let mut items = Vec::new();
+        let Some(entries) = self.viewer_echoes.entries_for(tile.id) else {
+            return items;
+        };
+        if self.text_rasterizer.is_none() {
+            return items;
+        }
+        let Some(composer_node) = Self::find_composer_node_in_tile(tile, scene) else {
+            return items;
+        };
+        let Some(region) = Self::composer_region_bounds(tile, scene, composer_node) else {
+            return items;
+        };
+
+        let line_height_multiplier =
+            crate::markdown::MarkdownTokens::default().line_height_multiplier;
+        // Anchor history to the single-line composer input box position (the
+        // post-submit resting height); viewer lines stack upward from its top.
+        let strip =
+            Self::composer_input_box(region, tokens.font_size_px, line_height_multiplier, 1.0);
+        let line_h = (tokens.font_size_px * line_height_multiplier).max(1.0);
+        let margin = COMPOSER_TEXT_MARGIN;
+        let opacity = self.tile_effective_opacity(tile, scene);
+
+        // The band available for history: from the region top down to the strip.
+        let band_top = region.y;
+
+        // Newest entry nearest the strip (bottom), older entries stacked above.
+        for (i, entry) in entries.iter().rev().enumerate() {
+            let line_top = strip.y - (i as f32 + 1.0) * line_h;
+            if line_top < band_top {
+                // Above the composer region — outside the bounded window.
+                break;
+            }
+            items.push(crate::text::TextItem {
+                text: Arc::from(entry.text.as_str()),
+                pixel_x: region.x + margin,
+                pixel_y: line_top,
+                // A wide layout width keeps each reply on a single line; the clip
+                // below confines it to the region interior so overflow is clipped
+                // at the box edge rather than wrapping onto a second row.
+                bounds_width: 100_000.0,
+                bounds_height: line_h,
+                clip_pixel_x: region.x + margin,
+                clip_pixel_y: line_top,
+                clip_bounds_width: (region.width - margin * 2.0).max(1.0),
+                clip_bounds_height: line_h,
+                font_size_px: tokens.font_size_px,
+                font_family: tze_hud_scene::types::FontFamily::SystemSansSerif,
+                font_weight: 400,
+                color: tokens.color,
+                alignment: tze_hud_scene::types::TextAlign::Start,
+                overflow: tze_hud_scene::types::TextOverflow::Clip,
+                outline_color: None,
+                outline_width: None,
+                opacity,
+                color_runs: Box::new([]),
+                styled_runs: Box::new([]),
+                line_height_multiplier,
+                viewport: crate::overflow::TruncationViewport::HeadAnchored,
+            });
+        }
+        items
+    }
+
     /// Render a node and its children within a tile.
     // Lint suppressed deliberately: `render_node` is a recursive tree walk.
     // `too_many_arguments` — the args are the node id plus the four distinct

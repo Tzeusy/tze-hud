@@ -332,6 +332,80 @@ async fn test_focused_hit_region_emits_focus_ring_in_overlay_mode() {
     }
 }
 
+/// hud-nx7yq.3: a runtime-authored viewer echo entry must render as a
+/// kind-distinct text line above the composer strip on a raw-tile portal. This
+/// is the compositor half of the "submitted text bubbles into the transcript"
+/// fix — draw-list-level (no pixel readback) so it is deadlock-safe.
+#[tokio::test]
+async fn test_viewer_echo_renders_kind_distinct_line_above_composer() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(400, 300).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+    // Portal tile rooted at a composer-input HitRegion spanning the tile, so
+    // there is room above the bottom input strip for history lines.
+    let mut scene = SceneGraph::new(400.0, 300.0);
+    let tab_id = scene.create_tab("agent", 0).unwrap();
+    let lease_id = scene.grant_lease("agent", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "agent",
+            lease_id,
+            Rect::new(0.0, 0.0, 400.0, 300.0),
+            1,
+        )
+        .unwrap();
+    let composer_id = SceneId::new();
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: composer_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+                    interaction_id: "portal-composer".to_owned(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    accepts_composer_input: true,
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap();
+
+    // No echoes yet → no viewer-echo text items.
+    let before = compositor.collect_text_items(&scene, 400.0, 300.0);
+    assert!(
+        !before.iter().any(|t| &*t.text == "hello there"),
+        "no viewer echo should render before any submission"
+    );
+
+    // Runtime authored a viewer reply (as append_raw_tile_viewer_echo does).
+    compositor
+        .viewer_echoes
+        .append(tile_id, "hello there".to_owned(), 1);
+
+    let after = compositor.collect_text_items(&scene, 400.0, 300.0);
+    let echo = after
+        .iter()
+        .find(|t| &*t.text == "hello there")
+        .expect("viewer echo line must render after a submission");
+
+    // Kind-distinct: carries the token-driven viewer color (default accent blue),
+    // not the near-white transcript text color.
+    assert_eq!(
+        echo.color,
+        [0x8A, 0xB4, 0xF8, 0xFF],
+        "viewer echo must use the kind-distinct viewer token color"
+    );
+    // Positioned above the bottom input strip (upper portion of the tile).
+    assert!(
+        echo.pixel_y < 300.0,
+        "viewer echo line must sit within the tile above the composer strip"
+    );
+}
+
 // ── Chrome layer pixel tests ──────────────────────────────────────────────
 
 /// Layer 1 pixel test: chrome layer is always visible above max-z-order agent tile.

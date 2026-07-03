@@ -39,6 +39,14 @@ impl Compositor {
         telemetry.node_count = scene.node_count() as u32;
         telemetry.active_leases = scene.leases.len() as u32;
 
+        // Runtime-authored viewer reply echoes (hud-nx7yq.3): drain any pending
+        // submit-time appends into the per-tile store and prune echoes for tiles
+        // that no longer exist, before the text pass reads them.
+        let queue = std::sync::Arc::clone(&self.viewer_echo_queue);
+        self.viewer_echoes.drain_queue(&queue);
+        self.viewer_echoes
+            .retain_tiles(|tile_id| scene.tiles.contains_key(&tile_id));
+
         let mut vertices: Vec<RectVertex> = Vec::new();
         let mut textured_cmds: Vec<TexturedDrawCmd> = Vec::new();
 
