@@ -87,7 +87,8 @@ fn build_activated_processor(element_id: SceneId) -> InputProcessor {
         DragHandleElementKind::Tile,
         cx,
         cy,
-        1, // 1ms threshold
+        1,     // 1ms threshold
+        false, // immediate (hud-cpjqe): legacy grip long-press path
     );
     // Manually advance phase to Activated so we can immediately produce Moved/Released.
     state.phase = DragPhase::Activated;
@@ -119,6 +120,7 @@ fn drag_to_then_release(
         element_bounds(),
         DISPLAY_W,
         DISPLAY_H,
+        false, // is_header_band (hud-cpjqe): legacy grip path, long-press
     );
 
     // Release
@@ -130,6 +132,7 @@ fn drag_to_then_release(
         element_bounds(),
         DISPLAY_W,
         DISPLAY_H,
+        false, // is_header_band (hud-cpjqe): legacy grip path, long-press
     );
 
     match released {
