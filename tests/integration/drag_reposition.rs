@@ -464,6 +464,7 @@ fn full_drag_flow_persists_geometry_on_release() {
             namespace: "test-tile".to_string(),
             created_at: 0,
             last_published_at: 0,
+            z_order: 0,
             geometry_override: None,
         },
     );
@@ -659,6 +660,7 @@ async fn setup_service_with_tile_override(
                 namespace: "test-agent".to_string(),
                 created_at: 1000,
                 last_published_at: 2000,
+                z_order: 0,
                 geometry_override: Some(override_policy),
             },
         );
@@ -779,6 +781,7 @@ async fn reset_succeeds_with_no_active_sessions() {
                 namespace: "test-agent".to_string(),
                 created_at: 1000,
                 last_published_at: 2000,
+                z_order: 0,
                 geometry_override: Some(GeometryPolicy::Relative {
                     x_pct: 0.1,
                     y_pct: 0.1,

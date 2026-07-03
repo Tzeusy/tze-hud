@@ -173,6 +173,7 @@ fn cross_session_persistence_preserves_user_geometry_override() {
             namespace: tile_namespace.to_string(),
             created_at: 1_000,
             last_published_at: 2_000,
+            z_order: 0,
             geometry_override: None,
         },
     );
@@ -306,6 +307,7 @@ fn element_discovery_by_namespace_returns_correct_scene_id_with_override_preserv
             namespace: tile_namespace.to_string(),
             created_at: 5_000,
             last_published_at: 6_000,
+            z_order: 0,
             geometry_override: Some(user_override),
         },
     );
@@ -319,6 +321,7 @@ fn element_discovery_by_namespace_returns_correct_scene_id_with_override_preserv
             namespace: "other-agent-tile".to_string(),
             created_at: 5_001,
             last_published_at: 6_001,
+            z_order: 0,
             geometry_override: None,
         },
     );
@@ -395,6 +398,7 @@ fn reset_position_clears_user_override_and_restores_agent_bounds() {
             namespace: tile_namespace.to_string(),
             created_at: 1_000,
             last_published_at: 2_000,
+            z_order: 0,
             geometry_override: Some(user_override),
         },
     );
@@ -487,6 +491,7 @@ fn zone_reset_falls_back_to_config_override_not_default_policy() {
             namespace: "zone-with-config-override".to_string(),
             created_at: 1_000,
             last_published_at: 2_000,
+            z_order: 0,
             geometry_override: Some(user_drag_override),
         },
     );
@@ -574,6 +579,7 @@ fn display_resolution_change_preserves_relative_center_position() {
             namespace: "resolution-test-tile".to_string(),
             created_at: 1,
             last_published_at: 1,
+            z_order: 0,
             geometry_override: None,
         },
     );

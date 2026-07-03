@@ -4251,6 +4251,7 @@ mod tests {
                     namespace: namespace.to_string(),
                     created_at: 1,
                     last_published_at: 1,
+                    z_order: 0,
                     geometry_override: None,
                 },
             );

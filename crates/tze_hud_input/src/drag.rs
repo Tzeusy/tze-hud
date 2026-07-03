@@ -513,6 +513,7 @@ mod tests {
                 namespace: "my-tile".to_string(),
                 created_at: 0,
                 last_published_at: 0,
+                z_order: 0,
                 geometry_override: None,
             },
         );

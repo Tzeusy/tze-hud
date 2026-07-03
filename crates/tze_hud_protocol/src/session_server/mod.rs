@@ -198,17 +198,25 @@ pub(super) async fn persist_created_tile_entries(
         return None;
     }
 
-    let created_tiles: Vec<(SceneId, String)> = {
+    // `(id, namespace, z_order)` for each just-created tile, plus the ids of
+    // every tile currently live in the scene (needed to tell a recreated portal
+    // member's orphaned entry from a still-live sibling's — hud-08nls).
+    let (created_tiles, live_ids): (
+        Vec<(SceneId, String, u32)>,
+        std::collections::HashSet<SceneId>,
+    ) = {
         let scene = st.scene.lock().await;
-        created_ids
+        let created = created_ids
             .iter()
             .filter_map(|id| {
                 scene
                     .tiles
                     .get(id)
-                    .map(|tile| (*id, tile.namespace.clone()))
+                    .map(|tile| (*id, tile.namespace.clone(), tile.z_order))
             })
-            .collect()
+            .collect();
+        let live = scene.tiles.keys().copied().collect();
+        (created, live)
     };
 
     if created_tiles.is_empty() {
@@ -217,7 +225,17 @@ pub(super) async fn persist_created_tile_entries(
 
     let now = now_ms();
     let mut changed = false;
-    for (id, namespace) in created_tiles {
+    let recreated: Vec<tze_hud_scene::element_store::RecreatedTile> = created_tiles
+        .iter()
+        .map(
+            |(id, namespace, z_order)| tze_hud_scene::element_store::RecreatedTile {
+                id: *id,
+                namespace: namespace.clone(),
+                z_order: *z_order,
+            },
+        )
+        .collect();
+    for (id, namespace, z_order) in created_tiles {
         match st.element_store.entries.get_mut(&id) {
             Some(entry) => {
                 if entry.element_type != ElementType::Tile {
@@ -226,6 +244,10 @@ pub(super) async fn persist_created_tile_entries(
                 }
                 if entry.namespace != namespace {
                     entry.namespace = namespace;
+                    changed = true;
+                }
+                if entry.z_order != z_order {
+                    entry.z_order = z_order;
                     changed = true;
                 }
                 if entry.created_at == 0 {
@@ -249,11 +271,29 @@ pub(super) async fn persist_created_tile_entries(
                         namespace,
                         created_at: now,
                         last_published_at: now,
+                        z_order,
                         geometry_override: None,
                     },
                 );
                 changed = true;
             }
+        }
+    }
+
+    // Re-home any durable override whose portal member tile was recreated with a
+    // fresh SceneId (the entries were just inserted above with no override; a
+    // matching orphan hands its override over here). Re-lock viewer geometry for
+    // each adopter so a subsequent adapter `UpdateTileBounds` republish cannot
+    // reposition it before the viewer touches it again (mirrors the bootstrap
+    // re-lock in `tze_hud_runtime::element_store`).
+    let adopted = st
+        .element_store
+        .adopt_orphaned_tile_overrides(&recreated, &live_ids);
+    if !adopted.is_empty() {
+        changed = true;
+        let mut scene = st.scene.lock().await;
+        for id in &adopted {
+            scene.lock_viewer_geometry(*id);
         }
     }
 
