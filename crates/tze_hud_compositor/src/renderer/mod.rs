@@ -358,6 +358,14 @@ pub struct Compositor {
     /// otherwise. The runtime clones this `Arc` at init and reads it on the main
     /// thread before dispatching ArrowUp/ArrowDown.
     pub composer_visual_layout: image_cache::ComposerVisualLayoutHandle,
+    /// Per-tile total WRAPPED visual-line count of the joined viewer-echo history,
+    /// measured once per frame in `prime_viewer_echo_layout` (hud-pncm3).
+    ///
+    /// Wrapping needs the `&mut` text rasterizer (font metrics), so it is measured
+    /// in the per-frame prime and read by the `&self` `collect_viewer_echo_text_items`
+    /// to bottom-align the history block above the live composer box. Absent =>
+    /// the collect path falls back to the logical (`\n`-split) line count.
+    pub(crate) viewer_echo_line_counts: HashMap<SceneId, usize>,
     /// Most-recently drained local composer state for this frame.
     ///
     /// Populated by draining `local_composer_state` at frame start.
@@ -561,6 +569,7 @@ impl Compositor {
             viewer_echo_queue: Arc::new(StdMutex::new(Vec::new())),
             viewer_echoes: viewer_echo::ViewerEchoStore::new(),
             composer_visual_layout: Arc::new(StdMutex::new(None)),
+            viewer_echo_line_counts: HashMap::new(),
             local_composer: None,
             composer_caret_blink_start: std::time::Instant::now(),
             composer_layout: image_cache::ComposerLayout::default(),
@@ -844,6 +853,7 @@ impl Compositor {
             viewer_echo_queue: Arc::new(StdMutex::new(Vec::new())),
             viewer_echoes: viewer_echo::ViewerEchoStore::new(),
             composer_visual_layout: Arc::new(StdMutex::new(None)),
+            viewer_echo_line_counts: HashMap::new(),
             local_composer: None,
             composer_caret_blink_start: std::time::Instant::now(),
             composer_layout: image_cache::ComposerLayout::default(),
@@ -1729,6 +1739,9 @@ impl Compositor {
         // (mutable rasterizer borrow), which the immutable collect path below
         // cannot do.  No-op when no composer is active.
         self.prime_composer_scroll_offset(scene);
+        // Measure the viewer-echo history wrap once per frame, before the
+        // text pass reads the line count for bottom-alignment (hud-pncm3).
+        self.prime_viewer_echo_layout(scene);
         // Collect text items before borrowing the rasterizer mutably, to avoid
         // simultaneous mutable + immutable borrow of `self`.
         let has_text_rasterizer = self.text_rasterizer.is_some();
