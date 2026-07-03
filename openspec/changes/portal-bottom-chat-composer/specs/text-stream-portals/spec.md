@@ -79,3 +79,40 @@ Scope: v1
 - **WHEN** the portal's transcript is redacted for the current viewer
 - **THEN** entry separation MAY remain visible as geometry
 - **AND** the separators SHALL NOT reveal entry content or counts beyond what the redaction policy permits
+
+## MODIFIED Requirements
+
+### Requirement: Phase-1 Markdown Rendering Subset
+
+Text stream portal surfaces SHALL render a defined CommonMark subset for transcript content: ATX headings (levels 1–6), strong emphasis, emphasis, inline code, fenced and indented code blocks, ordered and unordered lists (including nesting), links rendered as styled non-navigable text, and thematic breaks rendered as a token-styled horizontal divider. All subset styling (heading scale, emphasis weight/style, code font family and background, list indentation, link treatment, divider color and thickness) MUST resolve from design tokens rather than hardcoded values. The thematic-break divider treatment is shared with the Transcript Turn Separators requirement: the runtime encodes entry boundaries as thematic breaks when lowering the retained transcript, so adapter-authored thematic breaks and runtime-authored entry separators render with the same token-styled divider — an adapter can draw a divider line but MUST NOT thereby gain any additional semantics (a divider is content-free geometry and never implies a viewer turn, attention change, or attribution). Constructs outside the subset — tables, images, raw HTML, blockquotes, footnotes, strikethrough, task lists, and autolinks — MUST NOT be parsed in Phase 1 and SHALL render as literal source text rather than being silently dropped. Link destinations MUST NOT be navigable, fetched, or previewed; only the link text is styled. Rendered markdown content remains subject to the existing bounded-viewport, node-size, and per-tile resource budget rules.
+
+Source: RFC 0001 §TextMarkdownNode, RFC 0013 §3.4, `about/heart-and-soul/vision.md` (visual identity is modular), PR #994 (thematic-break divider, hud-nx7yq.4)
+
+#### Scenario: subset constructs render with token-driven styling
+
+- **WHEN** a portal transcript update contains a heading, bold and italic spans, inline code, a fenced code block, a nested list, and a link
+- **THEN** each construct SHALL render with the visual treatment resolved from the active design tokens
+- **AND** no construct's color, font, size, or background SHALL come from a hardcoded compositor value
+
+#### Scenario: thematic break renders as a token-styled divider
+
+- **WHEN** a portal transcript contains a thematic break line (for example `---`), whether authored by the adapter or inserted by the runtime as an entry separator
+- **THEN** the surface SHALL render a horizontal divider whose color and thickness resolve from the divider design tokens
+- **AND** the divider SHALL carry no semantics beyond visual separation
+
+#### Scenario: excluded constructs degrade to literal text
+
+- **WHEN** a portal transcript update contains a markdown table, an image reference, or raw HTML
+- **THEN** the surface SHALL render the construct's literal source text
+- **AND** no transcript content SHALL be silently dropped
+
+#### Scenario: links are styled text only
+
+- **WHEN** a transcript update contains `[release notes](https://example.com)`
+- **THEN** the link text SHALL render with the token-defined link treatment
+- **AND** activating, hovering, or rendering the link SHALL NOT trigger navigation, fetching, or preview of the destination
+
+#### Scenario: markdown rendering respects node budgets
+
+- **WHEN** a markdown-heavy transcript window is rendered into scene nodes
+- **THEN** the materialized content SHALL stay within the existing text-node size limits and per-tile resource budgets required by the Bounded Transcript Viewport requirement
