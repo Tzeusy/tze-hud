@@ -65,6 +65,7 @@ impl Compositor {
                     interaction_id: entry.interaction_id,
                     hit_region,
                     tab_order,
+                    is_header_band: entry.is_header_band,
                 });
         }
 

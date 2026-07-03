@@ -147,6 +147,7 @@ pub(super) fn scene_with_drag_handle_tile(
                 ..Default::default()
             },
             tab_order: 0,
+            is_header_band: false,
         });
 
     (scene, tile_id, element_id, interaction_id)

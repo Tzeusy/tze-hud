@@ -1682,6 +1682,20 @@ pub enum DragHandleGripPattern {
     None,
 }
 
+/// Design token key for the portal header-band drag-handle height (hud-643dv).
+///
+/// The runtime resolves this from the display token map; when absent the
+/// compositor falls back to [`PORTAL_HEADER_DRAG_BAND_PX_DEFAULT`]. Operators can
+/// override it to make the draggable titlebar band taller/shorter without a code
+/// change (CLAUDE.md "never hardcode visual properties in the compositor").
+pub const PORTAL_HEADER_DRAG_BAND_TOKEN: &str = "portal.header.drag_band_px";
+
+/// Fallback height (px) of the portal header drag band when the
+/// [`PORTAL_HEADER_DRAG_BAND_TOKEN`] token is not set. Chosen to match the
+/// exemplar's header strip height so the invisible drag band lines up with the
+/// visible header chrome.
+pub const PORTAL_HEADER_DRAG_BAND_PX_DEFAULT: f32 = 52.0;
+
 /// Design-token bundle for runtime drag handle visuals.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DragHandleStyle {
@@ -2057,6 +2071,16 @@ pub struct DragHandleHitRegion {
     pub hit_region: HitRegionNode,
     /// Stable tab-order index across all drag handles.
     pub tab_order: u32,
+    /// When `true`, this is a portal **header-band** drag handle (the whole top
+    /// header strip of a portal frame, Windows-titlebar style) rather than the
+    /// legacy small centered grip.  A band spans a large area that legitimately
+    /// overlaps interactive controls (e.g. the minimize button), so — unlike the
+    /// grip — it yields to any `accepts_pointer` HitRegionNode under the point:
+    /// the band drags empty header space but a control on the band still wins
+    /// (hud-643dv).  Legacy grips leave this `false` and keep their original
+    /// chrome-priority precedence.
+    #[serde(default)]
+    pub is_header_band: bool,
 }
 
 /// Local-first hover/press state for chrome drag handles.

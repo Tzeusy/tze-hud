@@ -395,6 +395,105 @@ class ComposerInputModeRoutingTests(unittest.TestCase):
         )
 
 
+class HeaderDragBandTests(unittest.TestCase):
+    """Full-width titlebar drag band (hud-643dv).
+
+    Owner direction: the whole top header band should drag the portal like a
+    Windows titlebar, minus the minimize control. Whole-portal MOVE is owned by
+    the runtime (screen-sovereignty): the runtime generates a geometry-driven
+    header-BAND drag handle for the portal frame tile, and — because a runtime
+    drag handle is hit-tested before node hit-regions — that band yields to any
+    interactive (accepts_pointer) node under the point so the minimize button
+    still wins inside its own bounds.
+
+    These pin the EXEMPLAR-side invariants the runtime band relies on:
+      * the header drag node is a full-width semantic marker of the band, and
+      * it is inert (accepts_pointer=False) so it neither drives movement nor
+        shadows the minimize control (which would be caught by the band's
+        yield-to-interactive-node rule and break the drag), while
+      * the minimize control stays pointer-interactive so the band yields to it.
+    """
+
+    @staticmethod
+    def _collect_hit_regions(children):
+        regions = {}
+        for node in children:
+            if node.HasField("hit_region"):
+                regions.setdefault(node.hit_region.interaction_id, []).append(
+                    node.hit_region
+                )
+        return regions
+
+    def test_header_drag_marker_spans_full_header_width(self) -> None:
+        _root, children = portal.build_portal_nodes(
+            "title", "subtitle", "body", "footer",
+        )
+        regions = self._collect_hit_regions(children)
+        self.assertIn(portal.PORTAL_DRAG_INTERACTION_ID, regions)
+        drag = regions[portal.PORTAL_DRAG_INTERACTION_ID][0]
+        # Full top band: origin at the top-left corner, spanning the whole portal
+        # width and the header height — not the old x=MINIMIZE_HIT_W carve-out.
+        self.assertEqual(drag.bounds.x, 0.0, "drag band must start at the left edge")
+        self.assertEqual(drag.bounds.y, 0.0, "drag band must start at the top edge")
+        self.assertEqual(
+            drag.bounds.width, portal.PORTAL_W,
+            "drag band must span the FULL portal width (Windows-titlebar band)",
+        )
+        self.assertEqual(
+            drag.bounds.height, portal.HEADER_H,
+            "drag band height must be the header layout constant, not a new magic value",
+        )
+
+    def test_header_drag_marker_is_inert_not_a_pointer_target(self) -> None:
+        _root, children = portal.build_portal_nodes(
+            "title", "subtitle", "body", "footer",
+        )
+        regions = self._collect_hit_regions(children)
+        for hit in regions[portal.PORTAL_DRAG_INTERACTION_ID]:
+            # Movement is owned by the runtime header-band handle, so this node
+            # must NOT claim the pointer: an accepts_pointer node here would
+            # shadow the minimize control and be swallowed by the runtime band's
+            # yield-to-interactive rule, breaking both drag and minimize.
+            self.assertFalse(
+                hit.accepts_pointer,
+                "the header drag marker must be inert (accepts_pointer=False); the "
+                "runtime band owns movement (hud-643dv)",
+            )
+            # Still pointer-only chrome — never a keyboard Tab stop.
+            self.assertFalse(
+                hit.accepts_focus,
+                "the header drag marker must not be a Tab stop",
+            )
+
+    def test_minimize_control_beats_the_band(self) -> None:
+        _root, children = portal.build_portal_nodes(
+            "title", "subtitle", "body", "footer",
+        )
+        regions = self._collect_hit_regions(children)
+        # The minimize control must stay pointer-interactive AND focusable so the
+        # runtime band yields to it (pointer) and a keyboard viewer can reach it.
+        self.assertIn(portal.PORTAL_MINIMIZE_INTERACTION_ID, regions)
+        for hit in regions[portal.PORTAL_MINIMIZE_INTERACTION_ID]:
+            self.assertTrue(
+                hit.accepts_pointer,
+                "minimize must remain a pointer target so the drag band yields to it",
+            )
+            self.assertTrue(
+                hit.accepts_focus,
+                "minimize stays a Tab stop (unchanged by the band)",
+            )
+        # And the minimize hit-rect lies within the full-width band, so the two
+        # genuinely overlap and precedence (not geometry) is what protects it.
+        minimize = regions[portal.PORTAL_MINIMIZE_INTERACTION_ID][0]
+        drag = regions[portal.PORTAL_DRAG_INTERACTION_ID][0]
+        self.assertGreaterEqual(minimize.bounds.x, drag.bounds.x)
+        self.assertLessEqual(
+            minimize.bounds.x + minimize.bounds.width,
+            drag.bounds.x + drag.bounds.width,
+            "minimize must sit inside the full-width band (real overlap)",
+        )
+
+
 class PortalFocusTraversalRingTests(unittest.TestCase):
     """Tab/Shift+Tab focus-traversal stops for the portal (hud-02sp5).
 
