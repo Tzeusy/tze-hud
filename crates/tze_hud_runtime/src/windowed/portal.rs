@@ -92,7 +92,7 @@ pub(super) fn apply_drag_handle_pointer_event(
     let device_id = pointer_event.device_id;
 
     // Determine which drag handle (if any) was hit on this event.
-    let hit_drag_info: Option<(&str, tze_hud_scene::SceneId, DragHandleElementKind)> =
+    let hit_drag_info: Option<(&str, tze_hud_scene::SceneId, DragHandleElementKind, bool)> =
         match result_hit {
             HitResult::ZoneInteraction {
                 interaction_id,
@@ -100,15 +100,21 @@ pub(super) fn apply_drag_handle_pointer_event(
                     ZoneInteractionKind::DragHandle {
                         element_id,
                         element_kind,
+                        is_header_band,
                     },
                 ..
-            } => Some((interaction_id.as_str(), *element_id, *element_kind)),
+            } => Some((
+                interaction_id.as_str(),
+                *element_id,
+                *element_kind,
+                *is_header_band,
+            )),
             _ => None,
         };
 
     // On PointerDown on a drag handle, start accumulating.
     if pointer_event.kind == PointerEventKind::Down {
-        if let Some((interaction_id, element_id, element_kind)) = hit_drag_info {
+        if let Some((interaction_id, element_id, element_kind, is_header_band)) = hit_drag_info {
             let element_bounds = scene
                 .tiles
                 .get(&element_id)
@@ -122,6 +128,7 @@ pub(super) fn apply_drag_handle_pointer_event(
                 element_bounds,
                 display_width,
                 display_height,
+                is_header_band,
             );
             tracing::trace!(
                 element_id = %element_id,
@@ -152,6 +159,9 @@ pub(super) fn apply_drag_handle_pointer_event(
         .map(|t| t.bounds)
         .unwrap_or_else(|| tze_hud_scene::Rect::new(0.0, 0.0, 0.0, 0.0));
 
+    // The drag is already in flight for this device; its DeviceDragState already
+    // carries the immediate/band flag, so the value passed here is unused on
+    // Move/Up (it only seeds a new state on Down).
     let outcome = input_processor.process_drag_handle_pointer(
         pointer_event,
         &interaction_id,
@@ -160,6 +170,7 @@ pub(super) fn apply_drag_handle_pointer_event(
         element_bounds,
         display_width,
         display_height,
+        false,
     );
 
     match outcome {

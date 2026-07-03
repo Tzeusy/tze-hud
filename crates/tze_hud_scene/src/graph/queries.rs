@@ -46,6 +46,35 @@ impl SceneGraph {
         Some(anchor_id)
     }
 
+    /// The VISIBLE frame/anchor tile of the portal group that owns `tile_id`:
+    /// the largest-area member that is NOT input-passthrough (ties → lowest id).
+    ///
+    /// The header drag band must live on the interactive frame, never on an
+    /// invisible passthrough sibling that shares the frame's bounds — the live
+    /// exemplar creates a capture-backstop tile with IDENTICAL bounds to the
+    /// frame, and a plain largest-area pick tie-breaks onto whichever was created
+    /// first (the backstop, via monotonic ids), stranding the band on an
+    /// invisible tile whose node tree lacks the header controls (hud-cpjqe).
+    /// Falls back to [`Self::portal_anchor_tile`] only if every member is
+    /// passthrough (degenerate — should not happen for a real portal).
+    pub fn portal_band_anchor_tile(&self, tile_id: SceneId) -> Option<SceneId> {
+        let seed = self.tiles.get(&tile_id)?;
+        let lease_id = seed.lease_id;
+        let mut anchor: Option<SceneId> = None;
+        let mut anchor_area = f32::NEG_INFINITY;
+        for (id, tile) in self.tiles.iter() {
+            if tile.lease_id != lease_id || tile.input_mode == InputMode::Passthrough {
+                continue;
+            }
+            let area = tile.bounds.width * tile.bounds.height;
+            if area > anchor_area || (area == anchor_area && anchor.is_none_or(|a| *id < a)) {
+                anchor_area = area;
+                anchor = Some(*id);
+            }
+        }
+        anchor.or_else(|| self.portal_anchor_tile(tile_id))
+    }
+
     /// `(anchor_tile_id, header_band_rect)` for every text-stream portal frame on
     /// the scene — the top `band_h` strip of each portal frame's bounds.
     ///
@@ -63,7 +92,9 @@ impl SceneGraph {
             if self.tile_scroll_config(*id).is_none() {
                 continue;
             }
-            if let Some(anchor) = self.portal_anchor_tile(*id) {
+            // Anchor on the VISIBLE frame, not an equal-bounds passthrough
+            // capture-backstop (hud-cpjqe).
+            if let Some(anchor) = self.portal_band_anchor_tile(*id) {
                 anchors.insert(anchor);
             }
         }
@@ -132,6 +163,7 @@ impl SceneGraph {
                     kind: ZoneInteractionKind::DragHandle {
                         element_id: region.element_id,
                         element_kind: region.element_kind,
+                        is_header_band: region.is_header_band,
                     },
                 };
             }

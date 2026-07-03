@@ -1721,6 +1721,7 @@ impl InputProcessor {
         element_bounds: tze_hud_scene::Rect,
         display_width: f32,
         display_height: f32,
+        is_header_band: bool,
     ) -> DragEventOutcome {
         let device_id = event.device_id;
 
@@ -1741,6 +1742,7 @@ impl InputProcessor {
                     event.x,
                     event.y,
                     threshold_ms,
+                    is_header_band,
                 );
                 self.drag_states.insert(device_id, state);
                 DragEventOutcome::Accumulating { progress: 0.0 }
@@ -1752,6 +1754,19 @@ impl InputProcessor {
                 match state.phase {
                     DragPhase::Idle => DragEventOutcome::Idle,
                     DragPhase::Accumulating => {
+                        // Immediate (portal header-band / titlebar) handles engage
+                        // on the FIRST move — no long-press hold, no early-movement
+                        // cancel (hud-cpjqe). This is what makes a fast titlebar
+                        // drag reliable; the grip path below keeps the hysteresis.
+                        if state.immediate {
+                            state.phase = DragPhase::Activated;
+                            state.grab_offset_x = event.x - element_bounds.x;
+                            state.grab_offset_y = event.y - element_bounds.y;
+                            return DragEventOutcome::Activated {
+                                element_id: state.element_id,
+                                element_kind: state.element_kind,
+                            };
+                        }
                         // Check movement cancellation.
                         if state.has_exceeded_movement_tolerance(event.x, event.y) {
                             let _ = self.drag_states.remove(&device_id);
@@ -4144,6 +4159,95 @@ mod tests {
         assert!(!notif.at_capacity, "draft not at capacity");
         assert_eq!(batch.submission, None, "no submission yet");
         assert_eq!(batch.cancel, None, "no cancel yet");
+    }
+
+    /// hud-cpjqe: a portal header BAND drags on the first pointer-move with NO
+    /// 250 ms long-press hold and NO early-movement cancel (Windows-titlebar) —
+    /// the fix for "clicking top to drag fails half the time". The legacy grip
+    /// keeps the long-press hysteresis (a fast move before the hold cancels).
+    #[test]
+    fn header_band_drag_activates_immediately_grip_still_requires_long_press() {
+        use tze_hud_scene::{DragHandleElementKind, Rect};
+        let eid = SceneId::new();
+        let ev = |x: f32, kind| PointerEvent {
+            x,
+            y: 120.0,
+            kind,
+            device_id: 0,
+            timestamp: None,
+        };
+
+        // ── BAND: down, then a large move immediately → Activated, then Moved ──
+        let mut proc_band = InputProcessor::new();
+        let band_bounds = Rect::new(100.0, 100.0, 600.0, 52.0);
+        let down = proc_band.process_drag_handle_pointer(
+            &ev(400.0, PointerEventKind::Down),
+            "drag-handle:band",
+            eid,
+            DragHandleElementKind::Tile,
+            band_bounds,
+            1920.0,
+            1080.0,
+            true,
+        );
+        assert!(matches!(down, DragEventOutcome::Accumulating { .. }));
+        // 60dp move with zero hold — a legacy grip would cancel here.
+        let activated = proc_band.process_drag_handle_pointer(
+            &ev(460.0, PointerEventKind::Move),
+            "drag-handle:band",
+            eid,
+            DragHandleElementKind::Tile,
+            band_bounds,
+            1920.0,
+            1080.0,
+            true,
+        );
+        assert!(
+            matches!(activated, DragEventOutcome::Activated { .. }),
+            "the header band must activate on the first move, got {activated:?}"
+        );
+        let moved = proc_band.process_drag_handle_pointer(
+            &ev(500.0, PointerEventKind::Move),
+            "drag-handle:band",
+            eid,
+            DragHandleElementKind::Tile,
+            band_bounds,
+            1920.0,
+            1080.0,
+            false,
+        );
+        assert!(
+            matches!(moved, DragEventOutcome::Moved { .. }),
+            "the header band must move once active, got {moved:?}"
+        );
+
+        // ── GRIP: same fast move before the hold → Cancelled (unchanged) ──────
+        let mut proc_grip = InputProcessor::new();
+        let grip_bounds = Rect::new(100.0, 100.0, 24.0, 8.0);
+        proc_grip.process_drag_handle_pointer(
+            &ev(112.0, PointerEventKind::Down),
+            "drag-handle:grip",
+            eid,
+            DragHandleElementKind::Tile,
+            grip_bounds,
+            1920.0,
+            1080.0,
+            false,
+        );
+        let cancelled = proc_grip.process_drag_handle_pointer(
+            &ev(172.0, PointerEventKind::Move),
+            "drag-handle:grip",
+            eid,
+            DragHandleElementKind::Tile,
+            grip_bounds,
+            1920.0,
+            1080.0,
+            false,
+        );
+        assert!(
+            matches!(cancelled, DragEventOutcome::Cancelled),
+            "the legacy grip must still cancel a fast move before the long-press, got {cancelled:?}"
+        );
     }
 
     /// Feed characters to a non-composer region: characters must NOT go into the

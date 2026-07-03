@@ -2015,6 +2015,13 @@ pub enum ZoneInteractionKind {
         element_id: SceneId,
         /// Element class this handle belongs to.
         element_kind: DragHandleElementKind,
+        /// `true` when this is a portal header-BAND handle (Windows-titlebar
+        /// strip) rather than the legacy small grip. A band is an unambiguous
+        /// drag surface, so the runtime activates it IMMEDIATELY on press+move —
+        /// no 250 ms long-press hold and no early-movement cancel — while the grip
+        /// keeps the long-press hysteresis that disambiguates tap-to-focus from
+        /// drag (hud-cpjqe).
+        is_header_band: bool,
     },
 }
 
