@@ -51,6 +51,28 @@ pub struct SceneGraph {
     pub display_area: Rect,
     /// Monotonic version counter, incremented on every mutation.
     pub version: u64,
+    /// Monotonic epoch for **position-only** geometry mutations (portal/tile
+    /// drag-move).
+    ///
+    /// A pure translation moves surfaces without changing their size or content,
+    /// so it must NOT invalidate the compositor's content-shaped caches
+    /// (markdown parse, ellipsis truncation) — those are gated on
+    /// [`Self::version`] and keyed on content + size, never on x/y position.
+    /// Bumping `version` on every drag-move pointer delta forced a full
+    /// re-hash / re-shape per frame, which showed up live as low-fps, flickery
+    /// drag (hud-uyhpn).
+    ///
+    /// Instead the drag-move path calls [`Self::bump_geometry_epoch`], which
+    /// advances this counter (re-arming the idle present-gate so the new
+    /// position paints every frame) while leaving `version` — and therefore the
+    /// content caches — untouched. The render dirty-gate treats a change in
+    /// EITHER `version` or `geometry_epoch` as "needs a frame".
+    ///
+    /// Position-only: `version` still increments on size/content/structural
+    /// mutations (resize, add/remove, content edit), so those correctly
+    /// re-prime the caches.
+    #[serde(default)]
+    pub geometry_epoch: u64,
     /// Monotonically increasing sequence number assigned to each committed batch.
     ///
     /// Incremented by [`SceneGraph::next_sequence_number`] on every successful
@@ -157,6 +179,7 @@ impl SceneGraph {
             sync_groups: HashMap::new(),
             display_area: Rect::new(0.0, 0.0, width, height),
             version: 0,
+            geometry_epoch: 0,
             sequence_number: 0,
             registered_resources: HashMap::new(),
             overlay: RuntimeOverlayState::default(),
@@ -172,6 +195,25 @@ impl SceneGraph {
     pub(crate) fn next_sequence_number(&mut self) -> u64 {
         self.sequence_number += 1;
         self.sequence_number
+    }
+
+    // ─── Position-only geometry epoch (hud-uyhpn) ───────────────────────
+
+    /// Signal a **position-only** geometry mutation (drag-move translation).
+    ///
+    /// Advances [`Self::geometry_epoch`] so the runtime's idle present-gate
+    /// repaints the moved surfaces on the next frame, WITHOUT bumping
+    /// [`Self::version`]. Because the compositor's markdown-parse and
+    /// ellipsis-truncation caches are gated on `version` (content + size, never
+    /// x/y), skipping the version bump means a smooth drag never triggers a
+    /// per-frame re-hash / re-shape — the low-fps drag fix for hud-uyhpn.
+    ///
+    /// Use this ONLY for pure translations (bounds x/y change, width/height and
+    /// content unchanged). Any mutation that changes size, content, or scene
+    /// structure MUST bump `version` so the caches re-prime.
+    #[inline]
+    pub fn bump_geometry_epoch(&mut self) {
+        self.geometry_epoch += 1;
     }
 
     // ─── Clock accessor ──────────────────────────────────────────────────
