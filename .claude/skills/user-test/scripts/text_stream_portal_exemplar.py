@@ -1154,6 +1154,32 @@ def scenario_lease_ttl_ms(phases: str | None, baseline_hold_s: float, soak_durat
     return lease_ttl_ms
 
 
+# Fraction of the granted lease TTL after which we proactively renew, leaving a
+# margin before expiry. Matches the runtime's 75%-TTL auto-renewal convention
+# (RFC 0008; tze_hud_protocol lease governance) and the resident gRPC bridge, so
+# a 600s lease renews at ~450s. Renewal — not just a large initial TTL — is what
+# keeps a sustained soak/streaming run alive past the original TTL (hud-hk8kl):
+# without it the runtime rejects mutations mid-run with MUTATION_REJECTED /
+# "lease expired" once the initial TTL elapses.
+LEASE_RENEW_FRACTION = 0.75
+
+# Never renew faster than this, so a small TTL cannot turn into a renewal
+# busy-loop. Renewal still fires comfortably before any TTL of practical size.
+LEASE_RENEW_MIN_INTERVAL_S = 1.0
+
+
+def lease_renew_interval_s(
+    granted_ttl_ms: int, fraction: float = LEASE_RENEW_FRACTION
+) -> float:
+    """Seconds to wait before renewing a lease of ``granted_ttl_ms``.
+
+    Returns ``fraction`` of the TTL (clamped to a sane minimum), i.e. strictly
+    less than the TTL, so the renewal lands before the lease can expire.
+    """
+    ttl_s = max(0, granted_ttl_ms) / 1000.0
+    return max(LEASE_RENEW_MIN_INTERVAL_S, ttl_s * fraction)
+
+
 def append_soak_tail_line(
     lines: list[str], seed: list[str], cycle: int, elapsed_s: float, window_lines: int,
 ) -> None:
@@ -2778,6 +2804,29 @@ async def heartbeat_loop(client: HudClient, interval_ms: int) -> None:
     while True:
         await asyncio.sleep(send_interval_s)
         await client.send_heartbeat()
+
+
+async def lease_renewal_loop(
+    client: HudClient, lease_id: bytes, granted_ttl_ms: int
+) -> None:
+    """Keep ``lease_id`` alive for the whole session by renewing before expiry.
+
+    Sustained phases (soak, baseline hold, cadence, live interaction) can run
+    longer than a single lease TTL. Without renewal the runtime starts rejecting
+    mutations mid-run with MUTATION_REJECTED / "lease expired", which also tears
+    down the portal render — the systemic self-termination tracked in hud-hk8kl.
+
+    Runs until cancelled (session cleanup). Renews at ``LEASE_RENEW_FRACTION`` of
+    the current granted TTL, re-reading the freshly granted TTL after each renew
+    so the cadence tracks whatever the runtime actually grants.
+    """
+    ttl_ms = granted_ttl_ms if granted_ttl_ms > 0 else client.last_granted_lease_ttl_ms
+    while True:
+        await asyncio.sleep(lease_renew_interval_s(ttl_ms))
+        # new_ttl_ms=0 asks the runtime to re-grant the original TTL.
+        ttl_ms = await client.renew_lease(lease_id, new_ttl_ms=0)
+        if ttl_ms <= 0:
+            ttl_ms = granted_ttl_ms
 
 
 async def portal_interaction_loop(
@@ -4701,6 +4750,7 @@ async def run_scenario(args: argparse.Namespace) -> int:
     )
     heartbeat_task: Optional[asyncio.Task] = None
     interaction_task: Optional[asyncio.Task] = None
+    lease_renewal_task: Optional[asyncio.Task] = None
     lease_id: Optional[bytes] = None
     scene_width = args.tab_width
     scene_height = args.tab_height
@@ -4727,6 +4777,12 @@ async def run_scenario(args: argparse.Namespace) -> int:
             args.phases, args.baseline_hold_s, args.soak_duration_s,
         )
         lease_id = await client.request_lease(ttl_ms=lease_ttl_ms)
+        # Keep the lease alive for the entire session. Sustained phases (soak,
+        # baseline hold, cadence, interaction) can outlast a single TTL; renewal
+        # prevents mid-run "lease expired" self-termination (hud-hk8kl).
+        lease_renewal_task = asyncio.create_task(
+            lease_renewal_loop(client, lease_id, client.last_granted_lease_ttl_ms)
+        )
         default_w, default_h = default_portal_size(scene_width, scene_height)
         set_portal_size(
             args.portal_width if args.portal_width is not None else default_w,
@@ -4881,6 +4937,16 @@ async def run_scenario(args: argparse.Namespace) -> int:
             "expected_visual": "portal visible until cleanup releases the lease",
         })
     finally:
+        if lease_renewal_task is not None:
+            lease_renewal_task.cancel()
+            try:
+                await lease_renewal_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                cleanup_errors.append(
+                    f"lease_renewal_task: {type(exc).__name__}: {exc}"
+                )
         if heartbeat_task is not None:
             heartbeat_task.cancel()
             try:
