@@ -336,6 +336,38 @@ impl ComposerDraft {
         }
     }
 
+    /// Insert a newline (`\n`) at the cursor as a LOCAL draft edit — the
+    /// Ctrl+Enter / Shift+Enter path for multi-line composer drafts (hud-nx7yq.2).
+    ///
+    /// Unlike [`Self::insert`], which rejects line endings (Enter alone submits),
+    /// this is the explicit multi-line-newline path. If a selection is active it
+    /// is deleted first, then a single `\n` is inserted, honoring the byte cap
+    /// (`\n` is one byte). Newline is subject to the same suspend/cap governance
+    /// as any other edit; the submitted draft carries embedded newlines verbatim.
+    pub fn insert_newline(&mut self) -> EditOutcome {
+        if self.suspended {
+            return EditOutcome::Suspended;
+        }
+        // Delete selection first if active (frees capacity for the newline).
+        if self.has_selection() {
+            let sel = self.selection();
+            self.text.replace_range(sel.start..sel.end, "");
+            self.cursor = sel.start;
+            self.selection_anchor = sel.start;
+        }
+        if self.cap.saturating_sub(self.text.len()) == 0 {
+            // At capacity — nothing further to insert. A selection delete above
+            // (if any) already freed space, so this only trips on a full buffer
+            // with no selection; that path did not mutate, so no sequence bump.
+            return EditOutcome::AtCapacity;
+        }
+        self.text.insert(self.cursor, '\n');
+        self.cursor += 1; // '\n' is one byte
+        self.selection_anchor = self.cursor;
+        self.bump_sequence();
+        EditOutcome::Mutated
+    }
+
     /// Paste `text` at the cursor position, truncating at the UTF-8 boundary
     /// at the remaining byte cap.
     ///
@@ -541,6 +573,118 @@ impl ComposerDraft {
         EditOutcome::Mutated
     }
 
+    // ── Vertical movement across hard-newline lines (hud-nx7yq.2) ─────────
+    //
+    // The draft buffer is the source of truth for logical lines (delimited by
+    // embedded '\n' from Ctrl/Shift+Enter). Vertical movement here is over those
+    // hard lines, tracked by grapheme column. Soft (visual) wrap sub-lines within
+    // one logical line are a compositor-side layout concern with no font metrics
+    // in this crate, so moving within a soft-wrapped long line is out of scope for
+    // this bead (tracked separately) — the caret still lands on a valid byte.
+
+    /// The caret's current column: grapheme clusters from the start of its
+    /// logical line (the byte after the preceding '\n', or 0). Used to seed the
+    /// vertical goal column.
+    pub fn current_col(&self) -> usize {
+        let line_start = logical_line_start(&self.text, self.cursor);
+        grapheme_count(&self.text[line_start..self.cursor])
+    }
+
+    /// Byte offset of the vertical-move target, or `None` when the caret cannot
+    /// move that direction (already on the first/last line at the boundary).
+    ///
+    /// `goal_col` is the desired grapheme column; the target lands at that column
+    /// in the adjacent logical line, clamped to that line's end. On the first line
+    /// an upward move goes to buffer start; on the last line a downward move goes
+    /// to buffer end (standard editor edge behavior).
+    fn vertical_target(&self, up: bool, goal_col: usize) -> Option<usize> {
+        let text = &self.text;
+        let line_start = logical_line_start(text, self.cursor);
+        if up {
+            if line_start == 0 {
+                // First logical line: move to buffer start (or no-op if there).
+                return if self.cursor == 0 { None } else { Some(0) };
+            }
+            let prev_line_end = line_start - 1; // the '\n' terminating the prev line
+            let prev_line_start = logical_line_start(text, prev_line_end);
+            Some(byte_at_grapheme_col(
+                text,
+                prev_line_start,
+                prev_line_end,
+                goal_col,
+            ))
+        } else {
+            let line_end = logical_line_end(text, self.cursor);
+            if line_end == text.len() {
+                // Last logical line: move to buffer end (or no-op if there).
+                return if self.cursor == text.len() {
+                    None
+                } else {
+                    Some(text.len())
+                };
+            }
+            let next_line_start = line_end + 1; // skip the '\n'
+            let next_line_end = logical_line_end(text, next_line_start);
+            Some(byte_at_grapheme_col(
+                text,
+                next_line_start,
+                next_line_end,
+                goal_col,
+            ))
+        }
+    }
+
+    /// Move the caret up one logical line at `goal_col`, collapsing any selection.
+    pub fn move_up(&mut self, goal_col: usize) -> EditOutcome {
+        match self.vertical_target(true, goal_col) {
+            Some(target) => {
+                self.cursor = target;
+                self.selection_anchor = target;
+                self.bump_sequence();
+                EditOutcome::Mutated
+            }
+            None => EditOutcome::Unchanged,
+        }
+    }
+
+    /// Move the caret down one logical line at `goal_col`, collapsing any selection.
+    pub fn move_down(&mut self, goal_col: usize) -> EditOutcome {
+        match self.vertical_target(false, goal_col) {
+            Some(target) => {
+                self.cursor = target;
+                self.selection_anchor = target;
+                self.bump_sequence();
+                EditOutcome::Mutated
+            }
+            None => EditOutcome::Unchanged,
+        }
+    }
+
+    /// Extend the selection up one logical line at `goal_col` (Shift+ArrowUp):
+    /// moves the caret without collapsing the anchor.
+    pub fn select_up(&mut self, goal_col: usize) -> EditOutcome {
+        match self.vertical_target(true, goal_col) {
+            Some(target) if target != self.cursor => {
+                self.cursor = target;
+                self.bump_sequence();
+                EditOutcome::Mutated
+            }
+            _ => EditOutcome::Unchanged,
+        }
+    }
+
+    /// Extend the selection down one logical line at `goal_col` (Shift+ArrowDown).
+    pub fn select_down(&mut self, goal_col: usize) -> EditOutcome {
+        match self.vertical_target(false, goal_col) {
+            Some(target) if target != self.cursor => {
+                self.cursor = target;
+                self.bump_sequence();
+                EditOutcome::Mutated
+            }
+            _ => EditOutcome::Unchanged,
+        }
+    }
+
     // ── Selection editing operations (shift + movement) ───────────────────
 
     /// Extend the selection one grapheme cluster to the left (shift + Left).
@@ -653,7 +797,12 @@ impl ComposerDraft {
         if self.suspended {
             return None;
         }
-        if self.text.is_empty() {
+        // Empty OR whitespace-only drafts do not submit (spec: Composer Submit-Key
+        // Contract). The buffer is left intact so the composer stays focused with
+        // its content. `trim()` only gates the emptiness test — a submitted draft
+        // keeps its leading/trailing/embedded whitespace and newlines verbatim
+        // (§4.7 submit-content fidelity).
+        if self.text.trim().is_empty() {
             return None;
         }
         let text = std::mem::take(&mut self.text);
@@ -739,6 +888,45 @@ pub fn truncate_at_utf8_boundary(s: &str, max_bytes: usize) -> &str {
         end = next;
     }
     &s[..end]
+}
+
+/// Byte offset of the start of the logical line (delimited by `\n`) containing
+/// `pos`: one past the nearest preceding `\n`, or `0` (hud-nx7yq.2).
+fn logical_line_start(text: &str, pos: usize) -> usize {
+    match text[..pos].rfind('\n') {
+        Some(nl) => nl + 1,
+        None => 0,
+    }
+}
+
+/// Byte offset of the end of the logical line containing `pos`: the next `\n` at
+/// or after `pos`, or `text.len()` (hud-nx7yq.2).
+fn logical_line_end(text: &str, pos: usize) -> usize {
+    match text[pos..].find('\n') {
+        Some(off) => pos + off,
+        None => text.len(),
+    }
+}
+
+/// Number of grapheme clusters in `s`.
+fn grapheme_count(s: &str) -> usize {
+    s.graphemes(true).count()
+}
+
+/// Byte offset of the `col`-th grapheme boundary within the line `[line_start,
+/// line_end)`, clamped to `line_end` when the line is shorter than `col`
+/// (hud-nx7yq.2). Used to land a vertical move at the goal column.
+fn byte_at_grapheme_col(text: &str, line_start: usize, line_end: usize, col: usize) -> usize {
+    let line = &text[line_start..line_end];
+    let mut offset = 0usize;
+    for (i, cluster) in line.graphemes(true).enumerate() {
+        if i == col {
+            return line_start + offset;
+        }
+        offset += cluster.len();
+    }
+    // Column past the end of the line → clamp to the line end.
+    line_end
 }
 
 /// Byte offset of the grapheme boundary immediately before `byte_pos`.
@@ -1122,6 +1310,17 @@ pub struct ComposerDraftManager {
     /// cancelled drafts are empty and are never stored. Bounded by
     /// [`MAX_PERSISTED_DRAFTS`].
     persisted_drafts: HashMap<SceneId, ComposerDraft>,
+    /// Goal column (grapheme count from the logical-line start) preserved across
+    /// a run of consecutive vertical caret moves (ArrowUp/ArrowDown), so the
+    /// caret tracks the same column when passing through shorter lines — standard
+    /// editor "desired column" behavior (hud-nx7yq.2).
+    ///
+    /// Set on the first vertical move of a run and cleared by any other key, so
+    /// horizontal movement or editing re-establishes the column on the next
+    /// vertical move. Grapheme-column based (not pixel-x): the runtime-owned draft
+    /// has no font metrics, so this tracks logical columns across the draft's
+    /// hard newlines. See [`Self::route_key_down`].
+    vertical_goal_col: Option<usize>,
 }
 
 impl ComposerDraftManager {
@@ -1280,8 +1479,11 @@ impl ComposerDraftManager {
     /// - `Ctrl+ArrowRight` → `draft.move_word_right()`
     /// - `Shift+Ctrl+ArrowLeft` → `draft.select_word_left()` (extend by word)
     /// - `Shift+Ctrl+ArrowRight` → `draft.select_word_right()` (extend by word)
+    /// - `ArrowUp` / `ArrowDown` → move the caret up/down one logical line at the
+    ///   preserved goal column (or extend the selection with `Shift`)
     /// - `Space` → insert literal space
-    /// - `Enter` / `NumpadEnter` → submit (returns batch with submission + clear)
+    /// - `Enter` / `NumpadEnter` → submit the draft (non-empty, non-whitespace)
+    /// - `Ctrl+Enter` / `Shift+Enter` → insert a newline into the draft (multi-line)
     /// - `Escape` → cancel (returns batch with cancel)
     ///
     /// Returns `(consumed, Option<DraftNotificationBatch>)`.
@@ -1295,6 +1497,13 @@ impl ComposerDraftManager {
         ctrl: bool,
         alt: bool,
     ) -> (bool, Option<DraftNotificationBatch>) {
+        // Take the preserved vertical goal column: it survives ONLY a run of
+        // consecutive ArrowUp/ArrowDown keys (those arms re-store it). Any other
+        // key clears it here, so the next vertical move re-seeds the column from
+        // the caret (standard editor "desired column" reset on horizontal move /
+        // edit).
+        let prev_goal = self.vertical_goal_col.take();
+
         let Some(draft) = self.draft.as_mut() else {
             return (false, None);
         };
@@ -1356,6 +1565,24 @@ impl ComposerDraftManager {
                 }
                 (true, None)
             }
+            "ArrowUp" | "ArrowDown" => {
+                // Seed the goal column from the caret on the first vertical move of
+                // a run, then preserve it across consecutive Up/Down (prev_goal was
+                // taken at the top; re-store it here so only vertical keys keep it).
+                let goal = prev_goal.unwrap_or_else(|| draft.current_col());
+                self.vertical_goal_col = Some(goal);
+                let up = key_code == "ArrowUp";
+                let o = match (up, shift) {
+                    (true, false) => draft.move_up(goal),
+                    (false, false) => draft.move_down(goal),
+                    (true, true) => draft.select_up(goal),
+                    (false, true) => draft.select_down(goal),
+                };
+                if o == EditOutcome::Mutated {
+                    self.scheduler.push_notification(draft.snapshot());
+                }
+                (true, None)
+            }
             "Home" => {
                 let o = if shift {
                     draft.select_to_start()
@@ -1385,17 +1612,17 @@ impl ComposerDraftManager {
                 }
                 (true, None)
             }
-            "Enter" | "NumpadEnter" => {
-                if let Some(sub) = draft.submit() {
-                    self.scheduler.flush_submit(sub);
-                    let b = self.scheduler.take_batch();
-                    (true, b)
-                } else {
-                    // Empty draft — consume but nothing to deliver.
-                    (true, None)
-                }
-            }
             _ if enter_key => {
+                // Ctrl+Enter / Shift+Enter insert a newline as a local draft edit;
+                // plain Enter submits (spec: Composer Submit-Key Contract). Covers
+                // "Enter"/"NumpadEnter" key codes and logical "\r"/"\n" keys.
+                if ctrl || shift {
+                    let o = draft.insert_newline();
+                    if matches!(o, EditOutcome::Mutated | EditOutcome::AtCapacity) {
+                        self.scheduler.push_notification(draft.snapshot());
+                    }
+                    return (true, None);
+                }
                 if let Some(sub) = draft.submit() {
                     self.scheduler.flush_submit(sub);
                     let b = self.scheduler.take_batch();
@@ -2294,6 +2521,284 @@ mod tests {
         assert!(
             clear.sequence > sub.sequence,
             "clear must have higher sequence than submission"
+        );
+    }
+
+    // ─── Submit-key contract + newline + vertical movement (hud-nx7yq.2) ──────
+
+    /// `insert_newline` adds a literal `\n` at the caret and advances the cursor,
+    /// unlike `insert` which rejects line endings.
+    #[test]
+    fn insert_newline_inserts_and_advances() {
+        let mut draft = ComposerDraft::new(DEFAULT_DRAFT_CAP);
+        assert_eq!(draft.insert("a"), EditOutcome::Mutated);
+        assert_eq!(draft.insert_newline(), EditOutcome::Mutated);
+        assert_eq!(draft.insert("b"), EditOutcome::Mutated);
+        assert_eq!(draft.text(), "a\nb");
+        assert_eq!(draft.cursor(), 3);
+    }
+
+    /// `insert_newline` deletes an active selection first (like `insert`).
+    #[test]
+    fn insert_newline_replaces_selection() {
+        let mut draft = ComposerDraft::new(DEFAULT_DRAFT_CAP);
+        for c in ["a", "b", "c"] {
+            draft.insert(c);
+        }
+        // Select "bc" (anchor at 1, cursor at 3): move left twice with shift.
+        draft.select_left();
+        draft.select_left();
+        assert!(draft.has_selection());
+        assert_eq!(draft.insert_newline(), EditOutcome::Mutated);
+        assert_eq!(draft.text(), "a\n", "selection replaced by newline");
+        assert_eq!(draft.cursor(), 2);
+    }
+
+    /// `insert_newline` is suspended under safe mode and honors the byte cap.
+    #[test]
+    fn insert_newline_governance() {
+        // Suspend → rejected.
+        let mut draft = ComposerDraft::new(DEFAULT_DRAFT_CAP);
+        draft.set_suspended(true);
+        assert_eq!(draft.insert_newline(), EditOutcome::Suspended);
+        assert!(draft.text().is_empty());
+
+        // At capacity → AtCapacity, no insert.
+        let mut small = ComposerDraft::new(2);
+        assert_eq!(small.insert("a"), EditOutcome::Mutated);
+        assert_eq!(small.insert("b"), EditOutcome::Mutated); // fills to cap 2
+        assert!(small.is_at_capacity());
+        assert_eq!(small.insert_newline(), EditOutcome::AtCapacity);
+        assert_eq!(small.text(), "ab", "no newline past the cap");
+    }
+
+    /// A whitespace-only (or empty) draft does not submit; the buffer is intact.
+    #[test]
+    fn submit_rejects_whitespace_only() {
+        let mut draft = ComposerDraft::new(DEFAULT_DRAFT_CAP);
+        assert!(draft.submit().is_none(), "empty draft does not submit");
+
+        for c in [" ", " "] {
+            draft.insert(c);
+        }
+        draft.insert_newline();
+        // Draft is "  \n" — all whitespace.
+        assert!(
+            draft.submit().is_none(),
+            "whitespace-only draft must not submit"
+        );
+        assert_eq!(
+            draft.text(),
+            "  \n",
+            "buffer left intact for continued editing"
+        );
+    }
+
+    /// A submitted multi-line draft preserves embedded newlines verbatim.
+    #[test]
+    fn submit_preserves_embedded_newlines() {
+        let mut draft = ComposerDraft::new(DEFAULT_DRAFT_CAP);
+        draft.insert("a");
+        draft.insert_newline();
+        draft.insert("b");
+        let sub = draft
+            .submit()
+            .expect("non-whitespace multi-line draft submits");
+        assert_eq!(sub.text, "a\nb", "embedded newline preserved in submission");
+        assert!(draft.text().is_empty(), "buffer cleared after submit");
+    }
+
+    /// Vertical movement lands at the goal column and clamps to shorter lines.
+    #[test]
+    fn vertical_move_tracks_goal_column() {
+        // "hello\nhi\nworld" — lines of length 5, 2, 5.
+        let mut draft = ComposerDraft::new(DEFAULT_DRAFT_CAP);
+        for c in ["h", "e", "l", "l", "o"] {
+            draft.insert(c);
+        }
+        draft.insert_newline();
+        for c in ["h", "i"] {
+            draft.insert(c);
+        }
+        draft.insert_newline();
+        for c in ["w", "o", "r", "l", "d"] {
+            draft.insert(c);
+        }
+        // Caret at end (col 5 of "world"). Move up with goal col 5.
+        assert_eq!(draft.current_col(), 5);
+        assert_eq!(draft.move_up(5), EditOutcome::Mutated);
+        // "hi" is only length 2 → clamp to its end (byte offset 8: "hello\nhi").
+        assert_eq!(draft.cursor(), 8);
+        // Move up again at goal col 5 → "hello" has col 5 (its end, byte 5).
+        assert_eq!(draft.move_up(5), EditOutcome::Mutated);
+        assert_eq!(draft.cursor(), 5);
+        // Move down at goal col 5 → back to "hi" clamped end (byte 8).
+        assert_eq!(draft.move_down(5), EditOutcome::Mutated);
+        assert_eq!(draft.cursor(), 8);
+    }
+
+    /// Up on the first line goes to buffer start; Down on the last goes to end.
+    #[test]
+    fn vertical_move_edges() {
+        let mut draft = ComposerDraft::new(DEFAULT_DRAFT_CAP);
+        for c in ["a", "b"] {
+            draft.insert(c);
+        }
+        draft.insert_newline();
+        for c in ["c", "d"] {
+            draft.insert(c);
+        }
+        // Caret at end of last line → Down goes to buffer end (already there → Unchanged).
+        assert_eq!(draft.move_down(2), EditOutcome::Unchanged);
+        // Move up to first line at col 2 → "ab" end (byte 2).
+        assert_eq!(draft.move_up(2), EditOutcome::Mutated);
+        assert_eq!(draft.cursor(), 2);
+        // Up again on the first line → buffer start (byte 0).
+        assert_eq!(draft.move_up(2), EditOutcome::Mutated);
+        assert_eq!(draft.cursor(), 0);
+        // Up at start → no-op.
+        assert_eq!(draft.move_up(2), EditOutcome::Unchanged);
+    }
+
+    /// Shift+vertical extends the selection instead of collapsing it.
+    #[test]
+    fn vertical_select_extends() {
+        let mut draft = ComposerDraft::new(DEFAULT_DRAFT_CAP);
+        for c in ["a", "b"] {
+            draft.insert(c);
+        }
+        draft.insert_newline();
+        for c in ["c", "d"] {
+            draft.insert(c);
+        }
+        // Caret at end (byte 5). Select up at col 2 → cursor to byte 2, anchor stays 5.
+        assert_eq!(draft.select_up(2), EditOutcome::Mutated);
+        assert!(draft.has_selection(), "shift+up extends a selection");
+        assert_eq!(draft.cursor(), 2);
+        assert_eq!(draft.selection_anchor(), 5);
+    }
+
+    /// Ctrl+Enter inserts a newline (no submission); a subsequent plain Enter
+    /// submits the full multi-line draft transactionally with newlines preserved.
+    #[test]
+    fn manager_ctrl_enter_newline_then_enter_submits_multiline() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+
+        mgr.route_character("a");
+        let (consumed, batch) = mgr.route_key_down("Enter", "Enter", false, true, false);
+        assert!(consumed, "Ctrl+Enter must be consumed");
+        assert!(
+            batch.is_none(),
+            "Ctrl+Enter is a local edit, not a transactional submit"
+        );
+        mgr.route_character("b");
+
+        // Plain Enter submits the whole multi-line draft.
+        let (_, batch) = mgr.route_key_down("Enter", "Enter", false, false, false);
+        let sub = batch
+            .expect("Enter emits a batch")
+            .submission
+            .expect("submission present");
+        assert_eq!(sub.text, "a\nb", "multi-line draft submitted with newline");
+    }
+
+    /// Shift+Enter also inserts a newline rather than submitting.
+    #[test]
+    fn manager_shift_enter_inserts_newline() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+
+        mgr.route_character("x");
+        let (consumed, batch) = mgr.route_key_down("Enter", "Enter", true, false, false);
+        assert!(consumed);
+        assert!(batch.is_none(), "Shift+Enter does not submit");
+
+        let flushed = mgr.try_flush().expect("newline edit flushes draft state");
+        assert_eq!(flushed.latest.as_ref().unwrap().text, "x\n");
+    }
+
+    /// Enter on a whitespace-only draft does not submit and keeps focus.
+    #[test]
+    fn manager_enter_whitespace_only_no_submit() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+
+        mgr.route_key_down("Space", "Space", false, false, false);
+        mgr.route_key_down("Space", "Space", false, false, false);
+        let (consumed, batch) = mgr.route_key_down("Enter", "Enter", false, false, false);
+        assert!(consumed, "Enter is still consumed");
+        assert!(
+            batch.is_none(),
+            "whitespace-only draft must not produce a submission"
+        );
+        assert!(mgr.is_active(), "composer stays focused");
+        assert_eq!(mgr.draft().unwrap().text(), "  ", "draft preserved");
+    }
+
+    /// ArrowUp/ArrowDown move the caret across logical lines and are consumed
+    /// (never forwarded to the agent), preserving the goal column across the run.
+    #[test]
+    fn manager_arrow_up_down_move_caret() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+
+        // Build "hello\nhi\nworld", caret at end.
+        for c in ["h", "e", "l", "l", "o"] {
+            mgr.route_character(c);
+        }
+        mgr.route_key_down("Enter", "Enter", false, true, false); // Ctrl+Enter newline
+        for c in ["h", "i"] {
+            mgr.route_character(c);
+        }
+        mgr.route_key_down("Enter", "Enter", false, true, false);
+        for c in ["w", "o", "r", "l", "d"] {
+            mgr.route_character(c);
+        }
+
+        // ArrowUp from col 5 → clamps to "hi" (byte 8), goal col 5 retained.
+        let (consumed, batch) = mgr.route_key_down("ArrowUp", "ArrowUp", false, false, false);
+        assert!(consumed, "ArrowUp is consumed by the composer");
+        assert!(batch.is_none());
+        assert_eq!(mgr.draft().unwrap().cursor(), 8);
+        // ArrowUp again keeps goal col 5 → "hello" end (byte 5), NOT clamped to 2.
+        mgr.route_key_down("ArrowUp", "ArrowUp", false, false, false);
+        assert_eq!(
+            mgr.draft().unwrap().cursor(),
+            5,
+            "goal column preserved across consecutive vertical moves"
+        );
+    }
+
+    /// A horizontal move between vertical moves resets the goal column.
+    #[test]
+    fn manager_goal_column_resets_on_horizontal_move() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+
+        for c in ["h", "e", "l", "l", "o"] {
+            mgr.route_character(c);
+        }
+        mgr.route_key_down("Enter", "Enter", false, true, false);
+        for c in ["h", "i"] {
+            mgr.route_character(c);
+        }
+        // Caret at end of "hi" (byte 8, col 2). ArrowUp goal col 2 → "hello" byte 2.
+        mgr.route_key_down("ArrowUp", "ArrowUp", false, false, false);
+        assert_eq!(mgr.draft().unwrap().cursor(), 2);
+        // Horizontal move (Home) resets goal; then ArrowDown uses col 0, not 2.
+        mgr.route_key_down("Home", "Home", false, false, false);
+        assert_eq!(mgr.draft().unwrap().cursor(), 0);
+        mgr.route_key_down("ArrowDown", "ArrowDown", false, false, false);
+        assert_eq!(
+            mgr.draft().unwrap().cursor(),
+            6,
+            "goal column re-seeded to 0 after the horizontal move (start of 'hi')"
         );
     }
 
