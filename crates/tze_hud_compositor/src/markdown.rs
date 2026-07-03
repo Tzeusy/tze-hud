@@ -163,13 +163,57 @@ impl Default for MarkdownTokens {
     }
 }
 
+/// Which markdown surface a token set is being resolved for (hud-3ryie).
+///
+/// The text-stream portal transcript is a *governed* markdown surface: it may
+/// restyle its own code/link/divider treatment via `portal.*`-namespaced token
+/// keys (minted in hud-8691s). Any *other* markdown surface must resolve only
+/// the generic (`color.*` / `typography.*`) keys, so a portal-scoped preference
+/// can never leak onto it.
+///
+/// In v1 the portal transcript is the sole governed markdown surface (zones use
+/// `StreamText`, not markdown), so every markdown node resolves [`Portal`]. This
+/// enum exists so that the moment a non-portal markdown surface is introduced,
+/// its tokens resolve [`Generic`] and the parse cache — keyed on the token-set
+/// identity (see [`MarkdownTokens::hash_into`]) — keeps the two scopes' parses
+/// from colliding on identical content.
+///
+/// [`Portal`]: MarkdownScope::Portal
+/// [`Generic`]: MarkdownScope::Generic
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkdownScope {
+    /// The governed text-stream portal transcript surface: prefer `portal.*`
+    /// namespaced keys over their generic fallbacks.
+    Portal,
+    /// Any non-portal markdown surface: resolve only the generic keys; ignore
+    /// every `portal.*`-namespaced token.
+    Generic,
+}
+
 impl MarkdownTokens {
-    /// Resolve styling from a design-token map.
+    /// Resolve styling from a design-token map for the **portal** surface.
+    ///
+    /// Equivalent to [`MarkdownTokens::from_token_map_scoped`] with
+    /// [`MarkdownScope::Portal`]. This is the v1 behavior (the portal transcript
+    /// is the sole governed markdown surface); it is kept as the ergonomic
+    /// default so existing call sites are unchanged.
     ///
     /// Unrecognised or unparseable token values fall back to [`Default`]
     /// values, so callers receive sensible rendering even with a partial or
     /// empty token map.
     pub fn from_token_map(map: &HashMap<String, String>) -> Self {
+        Self::from_token_map_scoped(map, MarkdownScope::Portal)
+    }
+
+    /// Resolve styling from a design-token map for a specific markdown
+    /// [`MarkdownScope`] (hud-3ryie).
+    ///
+    /// [`MarkdownScope::Portal`] prefers `portal.*`-namespaced keys (code/link
+    /// treatment, divider) over their generic fallbacks;
+    /// [`MarkdownScope::Generic`] ignores every `portal.*` key and resolves only
+    /// the generic (`color.*` / `typography.*` / `spacing.*`) keys, so a
+    /// portal-scoped preference can never reach a non-portal surface.
+    pub fn from_token_map_scoped(map: &HashMap<String, String>, scope: MarkdownScope) -> Self {
         let mut tokens = Self::default();
 
         // Heading weights: typography.heading.{1..6}.weight
@@ -200,13 +244,15 @@ impl MarkdownTokens {
         // a portal profile restyle its own code/link treatment while the generic
         // markdown defaults are preserved when no portal key is present.
         //
-        // NOTE (hud-hjckr): `self.markdown_tokens` is a single global instance
-        // (the portal is the sole governed markdown surface in v1), so this
-        // preference applies wherever markdown renders. Before ANY second governed
-        // markdown surface ships, per-tile token scoping is required (the parse
-        // cache is keyed on content only) or these portal keys will leak onto it.
-        let prefer = |portal_key: &str, generic_key: &str| {
-            map.get(portal_key).or_else(|| map.get(generic_key))
+        // Per-tile scoping (hud-3ryie): for the portal surface, prefer the
+        // portal-scoped key over the generic fallback; for any non-portal
+        // surface (`Generic`), resolve ONLY the generic key so a portal
+        // preference can never leak onto it. The resolved token-set identity is
+        // folded into the parse cache key (see `hash_into`), so the two scopes'
+        // parses of the same content never collide.
+        let prefer = |portal_key: &str, generic_key: &str| match scope {
+            MarkdownScope::Portal => map.get(portal_key).or_else(|| map.get(generic_key)),
+            MarkdownScope::Generic => map.get(generic_key),
         };
 
         // Link color: portal.transcript.link_color → color.link.text (hex).
@@ -289,23 +335,81 @@ impl MarkdownTokens {
             }
         }
 
-        // Transcript turn separator: portal.divider.color / .thickness_px (hud-nx7yq.4)
-        if let Some(c) = map
-            .get("portal.divider.color")
-            .and_then(|v| parse_hex_color(v))
-        {
-            tokens.separator_color = Some(c);
-        }
-        if let Some(t) = map
-            .get("portal.divider.thickness_px")
-            .and_then(|v| v.parse::<f32>().ok())
-        {
-            if t.is_finite() && t > 0.0 {
-                tokens.separator_thickness_px = t;
+        // Transcript turn separator: portal.divider.color / .thickness_px (hud-nx7yq.4).
+        // These are `portal.`-namespaced, so they resolve for the portal scope
+        // only; a non-portal (`Generic`) surface leaves the separator disabled
+        // (a `---` line renders as ordinary text) (hud-3ryie).
+        if scope == MarkdownScope::Portal {
+            if let Some(c) = map
+                .get("portal.divider.color")
+                .and_then(|v| parse_hex_color(v))
+            {
+                tokens.separator_color = Some(c);
+            }
+            if let Some(t) = map
+                .get("portal.divider.thickness_px")
+                .and_then(|v| v.parse::<f32>().ok())
+            {
+                if t.is_finite() && t > 0.0 {
+                    tokens.separator_thickness_px = t;
+                }
             }
         }
 
         tokens
+    }
+
+    /// Fold every parse-affecting styling field into `hasher` so the markdown
+    /// parse cache can key on the *token-set identity* alongside the content
+    /// (hud-3ryie).
+    ///
+    /// Two `MarkdownTokens` with identical field values hash the same and are
+    /// interchangeable — they produce byte-identical [`ParsedMarkdown`], so
+    /// sharing a cache entry is correct. Two token sets that differ in any
+    /// parse-affecting field (e.g. a portal scope that resolved
+    /// `portal.transcript.link_color` vs. a generic scope that did not) hash
+    /// differently, so the same content under each scope occupies distinct cache
+    /// entries and can never be mis-served across scopes.
+    ///
+    /// Every field of [`MarkdownTokens`] influences [`parse_markdown_subset`]'s
+    /// output (span styling, code panels, thematic breaks, line metrics), so all
+    /// are folded in. `f32` fields are hashed by their raw little-endian bits;
+    /// styling never uses `NaN`, so bit-hashing is a stable identity.
+    fn hash_into(&self, hasher: &mut blake3::Hasher) {
+        for s in self.heading_scale {
+            hasher.update(&s.to_le_bytes());
+        }
+        for w in self.heading_weight {
+            hasher.update(&w.to_le_bytes());
+        }
+        hasher.update(&self.bold_weight.to_le_bytes());
+        hash_opt_rgba(hasher, self.link_color);
+        hasher.update(&[self.code_monospace as u8]);
+        hash_opt_rgba(hasher, self.code_color);
+        hash_opt_rgba(hasher, self.code_background);
+        hasher.update(&self.line_height_multiplier.to_le_bytes());
+        hasher.update(&self.heading_margin_top.to_le_bytes());
+        hasher.update(&self.heading_margin_bottom.to_le_bytes());
+        hasher.update(&self.list_item_spacing.to_le_bytes());
+        hash_opt_rgba(hasher, self.separator_color);
+        hasher.update(&self.separator_thickness_px.to_le_bytes());
+    }
+}
+
+/// Fold an `Option<Rgba>` into `hasher` with a presence tag so `None` and a
+/// fully-transparent color hash differently (hud-3ryie).
+fn hash_opt_rgba(hasher: &mut blake3::Hasher, color: Option<Rgba>) {
+    match color {
+        None => {
+            hasher.update(&[0u8]);
+        }
+        Some(c) => {
+            hasher.update(&[1u8]);
+            hasher.update(&c.r.to_le_bytes());
+            hasher.update(&c.g.to_le_bytes());
+            hasher.update(&c.b.to_le_bytes());
+            hasher.update(&c.a.to_le_bytes());
+        }
     }
 }
 
@@ -512,15 +616,18 @@ impl MarkdownCache {
         Self::default()
     }
 
-    /// Return the cached parsed result for `content`, or `None` if it has
-    /// not been primed yet.
+    /// Return the cached parsed result for `content` under `tokens`, or `None`
+    /// if it has not been primed yet.
     ///
-    /// This hashes `content` on every call (O(content_bytes)).  Prefer
-    /// [`MarkdownCache::get_by_key`] when a precomputed key is available
-    /// (e.g. stored on the scene node at commit time) to keep lookups O(1).
-    pub fn get(&self, content: &str) -> Option<&ParsedMarkdown> {
-        let key = blake3::hash(content.as_bytes());
-        self.entries.get(key.as_bytes())
+    /// The lookup key folds both the content and the token-set identity
+    /// (hud-3ryie), so the same content parsed under a different token set is a
+    /// distinct entry — never mis-served.  This hashes `content` on every call
+    /// (O(content_bytes)).  Prefer [`MarkdownCache::get_by_key`] when a
+    /// precomputed key is available (e.g. stored on the scene node at commit
+    /// time) to keep lookups O(1).
+    pub fn get(&self, content: &str, tokens: &MarkdownTokens) -> Option<&ParsedMarkdown> {
+        let key = Self::compute_key(content, tokens);
+        self.entries.get(&key)
     }
 
     /// Return the cached parsed result for a precomputed BLAKE3 key, or
@@ -534,13 +641,27 @@ impl MarkdownCache {
         self.entries.get(key)
     }
 
-    /// Compute the BLAKE3 content key for `content`.
+    /// Compute the BLAKE3 cache key for `content` parsed under `tokens`.
     ///
-    /// Call this once at content-commit time and store the key alongside the
-    /// node so frame-time lookups can use [`MarkdownCache::get_by_key`].
+    /// The key folds the raw content **and** the token-set identity
+    /// ([`MarkdownTokens::hash_into`]) behind a domain separator, so the same
+    /// content under two different token sets (e.g. a portal vs. a non-portal
+    /// surface) yields two distinct keys and never collides in the cache
+    /// (hud-3ryie).  Two token sets with identical parse-affecting fields hash
+    /// the same — correct, since they produce identical parses.
+    ///
+    /// Call this once at content-commit time with the tile's scoped tokens and
+    /// store the key alongside the node so frame-time lookups can use
+    /// [`MarkdownCache::get_by_key`].
     #[inline]
-    pub fn compute_key(content: &str) -> [u8; 32] {
-        *blake3::hash(content.as_bytes()).as_bytes()
+    pub fn compute_key(content: &str, tokens: &MarkdownTokens) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(content.as_bytes());
+        // Domain separator so a token identity can never be confused with a
+        // trailing content byte sequence.
+        hasher.update(b"\x1fmarkdown-token-set\x1f");
+        tokens.hash_into(&mut hasher);
+        *hasher.finalize().as_bytes()
     }
 
     /// Parse and cache the content if it is not already present.
@@ -550,7 +671,7 @@ impl MarkdownCache {
     ///
     /// This method is called at content-commit time, **not** on the frame path.
     pub fn prime<'a>(&'a mut self, content: &str, tokens: &MarkdownTokens) -> &'a ParsedMarkdown {
-        let key = *blake3::hash(content.as_bytes()).as_bytes();
+        let key = Self::compute_key(content, tokens);
         // Use entry API to avoid double-hashing.
         self.entries
             .entry(key)
@@ -594,7 +715,7 @@ impl MarkdownCache {
     /// Because every produced snapshot is internally consistent, a reader that
     /// races the swap sees either `base` or the new snapshot in full — never a
     /// torn state.
-    fn rebuild_from(base: &MarkdownCache, jobs: &[PrimeJob], tokens: &MarkdownTokens) -> Self {
+    fn rebuild_from(base: &MarkdownCache, jobs: &[PrimeJob]) -> Self {
         let mut entries: HashMap<[u8; 32], ParsedMarkdown> = HashMap::with_capacity(jobs.len());
         for job in jobs {
             if entries.contains_key(&job.key) {
@@ -605,7 +726,11 @@ impl MarkdownCache {
                 // Carry forward the already-parsed entry (cheap Arc/Vec clone).
                 entries.insert(job.key, existing.clone());
             } else if let Some(content) = &job.content {
-                entries.insert(job.key, parse_markdown_subset(content, tokens));
+                // Parse with the job's own scoped tokens (hud-3ryie): each job
+                // carries the token set its owning tile resolved (portal vs.
+                // generic), so a single rebuild may mix scopes.  `job.key`
+                // already folds this token identity, so entries never collide.
+                entries.insert(job.key, parse_markdown_subset(content, &job.tokens));
             }
             // A job with no cached entry and `content: None` cannot be parsed;
             // it is simply omitted, and the render path's cache-miss fallback
@@ -628,10 +753,21 @@ impl MarkdownCache {
 /// parse thread without copying.
 #[derive(Clone)]
 pub struct PrimeJob {
-    /// BLAKE3 content key (see [`MarkdownCache::compute_key`]).
+    /// BLAKE3 cache key (see [`MarkdownCache::compute_key`]) — folds the content
+    /// **and** [`Self::tokens`]' identity, so a portal and a non-portal surface
+    /// with identical content occupy distinct entries (hud-3ryie).
     pub key: [u8; 32],
     /// Raw markdown source — `Some` only when this key needs parsing.
     pub content: Option<Arc<str>>,
+    /// The scoped token set this content must be parsed with (hud-3ryie).
+    ///
+    /// Selected per owning tile: [`MarkdownScope::Portal`] tokens for a governed
+    /// portal transcript surface, [`MarkdownScope::Generic`] tokens otherwise.
+    /// Held behind [`Arc`] so the two shared scope token sets are cloned by a
+    /// refcount bump rather than a deep copy, and ship to the background parse
+    /// thread without duplication.  `key` must have been computed with this same
+    /// token set, or a cache miss will result.
+    pub tokens: Arc<MarkdownTokens>,
 }
 
 /// Total source bytes below which a prime is parsed inline on the calling
@@ -699,10 +835,9 @@ pub struct MarkdownPrimer {
 struct PrimeRequest {
     /// Snapshot to rebuild from (carry-forward source for already-parsed entries).
     base: Arc<MarkdownCache>,
-    /// Complete live job set for this scene version.
+    /// Complete live job set for this scene version.  Each job carries its own
+    /// scoped token set (hud-3ryie), so the rebuild needs no ambient tokens.
     jobs: Vec<PrimeJob>,
-    /// Token styling in effect at dispatch time.
-    tokens: MarkdownTokens,
     /// Scene version this rebuild targets (store is gated on it).
     scene_version: u64,
 }
@@ -729,7 +864,7 @@ impl MarkdownPrimer {
                 // and swaps it in — unless a newer snapshot was published in the
                 // meantime (stale-clobber guard).
                 while let Ok(req) = rx.recv() {
-                    let next = MarkdownCache::rebuild_from(&req.base, &req.jobs, &req.tokens);
+                    let next = MarkdownCache::rebuild_from(&req.base, &req.jobs);
                     publish_if_newer(
                         &worker_cache,
                         &worker_version,
@@ -773,7 +908,7 @@ impl MarkdownPrimer {
     /// - Otherwise the rebuild is dispatched to the background parse thread; the
     ///   render path's cache-miss fallback keeps frames correct until the swap
     ///   lands.
-    pub fn prime(&self, jobs: Vec<PrimeJob>, tokens: &MarkdownTokens, scene_version: u64) {
+    pub fn prime(&self, jobs: Vec<PrimeJob>, scene_version: u64) {
         let current = self.cache.load();
 
         // Compute the byte volume of content not yet present in the snapshot,
@@ -802,7 +937,7 @@ impl MarkdownPrimer {
         // small snapshot is cheap and avoids a thread hop for the common case of
         // a node disappearing or a tiny content edit.
         if missing_bytes <= INLINE_PARSE_BYTE_THRESHOLD || self.tx.is_none() {
-            let next = MarkdownCache::rebuild_from(&current, &jobs, tokens);
+            let next = MarkdownCache::rebuild_from(&current, &jobs);
             publish_if_newer(
                 &self.cache,
                 &self.published_version,
@@ -817,7 +952,6 @@ impl MarkdownPrimer {
         let req = PrimeRequest {
             base: current.clone(),
             jobs,
-            tokens: tokens.clone(),
             scene_version,
         };
         if let Some(tx) = &self.tx {
@@ -825,7 +959,7 @@ impl MarkdownPrimer {
                 // Worker is gone (shutdown / panic): fall back to an inline
                 // rebuild so correctness is preserved even without the thread.
                 let req = failed.0;
-                let next = MarkdownCache::rebuild_from(&req.base, &req.jobs, &req.tokens);
+                let next = MarkdownCache::rebuild_from(&req.base, &req.jobs);
                 publish_if_newer(
                     &self.cache,
                     &self.published_version,
@@ -2678,7 +2812,7 @@ mod tests {
     fn cache_miss_before_prime() {
         let cache = MarkdownCache::new();
         assert!(
-            cache.get("unparsed content").is_none(),
+            cache.get("unparsed content", &tokens()).is_none(),
             "cache must be empty before prime"
         );
     }
@@ -2704,15 +2838,20 @@ mod tests {
         cache.prime(content_b, &t);
         assert_eq!(cache.len(), 2);
 
-        let keep_key = *blake3::hash(content_a.as_bytes()).as_bytes();
+        // Key folds content + token identity (hud-3ryie), so derive it via
+        // compute_key rather than a raw content hash.
+        let keep_key = MarkdownCache::compute_key(content_a, &t);
         cache.evict_except(&[keep_key]);
 
         assert_eq!(cache.len(), 1, "evict_except must remove stale entry");
         assert!(
-            cache.get(content_a).is_some(),
+            cache.get(content_a, &t).is_some(),
             "kept entry must remain after eviction"
         );
-        assert!(cache.get(content_b).is_none(), "evicted entry must be gone");
+        assert!(
+            cache.get(content_b, &t).is_none(),
+            "evicted entry must be gone"
+        );
     }
 
     // ── MarkdownTokens tests ───────────────────────────────────────────────────
@@ -3954,9 +4093,11 @@ mod tests {
     /// Build a `PrimeJob` for `content`, marking it as a cache miss (content
     /// attached) so the primer parses it.
     fn miss_job(content: &str) -> PrimeJob {
+        let tokens = Arc::new(MarkdownTokens::default());
         PrimeJob {
-            key: MarkdownCache::compute_key(content),
+            key: MarkdownCache::compute_key(content, &tokens),
             content: Some(Arc::<str>::from(content)),
+            tokens,
         }
     }
 
@@ -3979,11 +4120,10 @@ mod tests {
     #[test]
     fn primer_small_payload_swaps_in_synchronously() {
         let primer = MarkdownPrimer::new();
-        let tokens = MarkdownTokens::default();
         let job = miss_job("**bold** text");
         let key = job.key;
 
-        primer.prime(vec![job], &tokens, 1);
+        primer.prime(vec![job], 1);
 
         let snap = primer.load();
         let parsed = snap
@@ -3998,14 +4138,13 @@ mod tests {
     #[test]
     fn primer_large_payload_swaps_in_off_thread() {
         let primer = MarkdownPrimer::new();
-        let tokens = MarkdownTokens::default();
         // Exceed INLINE_PARSE_BYTE_THRESHOLD so the background path is taken.
         let big = "# Title\n\n".to_string() + &"word **emphasis** ".repeat(2000);
         assert!(big.len() > INLINE_PARSE_BYTE_THRESHOLD);
         let job = miss_job(&big);
         let key = job.key;
 
-        primer.prime(vec![job], &tokens, 1);
+        primer.prime(vec![job], 1);
 
         // The swap completes asynchronously; poll for it.
         let snap = wait_for_key(&primer, &key, 200);
@@ -4021,13 +4160,12 @@ mod tests {
     #[test]
     fn primer_evicts_dead_entries_on_reprime() {
         let primer = MarkdownPrimer::new();
-        let tokens = MarkdownTokens::default();
         let job_a = miss_job("alpha");
         let job_b = miss_job("beta");
         let key_a = job_a.key;
         let key_b = job_b.key;
 
-        primer.prime(vec![job_a.clone(), job_b], &tokens, 1);
+        primer.prime(vec![job_a.clone(), job_b], 1);
         let snap = primer.load();
         assert!(snap.get_by_key(&key_a).is_some());
         assert!(snap.get_by_key(&key_b).is_some());
@@ -4038,8 +4176,9 @@ mod tests {
         let carry_a = PrimeJob {
             key: key_a,
             content: None,
+            tokens: Arc::new(MarkdownTokens::default()),
         };
-        primer.prime(vec![carry_a], &tokens, 2);
+        primer.prime(vec![carry_a], 2);
         let snap = primer.load();
         assert!(
             snap.get_by_key(&key_a).is_some(),
@@ -4054,9 +4193,8 @@ mod tests {
     #[test]
     fn primer_reset_clears_snapshot() {
         let primer = MarkdownPrimer::new();
-        let tokens = MarkdownTokens::default();
         let job = miss_job("# Heading");
-        primer.prime(vec![job], &tokens, 1);
+        primer.prime(vec![job], 1);
         assert!(!primer.is_empty());
 
         primer.reset();
@@ -4075,14 +4213,14 @@ mod tests {
         // Publish version 5 with entry "new".
         let mut newer = MarkdownCache::new();
         newer.prime("new", &tokens);
-        let new_key = MarkdownCache::compute_key("new");
+        let new_key = MarkdownCache::compute_key("new", &tokens);
         publish_if_newer(&cache, &published, Arc::new(newer), 5);
         assert!(cache.load().get_by_key(&new_key).is_some());
 
         // A late version-3 rebuild (containing "old") must be dropped.
         let mut older = MarkdownCache::new();
         older.prime("old", &tokens);
-        let old_key = MarkdownCache::compute_key("old");
+        let old_key = MarkdownCache::compute_key("old", &tokens);
         publish_if_newer(&cache, &published, Arc::new(older), 3);
 
         let snap = cache.load();
@@ -4102,12 +4240,11 @@ mod tests {
     fn primer_reader_never_sees_torn_state() {
         use std::sync::atomic::{AtomicBool, Ordering};
         let primer = Arc::new(MarkdownPrimer::new());
-        let tokens = MarkdownTokens::default();
 
         // Seed an initial complete snapshot.
         let seed = miss_job("seed content");
         let seed_key = seed.key;
-        primer.prime(vec![seed], &tokens, 1);
+        primer.prime(vec![seed], 1);
 
         let stop = Arc::new(AtomicBool::new(false));
         let reader_primer = Arc::clone(&primer);
@@ -4130,9 +4267,134 @@ mod tests {
         // Hammer the primer with alternating live sets across versions.
         for v in 2..200u64 {
             let content = format!("# Doc {v}\n\n{}", "body ".repeat(1000));
-            primer.prime(vec![miss_job(&content)], &tokens, v);
+            primer.prime(vec![miss_job(&content)], v);
         }
         stop.store(true, Ordering::Relaxed);
         reader.join().unwrap();
+    }
+
+    // ── Per-tile markdown token scoping (hud-3ryie) ───────────────────────────
+
+    /// A map that sets BOTH a portal-scoped and a generic key for link color,
+    /// plus a portal-only code background (no generic fallback), so the two
+    /// scopes resolve provably different token sets.
+    fn scoped_token_map() -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        // Both keys present: portal prefers its own; generic must use the
+        // generic fallback and never the portal key.
+        map.insert(
+            "portal.transcript.link_color".to_string(),
+            "#0080ff".to_string(),
+        );
+        map.insert("color.link.text".to_string(), "#ff0000".to_string());
+        // Portal-only key with NO generic fallback: generic must resolve None.
+        map.insert(
+            "portal.transcript.code_background".to_string(),
+            "#112233".to_string(),
+        );
+        // Portal-only divider namespace: generic must ignore it entirely.
+        map.insert("portal.divider.color".to_string(), "#00ff00".to_string());
+        map
+    }
+
+    /// (b) A non-portal (`Generic`) surface must NOT receive `portal.transcript.*`
+    /// (or any `portal.*`) preference, while the portal surface does (hud-3ryie).
+    #[test]
+    fn generic_scope_never_receives_portal_preferences() {
+        let map = scoped_token_map();
+        let portal = MarkdownTokens::from_token_map_scoped(&map, MarkdownScope::Portal);
+        let generic = MarkdownTokens::from_token_map_scoped(&map, MarkdownScope::Generic);
+
+        // Link color: portal prefers the portal key; generic uses the generic
+        // fallback — the two must differ, proving no portal leak.
+        assert_eq!(portal.link_color, parse_hex_color("#0080ff"));
+        assert_eq!(
+            generic.link_color,
+            parse_hex_color("#ff0000"),
+            "generic scope must resolve the generic key, never the portal key"
+        );
+        assert_ne!(portal.link_color, generic.link_color);
+
+        // Code background is a portal-only key here (no generic fallback set):
+        // portal resolves it, generic must leave it None.
+        assert_eq!(portal.code_background, parse_hex_color("#112233"));
+        assert_eq!(
+            generic.code_background, None,
+            "a portal-only key must never reach a non-portal surface"
+        );
+
+        // Divider is portal-namespaced: portal enables it, generic disables it.
+        assert_eq!(portal.separator_color, parse_hex_color("#00ff00"));
+        assert_eq!(
+            generic.separator_color, None,
+            "portal.divider.* must never reach a non-portal surface"
+        );
+
+        // The default portal wrapper stays identical to the explicit Portal scope
+        // (v1 behavior unchanged, hud-3ryie).
+        let default_portal = MarkdownTokens::from_token_map(&map);
+        assert_eq!(default_portal.link_color, portal.link_color);
+        assert_eq!(default_portal.code_background, portal.code_background);
+        assert_eq!(default_portal.separator_color, portal.separator_color);
+    }
+
+    /// (a) The parse cache must not mis-serve entries across differing token
+    /// sets: the SAME content under two different token sets yields two distinct
+    /// cached parses keyed independently (no collision) (hud-3ryie).
+    #[test]
+    fn same_content_two_token_sets_do_not_collide_in_cache() {
+        let map = scoped_token_map();
+        let portal = MarkdownTokens::from_token_map_scoped(&map, MarkdownScope::Portal);
+        let generic = MarkdownTokens::from_token_map_scoped(&map, MarkdownScope::Generic);
+        // The two scopes genuinely differ, so their parses must differ too.
+        assert_ne!(portal.link_color, generic.link_color);
+
+        let content = "[docs](https://example.com)";
+
+        // Distinct keys for the same content under the two token sets.
+        let key_portal = MarkdownCache::compute_key(content, &portal);
+        let key_generic = MarkdownCache::compute_key(content, &generic);
+        assert_ne!(
+            key_portal, key_generic,
+            "content + token identity must produce distinct keys per token set"
+        );
+
+        // Priming the same content under each token set produces TWO entries,
+        // each serving its own parse — never one clobbering the other.
+        let mut cache = MarkdownCache::new();
+        let parsed_portal = cache.prime(content, &portal).clone();
+        let parsed_generic = cache.prime(content, &generic).clone();
+        assert_eq!(
+            cache.len(),
+            2,
+            "same content under two token sets must occupy two distinct entries"
+        );
+
+        // Each key resolves to the parse produced under its own token set.
+        assert_eq!(cache.get_by_key(&key_portal), Some(&parsed_portal));
+        assert_eq!(cache.get_by_key(&key_generic), Some(&parsed_generic));
+
+        // And the parses themselves differ: the portal link carries a color
+        // override span; the generic one (no generic link color here... actually
+        // generic sets #ff0000) also colors, but with a DIFFERENT color — so the
+        // parsed outputs are not equal.
+        assert_ne!(
+            parsed_portal, parsed_generic,
+            "the two token sets must yield materially different parses"
+        );
+        let portal_link_color = parsed_portal
+            .spans
+            .iter()
+            .find_map(|s| s.attr.color)
+            .expect("portal link span must carry a color");
+        let generic_link_color = parsed_generic
+            .spans
+            .iter()
+            .find_map(|s| s.attr.color)
+            .expect("generic link span must carry a color");
+        assert_ne!(
+            portal_link_color, generic_link_color,
+            "portal vs generic link color must differ (no cross-scope mis-serve)"
+        );
     }
 }

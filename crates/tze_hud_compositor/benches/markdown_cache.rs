@@ -66,7 +66,7 @@ fn bench_cache_hit(c: &mut Criterion) {
     cache.prime(&content, &tokens);
 
     // Precompute the key exactly as the frame path does (via node_key_cache).
-    let key = MarkdownCache::compute_key(&content);
+    let key = MarkdownCache::compute_key(&content, &tokens);
 
     let mut group = c.benchmark_group("markdown_cache");
     group.bench_function(BenchmarkId::new("cache_hit", "8KiB_warm"), |b| {
@@ -119,10 +119,16 @@ fn bench_parse_commit_64kb(c: &mut Criterion) {
 /// once at prime time and stored in node_key_cache.
 fn bench_compute_key_64kb(c: &mut Criterion) {
     let content = markdown_content(65535);
+    let tokens = MarkdownTokens::default();
 
     let mut group = c.benchmark_group("markdown_cache");
     group.bench_function(BenchmarkId::new("compute_key", "64kB"), |b| {
-        b.iter(|| black_box(MarkdownCache::compute_key(black_box(&content))))
+        b.iter(|| {
+            black_box(MarkdownCache::compute_key(
+                black_box(&content),
+                black_box(&tokens),
+            ))
+        })
     });
     group.finish();
 }

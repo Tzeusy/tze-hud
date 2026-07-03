@@ -400,7 +400,14 @@ impl Compositor {
                     .node_key_cache
                     .get(&node_id)
                     .copied()
-                    .unwrap_or_else(|| crate::markdown::MarkdownCache::compute_key(&tm.content));
+                    .unwrap_or_else(|| {
+                        // This helper resolves plain text for portal transcript tiles
+                        // only, so it keys with the portal token set (hud-3ryie).
+                        crate::markdown::MarkdownCache::compute_key(
+                            &tm.content,
+                            &self.markdown_tokens,
+                        )
+                    });
                 if let Some(parsed) = cache.get_by_key(&key) {
                     return Some(Arc::clone(&parsed.plain_text));
                 }
