@@ -5,13 +5,26 @@
 //! the protocol version via `initialize`. Without these, an LLM cannot
 //! introspect any tool and is wholly dependent on out-of-band skill docs.
 //!
-//! Schemas here are hand-written (the crate does not depend on `schemars`) and
-//! must stay faithful to the `*Params` structs in [`crate::tools`]. Each tool's
-//! `inputSchema` lists every accepted property, marks the non-defaulted /
-//! non-`Option` fields as `required`, and mirrors the field-level types. When a
-//! `*Params` struct changes, update the matching descriptor below — the
-//! `tools/list` introspection contract is only as honest as this file.
+//! Each tool's `inputSchema` is **derived** from the matching `*Params` struct
+//! in [`crate::tools`] via [`schemars`] (`#[derive(JsonSchema)]`), so the
+//! introspection contract cannot drift from the shape the runtime actually
+//! deserializes. Adding, renaming, or re-typing a `*Params` field flows through
+//! to `tools/list` automatically — no hand-editing here. Only the tool *name*
+//! and human-facing *description* live in this file (they have no home on the
+//! struct); everything else — property names, types, and required/optional —
+//! comes from the derive.
 
+use crate::tools::{
+    ClearWidgetParams, CreateTabParams, CreateTileParams, DismissParams, InjectComposerPasteParams,
+    ListElementsParams, ListSceneParams, ListWidgetsParams, ListZonesParams,
+    PortalProjectionAcknowledgeInputParams, PortalProjectionAttachParams,
+    PortalProjectionCleanupParams, PortalProjectionDetachParams,
+    PortalProjectionGetPendingInputParams, PortalProjectionPublishParams,
+    PortalProjectionPublishStatusParams, PublishToElementParams, PublishToWidgetParams,
+    PublishToZoneParams, RegisterWidgetAssetParams, SetContentParams,
+};
+use schemars::JsonSchema;
+use schemars::r#gen::SchemaSettings;
 use serde_json::{Value, json};
 
 /// MCP protocol revision advertised by `initialize`.
@@ -44,294 +57,283 @@ pub fn tools_list_result() -> Value {
     json!({ "tools": tool_descriptors() })
 }
 
-/// A single tool descriptor.
-fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
+/// Derive a JSON Schema `inputSchema` object for a `*Params` struct.
+///
+/// The schema is generated with `inline_subschemas` so nested params (bounds,
+/// color, …) are emitted inline instead of behind `$ref`/`definitions`, keeping
+/// the payload self-contained the way MCP clients expect. The generator's
+/// document-level `$schema`/`title` metadata is stripped so the result is a
+/// bare `{ "type": "object", "properties": {…}, "required": […] }` object —
+/// identical in shape to the descriptors this crate emitted by hand before the
+/// derive.
+///
+/// `properties` and `required` are always present (defaulting to `{}` / `[]`);
+/// schemars omits them for empty or all-required structs, but the pre-derive
+/// wire contract always carried both keys, and some MCP clients index them
+/// unconditionally.
+fn input_schema_for<T: JsonSchema>() -> Value {
+    let generator = SchemaSettings::draft07()
+        .with(|s| s.inline_subschemas = true)
+        .into_generator();
+    let root = generator.into_root_schema_for::<T>();
+    let mut schema =
+        serde_json::to_value(&root).expect("schemars root schema must serialize to a JSON value");
+    if let Value::Object(map) = &mut schema {
+        // Document-level metadata that has no meaning inside a tool inputSchema.
+        map.remove("$schema");
+        map.remove("title");
+        // Preserve the always-present `properties`/`required` wire shape.
+        map.entry("properties").or_insert_with(|| json!({}));
+        map.entry("required").or_insert_with(|| json!([]));
+    }
+    schema
+}
+
+/// A single tool descriptor whose `inputSchema` is derived from `T`.
+fn tool<T: JsonSchema>(name: &str, description: &str) -> Value {
     json!({
         "name": name,
         "description": description,
-        "inputSchema": {
-            "type": "object",
-            "properties": properties,
-            "required": required,
-        },
-    })
-}
-
-/// A scalar property: `{ "type": ty, "description": desc }`.
-fn p(ty: &str, desc: &str) -> Value {
-    json!({ "type": ty, "description": desc })
-}
-
-/// The RGBA color sub-object schema (`{r,g,b,a}` in `[0.0, 1.0]`, `a` defaults).
-fn color_schema(desc: &str) -> Value {
-    json!({
-        "type": "object",
-        "description": desc,
-        "properties": {
-            "r": { "type": "number" },
-            "g": { "type": "number" },
-            "b": { "type": "number" },
-            "a": { "type": "number", "description": "Alpha; defaults to 1.0." },
-        },
-        "required": ["r", "g", "b"],
+        "inputSchema": input_schema_for::<T>(),
     })
 }
 
 /// Full ordered list of tool descriptors. Order mirrors the dispatch router in
-/// [`crate::server`] for easy cross-checking.
+/// [`crate::server`] for easy cross-checking. Names and descriptions are the
+/// only hand-maintained fields; each `inputSchema` is derived from the tool's
+/// `*Params` struct so it stays in lockstep with the deserialized shape.
 fn tool_descriptors() -> Vec<Value> {
     vec![
-        tool(
-            "create_tab",
-            "Create a new tab in the scene.",
-            json!({
-                "name": p("string", "Human-readable name for the tab."),
-                "display_order": p("integer", "Display order (unique across tabs). Defaults to next available."),
-            }),
-            &["name"],
-        ),
-        tool(
+        tool::<CreateTabParams>("create_tab", "Create a new tab in the scene."),
+        tool::<CreateTileParams>(
             "create_tile",
             "Create a tile within a tab and grant it a lease.",
-            json!({
-                "tab_id": p("string", "Tab UUID to place the tile in. Defaults to the active tab."),
-                "namespace": p("string", "Namespace (agent identity) used as the lease namespace."),
-                "bounds": {
-                    "type": "object",
-                    "description": "Tile bounds in display pixels.",
-                    "properties": {
-                        "x": { "type": "number" },
-                        "y": { "type": "number" },
-                        "width": { "type": "number" },
-                        "height": { "type": "number" },
-                    },
-                    "required": ["x", "y", "width", "height"],
-                },
-                "z_order": p("integer", "Z-order (front = higher). Defaults to 1."),
-                "ttl_ms": p("integer", "Lease TTL in milliseconds. Defaults to 60000."),
-            }),
-            &["namespace", "bounds"],
         ),
-        tool(
-            "set_content",
-            "Set markdown text content on a tile.",
-            json!({
-                "tile_id": p("string", "UUID of the tile to set content on."),
-                "content": p("string", "Markdown text to display."),
-                "font_size_px": p("number", "Font size in pixels. Defaults to 16."),
-                "color": color_schema("Text color. Defaults to white (#ffffff)."),
-                "background": color_schema("Optional background color."),
-                "alignment": p("string", "Text alignment: 'start', 'center', or 'end'. Defaults to 'start'."),
-            }),
-            &["tile_id", "content"],
-        ),
-        tool(
-            "dismiss",
-            "Delete a tile and release its lease.",
-            json!({
-                "tile_id": p("string", "UUID of the tile to delete."),
-            }),
-            &["tile_id"],
-        ),
-        tool(
-            "publish_to_zone",
-            "Publish content to a named zone.",
-            json!({
-                "zone_name": p("string", "Name of the target zone (must exist in the zone registry)."),
-                "content": {
-                    "type": ["string", "object"],
-                    "description": "A plain string (StreamText) or a tagged object with a 'type' field: stream_text, notification, status_bar, solid_color, or static_image.",
-                },
-                "namespace": p("string", "Lease namespace. Defaults to 'mcp'."),
-                "font_size_px": p("number", "Font size in pixels. Defaults to 16."),
-                "ttl_us": p("integer", "TTL in microseconds. 0 selects the 60000ms default."),
-                "merge_key": p("string", "Merge key for idempotent zone publishes."),
-                "breakpoints": {
-                    "type": "array",
-                    "items": { "type": "integer" },
-                    "description": "Byte-offset breakpoints for word-by-word reveal of StreamText.",
-                },
-            }),
-            &["zone_name", "content"],
-        ),
-        tool("list_zones", "List all registered zones.", json!({}), &[]),
-        tool("list_scene", "List the scene's tabs.", json!({}), &[]),
-        tool(
+        tool::<SetContentParams>("set_content", "Set markdown text content on a tile."),
+        tool::<DismissParams>("dismiss", "Delete a tile and release its lease."),
+        tool::<PublishToZoneParams>("publish_to_zone", "Publish content to a named zone."),
+        tool::<ListZonesParams>("list_zones", "List all registered zones."),
+        tool::<ListSceneParams>("list_scene", "List the scene's tabs."),
+        tool::<ListElementsParams>(
             "list_elements",
             "List addressable elements (tiles, zones, widgets).",
-            json!({
-                "namespace_filter": p("string", "Optional namespace prefix filter."),
-                "element_type": p("string", "Optional element type filter: 'tile', 'zone', or 'widget'."),
-            }),
-            &[],
         ),
-        tool(
+        tool::<PublishToWidgetParams>(
             "publish_to_widget",
             "Publish typed parameter values to a widget instance.",
-            json!({
-                "widget_name": p("string", "Widget instance name (instance_id or type name for single-instance)."),
-                "instance_id": p("string", "Explicit instance_id to disambiguate multiple instances of a type."),
-                "params": {
-                    "type": "object",
-                    "description": "Parameter values keyed by name. Numbers, strings, color objects, or enum strings per the widget schema.",
-                    "additionalProperties": true,
-                },
-                "transition_ms": p("integer", "Transition duration in ms (0 = instant). Defaults to 0."),
-                "namespace": p("string", "Namespace. Defaults to 'mcp'."),
-                "ttl_us": p("integer", "TTL in microseconds (0 = widget instance default)."),
-            }),
-            &["widget_name", "params"],
         ),
-        tool(
+        tool::<ListWidgetsParams>(
             "list_widgets",
             "List registered widget types and instances.",
-            json!({}),
-            &[],
         ),
-        tool(
+        tool::<ClearWidgetParams>(
             "clear_widget",
             "Clear a namespace's publications from a widget instance.",
-            json!({
-                "widget_name": p("string", "Widget instance name (addressing key)."),
-                "namespace": p("string", "Agent namespace performing the clear. Defaults to ''."),
-                "instance_id": p("string", "Optional disambiguation when instances share a name."),
-            }),
-            &["widget_name"],
         ),
-        tool(
+        tool::<RegisterWidgetAssetParams>(
             "register_widget_asset",
             "Register (or dedup-preflight) an SVG asset for a widget type.",
-            json!({
-                "widget_type_id": p("string", "Widget type id to associate with this SVG asset."),
-                "svg_filename": p("string", "SVG filename (must end with '.svg')."),
-                "content_hash_blake3": p("string", "64-char hex BLAKE3 hash of the payload bytes."),
-                "total_size_bytes": p("integer", "Declared payload size in bytes."),
-                "transport_crc32c": p("integer", "Optional transport integrity checksum (CRC32C)."),
-                "payload": p("string", "Optional payload bytes as UTF-8 text (raw SVG XML)."),
-                "metadata_only_preflight": p("boolean", "When true, run metadata-only dedup preflight."),
-            }),
-            &[
-                "widget_type_id",
-                "svg_filename",
-                "content_hash_blake3",
-                "total_size_bytes",
-            ],
         ),
-        tool(
+        tool::<PublishToElementParams>(
             "publish_to_element",
             "Publish content to a tile, zone, or widget by stable element UUID.",
-            json!({
-                "element_id": p("string", "Stable element UUID."),
-                "content": {
-                    "type": ["string", "object"],
-                    "description": "Content payload following the same rules as set_content / publish_to_zone (tiles/zones) or widget params (widgets).",
-                },
-                "namespace": p("string", "Namespace for zone/widget publish bookkeeping. Defaults to 'mcp'."),
-                "merge_key": p("string", "Optional zone merge key."),
-                "breakpoints": {
-                    "type": "array",
-                    "items": { "type": "integer" },
-                    "description": "Optional zone breakpoints for stream_text content.",
-                },
-                "ttl_us": p("integer", "Optional zone/widget TTL in microseconds."),
-                "transition_ms": p("integer", "Optional widget transition duration in ms."),
-                "font_size_px": p("number", "Optional tile font size override."),
-                "color": color_schema("Optional tile text color override."),
-                "background": color_schema("Optional tile background color override."),
-                "alignment": p("string", "Optional tile text alignment override."),
-            }),
-            &["element_id", "content"],
         ),
-        tool(
+        tool::<InjectComposerPasteParams>(
             "inject_composer_paste",
             "Inject text into the active composer draft buffer.",
-            json!({
-                "text": p("string", "Text to inject. CR/LF/control chars stripped; truncated at the draft cap."),
-            }),
-            &["text"],
         ),
         // ── Portal projection tools (cooperative HUD self-projection) ─────────
-        tool(
+        tool::<PortalProjectionAttachParams>(
             "portal_projection_attach",
             "Attach a new cooperative projection session to the in-process authority.",
-            json!({
-                "projection_id": p("string", "Caller-assigned unique identifier for this projection session (max 128 bytes)."),
-                "display_name": p("string", "Human-readable label for this projection session (max 128 bytes)."),
-                "idempotency_key": p("string", "Optional key to replay-safely re-attach after a network interruption."),
-            }),
-            &["projection_id", "display_name"],
         ),
-        tool(
+        tool::<PortalProjectionPublishParams>(
             "portal_projection_publish",
             "Append output text to an existing projection transcript.",
-            json!({
-                "projection_id": p("string", "Projection id from a prior portal_projection_attach call."),
-                "owner_token": p("string", "Owner token returned by the successful attach."),
-                "output_text": p("string", "Text to append to the projection transcript."),
-                "logical_unit_id": p("string", "Optional logical-unit id for idempotent dedup (max 128 bytes)."),
-                "output_kind": p("string", "Optional output kind: assistant (default), tool, status, error, other."),
-                "content_classification": p("string", "Optional classification: public, household, private (default), sensitive."),
-                "coalesce_key": p("string", "Optional coalesce key; repeated publishes sharing it collapse in-place."),
-            }),
-            &["projection_id", "owner_token", "output_text"],
         ),
-        tool(
+        tool::<PortalProjectionPublishStatusParams>(
             "portal_projection_publish_status",
             "Publish a lifecycle status to an existing projection session.",
-            json!({
-                "projection_id": p("string", "Projection id from a prior portal_projection_attach call."),
-                "owner_token": p("string", "Owner token returned by the successful attach."),
-                "lifecycle_state": p("string", "Lifecycle state: attached, active, degraded, hud_unavailable, detached, cleanup_pending, expired."),
-                "status_text": p("string", "Optional human-readable status detail recorded with the state."),
-            }),
-            &["projection_id", "owner_token", "lifecycle_state"],
         ),
-        tool(
+        tool::<PortalProjectionGetPendingInputParams>(
             "portal_projection_get_pending_input",
             "Drain HUD-originated pending input for a projection session.",
-            json!({
-                "projection_id": p("string", "Projection id from a prior portal_projection_attach call."),
-                "owner_token": p("string", "Owner token returned by the successful attach."),
-                "max_items": p("integer", "Optional cap on items returned; clamped to the authority's max_poll_items."),
-                "max_bytes": p("integer", "Optional cap on response byte budget; clamped to the authority's max_poll_response_bytes."),
-                "wait_ms": p("integer", "Optional long-poll wait in milliseconds (clamped to 30000). When set, the call blocks until at least one input item is available or the wait elapses; omit (or 0) for return-immediately behavior."),
-            }),
-            &["projection_id", "owner_token"],
         ),
-        tool(
+        tool::<PortalProjectionAcknowledgeInputParams>(
             "portal_projection_acknowledge_input",
             "Acknowledge a delivered input item for a projection session.",
-            json!({
-                "projection_id": p("string", "Projection id from a prior portal_projection_attach call."),
-                "owner_token": p("string", "Owner token returned by the successful attach."),
-                "input_id": p("string", "Identifier of the input item being acknowledged."),
-                "ack_state": p("string", "Acknowledgement state: handled, deferred, or rejected."),
-                "ack_message": p("string", "Optional human-readable message recorded with the ack."),
-                "not_before_wall_us": p("integer", "Optional re-delivery floor (wall-clock µs); valid only when ack_state is deferred."),
-            }),
-            &["projection_id", "owner_token", "input_id", "ack_state"],
         ),
-        tool(
+        tool::<PortalProjectionDetachParams>(
             "portal_projection_detach",
             "Detach a projection session, purging its private state.",
-            json!({
-                "projection_id": p("string", "Projection id from a prior portal_projection_attach call."),
-                "owner_token": p("string", "Owner token returned by the successful attach."),
-                "reason": p("string", "Human-readable reason recorded in the audit log."),
-            }),
-            &["projection_id", "owner_token", "reason"],
         ),
-        tool(
+        tool::<PortalProjectionCleanupParams>(
             "portal_projection_cleanup",
             "Cleanup a projection session via owner or operator authority.",
-            json!({
-                "projection_id": p("string", "Projection id from a prior portal_projection_attach call."),
-                "cleanup_authority": p("string", "Cleanup authority: 'owner' or 'operator'."),
-                "owner_token": p("string", "Owner token required when cleanup_authority = 'owner'."),
-                "operator_authority": p("string", "Operator credential required when cleanup_authority = 'operator'."),
-                "reason": p("string", "Human-readable reason recorded in the audit log."),
-            }),
-            &["projection_id", "cleanup_authority", "reason"],
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fetch a single tool's `inputSchema` from the live `tools/list` payload.
+    fn input_schema(tool_name: &str) -> Value {
+        let list = tools_list_result();
+        let tools = list["tools"].as_array().expect("tools must be an array");
+        let tool = tools
+            .iter()
+            .find(|t| t["name"] == tool_name)
+            .unwrap_or_else(|| panic!("tool {tool_name} not present in tools/list"));
+        tool["inputSchema"].clone()
+    }
+
+    /// The property names declared for a tool's inputSchema.
+    fn prop_names(schema: &Value) -> Vec<String> {
+        schema["properties"]
+            .as_object()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// The `required` list for a tool's inputSchema.
+    fn required(schema: &Value) -> Vec<String> {
+        schema["required"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Every derived inputSchema is a JSON Schema object, and the tool set /
+    /// order matches the dispatch router. Guards against an accidental empty or
+    /// malformed derive.
+    #[test]
+    fn every_tool_has_object_input_schema() {
+        let list = tools_list_result();
+        let tools = list["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 21, "expected 21 MCP tools");
+        for t in tools {
+            assert!(t["name"].is_string(), "tool missing name: {t:?}");
+            assert!(
+                t["description"].is_string(),
+                "tool missing description: {t:?}"
+            );
+            assert_eq!(
+                t["inputSchema"]["type"], "object",
+                "tool {} inputSchema is not an object",
+                t["name"]
+            );
+        }
+    }
+
+    /// A representative tool's derived schema carries every field the `*Params`
+    /// struct declares, with the correct required/optional split — the wire
+    /// contract MCP clients depend on.
+    #[test]
+    fn create_tile_schema_matches_params_struct() {
+        let schema = input_schema("create_tile");
+        let props = prop_names(&schema);
+        for expected in ["tab_id", "namespace", "bounds", "z_order", "ttl_ms"] {
+            assert!(
+                props.contains(&expected.to_string()),
+                "create_tile schema missing property {expected}; has {props:?}"
+            );
+        }
+        // Non-`Option`, non-defaulted fields are required; defaulted/optional are not.
+        let req = required(&schema);
+        assert!(req.contains(&"namespace".to_string()));
+        assert!(req.contains(&"bounds".to_string()));
+        assert!(
+            !req.contains(&"z_order".to_string()),
+            "z_order has a serde default"
+        );
+        assert!(!req.contains(&"tab_id".to_string()), "tab_id is Option");
+        // Nested `bounds` params are inlined (no $ref) with their own required set.
+        let bounds = &schema["properties"]["bounds"];
+        assert_eq!(bounds["type"], "object");
+        let bounds_req = required(bounds);
+        for c in ["x", "y", "width", "height"] {
+            assert!(
+                bounds_req.contains(&c.to_string()),
+                "bounds missing required {c}"
+            );
+        }
+    }
+
+    /// Regression for the drift the derive is meant to eliminate: `wait_ms` was
+    /// added to `PortalProjectionGetPendingInputParams` and once had to be
+    /// hand-mirrored here. It must now appear in `tools/list` purely by virtue
+    /// of living on the struct.
+    #[test]
+    fn wait_ms_field_flows_through_from_struct() {
+        let schema = input_schema("portal_projection_get_pending_input");
+        assert!(
+            prop_names(&schema).contains(&"wait_ms".to_string()),
+            "wait_ms must be derived into the inputSchema automatically"
+        );
+    }
+
+    /// `portal_projection_attach` had grown six fields the hand-written schema
+    /// never mirrored. The derive picks them up automatically — proving struct
+    /// changes can no longer silently diverge from `tools/list`.
+    #[test]
+    fn attach_schema_reflects_all_struct_fields() {
+        let props = prop_names(&input_schema("portal_projection_attach"));
+        for field in [
+            "projection_id",
+            "display_name",
+            "idempotency_key",
+            "provider_kind",
+            "content_classification",
+            "workspace_hint",
+            "repository_hint",
+            "icon_profile_hint",
+            "hud_target",
+        ] {
+            assert!(
+                props.contains(&field.to_string()),
+                "attach schema missing struct field {field}; has {props:?}"
+            );
+        }
+    }
+
+    /// Mechanism-level proof (independent of any real tool): adding a field to a
+    /// `#[derive(JsonSchema)]` params struct surfaces in the derived inputSchema
+    /// with no hand-editing. This is the property that makes schema.rs
+    /// drift-proof — the real `*Params` structs derive the same way.
+    #[test]
+    fn added_struct_field_appears_in_derived_schema() {
+        #[derive(JsonSchema)]
+        #[allow(dead_code)]
+        struct FutureParams {
+            /// A required field newly added to a params struct.
+            newly_added_field: String,
+            /// An optional field should not become required.
+            #[serde(default)]
+            optional_extra: Option<u32>,
+        }
+
+        let schema = input_schema_for::<FutureParams>();
+        assert_eq!(schema["type"], "object");
+        let props = prop_names(&schema);
+        assert!(
+            props.contains(&"newly_added_field".to_string()),
+            "a newly added struct field must flow into the derived schema"
+        );
+        assert!(props.contains(&"optional_extra".to_string()));
+        let req = required(&schema);
+        assert!(req.contains(&"newly_added_field".to_string()));
+        assert!(
+            !req.contains(&"optional_extra".to_string()),
+            "an Option/defaulted field must not be marked required"
+        );
+        // Document-level schemars metadata is stripped from the inputSchema.
+        assert!(schema.get("$schema").is_none(), "$schema must be stripped");
+        assert!(schema.get("title").is_none(), "title must be stripped");
+    }
 }
