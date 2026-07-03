@@ -463,14 +463,29 @@ impl super::Compositor {
                 // recursive node visit — it is constant across all nodes in
                 // the same tile.
                 let (scroll_x, scroll_y) = self.display_tile_scroll_offset(scene, tile.id);
+                // Compute the whole-tile fade once per tile (drag + §6.3 portal
+                // transition) so a rounded backdrop fades with the rest of the tile
+                // instead of staying opaque while the flat backdrop/text fade
+                // (hud-b0x0m; same class as the hud-w41ef flat-backdrop fix).
+                let tile_opacity = self.tile_effective_opacity(tile, scene);
                 self.collect_tile_rounded_rect_cmds_from_node(
-                    root_id, tile, scene, scroll_x, scroll_y, &mut cmds,
+                    root_id,
+                    tile,
+                    scene,
+                    scroll_x,
+                    scroll_y,
+                    tile_opacity,
+                    &mut cmds,
                 );
             }
         }
         cmds
     }
 
+    // `tile_opacity` is the whole-tile fade computed once per tile by the caller
+    // and threaded unchanged through the recursion (like `scroll_x`/`scroll_y`),
+    // so every rounded backdrop in the subtree fades with the tile (hud-b0x0m).
+    #[allow(clippy::too_many_arguments)]
     fn collect_tile_rounded_rect_cmds_from_node(
         &self,
         node_id: SceneId,
@@ -478,6 +493,7 @@ impl super::Compositor {
         scene: &SceneGraph,
         scroll_x: f32,
         scroll_y: f32,
+        tile_opacity: f32,
         cmds: &mut Vec<crate::pipeline::RoundedRectDrawCmd>,
     ) {
         let node = match scene.nodes.get(&node_id) {
@@ -501,7 +517,10 @@ impl super::Compositor {
                         width: rect.width,
                         height: rect.height,
                         radius: radius.min(max_r),
-                        color: self.gpu_color(sc.color),
+                        color: self.gpu_color(Rgba {
+                            a: sc.color.a * tile_opacity,
+                            ..sc.color
+                        }),
                         clip: Some(RoundedRectClip {
                             x: clipped.x,
                             y: clipped.y,
@@ -515,7 +534,13 @@ impl super::Compositor {
 
         for child_id in &node.children {
             self.collect_tile_rounded_rect_cmds_from_node(
-                *child_id, tile, scene, scroll_x, scroll_y, cmds,
+                *child_id,
+                tile,
+                scene,
+                scroll_x,
+                scroll_y,
+                tile_opacity,
+                cmds,
             );
         }
     }
