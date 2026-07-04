@@ -1010,6 +1010,28 @@ impl InProcessPortalDriver {
                     // a drive entry the first time we see this projection_id.
                     if !self.drive.entries.contains_key(&projection_id) {
                         self.attach_projection(&projection_id, Vec::new());
+                        // Route the new projection onto the resident gRPC bridge
+                        // when it is installed (hud-hfuxy). The bridge-enabled
+                        // config/env knob (`resident_grpc_bridge_tx.is_some()`) is
+                        // the only production signal that exists for "materialise
+                        // portals over the bridge" — there is no per-projection
+                        // selector yet (reserved for the external-authority epic;
+                        // see hud-g7ool's design note) — so this is the minimal
+                        // wiring that actually uses the hud-g7ool discriminant.
+                        // Before this, nothing in production ever called
+                        // `set_projection_transport`, so an enabled bridge stayed
+                        // materialised-but-inert (every projection defaulted to
+                        // `InProcess` forever). `effective_transport` fails back to
+                        // `InProcess` if the channel later closes, so this stays
+                        // safe even if the bridge task has already exited by drain
+                        // time. When the bridge is not installed (default
+                        // deployment), this is a no-op — byte-for-byte unchanged.
+                        if self.resident_grpc_bridge_tx.is_some() {
+                            self.set_projection_transport(
+                                &projection_id,
+                                PortalTransport::ResidentGrpcBridge,
+                            );
+                        }
                     }
                     // Re-attach is the reconnect signal: if this projection was
                     // latched as ungracefully disconnected, restore the connection
@@ -5544,6 +5566,130 @@ mod tests {
         assert!(
             saw_detach,
             "detaching a bridged projection must emit a Detach tombstone to the bridge"
+        );
+    }
+
+    // ── Production routing wiring (hud-hfuxy) ─────────────────────────────────
+    //
+    // hud-g7ool installed the `PortalTransport` discriminant and the
+    // `set_projection_transport` seam, but nothing in production ever called
+    // it — every projection defaulted to `InProcess` forever and the bridge
+    // stayed materialised-but-inert even when explicitly enabled. These two
+    // tests drive the actual production entry point (`dispatch_portal_op`, the
+    // same call `windowed/mod.rs::drain_portal_ops` makes) rather than calling
+    // `set_projection_transport` directly, to pin the wiring itself.
+
+    /// Attaching through `dispatch_portal_op` with the bridge channel already
+    /// installed must route the new projection onto the bridge: exactly one
+    /// `Publish`, no in-process tile, no scene mutation.
+    #[test]
+    fn dispatch_portal_op_attach_routes_to_bridge_when_installed() {
+        let mut driver = InProcessPortalDriver::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<BridgeMessage>(16);
+        driver.set_resident_grpc_bridge_tx(Some(tx));
+
+        let proj = "proj-auto-bridge";
+        let (attach_tx, mut attach_rx) =
+            tokio::sync::oneshot::channel::<Result<String, PortalOpRejection>>();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: proj.to_string(),
+            display_name: "Test Projection".to_string(),
+            idempotency_key: None,
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
+            reply: attach_tx,
+        });
+        let token = attach_rx
+            .try_recv()
+            .expect("reply must be sent synchronously")
+            .expect("Attach must be accepted");
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+        let version_before = scene.version;
+
+        publish(&mut driver, proj, &token, "auto-bridged line", 100);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+
+        assert!(
+            driver
+                .drive
+                .entries
+                .get(proj)
+                .unwrap()
+                .tile_scene_id
+                .is_none(),
+            "attaching through the production dispatch_portal_op path with the \
+             bridge installed must route to the bridge (no in-process tile) — \
+             this is the wiring hud-hfuxy adds"
+        );
+        assert_eq!(
+            scene.version, version_before,
+            "a bridge-routed projection must not mutate the in-process scene"
+        );
+
+        let mut publishes = 0;
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                BridgeMessage::Publish { projection_id, .. } => {
+                    assert_eq!(projection_id, proj, "unexpected projection id in tee");
+                    publishes += 1;
+                }
+                other => panic!("unexpected bridge message on a live publish: {other:?}"),
+            }
+        }
+        assert_eq!(publishes, 1, "must materialise exactly once via the bridge");
+    }
+
+    /// Attaching through `dispatch_portal_op` with no bridge channel installed
+    /// (the default, shipped deployment) must leave the projection on the
+    /// in-process path — byte-for-byte unchanged.
+    #[test]
+    fn dispatch_portal_op_attach_stays_in_process_when_bridge_not_installed() {
+        let mut driver = InProcessPortalDriver::new();
+
+        let proj = "proj-no-bridge";
+        let (attach_tx, mut attach_rx) =
+            tokio::sync::oneshot::channel::<Result<String, PortalOpRejection>>();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: proj.to_string(),
+            display_name: "Test Projection".to_string(),
+            idempotency_key: None,
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
+            reply: attach_tx,
+        });
+        let token = attach_rx
+            .try_recv()
+            .expect("reply must be sent synchronously")
+            .expect("Attach must be accepted");
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        publish(&mut driver, proj, &token, "default line", 100);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+
+        assert!(
+            driver
+                .drive
+                .entries
+                .get(proj)
+                .unwrap()
+                .tile_scene_id
+                .is_some(),
+            "default deployment (bridge not installed) must be byte-for-byte \
+             unchanged: projections still materialise in-process"
         );
     }
 
