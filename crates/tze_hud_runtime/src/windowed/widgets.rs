@@ -11,6 +11,19 @@ use crate::widget_hover::{
     WidgetHoverTracker, build_hover_trackers, hidden_mutations_for_removed, tick_hover_trackers,
 };
 
+/// Default empty-draft placeholder hint for the portal chat composer (hud-evk0j).
+///
+/// The portal composer is a chat-message composer (`portal-bottom-chat-composer`),
+/// so this matches the existing UX. Rendered — dimmed, from
+/// `portal.composer.placeholder_color` — only while the draft is empty; it is
+/// never part of the draft buffer and is never submitted.
+///
+/// FOLLOW-UP (hud-evk0j): this is a single global default. A per-composer
+/// placeholder (sourced from the owning `HitRegionNode` / scene config) would let
+/// non-chat composers set their own hint copy; thread that through
+/// `composer_draft_snapshot` when the scene schema grows a placeholder field.
+const COMPOSER_DEFAULT_PLACEHOLDER: &str = "Type a message…";
+
 impl WinitApp {
     /// Push the current composer draft snapshot to the compositor thread for
     /// local echo rendering (hud-r3ax6).
@@ -33,6 +46,7 @@ impl WinitApp {
                 selection_anchor,
                 at_capacity,
                 node_id,
+                placeholder: Some(COMPOSER_DEFAULT_PLACEHOLDER.to_string()),
             };
             if let Ok(mut guard) = self.state.local_composer_state.lock() {
                 *guard = Some(Some(state));

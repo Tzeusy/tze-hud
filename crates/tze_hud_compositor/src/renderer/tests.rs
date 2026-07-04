@@ -9027,6 +9027,7 @@ async fn idle_render_gate_renders_for_composer_echo_and_caret_blink() {
             selection_anchor: 2,
             at_capacity: false,
             node_id,
+            placeholder: None,
         }));
     }
     assert!(
@@ -11058,6 +11059,7 @@ fn local_composer_state_handle_slot_semantics() {
             selection_anchor: 5, // no selection
             at_capacity: false,
             node_id,
+            placeholder: None,
         }));
     }
     apply_composer_slot(&handle, &mut local_composer);
@@ -11155,6 +11157,7 @@ async fn local_composer_text_item_uses_hit_region_bounds() {
         selection_anchor: 5,
         at_capacity: false,
         node_id: hit_id,
+        placeholder: None,
     });
 
     let tokens = resolve_composer_overlay_tokens(&std::collections::HashMap::new());
@@ -11196,6 +11199,157 @@ async fn local_composer_text_item_uses_hit_region_bounds() {
     assert_eq!(
         item.clip_bounds_height, strip_height,
         "clip height must be one input-line strip, not the full region height"
+    );
+}
+
+/// hud-evk0j: an EMPTY composer draft with a placeholder hint renders that hint
+/// dimmed from `portal.composer.placeholder_color`, and the placeholder vanishes
+/// the instant the draft is non-empty (or the composer carries no placeholder).
+///
+/// Asserts the three contract points: (1) empty draft + placeholder → the item
+/// text is the placeholder, colored `placeholder_color`, with no caret/selection
+/// styled runs; (2) a non-empty draft suppresses the placeholder even when one is
+/// present (it is not treated as draft text and disappears on the first keystroke);
+/// (3) an empty draft with NO placeholder is unchanged (never the placeholder
+/// color).
+#[tokio::test]
+async fn composer_placeholder_renders_only_when_draft_empty() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(320, 200).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+    let mut scene = SceneGraph::new(320.0, 200.0);
+    let tab_id = scene.create_tab("test", 0).unwrap();
+    let lease_id = scene.grant_lease("test", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "test",
+            lease_id,
+            Rect::new(20.0, 30.0, 200.0, 120.0),
+            1,
+        )
+        .unwrap();
+    let root_id = SceneId::new();
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: root_id,
+                children: vec![],
+                data: NodeData::SolidColor(SolidColorNode {
+                    color: Rgba::new(0.0, 0.0, 0.0, 0.0),
+                    bounds: Rect::new(0.0, 0.0, 200.0, 120.0),
+                    radius: None,
+                }),
+            },
+        )
+        .unwrap();
+    let hit_id = SceneId::new();
+    scene
+        .add_node_to_tile(
+            tile_id,
+            Some(root_id),
+            Node {
+                id: hit_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(12.0, 16.0, 140.0, 72.0),
+                    interaction_id: "composer".to_owned(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    accepts_composer_input: true,
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap();
+
+    let tokens = resolve_composer_overlay_tokens(&std::collections::HashMap::new());
+    // Default placeholder color is the dimmed slate #6B7689 (config-crate default).
+    assert_eq!(
+        tokens.placeholder_color,
+        [0x6B, 0x76, 0x89, 0xFF],
+        "default placeholder color must resolve to the dimmed slate token default"
+    );
+
+    let placeholder = "Type a message…";
+
+    // ── 1. Empty draft + placeholder → dimmed placeholder run, no caret. ──
+    compositor.local_composer = Some(LocalComposerState {
+        text: String::new(),
+        cursor_byte: 0,
+        selection_anchor: 0,
+        at_capacity: false,
+        node_id: hit_id,
+        placeholder: Some(placeholder.to_owned()),
+    });
+    let tile = scene.tiles.get(&tile_id).unwrap();
+    let item = compositor
+        .collect_composer_text_item(tile, &scene, 320.0, 200.0, &tokens)
+        .expect("empty focused composer with a placeholder must still produce a text item");
+    assert_eq!(
+        item.text.as_ref(),
+        placeholder,
+        "empty draft must render the placeholder string, not the caret glyph"
+    );
+    assert_eq!(
+        item.color, tokens.placeholder_color,
+        "placeholder text must be colored from portal.composer.placeholder_color"
+    );
+    assert!(
+        item.styled_runs.is_empty(),
+        "placeholder is a static hint: no caret or selection styled runs"
+    );
+
+    // ── 2. Non-empty draft suppresses the placeholder (disappears on typing). ──
+    compositor.local_composer = Some(LocalComposerState {
+        text: "hi".to_owned(),
+        cursor_byte: 2,
+        selection_anchor: 2,
+        at_capacity: false,
+        node_id: hit_id,
+        placeholder: Some(placeholder.to_owned()),
+    });
+    let tile = scene.tiles.get(&tile_id).unwrap();
+    let typed = compositor
+        .collect_composer_text_item(tile, &scene, 320.0, 200.0, &tokens)
+        .expect("non-empty composer must produce a text item");
+    assert!(
+        typed.text.contains("hi"),
+        "non-empty draft must render the live draft text ({:?})",
+        typed.text
+    );
+    assert_ne!(
+        typed.text.as_ref(),
+        placeholder,
+        "a non-empty draft must NOT render the placeholder"
+    );
+    assert_ne!(
+        typed.color, tokens.placeholder_color,
+        "live draft text must use the composer text color, not the placeholder color"
+    );
+
+    // ── 3. Empty draft with NO placeholder is unchanged (never dimmed). ──
+    compositor.local_composer = Some(LocalComposerState {
+        text: String::new(),
+        cursor_byte: 0,
+        selection_anchor: 0,
+        at_capacity: false,
+        node_id: hit_id,
+        placeholder: None,
+    });
+    let tile = scene.tiles.get(&tile_id).unwrap();
+    let no_hint = compositor
+        .collect_composer_text_item(tile, &scene, 320.0, 200.0, &tokens)
+        .expect("empty composer without a placeholder must still produce a text item");
+    assert_ne!(
+        no_hint.text.as_ref(),
+        placeholder,
+        "no placeholder configured → the placeholder string must never appear"
+    );
+    assert_ne!(
+        no_hint.color, tokens.placeholder_color,
+        "no placeholder configured → text must not use the placeholder color"
     );
 }
 
@@ -11275,6 +11429,7 @@ async fn composer_echo_confined_to_bottom_strip_full_tile_hitregion() {
         selection_anchor: draft_len,
         at_capacity: false,
         node_id: hit_id,
+        placeholder: None,
     });
 
     compositor.prime_markdown_cache(&scene);
@@ -11411,6 +11566,7 @@ async fn composer_wrapped_draft_stays_in_short_pane_headless() {
         selection_anchor: draft_len,
         at_capacity: false,
         node_id: hit_id,
+        placeholder: None,
     });
 
     compositor.prime_markdown_cache(&scene);
@@ -11520,6 +11676,7 @@ async fn composer_draft_overflow_is_clipped_to_box_headless() {
         selection_anchor: draft_len,
         at_capacity: false,
         node_id: hit_id,
+        placeholder: None,
     });
 
     compositor.prime_markdown_cache(&scene);
@@ -12293,6 +12450,7 @@ async fn top_anchored_empty_caret_sits_at_pane_origin_no_teleport() {
         selection_anchor: 0,
         at_capacity: false,
         node_id: hit_id,
+        placeholder: None,
     });
     compositor.prime_composer_scroll_offset(&scene);
     let empty_item = {
@@ -12319,6 +12477,7 @@ async fn top_anchored_empty_caret_sits_at_pane_origin_no_teleport() {
         selection_anchor: 1,
         at_capacity: false,
         node_id: hit_id,
+        placeholder: None,
     });
     compositor.prime_composer_scroll_offset(&scene);
     let typed_item = {
