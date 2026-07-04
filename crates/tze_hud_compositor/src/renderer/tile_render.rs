@@ -1878,7 +1878,10 @@ mod resize_grip_tests {
         let corner_y = region.y + region.height; // 240
 
         for d in &dots {
-            assert!(d.width > 0.0 && d.height > 0.0, "every dot must be non-empty");
+            assert!(
+                d.width > 0.0 && d.height > 0.0,
+                "every dot must be non-empty"
+            );
             assert!(
                 d.x >= grip_x - 1e-3 && d.x + d.width <= corner_x + 1e-3,
                 "dot x {} must sit inside the grip square [{grip_x}, {corner_x}]",

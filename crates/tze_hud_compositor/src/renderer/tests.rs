@@ -377,7 +377,10 @@ async fn test_portal_tile_emits_resize_grip_in_overlay_mode() {
     // transparent overlay.
     let grip = crate::renderer::token_colors::resolve_resize_grip_tokens(&compositor.token_map);
     let expected = compositor.gpu_color_raw(grip.mark_color(false));
-    assert!(expected[3] > 0.0, "resize grip default alpha must be visible");
+    assert!(
+        expected[3] > 0.0,
+        "resize grip default alpha must be visible"
+    );
     for v in &verts {
         for (c, (actual, want)) in v.color.iter().zip(expected.iter()).enumerate() {
             assert!(
