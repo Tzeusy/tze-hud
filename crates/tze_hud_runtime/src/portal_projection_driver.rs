@@ -893,7 +893,21 @@ impl InProcessPortalDriver {
     }
 
     /// Apply a new design-token override map, propagating to all live adapters.
+    ///
+    /// On a design-token / profile hot-reload this re-skins both transport
+    /// families: the in-process adapters (via `drive.apply_token_map`) AND, when a
+    /// resident gRPC bridge is installed, the bridged portals — the bridge holds
+    /// its own adapters spawned with the startup tokens, so it needs the swap
+    /// forwarded explicitly (`BridgeMessage::SetVisualTokens`) to reach parity
+    /// with in-process surfaces (hud-fm0nf; builds on ygtiy's spawn-time
+    /// `resolve_bridge_visual_tokens`, reused here to re-resolve from the same map).
     pub fn apply_token_map(&mut self, overrides: DesignTokenMap) {
+        if let Some(tx) = &self.resident_grpc_bridge_tx {
+            let tokens = crate::portal_tokens::resolve_bridge_visual_tokens(&overrides);
+            // Best-effort, latest-wins: a full channel means a newer token swap is
+            // already queued, so dropping this one is harmless.
+            let _ = tx.try_send(BridgeMessage::SetVisualTokens(Box::new(tokens)));
+        }
         self.drive.apply_token_map(overrides);
     }
 
@@ -3007,6 +3021,70 @@ mod tests {
             "pre-existing adapter must also be updated to 48.0 by apply_token_map; \
              only the new-entry path in attach() being correct is not sufficient"
         );
+    }
+
+    /// hud-fm0nf: `apply_token_map` must ALSO forward the re-resolved tokens to
+    /// the resident gRPC bridge (when one is installed) as a
+    /// `BridgeMessage::SetVisualTokens`, so a bridged portal re-renders with the
+    /// new active-profile tokens on hot-reload — parity with the in-process
+    /// adapters updated in the same call. The forwarded palette must be resolved
+    /// through the same `resolve_bridge_visual_tokens` helper ygtiy wired at
+    /// spawn, so the override appears in the bridge's tokens.
+    #[test]
+    fn apply_token_map_forwards_resolved_tokens_to_bridge() {
+        let mut driver = InProcessPortalDriver::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<BridgeMessage>(16);
+        driver.set_resident_grpc_bridge_tx(Some(tx));
+
+        // A non-default collapsed font size sentinel (canonical key
+        // `portal.collapsed.font_size`, no `_px` suffix).
+        let mut tokens = DesignTokenMap::new();
+        tokens.insert(
+            "portal.collapsed_card.font_size".to_string(),
+            "42".to_string(),
+        );
+        driver.apply_token_map(tokens);
+
+        // Exactly one SetVisualTokens must have been forwarded, carrying the
+        // resolved sentinel — the same value the spawn-time helper would produce.
+        let mut set_token_msgs = 0;
+        let mut observed_font_size = None;
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                BridgeMessage::SetVisualTokens(tokens) => {
+                    set_token_msgs += 1;
+                    observed_font_size = Some(tokens.collapsed_font_size_px);
+                }
+                other => panic!("unexpected bridge message on apply_token_map: {other:?}"),
+            }
+        }
+        assert_eq!(
+            set_token_msgs, 1,
+            "apply_token_map must forward exactly one SetVisualTokens to the bridge"
+        );
+        assert_eq!(
+            observed_font_size,
+            Some(42.0),
+            "the forwarded bridge tokens must carry the resolved active-profile \
+             override (collapsed font size 42), not the spawn-time default"
+        );
+    }
+
+    /// hud-fm0nf: with NO bridge installed, `apply_token_map` must not attempt to
+    /// forward anything (the in-process-only path is unchanged).
+    #[test]
+    fn apply_token_map_without_bridge_does_not_forward() {
+        let mut driver = InProcessPortalDriver::new();
+        // No bridge tx installed. This must simply not panic and must still update
+        // in-process adapters (covered by apply_token_map_propagates_to_drive_state).
+        let mut tokens = DesignTokenMap::new();
+        tokens.insert(
+            "portal.collapsed_card.font_size".to_string(),
+            "42".to_string(),
+        );
+        driver.apply_token_map(tokens);
+        // Reaching here without panicking is the assertion: the None-bridge branch
+        // is a no-op forward.
     }
 
     /// Regression guard for the `dispatch_portal_op` → `drain_inner` wiring
