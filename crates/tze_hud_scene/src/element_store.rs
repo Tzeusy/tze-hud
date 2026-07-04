@@ -753,9 +753,10 @@ mod tests {
         // it is pruned instead of lingering forever.
         let orphan_id = SceneId::new();
         let mut store = ElementStore::default();
-        store
-            .entries
-            .insert(orphan_id, tile_entry_with_override("agent.dead-portal", 5, 0.7));
+        store.entries.insert(
+            orphan_id,
+            tile_entry_with_override("agent.dead-portal", 5, 0.7),
+        );
 
         // Simulate `MAX_UNSEEN_ORPHAN_OVERRIDE_RESTARTS` bootstraps with no
         // republish reclaiming the entry.
