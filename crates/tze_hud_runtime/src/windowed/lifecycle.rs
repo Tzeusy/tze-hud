@@ -272,6 +272,38 @@ pub(super) fn spin_acquire<T>(
     }
 }
 
+/// [`spin_acquire`] plus interaction-feedback miss telemetry (hud-uyhpn).
+///
+/// Identical acquisition semantics to [`spin_acquire`], but on a budget timeout
+/// (the guaranteed-feedback gesture is about to drop a scene update) it bumps
+/// `misses` and, throttled, records the drop through the best-effort `diag` log.
+///
+/// This is the confirmation lever for the lock-scope fix: with the compositor no
+/// longer holding the scene lock across the vsync-blocking present, a live drag
+/// should never time out here, so `misses` should stay at 0. It is kept a free
+/// function (not a method) so it can be called from the `if`-scrutinee position
+/// without extending any `self` borrow past the if-let.
+pub(super) fn spin_acquire_recording<'a, T>(
+    mutex: &'a Mutex<T>,
+    budget: std::time::Duration,
+    misses: &std::sync::atomic::AtomicU64,
+) -> Option<tokio::sync::MutexGuard<'a, T>> {
+    let guard = spin_acquire(mutex, budget);
+    if guard.is_none() {
+        let n = misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        // First miss, then every 30th (~0.5s of dropped drag at 60Hz) — noisy
+        // only while genuinely broken, which is exactly the signal we want.
+        if n == 1 || n % 30 == 0 {
+            crate::diag::diag_write(&format!(
+                "INTERACTION-FEEDBACK-MISS: guaranteed-feedback gesture dropped a scene \
+                 update (spin_acquire exceeded {}ms budget) — cumulative {n} [hud-uyhpn]",
+                budget.as_millis(),
+            ));
+        }
+    }
+    guard
+}
+
 pub(super) fn pointer_down_starts_guaranteed_feedback_gesture(
     snapshot: &crate::pipeline::HitTestSnapshot,
     x: f32,
@@ -920,13 +952,29 @@ impl WinitApp {
         // borrow of `self` is released at the end of this if-let/else — the
         // post-lock section below needs `&mut self` (drag-release persist,
         // composer-echo clear).
+        // The interaction-feedback miss counter (hud-uyhpn) is bumped inside
+        // `spin_acquire_recording`, which wraps `spin_acquire` and — on a budget
+        // timeout during a guaranteed-feedback gesture — records the dropped scene
+        // update. Kept in the `if`-scrutinee position (not a named `let`) so the
+        // returned guard remains a temporary whose borrow ends with the if-let,
+        // leaving `&mut self` free for the post-lock work below. This counter is
+        // the confirmation lever: after the lock-scope fix it must hold at 0
+        // during a live drag.
         if let Some(state) = if needs_guaranteed_feedback {
-            spin_acquire(&self.state.shared_state, INTERACTION_LOCK_BUDGET)
+            spin_acquire_recording(
+                &self.state.shared_state,
+                INTERACTION_LOCK_BUDGET,
+                &self.state.interaction_feedback_lock_misses,
+            )
         } else {
             self.state.shared_state.try_lock().ok()
         } {
             let scene_guard = if needs_guaranteed_feedback {
-                spin_acquire(&state.scene, INTERACTION_LOCK_BUDGET)
+                spin_acquire_recording(
+                    &state.scene,
+                    INTERACTION_LOCK_BUDGET,
+                    &self.state.interaction_feedback_lock_misses,
+                )
             } else {
                 state.scene.try_lock().ok()
             };

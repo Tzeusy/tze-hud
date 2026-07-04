@@ -1648,6 +1648,7 @@ mod tests {
             portal_op_rx: None,
             pending_keyboard_events: VecDeque::new(),
             resident_grpc_bridge: None,
+            interaction_feedback_lock_misses: std::sync::atomic::AtomicU64::new(0),
         };
 
         drop(input_capture_tx);

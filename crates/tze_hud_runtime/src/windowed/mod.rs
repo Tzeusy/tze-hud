@@ -90,8 +90,8 @@ use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel}
 
 use crate::component_startup::{register_profile_widgets, run_component_startup};
 use tze_hud_compositor::{
-    Compositor, FocusRingOwnerHandle, LocalComposerStateHandle, PortalViewerEchoQueue,
-    WindowSurface,
+    Compositor, CompositorSurface, FocusRingOwnerHandle, LocalComposerStateHandle,
+    PortalViewerEchoQueue, WindowSurface,
 };
 use tze_hud_config::resolve_runtime_widget_asset_store;
 use tze_hud_input::{
@@ -493,6 +493,20 @@ struct WindowedRuntimeState {
     /// server + PSK are configured. Aborted on teardown so its task/stream is not
     /// leaked. `None` in the default configuration.
     resident_grpc_bridge: Option<crate::resident_grpc_bridge::ResidentGrpcBridgeHandle>,
+    /// Cumulative count of interactive-feedback scene updates dropped because the
+    /// main-thread `spin_acquire` timed out on the scene / shared-state lock
+    /// during a guaranteed-feedback gesture (drag-move / live resize) — the exact
+    /// symptom the hud-uyhpn lock-scope fix targets (see
+    /// [`INTERACTION_LOCK_BUDGET`]).
+    ///
+    /// This is the confirmation lever for the fix: with the compositor no longer
+    /// holding the scene lock across the vsync-blocking present, this counter
+    /// should stay at 0 during a live drag. It is surfaced through the existing
+    /// best-effort `diag` log (throttled) and readable directly in tests.
+    ///
+    /// Incremented via interior mutability at the `spin_acquire` miss sites; the
+    /// borrow of this field ends before any `&mut self` work in the same tick.
+    interaction_feedback_lock_misses: std::sync::atomic::AtomicU64,
 }
 
 // ─── WinitApp ────────────────────────────────────────────────────────────────
@@ -1119,10 +1133,21 @@ impl ApplicationHandler for WinitApp {
                             // signalling the main thread to present.
                             drop(scene);
                         } else {
-                            // ── Stage 5–7: Render Encode + GPU Submit ─────────
+                            // ── Stage 5: Build under the scene lock (hud-uyhpn) ─
+                            // Do ALL scene reads (vertex/geometry build, encode
+                            // inputs, chrome geometry, hit-region population) here
+                            // while holding the lock, producing a self-contained
+                            // `WindowedFrameBuild`. Crucially this phase does NOT
+                            // touch the swapchain surface — so it never blocks on
+                            // vsync while the lock is held.
                             let scene_commit_at = Instant::now();
-                            let compositor_telemetry = compositor
-                                .render_frame(&mut scene, surface_for_compositor.as_ref());
+                            let (surf_w, surf_h) = surface_for_compositor.size();
+                            let build =
+                                compositor.build_windowed_frame(&mut scene, surf_w, surf_h);
+                            // Hit-region refresh + hit-test snapshot are still
+                            // computed under the lock, from the geometry we are
+                            // about to present (build already populated the
+                            // drag-handle hit regions from that same geometry).
                             refresh_interaction_hit_regions_after_render(
                                 &compositor,
                                 &mut scene,
@@ -1134,7 +1159,18 @@ impl ApplicationHandler for WinitApp {
                             // scene idles on the next iteration.
                             last_rendered_scene_version = scene.version;
                             last_rendered_geometry_epoch = scene.geometry_epoch;
-                            drop(scene); // Release lock before signalling main thread.
+                            // ── DROP the scene lock BEFORE the vsync-blocking
+                            // acquire/encode/submit/poll (hud-uyhpn) ────────────
+                            // This is the fix: the lock hold now collapses to the
+                            // cheap build phase above instead of spanning a full
+                            // ~16.6ms refresh interval, so the main-thread
+                            // interaction path's `spin_acquire` (12ms budget) no
+                            // longer times out and drops drag-move samples.
+                            drop(scene);
+
+                            // ── Stage 6–7: Present lock-free ──────────────────
+                            let compositor_telemetry = compositor
+                                .present_windowed_frame(build, surface_for_compositor.as_ref());
 
                             // ── Signal main thread to present ─────────────────
                             // Per spec §Compositor Thread Ownership (line 55):
@@ -2152,6 +2188,7 @@ impl WindowedRuntime {
             portal_op_rx: portal_op_rx_opt.take(),
             pending_keyboard_events: VecDeque::new(),
             resident_grpc_bridge,
+            interaction_feedback_lock_misses: std::sync::atomic::AtomicU64::new(0),
         };
 
         let mut app = WinitApp { state: app_state };
