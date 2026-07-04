@@ -3,7 +3,7 @@
 ## 1. Spec delta (this change's deliverable)
 
 - [x] 1.1 Author delta: Multi-Line Composer Wrap and Growth, Composer Submit-Key Contract, Pilot-Path Viewer History, Transcript Turn Separators
-- [ ] 1.2 `openspec validate portal-bottom-chat-composer --strict` passes
+- [x] 1.2 `openspec validate portal-bottom-chat-composer --strict` passes
 - [ ] 1.3 Commit + push to main
 
 ## 2. Implementation (beads under hud-nx7yq — file, then implement)
@@ -17,5 +17,5 @@
 ## 3. Closeout
 
 - [ ] 3.1 Live re-verify on reference Windows overlay (wrap, growth, Ctrl+Enter, Enter-send, history bubbling, separators)
-- [ ] 3.2 Annotate the superseded decision in `docs/reports/text-stream-refinement.md`
+- [x] 3.2 Annotate the superseded decision in `docs/reports/text-stream-refinement.md`
 - [ ] 3.3 Sync + archive per hud-hpuzp convention once implementation lands
