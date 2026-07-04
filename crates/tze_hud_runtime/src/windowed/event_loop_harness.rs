@@ -140,6 +140,7 @@ impl WindowedRuntimeState {
             portal_projection_driver: crate::portal_projection_driver::InProcessPortalDriver::new(),
             portal_op_rx: None,
             pending_keyboard_events: VecDeque::new(),
+            interaction_feedback_lock_misses: std::sync::atomic::AtomicU64::new(0),
             resident_grpc_bridge: None,
         }
     }
