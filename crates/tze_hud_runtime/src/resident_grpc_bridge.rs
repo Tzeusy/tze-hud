@@ -61,6 +61,39 @@ use tze_hud_protocol::proto::session::{
 /// scopes) so the resident session is least-privilege.
 pub const PORTAL_CAPABILITIES: [&str; 2] = ["create_tiles", "modify_own_tiles"];
 
+/// A message fed to the resident gRPC bridge task by the per-projection transport
+/// router (hud-g7ool).
+///
+/// Under the v1 routing policy each projection is materialised by exactly one
+/// transport. When a projection is routed to the bridge, the driver sends one of
+/// these for it:
+///
+/// - [`BridgeMessage::Publish`] carries a fresh authority-derived snapshot to
+///   render over the authenticated stream (creating the remote tile on first
+///   publish).
+/// - [`BridgeMessage::Detach`] is the detach/release **tombstone** (absorbs
+///   hud-sjdkk): it tears down the remote portal tile and drops the projection
+///   from the replay set, so a bridged projection cannot leave a STALE remote
+///   portal after its in-process cleanup — and a later reconnect does not
+///   resurrect it.
+#[derive(Debug)]
+pub enum BridgeMessage {
+    /// Render `state` for `projection_id` over the bridge.
+    Publish {
+        /// Authority projection id.
+        projection_id: String,
+        /// Coalesced authority-derived state to materialise. Boxed because a
+        /// [`ProjectedPortalState`] is large (~0.5 KiB) relative to the `Detach`
+        /// variant, so an unboxed enum would bloat every queued message.
+        state: Box<ProjectedPortalState>,
+    },
+    /// Tear down the remote portal for `projection_id` (detach/release tombstone).
+    Detach {
+        /// Authority projection id whose remote portal must be released.
+        projection_id: String,
+    },
+}
+
 /// Default lease TTL requested for a resident portal lease.
 const DEFAULT_LEASE_TTL_MS: u64 = 60_000;
 
@@ -418,6 +451,42 @@ impl ResidentGrpcPortalBridge {
         drop(self.stream);
     }
 
+    /// Tear down the remote portal for `projection_id` — the detach/release
+    /// tombstone (hud-g7ool / hud-sjdkk).
+    ///
+    /// Sends a `LeaseRelease` for the projection's lease so the runtime removes
+    /// the remote tile (mirroring the dashboard dismiss → `LeaseRelease` + tile
+    /// removal path), then drops the local adapter + lease bookkeeping. This is
+    /// fire-and-forget: the server's `LeaseResponse` is not awaited here (it
+    /// interleaves harmlessly and is skipped by the next read loop), so a detach
+    /// never blocks the bridge task. A subsequent publish for the same projection
+    /// re-acquires a fresh lease and recreates the tile (self-healing). No-op when
+    /// the projection is unknown (never acquired a lease).
+    pub async fn release_projection(
+        &mut self,
+        projection_id: &str,
+    ) -> Result<(), ResidentGrpcBridgeError> {
+        // Build the release message under a short immutable borrow (sequence is
+        // bumped first so the `&mut self` and `&self` borrows do not overlap).
+        let message = if self.adapters.contains_key(projection_id) {
+            let seq = self.next_seq();
+            let ts = now_wall_us();
+            let adapter = self
+                .adapters
+                .get(projection_id)
+                .expect("presence checked above");
+            Some(adapter.release_lease_message(seq, ts).message)
+        } else {
+            None
+        };
+        if let Some(message) = message {
+            Self::send(&self.tx, message).await?;
+        }
+        self.adapters.remove(projection_id);
+        self.leases.remove(projection_id);
+        Ok(())
+    }
+
     /// Acquire a capability-scoped lease for `projection_id` and construct its
     /// adapter, if not already present.
     async fn ensure_projection(
@@ -611,13 +680,14 @@ impl ResidentGrpcPortalBridge {
 /// [`ResidentGrpcBridgeHandle::abort`] (sync, for teardown) to stop the task
 /// without leaking it.
 pub struct ResidentGrpcBridgeHandle {
-    state_tx: mpsc::Sender<(String, ProjectedPortalState)>,
+    state_tx: mpsc::Sender<BridgeMessage>,
     join: tokio::task::JoinHandle<()>,
 }
 
 impl ResidentGrpcBridgeHandle {
-    /// A cloneable sender for feeding `(projection_id, state)` to the bridge.
-    pub fn state_sender(&self) -> mpsc::Sender<(String, ProjectedPortalState)> {
+    /// A cloneable sender for feeding [`BridgeMessage`]s (publish / detach) to the
+    /// bridge.
+    pub fn state_sender(&self) -> mpsc::Sender<BridgeMessage> {
         self.state_tx.clone()
     }
 
@@ -653,6 +723,12 @@ trait ResidentPortalTransport: Sized {
         &mut self,
     ) -> impl std::future::Future<Output = Result<(), ResidentGrpcBridgeError>> + Send;
 
+    /// Tear down the remote portal for `projection_id` (detach/release tombstone).
+    fn release_projection(
+        &mut self,
+        projection_id: &str,
+    ) -> impl std::future::Future<Output = Result<(), ResidentGrpcBridgeError>> + Send;
+
     /// Earliest lease-renewal deadline, or `None` when no leases are held.
     fn next_renew_deadline(&self) -> Option<Instant>;
 
@@ -674,6 +750,13 @@ impl ResidentPortalTransport for ResidentGrpcPortalBridge {
         &mut self,
     ) -> impl std::future::Future<Output = Result<(), ResidentGrpcBridgeError>> + Send {
         ResidentGrpcPortalBridge::renew_due_leases(self)
+    }
+
+    fn release_projection(
+        &mut self,
+        projection_id: &str,
+    ) -> impl std::future::Future<Output = Result<(), ResidentGrpcBridgeError>> + Send {
+        ResidentGrpcPortalBridge::release_projection(self, projection_id)
     }
 
     fn next_renew_deadline(&self) -> Option<Instant> {
@@ -723,7 +806,7 @@ fn is_fatal_connect_error(err: &ResidentGrpcBridgeError) -> bool {
 async fn run_bridge_loop<T, C, Fut>(
     connect: C,
     policy: ReconnectPolicy,
-    mut state_rx: mpsc::Receiver<(String, ProjectedPortalState)>,
+    mut state_rx: mpsc::Receiver<BridgeMessage>,
 ) where
     T: ResidentPortalTransport,
     C: Fn() -> Fut,
@@ -787,23 +870,44 @@ async fn run_bridge_loop<T, C, Fut>(
 
             tokio::select! {
                 incoming = state_rx.recv() => {
-                    let Some((projection_id, state)) = incoming else {
+                    let Some(message) = incoming else {
                         // Feed closed: clean shutdown.
                         bridge.shutdown().await;
                         tracing::info!("resident gRPC portal bridge task exited (feed closed)");
                         return;
                     };
-                    last_state.insert(projection_id.clone(), state);
-                    let state = last_state.get(&projection_id).expect("just inserted");
-                    match bridge.publish_state(&projection_id, state).await {
-                        Ok(()) => failures = 0,
-                        Err(e) if is_reconnectable(&e) => {
-                            tracing::warn!(projection_id = %projection_id, error = %e, "resident gRPC portal bridge publish failed; reconnecting");
-                            failures += 1;
-                            continue 'reconnect;
+                    match message {
+                        BridgeMessage::Publish { projection_id, state } => {
+                            last_state.insert(projection_id.clone(), *state);
+                            let state = last_state.get(&projection_id).expect("just inserted");
+                            match bridge.publish_state(&projection_id, state).await {
+                                Ok(()) => failures = 0,
+                                Err(e) if is_reconnectable(&e) => {
+                                    tracing::warn!(projection_id = %projection_id, error = %e, "resident gRPC portal bridge publish failed; reconnecting");
+                                    failures += 1;
+                                    continue 'reconnect;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(projection_id = %projection_id, error = %e, "resident gRPC portal bridge publish rejected");
+                                }
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!(projection_id = %projection_id, error = %e, "resident gRPC portal bridge publish rejected");
+                        BridgeMessage::Detach { projection_id } => {
+                            // Detach/release tombstone (hud-sjdkk): drop the projection
+                            // from the replay set FIRST so a mid-detach reconnect cannot
+                            // resurrect it, then tear down the remote portal tile.
+                            last_state.remove(&projection_id);
+                            match bridge.release_projection(&projection_id).await {
+                                Ok(()) => {}
+                                Err(e) if is_reconnectable(&e) => {
+                                    tracing::warn!(projection_id = %projection_id, error = %e, "resident gRPC portal bridge detach/release failed; reconnecting");
+                                    failures += 1;
+                                    continue 'reconnect;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(projection_id = %projection_id, error = %e, "resident gRPC portal bridge detach/release rejected");
+                                }
+                            }
                         }
                     }
                 }
@@ -838,8 +942,7 @@ pub fn spawn_resident_grpc_bridge(
     config: ResidentGrpcBridgeConfig,
     visual_tokens: PortalVisualTokens,
 ) -> ResidentGrpcBridgeHandle {
-    let (state_tx, state_rx) =
-        mpsc::channel::<(String, ProjectedPortalState)>(STATE_CHANNEL_CAPACITY);
+    let (state_tx, state_rx) = mpsc::channel::<BridgeMessage>(STATE_CHANNEL_CAPACITY);
 
     let join = runtime.spawn(async move {
         let connect = move || {
@@ -1048,6 +1151,7 @@ mod tests {
         connect_calls: Arc<AtomicUsize>,
         publish_calls: Arc<AtomicUsize>,
         renew_calls: Arc<AtomicUsize>,
+        release_calls: Arc<AtomicUsize>,
         /// Per-publish outcomes: `true` => reconnectable transport error.
         publish_fail_queue: Arc<Mutex<VecDeque<bool>>>,
         /// When set, every publish fails with a reconnectable transport error.
@@ -1111,6 +1215,17 @@ mod tests {
             let world = self.world.clone();
             async move {
                 world.renew_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        fn release_projection(
+            &mut self,
+            _projection_id: &str,
+        ) -> impl std::future::Future<Output = Result<(), ResidentGrpcBridgeError>> + Send {
+            let world = self.world.clone();
+            async move {
+                world.release_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }
         }
@@ -1195,7 +1310,7 @@ mod tests {
         // First publish fails (transport); the reconnect's replay then succeeds.
         world.publish_fail_queue.lock().unwrap().push_back(true);
 
-        let (tx, rx) = mpsc::channel::<(String, ProjectedPortalState)>(8);
+        let (tx, rx) = mpsc::channel::<BridgeMessage>(8);
         let connect = {
             let world = world.clone();
             move || {
@@ -1208,7 +1323,12 @@ mod tests {
         };
         let handle = tokio::spawn(run_bridge_loop(connect, ReconnectPolicy::default(), rx));
 
-        tx.send(("p".to_string(), sample_state())).await.unwrap();
+        tx.send(BridgeMessage::Publish {
+            projection_id: "p".to_string(),
+            state: Box::new(sample_state()),
+        })
+        .await
+        .unwrap();
 
         // Drive virtual time so the backoff elapses and the reconnect happens.
         let mut iters = 0;
@@ -1242,7 +1362,7 @@ mod tests {
             max: Duration::from_millis(50),
             max_retries: 2,
         };
-        let (tx, rx) = mpsc::channel::<(String, ProjectedPortalState)>(8);
+        let (tx, rx) = mpsc::channel::<BridgeMessage>(8);
         let connect = {
             let world = world.clone();
             move || {
@@ -1257,7 +1377,12 @@ mod tests {
 
         // Keep the sender alive: the loop must exit by exhausting its budget, not
         // by the feed closing.
-        tx.send(("p".to_string(), sample_state())).await.unwrap();
+        tx.send(BridgeMessage::Publish {
+            projection_id: "p".to_string(),
+            state: Box::new(sample_state()),
+        })
+        .await
+        .unwrap();
 
         let mut iters = 0;
         while !handle.is_finished() && iters < 1_000 {
@@ -1279,7 +1404,7 @@ mod tests {
         // 75% of a 60s lease — the deadline the transport reports.
         *world.renew_after.lock().unwrap() = Some(Duration::from_secs(45));
 
-        let (tx, rx) = mpsc::channel::<(String, ProjectedPortalState)>(8);
+        let (tx, rx) = mpsc::channel::<BridgeMessage>(8);
         let connect = {
             let world = world.clone();
             move || {
@@ -1293,7 +1418,12 @@ mod tests {
         let handle = tokio::spawn(run_bridge_loop(connect, ReconnectPolicy::default(), rx));
 
         // First publish arms the renewal deadline.
-        tx.send(("p".to_string(), sample_state())).await.unwrap();
+        tx.send(BridgeMessage::Publish {
+            projection_id: "p".to_string(),
+            state: Box::new(sample_state()),
+        })
+        .await
+        .unwrap();
         for _ in 0..5 {
             tokio::task::yield_now().await;
         }
@@ -1310,6 +1440,62 @@ mod tests {
         assert!(
             world.renew_calls.load(Ordering::SeqCst) >= 1,
             "bridge must renew the lease before its TTL expires"
+        );
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    /// hud-g7ool / hud-sjdkk: a `BridgeMessage::Detach` tombstone must tear down
+    /// the remote portal via `release_projection` so a bridged projection does not
+    /// leave a stale remote tile after its in-process cleanup.
+    #[tokio::test(start_paused = true)]
+    async fn bridge_detach_releases_the_projection() {
+        let world = FakeWorld::default();
+        let (tx, rx) = mpsc::channel::<BridgeMessage>(8);
+        let connect = {
+            let world = world.clone();
+            move || {
+                let world = world.clone();
+                async move {
+                    world.connect_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, ResidentGrpcBridgeError>(FakeTransport::new(world.clone()))
+                }
+            }
+        };
+        let handle = tokio::spawn(run_bridge_loop(connect, ReconnectPolicy::default(), rx));
+
+        // Publish once so the projection is live in the bridge's replay set.
+        tx.send(BridgeMessage::Publish {
+            projection_id: "p".to_string(),
+            state: Box::new(sample_state()),
+        })
+        .await
+        .unwrap();
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            world.release_calls.load(Ordering::SeqCst),
+            0,
+            "no release before the detach tombstone"
+        );
+
+        // The detach tombstone tears the remote portal down.
+        tx.send(BridgeMessage::Detach {
+            projection_id: "p".to_string(),
+        })
+        .await
+        .unwrap();
+        let mut iters = 0;
+        while world.release_calls.load(Ordering::SeqCst) < 1 && iters < 50 {
+            tokio::task::yield_now().await;
+            iters += 1;
+        }
+        assert_eq!(
+            world.release_calls.load(Ordering::SeqCst),
+            1,
+            "a detach tombstone must release the bridged projection (remote teardown)"
         );
 
         drop(tx);

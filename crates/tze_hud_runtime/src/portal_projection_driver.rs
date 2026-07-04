@@ -59,9 +59,9 @@ use tze_hud_projection::{
     AdapterDraftSubmission, AdapterGeometrySnapshot, AdapterPortalRect, AttachRequest,
     CleanupAuthority, CleanupRequest, ContentClassification, DetachRequest, GetPendingInputRequest,
     HudConnectionMetadata, InputAckState, OperationEnvelope, OutputKind, PendingInputItem,
-    PortalInputFeedback, ProjectedPortalPolicy, ProjectedPortalState, ProjectionAuthority,
-    ProjectionBounds, ProjectionErrorCode, ProjectionLifecycleState, ProjectionOperation,
-    ProviderKind, PublishOutputRequest, PublishStatusRequest,
+    PortalInputFeedback, ProjectedPortalPolicy, ProjectionAuthority, ProjectionBounds,
+    ProjectionErrorCode, ProjectionLifecycleState, ProjectionOperation, ProviderKind,
+    PublishOutputRequest, PublishStatusRequest,
     resident_grpc::{
         ResidentGrpcPortalAdapter, ResidentGrpcPortalCommandKind, ResidentGrpcPortalConfig,
         portal_visual_tokens_from_part_tokens,
@@ -72,6 +72,36 @@ use tze_hud_scene::{
     types::{SceneId, TileScrollConfig},
 };
 use tze_hud_telemetry::LatencyBucket;
+
+use crate::resident_grpc_bridge::BridgeMessage;
+
+/// Which transport materialises a portal projection's scene presence (hud-g7ool).
+///
+/// v1 routing policy (owner decision 2026-07-04, OPTION B): each projection is
+/// materialised by EXACTLY ONE transport — bridge XOR in-process.
+///
+/// - [`PortalTransport::InProcess`] (the default) paints the projection's tile
+///   directly on the winit thread via the in-process direct-scene path.
+/// - [`PortalTransport::ResidentGrpcBridge`] routes the projection's coalesced
+///   state to the resident gRPC bridge, which materialises it over an
+///   authenticated `HudSession` stream. When a projection is bridged, its
+///   in-process direct-scene materialisation is SUPPRESSED so the two transports
+///   never double-paint one scene (the original hud-d7frs double-materialisation
+///   bug).
+///
+/// This discriminant is the foundation the completeness cluster (hud-omfqi,
+/// hud-ygtiy) builds on. A routed-to-bridge projection whose bridge channel is
+/// not wired (or has closed) falls back to the in-process path — see
+/// [`InProcessPortalDriver::effective_transport`] — so a projection routed to a
+/// dead bridge still materialises somewhere rather than vanishing (fail-safe).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PortalTransport {
+    /// In-process direct-scene materialisation (default).
+    #[default]
+    InProcess,
+    /// The resident gRPC bridge is the sole materialiser for this projection.
+    ResidentGrpcBridge,
+}
 
 /// Line-height multiplier used by the compositor's text shaper (text.rs).
 ///
@@ -344,6 +374,12 @@ struct InProcessPortalDriveState {
     pending_tile_removals: Vec<SceneId>,
     /// Current resolved design-token overrides (flat key → value strings).
     token_overrides: DesignTokenMap,
+    /// Per-projection transport routing (hud-g7ool). Absent ⇒ the default
+    /// [`PortalTransport::InProcess`]. Kept independent of `entries` (rather than
+    /// on `DriveEntry`) so a projection's transport can be set without an attached
+    /// in-process drive entry, and so the default in-process path is byte-for-byte
+    /// unchanged when nothing is routed to the bridge.
+    projection_transports: HashMap<String, PortalTransport>,
 }
 
 impl InProcessPortalDriveState {
@@ -352,7 +388,23 @@ impl InProcessPortalDriveState {
             entries: HashMap::new(),
             pending_tile_removals: Vec::new(),
             token_overrides: DesignTokenMap::new(),
+            projection_transports: HashMap::new(),
         }
+    }
+
+    /// Route `projection_id` to `transport`. `InProcess` (the default) is stored
+    /// as an explicit entry so a later `transport()` reflects the last routing.
+    fn set_transport(&mut self, projection_id: &str, transport: PortalTransport) {
+        self.projection_transports
+            .insert(projection_id.to_string(), transport);
+    }
+
+    /// The routed transport for `projection_id`, or the default `InProcess`.
+    fn transport(&self, projection_id: &str) -> PortalTransport {
+        self.projection_transports
+            .get(projection_id)
+            .copied()
+            .unwrap_or_default()
     }
 
     fn resolve_visual_tokens(&self) -> tze_hud_projection::resident_grpc::PortalVisualTokens {
@@ -378,6 +430,10 @@ impl InProcessPortalDriveState {
     }
 
     fn detach(&mut self, projection_id: &str) {
+        // Drop the transport routing so a re-attach starts from the default
+        // (hud-g7ool); the tombstone to the bridge is sent by the driver's
+        // `detach_projection` before this runs.
+        self.projection_transports.remove(projection_id);
         if let Some(entry) = self.entries.remove(projection_id)
             && let Some(tile_id) = entry.tile_scene_id
         {
@@ -437,17 +493,22 @@ pub struct InProcessPortalDriver {
     ///
     /// Exposed via [`InProcessPortalDriver::drain_deferral_count`].
     drain_deferral_count: u64,
-    /// Optional tee to the resident gRPC portal bridge (hud-d7frs).
+    /// Optional channel to the resident gRPC portal bridge (hud-d7frs, routing
+    /// reworked in hud-g7ool).
     ///
     /// When set (production: only when the resident gRPC bridge is explicitly
-    /// enabled via config), each coalesced `ProjectedPortalState` materialised by
-    /// the in-process drain is *also* forwarded to the bridge, which renders it
-    /// over an authenticated gRPC `HudSession` stream — the "two adapter families,
-    /// one authority" wiring required by the RFC 0013 §7.2 gate. The send is
+    /// enabled via config), it is the transport for projections routed to
+    /// [`PortalTransport::ResidentGrpcBridge`]: their coalesced state is forwarded
+    /// as [`BridgeMessage::Publish`] and their in-process direct-scene
+    /// materialisation is SUPPRESSED, so each bridged projection is materialised
+    /// exactly once (over an authenticated gRPC `HudSession` stream) rather than
+    /// double-painted. Projection removal sends a [`BridgeMessage::Detach`]
+    /// tombstone so the bridge tears down the remote portal too. The send is
     /// non-blocking (`try_send`): a full channel drops the snapshot rather than
-    /// stalling the winit thread. `None` (the default) is a complete no-op, so the
-    /// live in-process path is byte-for-byte unchanged when the bridge is off.
-    resident_grpc_bridge_tx: Option<tokio::sync::mpsc::Sender<(String, ProjectedPortalState)>>,
+    /// stalling the winit thread. `None` (the default) leaves every projection on
+    /// the in-process path, so the live path is byte-for-byte unchanged when the
+    /// bridge is off.
+    resident_grpc_bridge_tx: Option<tokio::sync::mpsc::Sender<BridgeMessage>>,
 }
 
 impl InProcessPortalDriver {
@@ -488,19 +549,53 @@ impl InProcessPortalDriver {
         self.drain_deferral_count
     }
 
-    /// Install (or clear) the resident gRPC portal bridge tee (hud-d7frs).
+    /// Install (or clear) the resident gRPC portal bridge channel (hud-d7frs).
     ///
-    /// When `Some`, every coalesced `ProjectedPortalState` materialised by the
-    /// in-process drain is also forwarded to the resident gRPC bridge, which
-    /// renders it over an authenticated gRPC `HudSession` stream — the second
-    /// adapter family for the RFC 0013 §7.2 gate, driven by the *same* authority.
-    /// `None` (the default) makes the tee a no-op so the live in-process path is
-    /// unchanged.
+    /// Installing the channel makes the resident gRPC bridge *available* as a
+    /// transport, but does not by itself route any projection to it: per-projection
+    /// routing is set via [`Self::set_projection_transport`]. A projection routed
+    /// to [`PortalTransport::ResidentGrpcBridge`] is then materialised solely over
+    /// the bridge (its in-process direct-scene path suppressed); projections left
+    /// on the default `InProcess` transport are unaffected. `None` clears the
+    /// channel and forces every projection back onto the in-process path.
     pub fn set_resident_grpc_bridge_tx(
         &mut self,
-        tx: Option<tokio::sync::mpsc::Sender<(String, ProjectedPortalState)>>,
+        tx: Option<tokio::sync::mpsc::Sender<BridgeMessage>>,
     ) {
         self.resident_grpc_bridge_tx = tx;
+    }
+
+    /// Route `projection_id` to a materialisation transport (hud-g7ool).
+    ///
+    /// This is the per-projection transport-selection seam: routing a projection
+    /// to [`PortalTransport::ResidentGrpcBridge`] suppresses its in-process
+    /// direct-scene materialisation and makes the bridge its sole materialiser
+    /// (requires a bridge channel installed via [`Self::set_resident_grpc_bridge_tx`];
+    /// otherwise it falls back to in-process — see [`Self::effective_transport`]).
+    /// Routing back to `InProcess` (the default) restores the direct-scene path.
+    pub fn set_projection_transport(&mut self, projection_id: &str, transport: PortalTransport) {
+        self.drive.set_transport(projection_id, transport);
+    }
+
+    /// The transport that will actually materialise `projection_id` this drain
+    /// (hud-g7ool).
+    ///
+    /// Resolves the routed transport but fails SAFE: a projection routed to the
+    /// bridge only materialises over the bridge when a live channel is installed
+    /// and open; if the channel is absent or its receiver has been dropped (the
+    /// bridge task exited), the projection falls back to the in-process path so it
+    /// still materialises somewhere rather than vanishing. This also guarantees
+    /// the two transports remain mutually exclusive: the tee fires iff this returns
+    /// `ResidentGrpcBridge`, and the in-process path runs iff it returns
+    /// `InProcess`.
+    fn effective_transport(&self, projection_id: &str) -> PortalTransport {
+        match self.drive.transport(projection_id) {
+            PortalTransport::ResidentGrpcBridge => match &self.resident_grpc_bridge_tx {
+                Some(tx) if !tx.is_closed() => PortalTransport::ResidentGrpcBridge,
+                _ => PortalTransport::InProcess,
+            },
+            PortalTransport::InProcess => PortalTransport::InProcess,
+        }
     }
 
     /// Attach a new projection session to the driver.
@@ -513,7 +608,22 @@ impl InProcessPortalDriver {
     }
 
     /// Detach a projection session from the driver.
+    ///
+    /// If the projection was materialised via the resident gRPC bridge, a
+    /// [`BridgeMessage::Detach`] tombstone is sent FIRST so the bridge tears down
+    /// the remote portal too (hud-sjdkk, absorbed here). Without it, in-process
+    /// cleanup would remove the local drive entry while the bridge — which only
+    /// ever sees positive snapshots — kept a STALE remote portal alive until its
+    /// lease expired. The transport is read before `drive.detach` clears the
+    /// routing. Non-bridged projections are unaffected.
     pub fn detach_projection(&mut self, projection_id: &str) {
+        if self.effective_transport(projection_id) == PortalTransport::ResidentGrpcBridge {
+            if let Some(tx) = &self.resident_grpc_bridge_tx {
+                let _ = tx.try_send(BridgeMessage::Detach {
+                    projection_id: projection_id.to_string(),
+                });
+            }
+        }
         self.drive.detach(projection_id);
     }
 
@@ -1387,17 +1497,26 @@ impl InProcessPortalDriver {
                 continue;
             };
 
-            // Two-adapter-families tee (hud-d7frs): forward the same authority-
-            // derived state to the resident gRPC bridge when enabled. Non-blocking
-            // so the winit drain never stalls on a slow/full bridge; a dropped
-            // snapshot is acceptable (state is coalesced/latest-relevant). No-op
-            // when the bridge is not wired (default).
-            if let Some(tx) = &self.resident_grpc_bridge_tx {
-                // Skip the clone+alloc on the hot winit thread when the bridge task
-                // has already exited or never connected (closed receiver).
-                if !tx.is_closed() {
-                    let _ = tx.try_send((proj_id.clone(), state.clone()));
+            // Per-projection transport routing (hud-g7ool). A projection routed to
+            // the resident gRPC bridge is materialised SOLELY by the bridge:
+            // forward its coalesced state as a `Publish` and SUPPRESS the in-process
+            // direct-scene path below, so the two transports never double-paint one
+            // scene (the original hud-d7frs double-materialisation bug). The send is
+            // non-blocking so the winit drain never stalls on a slow/full bridge; a
+            // dropped snapshot is acceptable (state is coalesced/latest-relevant).
+            // Non-bridged projections (the default, and the shipped config) fall
+            // through to the unchanged in-process path and are never teed.
+            if self.effective_transport(&proj_id) == PortalTransport::ResidentGrpcBridge {
+                if let Some(tx) = &self.resident_grpc_bridge_tx {
+                    let _ = tx.try_send(BridgeMessage::Publish {
+                        projection_id: proj_id.clone(),
+                        state: Box::new(state.clone()),
+                    });
                 }
+                // The bridge is this projection's materialiser — count the update
+                // for the drain-health metric and skip the in-process arms below.
+                cycle_updates = cycle_updates.saturating_add(1);
+                continue;
             }
 
             // Check if the drive entry exists and what kind of command to issue.
@@ -1811,12 +1930,22 @@ impl InProcessPortalDriver {
                 self.detach_projection(&proj_id);
                 continue;
             };
-            // Mirror the two-adapter-families tee (hud-d7frs) so the resident
-            // gRPC family also dims on a pure drop, not just the in-process scene.
-            if let Some(tx) = &self.resident_grpc_bridge_tx {
-                if !tx.is_closed() {
-                    let _ = tx.try_send((proj_id.clone(), state.clone()));
+            // Per-projection transport routing (hud-g7ool): a bridged projection's
+            // degraded state is forwarded over the bridge and its in-process
+            // repaint suppressed, mirroring the due-loop rule (tee iff bridged).
+            // NOTE: a bridged projection has no in-process tile, so it is excluded
+            // by the `tile_scene_id.is_some()` filter above and does not currently
+            // reach this pass — propagating degraded state to the bridge on a pure
+            // drop is tracked as a follow-up. The gate keeps the invariant explicit
+            // and correct for the in-process path (which is never teed).
+            if self.effective_transport(&proj_id) == PortalTransport::ResidentGrpcBridge {
+                if let Some(tx) = &self.resident_grpc_bridge_tx {
+                    let _ = tx.try_send(BridgeMessage::Publish {
+                        projection_id: proj_id.clone(),
+                        state: Box::new(state.clone()),
+                    });
                 }
+                continue;
             }
             let Some(entry) = self.drive.entries.get_mut(&proj_id) else {
                 continue;
@@ -5075,10 +5204,6 @@ mod tests {
     #[test]
     fn pure_drop_forces_degraded_repaint_without_subsequent_publish() {
         let mut driver = InProcessPortalDriver::new();
-        // Wire the resident-gRPC tee so we can observe that the drop-only drain
-        // re-rendered the dropped entry, and that it carried degraded state.
-        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-        driver.set_resident_grpc_bridge_tx(Some(tx));
 
         let proj = "proj-pure-drop";
         let token = attach_and_get_token(&mut driver, proj);
@@ -5089,6 +5214,8 @@ mod tests {
         let mut processor = InputProcessor::new();
 
         // Drain 1: publish + drain → tile created and painted with live colors.
+        // This projection stays on the default in-process transport, so its
+        // materialisation happens in the scene (not over the bridge) — hud-g7ool.
         publish(&mut driver, proj, &token, "live line", 100);
         driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
         assert!(
@@ -5101,13 +5228,6 @@ mod tests {
                 .is_some(),
             "tile must exist after the first drain"
         );
-        // The live render must not be degraded; drain the tee for those snapshots.
-        while let Ok((_, st)) = rx.try_recv() {
-            assert!(
-                !st.connection_degraded,
-                "a live (pre-drop) render must not be marked degraded"
-            );
-        }
         let version_after_live = scene.version;
 
         // Pure drop: latch disconnected with NO subsequent publish.
@@ -5135,17 +5255,6 @@ mod tests {
             "a pure-drop drain must repaint the tile (scene version must advance) \
              without waiting for a publish"
         );
-        // The repaint forwarded the degraded state to the resident-gRPC family.
-        let mut saw_degraded = false;
-        while let Ok((id, st)) = rx.try_recv() {
-            if id == proj && st.connection_degraded {
-                saw_degraded = true;
-            }
-        }
-        assert!(
-            saw_degraded,
-            "the drop-only drain must re-render the dropped portal with degraded state"
-        );
         // One-shot: the flag is consumed so an idle degraded tile is not
         // re-rendered on every subsequent drain.
         assert!(
@@ -5164,6 +5273,150 @@ mod tests {
         assert_eq!(
             scene.version, version_after_degraded,
             "an idle degraded tile must not be repainted again on the next drain"
+        );
+    }
+
+    // ── Per-projection transport selection (hud-g7ool) ───────────────────────
+    //
+    // v1 routing policy (owner decision, OPTION B): each projection is
+    // materialised by EXACTLY ONE transport (bridge XOR in-process). These three
+    // tests pin the acceptance criteria: (a) a bridged projection materialises
+    // once via the bridge with its in-process direct path suppressed; (b) a
+    // non-bridged projection still materialises via the direct path and is never
+    // teed; (c) detaching a bridged projection emits a Detach tombstone so the
+    // bridge tears down the remote portal (absorbs hud-sjdkk).
+
+    /// (a) A projection routed to the bridge is materialised SOLELY over the
+    /// bridge: no in-process scene tile, no scene mutation, exactly one `Publish`.
+    #[test]
+    fn bridged_projection_materialises_via_bridge_and_suppresses_direct_path() {
+        let mut driver = InProcessPortalDriver::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<BridgeMessage>(16);
+        driver.set_resident_grpc_bridge_tx(Some(tx));
+
+        let proj = "proj-bridged";
+        let token = attach_and_get_token(&mut driver, proj);
+        driver.attach_projection(proj, Vec::new());
+        driver.set_projection_transport(proj, PortalTransport::ResidentGrpcBridge);
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+        let version_before = scene.version;
+
+        publish(&mut driver, proj, &token, "bridged line", 100);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+
+        // In-process direct path suppressed: no scene tile, scene untouched.
+        assert!(
+            driver
+                .drive
+                .entries
+                .get(proj)
+                .unwrap()
+                .tile_scene_id
+                .is_none(),
+            "a bridged projection must NOT create an in-process scene tile"
+        );
+        assert_eq!(
+            scene.version, version_before,
+            "a bridged projection must not mutate the in-process scene \
+             (direct-scene path suppressed)"
+        );
+
+        // The bridge is the sole materialiser: exactly one Publish for this proj.
+        let mut publishes = 0;
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                BridgeMessage::Publish { projection_id, .. } => {
+                    assert_eq!(projection_id, proj, "unexpected projection id in tee");
+                    publishes += 1;
+                }
+                other => panic!("unexpected bridge message on a live publish: {other:?}"),
+            }
+        }
+        assert_eq!(
+            publishes, 1,
+            "a bridged projection must materialise exactly once via the bridge"
+        );
+    }
+
+    /// (b) A non-bridged projection (the default) still materialises via the
+    /// in-process direct path and is never teed to the bridge — even when a bridge
+    /// channel is installed for other projections.
+    #[test]
+    fn non_bridged_projection_materialises_in_process_and_is_not_teed() {
+        let mut driver = InProcessPortalDriver::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<BridgeMessage>(16);
+        // Bridge channel installed, but this projection is left on the default
+        // in-process transport (not routed to the bridge).
+        driver.set_resident_grpc_bridge_tx(Some(tx));
+
+        let proj = "proj-inproc";
+        let token = attach_and_get_token(&mut driver, proj);
+        driver.attach_projection(proj, Vec::new());
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        publish(&mut driver, proj, &token, "in-process line", 100);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+
+        assert!(
+            driver
+                .drive
+                .entries
+                .get(proj)
+                .unwrap()
+                .tile_scene_id
+                .is_some(),
+            "a non-bridged projection must materialise via the in-process direct path"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a non-bridged projection must NOT be teed to the resident gRPC bridge"
+        );
+    }
+
+    /// (c) Detaching a bridged projection emits a `Detach` tombstone so the bridge
+    /// tears down the remote portal (no stale remote portal) — absorbs hud-sjdkk.
+    #[test]
+    fn detaching_a_bridged_projection_emits_a_detach_tombstone() {
+        let mut driver = InProcessPortalDriver::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<BridgeMessage>(16);
+        driver.set_resident_grpc_bridge_tx(Some(tx));
+
+        let proj = "proj-bridged-detach";
+        let token = attach_and_get_token(&mut driver, proj);
+        driver.attach_projection(proj, Vec::new());
+        driver.set_projection_transport(proj, PortalTransport::ResidentGrpcBridge);
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        // Materialise once over the bridge, then drain that Publish from the tee.
+        publish(&mut driver, proj, &token, "bridged line", 100);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+        while rx.try_recv().is_ok() {}
+
+        // Detaching the bridged projection sends the teardown tombstone.
+        driver.detach_projection(proj);
+
+        let mut saw_detach = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let BridgeMessage::Detach { projection_id } = msg {
+                assert_eq!(
+                    projection_id, proj,
+                    "tombstone must target the detached proj"
+                );
+                saw_detach = true;
+            }
+        }
+        assert!(
+            saw_detach,
+            "detaching a bridged projection must emit a Detach tombstone to the bridge"
         );
     }
 
