@@ -139,11 +139,137 @@ impl GpuLock {
     }
 }
 
+// ─── Cross-platform lock-staleness logic (unit-testable) ─────────────────────
+//
+// "Is an existing lock stale, or held by a genuinely-live tze_hud?" is a pure
+// decision given three inputs: the lock's STARTED_AT, the system boot instant,
+// and facts about the process currently occupying the lock's PID. Keeping that
+// decision here — free of Win32 calls — lets it be unit-tested on any platform.
+// The Windows layer only gathers the inputs and acts on the verdict.
+//
+// Compiled on Windows (where it is used) and in test builds (where it is
+// exercised); on other non-test builds it would be dead code, so it is gated.
+#[cfg(any(target_os = "windows", test))]
+mod lock_logic {
+    /// Small tolerance (seconds) applied to the boot comparison so second-level
+    /// truncation and the ~1s jitter in deriving the boot instant never let us
+    /// reclaim a lock a genuinely-live process wrote moments *after* boot.
+    const BOOT_SKEW_SECS: i64 = 5;
+
+    /// Tolerance (seconds) between a process's creation time and the lock's
+    /// STARTED_AT. The lock is written shortly after the process starts, so a
+    /// match within this window confirms the live PID is the lock's author; a
+    /// gross mismatch means the PID was recycled by an unrelated launch.
+    const CREATION_MATCH_TOLERANCE_SECS: i64 = 120;
+
+    /// Facts about the process currently occupying a lock's PID.
+    pub(super) struct ProcessFacts {
+        /// True when the process image name is `tze_hud.exe`.
+        pub image_is_tze_hud: bool,
+        /// Process creation time as Unix seconds (UTC), if it could be read.
+        pub creation_unix: Option<i64>,
+    }
+
+    /// Classification of an existing lock file.
+    pub(super) enum LockClass {
+        /// The lock can be reclaimed (writer is provably gone or PID recycled).
+        Stale,
+        /// A genuinely-live tze_hud holds the lock; startup must be refused.
+        LiveConflict,
+    }
+
+    /// Unix seconds for a proleptic-Gregorian UTC date-time (Hinnant's civil
+    /// algorithm). Valid for every date this module encounters.
+    pub(super) fn civil_to_unix(y: i64, m: i64, d: i64, hh: i64, mm: i64, ss: i64) -> i64 {
+        let y = if m <= 2 { y - 1 } else { y };
+        let era = (if y >= 0 { y } else { y - 399 }) / 400;
+        let yoe = y - era * 400; // [0, 399]
+        let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // [0, 365]
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+        let days = era * 146097 + doe - 719468;
+        days * 86400 + hh * 3600 + mm * 60 + ss
+    }
+
+    /// Parse a `YYYY-MM-DDTHH:MM:SSZ` timestamp (the format `write_lock` emits)
+    /// into Unix seconds. Returns `None` on anything that doesn't match, so an
+    /// unparseable STARTED_AT never drives a reclaim decision on its own.
+    pub(super) fn parse_rfc3339_utc(s: &str) -> Option<i64> {
+        let s = s.trim();
+        let (date, rest) = s.split_once('T')?;
+        let mut dparts = date.split('-');
+        let y: i64 = dparts.next()?.parse().ok()?;
+        let mo: i64 = dparts.next()?.parse().ok()?;
+        let d: i64 = dparts.next()?.parse().ok()?;
+        // Time may carry a trailing 'Z' and/or fractional seconds; keep HH:MM:SS.
+        let time = rest.trim_end_matches('Z');
+        let time = time.split('.').next()?;
+        let mut tparts = time.split(':');
+        let hh: i64 = tparts.next()?.parse().ok()?;
+        let mm: i64 = tparts.next()?.parse().ok()?;
+        let ss: i64 = tparts.next()?.parse().ok()?;
+        if !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
+            return None;
+        }
+        Some(civil_to_unix(y, mo, d, hh, mm, ss))
+    }
+
+    /// True when the lock's STARTED_AT is confidently before the system boot
+    /// instant — the writing process cannot have survived the reboot, so the
+    /// lock is stale by definition. Unparseable timestamps return false.
+    pub(super) fn started_at_predates_boot(started_at: &str, boot_unix: i64) -> bool {
+        match parse_rfc3339_utc(started_at) {
+            Some(t) => t + BOOT_SKEW_SECS < boot_unix,
+            None => false,
+        }
+    }
+
+    /// Whether the live process occupying the lock's PID is the tze_hud that
+    /// authored this lock: it must be `tze_hud.exe`, and (when both times are
+    /// known) its creation time must line up with STARTED_AT. A recycled PID
+    /// owned by an unrelated image, or a wildly different creation time, fails.
+    pub(super) fn pid_is_lock_owner(facts: &ProcessFacts, started_at: &str) -> bool {
+        if !facts.image_is_tze_hud {
+            return false;
+        }
+        match (facts.creation_unix, parse_rfc3339_utc(started_at)) {
+            (Some(created), Some(started)) => {
+                (started - created).abs() <= CREATION_MATCH_TOLERANCE_SECS
+            }
+            // Missing either time: fall back to the image-name match alone.
+            _ => true,
+        }
+    }
+
+    /// Classify an existing lock. `boot_unix` is `None` when the boot instant
+    /// could not be determined; `live_facts` is `None` when no live process
+    /// occupies the lock's PID.
+    ///
+    /// Boot-time is the primary defense: a lock predating boot is stale
+    /// regardless of what now occupies its PID. Only a live `tze_hud.exe` whose
+    /// creation time matches STARTED_AT is treated as a genuine holder.
+    pub(super) fn classify_existing_lock(
+        started_at: &str,
+        boot_unix: Option<i64>,
+        live_facts: Option<&ProcessFacts>,
+    ) -> LockClass {
+        if let Some(boot) = boot_unix {
+            if started_at_predates_boot(started_at, boot) {
+                return LockClass::Stale;
+            }
+        }
+        match live_facts {
+            Some(facts) if pid_is_lock_owner(facts, started_at) => LockClass::LiveConflict,
+            _ => LockClass::Stale,
+        }
+    }
+}
+
 // ─── Windows implementation ───────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
 mod windows_impl {
     use super::GpuLockConflict;
+    use super::lock_logic::{self, LockClass, ProcessFacts};
     use std::path::{Path, PathBuf};
 
     const LOCK_DIR: &str = r"C:\ProgramData\tze_hud";
@@ -225,25 +351,134 @@ mod windows_impl {
         true
     }
 
-    /// Check whether the process identified by `pid` is currently running.
+    /// System boot instant as Unix seconds (UTC), or `None` if it cannot be
+    /// derived. Computed as `now - uptime`: `GetTickCount64` gives milliseconds
+    /// since boot, so subtracting it from the current UTC time yields the boot
+    /// instant — the same quantity as `Win32_OperatingSystem.LastBootUpTime`
+    /// that the shipped `hud_vm_env.sh` workaround compared against.
+    fn system_boot_unix() -> Option<i64> {
+        use windows::Win32::System::SystemInformation::GetTickCount64;
+        // SAFETY: GetTickCount64 has no preconditions; returns ms since boot.
+        let uptime_ms = unsafe { GetTickCount64() };
+        let now = system_time_now_unix()?;
+        Some(now - (uptime_ms / 1000) as i64)
+    }
+
+    /// Current UTC time as Unix seconds via `GetSystemTime`.
+    fn system_time_now_unix() -> Option<i64> {
+        use windows::Win32::System::SystemInformation::GetSystemTime;
+        // SAFETY: GetSystemTime returns the current UTC SYSTEMTIME; no preconditions.
+        let st = unsafe { GetSystemTime() };
+        Some(lock_logic::civil_to_unix(
+            st.wYear as i64,
+            st.wMonth as i64,
+            st.wDay as i64,
+            st.wHour as i64,
+            st.wMinute as i64,
+            st.wSecond as i64,
+        ))
+    }
+
+    /// Observe the process currently occupying `pid`: image name and
+    /// (best-effort) creation time. Returns `None` when no such process
+    /// exists — i.e. the PID is dead and any lock naming it is stale.
     ///
-    /// Uses `OpenProcess` with `PROCESS_QUERY_LIMITED_INFORMATION`. A successful
-    /// open means the process exists (it may be a zombie, but for our purposes
-    /// that is still "alive" — the CI job is still accounting for the PID).
-    fn pid_is_alive(pid: u32) -> bool {
+    /// This replaces a bare `OpenProcess` liveness probe: after a reboot,
+    /// Windows aggressively recycles PIDs, so an unrelated process inheriting
+    /// the lock's PID would pass a bare liveness check. Checking the image name
+    /// (and creation time) is what distinguishes a real tze_hud holder from a
+    /// recycled PID.
+    fn observe_process(pid: u32) -> Option<ProcessFacts> {
+        let image = process_image_name(pid)?;
+        Some(ProcessFacts {
+            image_is_tze_hud: image.eq_ignore_ascii_case("tze_hud.exe"),
+            creation_unix: process_creation_unix(pid),
+        })
+    }
+
+    /// Return the image (exe) file name for a live PID, or `None` if the PID is
+    /// not present in the process table. Uses the same Toolhelp snapshot pattern
+    /// as [`find_existing_tze_hud_process`].
+    fn process_image_name(pid: u32) -> Option<String> {
         use windows::Win32::Foundation::CloseHandle;
-        use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-        // SAFETY: OpenProcess with a well-known access mask is safe. The resulting
-        // handle (if any) is closed immediately via CloseHandle.
-        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) };
-        match handle {
-            Ok(h) => {
-                // SAFETY: `h` is a valid handle returned by OpenProcess.
-                unsafe { CloseHandle(h).ok() };
-                true
+        use windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+            TH32CS_SNAPPROCESS,
+        };
+
+        // SAFETY: CreateToolhelp32Snapshot has no memory safety preconditions.
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
+
+        // SAFETY: PROCESSENTRY32W is plain-old-data; dwSize must be set first.
+        let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+        let mut name = None;
+        // SAFETY: snapshot is valid and entry points to initialized storage.
+        if unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok() {
+            loop {
+                if entry.th32ProcessID == pid {
+                    let nul = entry
+                        .szExeFile
+                        .iter()
+                        .position(|ch| *ch == 0)
+                        .unwrap_or(entry.szExeFile.len());
+                    name = Some(String::from_utf16_lossy(&entry.szExeFile[..nul]));
+                    break;
+                }
+                // SAFETY: snapshot valid and entry remains initialized storage.
+                if unsafe { Process32NextW(snapshot, &mut entry) }.is_err() {
+                    break;
+                }
             }
-            Err(_) => false,
         }
+
+        // SAFETY: snapshot is a valid handle from CreateToolhelp32Snapshot.
+        unsafe { CloseHandle(snapshot).ok() };
+        name
+    }
+
+    /// Best-effort process creation time as Unix seconds (UTC) for `pid`.
+    /// Returns `None` if the process cannot be opened or queried.
+    fn process_creation_unix(pid: u32) -> Option<i64> {
+        use windows::Win32::Foundation::{CloseHandle, FILETIME};
+        use windows::Win32::System::Threading::{
+            GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        // SAFETY: OpenProcess with a well-known access mask is safe.
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+        let mut creation = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut exit = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut kernel = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut user = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        // SAFETY: handle is valid; all four FILETIME out-params are initialized.
+        let res =
+            unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) };
+        // SAFETY: handle is a valid process handle returned by OpenProcess.
+        unsafe { CloseHandle(handle).ok() };
+        res.ok()?;
+        Some(filetime_to_unix(&creation))
+    }
+
+    /// Convert a Win32 FILETIME (100-ns ticks since 1601-01-01 UTC) to Unix seconds.
+    fn filetime_to_unix(ft: &windows::Win32::Foundation::FILETIME) -> i64 {
+        const TICKS_PER_SEC: u64 = 10_000_000;
+        const EPOCH_DIFF_SECS: i64 = 11_644_473_600; // 1601-01-01 → 1970-01-01
+        let ticks = ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64);
+        (ticks / TICKS_PER_SEC) as i64 - EPOCH_DIFF_SECS
     }
 
     /// Find another live `tze_hud.exe` process that may predate the lock file.
@@ -400,36 +635,62 @@ mod windows_impl {
                         tracing::info!("[gpu-lock] Description: {}", existing_desc);
                     }
 
-                    if existing_pid > 0 && pid_is_alive(existing_pid) {
-                        // A live process holds the lock. Refuse startup.
-                        tracing::error!(
-                            existing_pid,
-                            existing_session_type = %existing_type,
-                            "[gpu-lock] Process {} is alive. GPU is in use. Refusing startup.",
-                            existing_pid
-                        );
-                        return Err(GpuLockConflict {
-                            session_type: existing_type,
-                            pid: existing_pid,
-                            started_at: existing_started,
-                            description: existing_desc,
-                        });
+                    // A lock is only a live conflict if a genuinely-live
+                    // tze_hud owns it. Boot-time is the primary defense: a lock
+                    // predating the last boot is dead by definition (its writer
+                    // could not have survived the reboot), which fixes the
+                    // observed failure where a hard shutdown left the lock and a
+                    // recycled PID read as "alive". The process-identity check is
+                    // defense-in-depth for locks written since boot.
+                    let boot_unix = system_boot_unix();
+                    let live_facts = if existing_pid > 0 {
+                        observe_process(existing_pid)
                     } else {
-                        // Stale lock (dead PID or PID=0) — remove and take over.
-                        tracing::warn!(
-                            stale_pid = existing_pid,
-                            "[gpu-lock] Process {} is no longer running. Lock is stale. Removing.",
-                            existing_pid
-                        );
-                        if let Err(e) = std::fs::remove_file(lock_path) {
-                            tracing::warn!(
-                                error = %e,
-                                "[gpu-lock] Could not remove stale lock; proceeding without lock"
+                        None
+                    };
+
+                    match lock_logic::classify_existing_lock(
+                        &existing_started,
+                        boot_unix,
+                        live_facts.as_ref(),
+                    ) {
+                        LockClass::LiveConflict => {
+                            // A live tze_hud owns the lock. Refuse startup.
+                            tracing::error!(
+                                existing_pid,
+                                existing_session_type = %existing_type,
+                                "[gpu-lock] tze_hud PID {} is alive and owns the lock. GPU is in use. Refusing startup.",
+                                existing_pid
                             );
-                            return Ok(GpuLockGuardInner {
-                                lock_path: PathBuf::from(LOCK_FILE),
-                                owner_pid: pid,
+                            return Err(GpuLockConflict {
+                                session_type: existing_type,
+                                pid: existing_pid,
+                                started_at: existing_started,
+                                description: existing_desc,
                             });
+                        }
+                        LockClass::Stale => {
+                            // Writer is gone, the lock predates boot, or the PID
+                            // was recycled by an unrelated process — remove and
+                            // take over.
+                            let predates_boot = boot_unix
+                                .map(|b| lock_logic::started_at_predates_boot(&existing_started, b))
+                                .unwrap_or(false);
+                            tracing::warn!(
+                                stale_pid = existing_pid,
+                                predates_boot,
+                                "[gpu-lock] Lock is stale (writer gone, predates boot, or PID recycled). Removing and taking over."
+                            );
+                            if let Err(e) = std::fs::remove_file(lock_path) {
+                                tracing::warn!(
+                                    error = %e,
+                                    "[gpu-lock] Could not remove stale lock; proceeding without lock"
+                                );
+                                return Ok(GpuLockGuardInner {
+                                    lock_path: PathBuf::from(LOCK_FILE),
+                                    owner_pid: pid,
+                                });
+                            }
                         }
                     }
                 }
@@ -531,5 +792,146 @@ mod tests {
         let s = conflict.to_string();
         assert!(s.contains("12345"), "Display should include PID: {s}");
         assert!(s.contains("ci"), "Display should include session type: {s}");
+    }
+
+    // ── Stale-lock classification (cross-platform pure logic) ─────────────────
+    //
+    // These exercise the reboot/PID-reuse fix without touching any Win32 API,
+    // so they run deterministically on the Linux CI host. Boot time is injected
+    // as a plain parameter, so tests never depend on the real system boot time.
+    mod stale_lock {
+        use super::super::lock_logic::{self, LockClass, ProcessFacts};
+
+        #[test]
+        fn parses_and_compares_started_at_against_boot() {
+            let t = lock_logic::parse_rfc3339_utc("2026-07-03T17:48:04Z").unwrap();
+            assert_eq!(t, lock_logic::civil_to_unix(2026, 7, 3, 17, 48, 4));
+
+            let boot = lock_logic::civil_to_unix(2026, 7, 4, 0, 0, 0);
+            // Written the day before boot → predates.
+            assert!(lock_logic::started_at_predates_boot(
+                "2026-07-03T17:48:04Z",
+                boot
+            ));
+            // Written after boot → does not predate.
+            assert!(!lock_logic::started_at_predates_boot(
+                "2026-07-04T01:00:00Z",
+                boot
+            ));
+            // Within the skew margin of boot → not treated as predating.
+            assert!(!lock_logic::started_at_predates_boot(
+                "2026-07-03T23:59:58Z",
+                boot
+            ));
+            // Unparseable STARTED_AT never drives a reclaim on its own.
+            assert!(!lock_logic::started_at_predates_boot("garbage", boot));
+        }
+
+        // Acceptance (a): a lock whose STARTED_AT predates the last boot is
+        // reclaimed — the exact hud-7gp40 reproduction. Boot-time wins even when
+        // a live-looking process occupies the PID.
+        #[test]
+        fn lock_predating_boot_is_reclaimed() {
+            let boot = lock_logic::civil_to_unix(2026, 7, 4, 0, 0, 0);
+            let facts = ProcessFacts {
+                image_is_tze_hud: true,
+                creation_unix: Some(boot + 10),
+            };
+            assert!(matches!(
+                lock_logic::classify_existing_lock(
+                    "2026-07-03T17:48:04Z",
+                    Some(boot),
+                    Some(&facts),
+                ),
+                LockClass::Stale
+            ));
+        }
+
+        // Acceptance (b): a genuinely-live tze_hud holding the lock still blocks
+        // a second startup — mutual exclusion is preserved.
+        #[test]
+        fn live_tze_hud_holder_blocks_startup() {
+            let boot = lock_logic::civil_to_unix(2026, 7, 3, 0, 0, 0);
+            let started = "2026-07-03T10:00:00Z";
+            // Creation ~2s before the lock write — a matching author.
+            let created = lock_logic::civil_to_unix(2026, 7, 3, 9, 59, 58);
+            let facts = ProcessFacts {
+                image_is_tze_hud: true,
+                creation_unix: Some(created),
+            };
+            assert!(matches!(
+                lock_logic::classify_existing_lock(started, Some(boot), Some(&facts)),
+                LockClass::LiveConflict
+            ));
+        }
+
+        // Acceptance (c): a recycled PID owned by an unrelated (non-tze_hud)
+        // process does NOT keep startup refused.
+        #[test]
+        fn recycled_pid_of_unrelated_process_is_reclaimed() {
+            let boot = lock_logic::civil_to_unix(2026, 7, 3, 0, 0, 0);
+            let started = "2026-07-03T10:00:00Z"; // after boot; boot check won't fire
+            let facts = ProcessFacts {
+                image_is_tze_hud: false,
+                creation_unix: Some(boot + 42),
+            };
+            assert!(matches!(
+                lock_logic::classify_existing_lock(started, Some(boot), Some(&facts)),
+                LockClass::Stale
+            ));
+        }
+
+        // A different tze_hud that reused the PID (creation time far from
+        // STARTED_AT) is not the lock's author → reclaim. (A concurrently-live
+        // untracked tze_hud is separately caught by find_existing_tze_hud_process.)
+        #[test]
+        fn tze_hud_pid_with_mismatched_creation_is_reclaimed() {
+            let boot = lock_logic::civil_to_unix(2026, 7, 3, 0, 0, 0);
+            let started = "2026-07-03T10:00:00Z";
+            let created = lock_logic::civil_to_unix(2026, 7, 3, 12, 0, 0); // 2h later
+            let facts = ProcessFacts {
+                image_is_tze_hud: true,
+                creation_unix: Some(created),
+            };
+            assert!(matches!(
+                lock_logic::classify_existing_lock(started, Some(boot), Some(&facts)),
+                LockClass::Stale
+            ));
+        }
+
+        // A dead PID (no live process) with a post-boot STARTED_AT is stale.
+        #[test]
+        fn dead_pid_after_boot_is_reclaimed() {
+            let boot = lock_logic::civil_to_unix(2026, 7, 3, 0, 0, 0);
+            assert!(matches!(
+                lock_logic::classify_existing_lock("2026-07-03T10:00:00Z", Some(boot), None),
+                LockClass::Stale
+            ));
+        }
+
+        // With no derivable boot time, classification falls back to the
+        // process-identity check: a live tze_hud author still blocks.
+        #[test]
+        fn falls_back_to_identity_when_boot_unknown() {
+            let started = "2026-07-03T10:00:00Z";
+            let created = lock_logic::civil_to_unix(2026, 7, 3, 10, 0, 0);
+            let live = ProcessFacts {
+                image_is_tze_hud: true,
+                creation_unix: Some(created),
+            };
+            assert!(matches!(
+                lock_logic::classify_existing_lock(started, None, Some(&live)),
+                LockClass::LiveConflict
+            ));
+            // …and a recycled non-tze_hud PID is still reclaimed.
+            let recycled = ProcessFacts {
+                image_is_tze_hud: false,
+                creation_unix: None,
+            };
+            assert!(matches!(
+                lock_logic::classify_existing_lock(started, None, Some(&recycled)),
+                LockClass::Stale
+            ));
+        }
     }
 }
