@@ -178,6 +178,15 @@ right thing (no background rect emitted).
 
 1. **Layout**: `[INPUT left | OUTPUT right]` 50/50 split with a fat 6px drag
    divider between them. No bottom-chat-style input.
+   > **Superseded (owner direction 2026-07-03, live rounds 1–2):** the
+   > "No bottom-chat-style input" decision is reversed. The composer is now a
+   > bottom-pinned, multi-line wrapping box (Ctrl/Shift+Enter newline, Enter
+   > send) whose submissions bubble up into the transcript as viewer-authored
+   > entries with token-styled turn separators, so the surface reads as a chat.
+   > Scoped and specified in the `portal-bottom-chat-composer` OpenSpec change
+   > (delta on `text-stream-portals`); implemented under bead `hud-nx7yq`
+   > (children `.1`–`.4`, PRs #990/#992/#994/#996). Horizontal caret-follow
+   > survives only as the degenerate single-line-profile fallback.
 2. **Icons**: ASCII only — unicode `↵ ⇧ esc` rendered as `[]` boxes in the
    font. Current hint: `Enter submit · Shift+Enter newline · Esc cancel`.
 3. **Backdrop opacity**: iterated 80% → 90% → 95%. Currently 95%. User has
