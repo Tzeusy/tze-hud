@@ -191,6 +191,14 @@ DRAG_IDLE_RELEASE_SECONDS = 1.0
 DRAG_APPLY_MIN_INTERVAL_SECONDS = 0.025
 ICON_DRAG_APPLY_MIN_INTERVAL_SECONDS = 0.008
 ICON_DRAG_START_THRESHOLD_PX = 20.0
+# A bare click on the middle pane divider (pointer down+up with no meaningful
+# horizontal travel) must NOT commit a resize (hud-z8z7p). The divider only
+# becomes a live resize handle once cumulative horizontal movement crosses this
+# activation threshold; below it the pointer stream is treated as a no-op click
+# and INPUT_PANE_W is left bit-identical. Kept smaller than the icon threshold
+# so a deliberate divider drag still feels responsive, but larger than the ~6px
+# of jitter a real "click" produced in the field.
+PANE_DRAG_START_THRESHOLD_PX = 8.0
 COMPOSER_RENDER_DEBOUNCE_SECONDS = 0.02
 COMPOSER_CARET_BLINK_SECONDS = 0.45
 COMPOSER_CARET_W = 2.0
@@ -700,6 +708,35 @@ def clamp_input_pane_width(width: float) -> float:
 def set_input_pane_width(width: float) -> None:
     global INPUT_PANE_W
     INPUT_PANE_W = clamp_input_pane_width(width)
+
+
+def partition_pane_widths(portal_w: float, input_pane_w: float) -> tuple[float, float]:
+    """Split a portal frame into (input_pane_w, output_pane_w) around the divider.
+
+    Pure helper so the invariant is testable in isolation: the two pane widths
+    plus the fat divider account for the whole frame exactly, i.e.
+
+        input_pane_w + PANE_DIVIDER_W + output_pane_w == portal_w
+
+    with no pixels left unaccounted (hud-z8z7p). Note this returns the *pane*
+    widths, not the inner text-body width — the output body is further inset by
+    PADDING_X on each side, which is a rendering inset, not lost frame width.
+    """
+    return input_pane_w, portal_w - input_pane_w - PANE_DIVIDER_W
+
+
+def output_pane_width() -> float:
+    """Live output-pane width honouring the partition invariant above."""
+    return partition_pane_widths(PORTAL_W, INPUT_PANE_W)[1]
+
+
+def pane_drag_crosses_threshold(dx: float) -> bool:
+    """Whether a pane-divider pointer stream has moved far enough to be a resize.
+
+    A bare click (|dx| below the activation threshold) returns False, so the
+    caller commits no width change and INPUT_PANE_W stays bit-identical.
+    """
+    return abs(dx) >= PANE_DRAG_START_THRESHOLD_PX
 
 
 def set_portal_size(w: float, h: float, tab_width: float, tab_height: float) -> None:
@@ -1316,10 +1353,9 @@ def portal_pane_rects() -> tuple[PaneRect, PaneRect]:
     pane_y = HEADER_H + DIVIDER_H
     pane_h = PORTAL_H - pane_y - FOOTER_H - DIVIDER_H
     input_pane_x = 0.0
-    input_pane_w = INPUT_PANE_W
+    input_pane_w, output_pane_w = partition_pane_widths(PORTAL_W, INPUT_PANE_W)
     divider_x = input_pane_w
     output_pane_x = divider_x + PANE_DIVIDER_W
-    output_pane_w = PORTAL_W - output_pane_x
 
     composer_inset = 14.0
     composer_x = composer_inset
@@ -3158,6 +3194,15 @@ async def portal_interaction_loop(
             await move_minimized_icon(float(drag["portal_x"]) + dx, float(drag["portal_y"]) + dy)
             return
         if drag_kind == "pane":
+            # Drag-activation threshold: a bare click (no meaningful horizontal
+            # travel) must not commit a resize. Mirror the icon-drag idiom —
+            # hold the width until cumulative dx crosses the threshold, then
+            # latch `pane_dragging` so later sub-threshold jitter keeps resizing
+            # (hud-z8z7p).
+            if not bool(drag.get("pane_dragging", False)):
+                if not pane_drag_crosses_threshold(dx):
+                    return
+                drag["pane_dragging"] = True
             set_input_pane_width(float(drag["input_pane_w"]) + dx)
         elif drag_kind == "resize":
             set_portal_size(
@@ -3393,8 +3438,25 @@ async def portal_interaction_loop(
                     "expected_visual": "icon remains clickable at the dragged position",
                 }, portal_x=portal_x, portal_y=portal_y, reason=reason)
             return
+        pane_dragging = bool(drag.get("pane_dragging", False))
         drag = None
         await clear_drag_shield()
+        if drag_kind == "pane" and not pane_dragging:
+            # Bare click on the middle divider: the activation threshold was
+            # never crossed, so no width was committed and INPUT_PANE_W is
+            # bit-identical to its pre-click value. Emit a cancel (not an
+            # end) and skip the rebuild entirely (hud-z8z7p).
+            input_w, out_w = partition_pane_widths(PORTAL_W, INPUT_PANE_W)
+            emit_step_event(transcript, 9, "checkpoint", {
+                "code": "pane-resize:cancel",
+                "title": "Pane resize cancelled",
+                "action": "middle divider was clicked without crossing the drag threshold",
+                "expected_visual": "input/output panes are unchanged from before the click",
+            }, portal_x=portal_x, portal_y=portal_y,
+               portal_w=PORTAL_W, portal_h=PORTAL_H,
+               input_pane_w=input_w, output_pane_w=out_w,
+               reason=reason)
+            return
         if drag_kind in {"pane", "resize"}:
             await rebuild_resized_portal()
         code = {
@@ -3407,6 +3469,12 @@ async def portal_interaction_loop(
             "pane": "Pane resize ended",
             "resize": "Portal resize ended",
         }.get(drag_kind, "Portal drag ended")
+        # Report the true output *pane* width (partition invariant), not the
+        # inner text-body width — the latter is inset by 2*PADDING_X and made
+        # the committed widths look like they failed to sum to portal_w
+        # (860+818=1678 vs 1720; the 42px was 6px divider + 36px body inset,
+        # not lost frame width) (hud-z8z7p).
+        input_w, out_w = partition_pane_widths(PORTAL_W, INPUT_PANE_W)
         emit_step_event(transcript, 9, "checkpoint", {
             "code": code,
             "title": title,
@@ -3414,7 +3482,7 @@ async def portal_interaction_loop(
             "expected_visual": "input/output panes remain aligned with portal frame",
         }, portal_x=portal_x, portal_y=portal_y,
            portal_w=PORTAL_W, portal_h=PORTAL_H,
-           input_pane_w=INPUT_PANE_W, output_pane_w=portal_pane_rects()[1].w,
+           input_pane_w=input_w, output_pane_w=out_w,
            reason=reason)
 
     async def on_composer_draft_state(text: str, cursor: int, at_capacity: bool, sequence: int) -> None:
