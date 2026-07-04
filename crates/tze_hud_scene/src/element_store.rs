@@ -50,21 +50,24 @@ pub struct ElementStoreEntry {
     /// persisted before this field existed.
     #[serde(default)]
     pub z_order: u32,
-    /// Consecutive runtime restarts this override-bearing tile entry has survived
-    /// without a live tile reclaiming it (hud-fwgv7).
+    /// Consecutive runtime restarts this tile entry has survived without a live
+    /// tile reclaiming it (hud-fwgv7 for override-bearing, hud-m1ok3 for
+    /// override-free entries).
     ///
     /// `adopt_orphaned_tile_overrides` (hud-08nls) only removes an orphaned
-    /// override entry when a same-namespace member tile is recreated. A portal
-    /// closed *permanently* is never recreated, so its override entry would
+    /// *override-bearing* entry when a same-namespace member tile is recreated,
+    /// and an override-*free* entry is never migrated at all — its portal simply
+    /// republishes under a fresh `SceneId`, stranding the old entry. Either way a
+    /// portal closed *permanently* is never recreated, so its entry would
     /// otherwise linger in `element_store.toml` forever. This counter, bumped once
     /// per bootstrap by [`ElementStore::gc_expired_orphan_tile_overrides`], bounds
-    /// that: an entry that reaches [`MAX_UNSEEN_ORPHAN_OVERRIDE_RESTARTS`] restarts
-    /// without being reclaimed belongs to a permanently-closed portal and is
-    /// pruned. It resets to `0` the moment a recreated tile adopts the override
+    /// both: any tile entry that reaches [`MAX_UNSEEN_ORPHAN_OVERRIDE_RESTARTS`]
+    /// restarts without being reclaimed belongs to a permanently-closed portal and
+    /// is pruned. It resets to `0` the moment a recreated tile adopts the override
     /// (the orphan is removed, its successor starts fresh) or the entry is
-    /// re-published — so a live portal's entry never accumulates and is never
-    /// pruned, preserving #1015's restart durability. `0` for zones/widgets and
-    /// for entries persisted before this field existed.
+    /// re-published under the same id — so a live portal's entry never accumulates
+    /// and is never pruned, preserving #1015's restart durability. `0` for
+    /// zones/widgets and for entries persisted before this field existed.
     #[serde(default)]
     pub unseen_restarts: u32,
     /// Optional user geometry override.
@@ -297,23 +300,35 @@ impl ElementStore {
         }
     }
 
-    /// Bounded retention for override-bearing orphan tile entries (hud-fwgv7).
+    /// Bounded retention for orphan tile entries (hud-fwgv7, hud-m1ok3).
     ///
     /// Call once per runtime bootstrap, **before** any tile is recreated. At that
-    /// point every persisted `Tile` entry carrying a durable override is an orphan
-    /// by construction: portal tiles are recreated *after* bootstrap with fresh
-    /// `SceneId`s (see [`Self::adopt_orphaned_tile_overrides`]), so none is backed
-    /// by a live tile yet. This bumps each such entry's `unseen_restarts` counter;
-    /// an entry whose counter reaches `max_unseen_restarts` has gone that many
-    /// restarts without its portal republishing to reclaim it — a permanently
-    /// closed portal — and is pruned.
+    /// point *every* persisted `Tile` entry is an orphan by construction: tiles
+    /// are never reconciled by name/instance the way zones/widgets are, so portal
+    /// tiles are recreated *after* bootstrap with fresh `SceneId`s (see
+    /// [`Self::adopt_orphaned_tile_overrides`]) and none is backed by a live tile
+    /// yet. This bumps each tile entry's `unseen_restarts` counter; an entry whose
+    /// counter reaches `max_unseen_restarts` has gone that many restarts without a
+    /// live tile reclaiming it — a permanently closed portal — and is pruned.
     ///
-    /// A live portal's entry is reclaimed on the very first restart-republish
-    /// (`adopt_orphaned_tile_overrides` migrates the override to a fresh,
-    /// zero-counter entry and removes the orphan), so its counter never exceeds
-    /// `1` before being replaced. As long as `max_unseen_restarts` sits well above
-    /// `1` this can never prune an override a tile could still legitimately reclaim
-    /// on a near-future restart, preserving #1015's restart durability.
+    /// Both flavours of orphan are covered by one retention model:
+    ///
+    /// - **Override-bearing** (hud-fwgv7): reclaimed on the first restart-republish
+    ///   when `adopt_orphaned_tile_overrides` migrates the override to a fresh,
+    ///   zero-counter entry and removes the orphan, so a live portal's entry never
+    ///   exceeds `1` before being replaced.
+    /// - **Override-free** (hud-m1ok3): a portal that republishes always issues a
+    ///   fresh `CreateTile` with a new `SceneId`, so the previous restart's
+    ///   override-free entry is never reclaimed by name and nothing removed it —
+    ///   an unbounded, slower leak. Here that entry simply ages out: it accrues one
+    ///   unseen restart per bootstrap and is pruned at the bound. A tile that
+    ///   *does* republish under the same id resets its own counter to `0` on
+    ///   publish (see the session/runtime create-tile reconcile), so a still-live
+    ///   entry is never pruned.
+    ///
+    /// As long as `max_unseen_restarts` sits well above `1` this can never prune an
+    /// entry a tile could still legitimately reclaim on a near-future restart,
+    /// preserving #1015's restart durability.
     ///
     /// Returns the [`OrphanOverrideGc`] outcome: the ids pruned and whether any
     /// counter was mutated (the caller must persist whenever `mutated` is set so
@@ -325,7 +340,7 @@ impl ElementStore {
         let mut pruned = Vec::new();
         let mut mutated = false;
         for (id, entry) in self.entries.iter_mut() {
-            if entry.element_type == ElementType::Tile && entry.geometry_override.is_some() {
+            if entry.element_type == ElementType::Tile {
                 entry.unseen_restarts = entry.unseen_restarts.saturating_add(1);
                 mutated = true;
                 if entry.unseen_restarts >= max_unseen_restarts {
@@ -340,11 +355,12 @@ impl ElementStore {
     }
 }
 
-/// Outcome of [`ElementStore::gc_expired_orphan_tile_overrides`] (hud-fwgv7).
+/// Outcome of [`ElementStore::gc_expired_orphan_tile_overrides`] (hud-fwgv7,
+/// hud-m1ok3).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OrphanOverrideGc {
-    /// Ids of override-bearing orphan tile entries pruned for exceeding the
-    /// retention bound.
+    /// Ids of orphan tile entries (override-bearing or override-free) pruned for
+    /// exceeding the retention bound.
     pub pruned: Vec<SceneId>,
     /// Whether any entry's retention counter was incremented. When set the caller
     /// must persist the store so the bumped counts survive the next restart, even
@@ -352,11 +368,12 @@ pub struct OrphanOverrideGc {
     pub mutated: bool,
 }
 
-/// Maximum consecutive runtime restarts an override-bearing orphan tile entry may
-/// survive unreclaimed before it is pruned (hud-fwgv7).
+/// Maximum consecutive runtime restarts an orphan tile entry may survive
+/// unreclaimed before it is pruned (hud-fwgv7, hud-m1ok3).
 ///
-/// A live portal member's entry is reclaimed on the first restart-republish, so
-/// its retention counter never exceeds `1`; this bound sits far above that to
+/// A live portal member's entry is reclaimed (override-bearing) or republished
+/// under a fresh id (override-free) well within this window, so a still-live
+/// entry's retention counter never approaches the bound; it sits far above `1` to
 /// guarantee no durable override is pruned while it could still legitimately be
 /// reclaimed (#1015). Only an entry whose portal never republishes across this
 /// many restarts — a permanently-closed portal — ages out.
@@ -835,9 +852,10 @@ mod tests {
     }
 
     #[test]
-    fn gc_ignores_zones_widgets_and_override_free_tiles() {
-        // GC only touches override-bearing Tile entries. A zone, a widget, and an
-        // override-free tile are all left untouched (no counter, no prune).
+    fn gc_ignores_zones_and_widgets_but_tracks_override_free_tiles() {
+        // GC touches only Tile entries — now including override-FREE ones
+        // (hud-m1ok3). A zone and an (override-bearing) widget are never tile
+        // orphans and stay untouched; the bare tile's counter is bumped.
         let zone_id = SceneId::new();
         let widget_id = SceneId::new();
         let bare_tile_id = SceneId::new();
@@ -854,13 +872,96 @@ mod tests {
 
         let gc = store.gc_expired_orphan_tile_overrides(MAX_UNSEEN_ORPHAN_OVERRIDE_RESTARTS);
 
-        assert!(gc.pruned.is_empty(), "nothing eligible to prune");
-        assert!(!gc.mutated, "no override-bearing tile entry to bump");
+        assert!(
+            gc.pruned.is_empty(),
+            "nothing reaches the bound in one pass"
+        );
+        assert!(gc.mutated, "the override-free tile entry was bumped");
         assert_eq!(store.entries[&zone_id].unseen_restarts, 0);
         assert_eq!(
             store.entries[&widget_id].unseen_restarts, 0,
             "an override-bearing WIDGET is not a tile orphan and is untouched"
         );
-        assert_eq!(store.entries[&bare_tile_id].unseen_restarts, 0);
+        assert_eq!(
+            store.entries[&bare_tile_id].unseen_restarts, 1,
+            "an override-free tile orphan is now tracked toward the retention bound"
+        );
+    }
+
+    #[test]
+    fn gc_prunes_override_free_orphan_past_retention_bound() {
+        // A permanently-closed portal member that never carried a user override
+        // still strands a fresh-id tile entry on every restart (nothing migrates
+        // an override-free entry). It must age out just like an override-bearing
+        // orphan instead of leaking unbounded (hud-m1ok3).
+        let orphan_id = SceneId::new();
+        let mut store = ElementStore::default();
+        store
+            .entries
+            .insert(orphan_id, tile_entry("agent.dead-portal", 5, 100));
+
+        let mut last = OrphanOverrideGc::default();
+        for _ in 0..MAX_UNSEEN_ORPHAN_OVERRIDE_RESTARTS {
+            last = store.gc_expired_orphan_tile_overrides(MAX_UNSEEN_ORPHAN_OVERRIDE_RESTARTS);
+        }
+
+        assert_eq!(
+            last.pruned,
+            vec![orphan_id],
+            "the override-free entry is pruned on the bootstrap that reaches the bound"
+        );
+        assert!(last.mutated, "a prune counts as a mutation to persist");
+        assert!(
+            !store.entries.contains_key(&orphan_id),
+            "the expired override-free orphan entry is removed from the store"
+        );
+    }
+
+    #[test]
+    fn gc_preserves_override_free_orphan_reclaimed_within_window() {
+        // An override-free entry reclaimed within the retention window (its tile
+        // republishes under the same id, resetting the counter the way the
+        // session/runtime create-tile reconcile does) must NOT be pruned — it
+        // survives and keeps accumulating from zero (hud-m1ok3).
+        let tile_id = SceneId::new();
+        let mut store = ElementStore::default();
+        store
+            .entries
+            .insert(tile_id, tile_entry("agent.portal", 5, 100));
+
+        // A few restarts short of the bound: the entry survives, counter climbs.
+        for _ in 0..(MAX_UNSEEN_ORPHAN_OVERRIDE_RESTARTS - 1) {
+            let gc = store.gc_expired_orphan_tile_overrides(MAX_UNSEEN_ORPHAN_OVERRIDE_RESTARTS);
+            assert!(gc.pruned.is_empty(), "not pruned while within the window");
+        }
+        assert_eq!(
+            store.entries[&tile_id].unseen_restarts,
+            MAX_UNSEEN_ORPHAN_OVERRIDE_RESTARTS - 1,
+            "the counter accumulated but has not reached the bound"
+        );
+
+        // The tile republishes under the same id: the reconcile path resets the
+        // retention counter (mirrored here). The entry is now reclaimed.
+        store
+            .entries
+            .get_mut(&tile_id)
+            .expect("entry present")
+            .unseen_restarts = 0;
+
+        // Even at the bootstrap that would have hit the bound, the reclaimed entry
+        // is preserved and merely starts a fresh window.
+        let gc = store.gc_expired_orphan_tile_overrides(MAX_UNSEEN_ORPHAN_OVERRIDE_RESTARTS);
+        assert!(
+            gc.pruned.is_empty(),
+            "a reclaimed override-free entry is not pruned"
+        );
+        assert!(
+            store.entries.contains_key(&tile_id),
+            "the reclaimed override-free entry is preserved"
+        );
+        assert_eq!(
+            store.entries[&tile_id].unseen_restarts, 1,
+            "it resumes accumulating from the reset, well within the window"
+        );
     }
 }

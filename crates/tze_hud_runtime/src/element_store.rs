@@ -204,16 +204,18 @@ pub fn bootstrap_scene_element_store_with_path(
 
     let now_ms = now_wall_ms();
     let changed = reconcile_scene_ids(scene, &mut store, now_ms);
-    // Bounded retention for override-bearing orphan tile entries (hud-fwgv7).
-    // Runs before tiles are recreated (they are republished after bootstrap), so
-    // every override-bearing tile entry is an orphan here; `adopt_orphaned_tile_
-    // overrides` later reclaims the ones whose portals republish. Entries whose
-    // portal was closed permanently accumulate unseen restarts and are pruned.
+    // Bounded retention for orphan tile entries (hud-fwgv7 override-bearing,
+    // hud-m1ok3 override-free). Runs before tiles are recreated (they are
+    // republished after bootstrap), so every tile entry is an orphan here;
+    // `adopt_orphaned_tile_overrides` later reclaims override-bearing ones whose
+    // portals republish, while override-free entries for republishing portals are
+    // superseded by fresh-id entries. Entries whose portal was closed permanently
+    // accumulate unseen restarts and are pruned.
     let gc = store.gc_expired_orphan_tile_overrides(MAX_UNSEEN_ORPHAN_OVERRIDE_RESTARTS);
     if !gc.pruned.is_empty() {
         tracing::info!(
             pruned = gc.pruned.len(),
-            "element_store: pruned override-bearing orphan tile entries past retention bound (hud-fwgv7)"
+            "element_store: pruned orphan tile entries past retention bound (hud-fwgv7, hud-m1ok3)"
         );
     }
     relock_tiles_with_durable_override(scene, &store);
