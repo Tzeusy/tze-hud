@@ -999,6 +999,7 @@ impl WinitApp {
             &self.state.input_event_tx,
             context.namespace,
             &context.node_id_bytes,
+            context.tile_id.as_uuid().as_bytes(),
             batch,
         );
     }
