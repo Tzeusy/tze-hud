@@ -426,13 +426,15 @@ impl Compositor {
     ///
     /// The mark is sized from `portal.window.resize_grip.size_px` and colored
     /// from `portal.window.resize_grip.color`. The pointer-hover tint
-    /// (`hover_color`) is resolved and selected via
-    /// [`ResizeGripTokens::mark_color`](super::token_colors::ResizeGripTokens::mark_color),
-    /// but the live per-tile hover signal is
-    /// not yet plumbed to the render site, so the resting color is used for now
-    /// (the hover swap is tracked as a follow-up). Dots are clipped to the
-    /// owning tile so an undersized tile never bleeds the mark outside its
-    /// bounds.
+    /// (`hover_color`) is selected via
+    /// [`ResizeGripTokens::mark_color`](super::token_colors::ResizeGripTokens::mark_color):
+    /// the tile named by the runtime-plumbed [`resize_grip_hover`] slot — the
+    /// focused portal whose bottom-right resize corner the pointer is over
+    /// (hud-wgiys) — renders in `hover_color`; every other grip stays resting.
+    /// Dots are clipped to the owning tile so an undersized tile never bleeds the
+    /// mark outside its bounds.
+    ///
+    /// [`resize_grip_hover`]: super::Compositor::resize_grip_hover
     pub(super) fn append_resize_grip_vertices(
         &self,
         scene: &SceneGraph,
@@ -444,14 +446,19 @@ impl Compositor {
         if grip.size_px <= 0.0 {
             return;
         }
-        // Resting color; the hover tint is deferred until a per-tile hover
-        // signal is plumbed to the compositor (see follow-up).
-        let color = self.gpu_color_raw(grip.mark_color(false));
+        // Resolve both tints once; the per-tile hover slot selects between them.
+        let resting = self.gpu_color_raw(grip.mark_color(false));
+        let hover = self.gpu_color_raw(grip.mark_color(true));
         for tile in scene.visible_tiles() {
             // Only portal (scrollable) tiles are resizable.
             if scene.tile_scroll_config(tile.id).is_none() {
                 continue;
             }
+            let color = if self.resize_grip_hover == Some(tile.id) {
+                hover
+            } else {
+                resting
+            };
             for dot in Self::resize_grip_dot_rects(tile.bounds, grip.size_px) {
                 Self::append_clipped_rect_vertices(tile, dot, sw, sh, color, vertices);
             }

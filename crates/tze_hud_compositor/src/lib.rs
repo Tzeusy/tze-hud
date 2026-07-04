@@ -43,7 +43,7 @@ pub use pipeline::{ChromeDrawCmd, RoundedRectDrawCmd, TexturedRectVertex};
 pub use renderer::{
     ComposerVisualLayoutHandle, Compositor, CompositorError, FocusRingOwner, FocusRingOwnerHandle,
     ImageTextureEntry, LocalComposerState, LocalComposerStateHandle, PortalViewerEchoQueue,
-    ViewerEchoAppend, ViewerEchoEntry, ViewerEchoStore,
+    ResizeGripHoverHandle, ViewerEchoAppend, ViewerEchoEntry, ViewerEchoStore,
 };
 pub use surface::{CompositorFrame, CompositorSurface, HeadlessSurface, WindowSurface};
 pub use text::{LINE_HEIGHT_MULTIPLIER, StyledRunItem, TextItem, TextRasterizer};
