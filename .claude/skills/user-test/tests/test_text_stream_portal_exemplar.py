@@ -15,6 +15,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 import text_stream_portal_exemplar as portal  # noqa: E402
 import portal_part_tokens as portal_tokens  # noqa: E402
+import portal_two_pane_geometry as pg  # noqa: E402
 
 
 class TextStreamPortalExemplarTests(unittest.TestCase):
@@ -2005,6 +2006,107 @@ class RuntimeHandshakeTokenTests(unittest.TestCase):
             portal.TOKENS, direct,
             "runtime adoption must match resolving the map through the mirror",
         )
+
+
+class TwoPaneGeometryProfileTests(unittest.TestCase):
+    """hud-q1qzw: the exemplar's two-pane chrome GEOMETRY (header height, pane
+    split, content inset, corner radius) resolves from an exemplar-local geometry
+    profile, and a geometry-profile swap re-lays the published chrome — the
+    geometry analogue of the 7jrj3 color/font reskin proof. This surface is
+    deliberately exemplar-local (the runtime has no two-pane concept), so its
+    keys must stay OUT of the canonical product token vocabulary."""
+
+    def tearDown(self) -> None:
+        # Restore the reviewed geometry so other tests stay isolated.
+        portal.apply_geometry_profile(None)
+
+    def _published_frame_radius(self) -> float:
+        root, _ = portal.build_portal_nodes(
+            title="t", subtitle="s", body="b", footer_meta="f",
+        )
+        return root.solid_color.radius
+
+    def test_exemplar_defaults_reproduce_reviewed_chrome_geometry(self) -> None:
+        """Resolving with no overrides reproduces the reviewed literals exactly —
+        the guard against a visual regression from the literal→token move."""
+        portal.apply_geometry_profile(None)
+        g = portal.GEOMETRY
+        self.assertEqual(g.header_height_px, 52.0)
+        self.assertEqual(g.footer_height_px, 30.0)
+        self.assertEqual(g.divider_height_px, 1.0)
+        self.assertEqual(g.content_inset_px, 18.0)
+        self.assertEqual(g.corner_radius_px, 14.0)
+        self.assertEqual(g.pane_split_ratio, 0.5)
+        self.assertEqual(g.pane_divider_width_px, 6.0)
+        self.assertEqual(g.min_pane_width_px, 240.0)
+        # The bound module constants track the resolved geometry (no literals).
+        self.assertEqual(portal.HEADER_H, 52.0)
+        self.assertEqual(portal.FOOTER_H, 30.0)
+        self.assertEqual(portal.PADDING_X, 18.0)
+        self.assertEqual(portal.PORTAL_RADIUS, 14.0)
+        self.assertEqual(portal.PANE_DIVIDER_W, 6.0)
+        self.assertEqual(portal.MIN_PANE_W, 240.0)
+        # Default 0.5 split reproduces the equal 50/50 pane widths.
+        self.assertEqual(portal.INPUT_PANE_W, (portal.PORTAL_W - 6.0) / 2.0)
+        # Published frame corner radius IS the resolved token, not a literal.
+        self.assertEqual(self._published_frame_radius(), 14.0)
+
+    def test_geometry_profile_swap_relays_published_chrome(self) -> None:
+        """Swapping the geometry profile changes the PUBLISHED chrome geometry —
+        the end-to-end proof the two-pane geometry is profile-driven, not literal."""
+        portal.apply_geometry_profile(None)
+        base_input, base_output = portal.portal_pane_rects()
+        base_radius = self._published_frame_radius()
+        self.assertEqual(base_radius, 14.0)
+
+        # A taller header, an input-heavy split, and a tighter corner radius.
+        portal.apply_geometry_profile(
+            {
+                pg.PORTAL_TWO_PANE_HEADER_HEIGHT_PX: "80",
+                pg.PORTAL_TWO_PANE_SPLIT_RATIO: "0.65",
+                pg.PORTAL_TWO_PANE_CORNER_RADIUS_PX: "4",
+            }
+        )
+        self.assertEqual(portal.HEADER_H, 80.0)
+        self.assertEqual(portal.PORTAL_RADIUS, 4.0)
+
+        swapped_input, swapped_output = portal.portal_pane_rects()
+        # Taller header pushes the pane band down (pane_y = HEADER_H + DIVIDER_H).
+        self.assertGreater(swapped_output.y, base_output.y)
+        # Input-heavy split widens the input pane and narrows the output pane.
+        self.assertGreater(portal.INPUT_PANE_W, (portal.PORTAL_W - 6.0) / 2.0)
+        self.assertLess(swapped_output.w, base_output.w)
+        # Published frame radius tracks the swapped token — still no literal.
+        self.assertEqual(self._published_frame_radius(), 4.0)
+        self.assertNotEqual(self._published_frame_radius(), base_radius)
+        # Panes still tile the frame exactly after the split-ratio swap.
+        input_w, output_w = portal.partition_pane_widths(
+            portal.PORTAL_W, portal.INPUT_PANE_W
+        )
+        self.assertEqual(input_w + portal.PANE_DIVIDER_W + output_w, portal.PORTAL_W)
+
+        # Restoring the exemplar geometry returns the original published chrome.
+        portal.apply_geometry_profile(None)
+        restored_input, restored_output = portal.portal_pane_rects()
+        self.assertEqual(base_output.y, restored_output.y)
+        self.assertEqual(base_output.w, restored_output.w)
+        self.assertEqual(self._published_frame_radius(), 14.0)
+
+    def test_unparseable_geometry_override_falls_back_to_default(self) -> None:
+        """A bad override value resolves to the exemplar default (warn-and-default),
+        mirroring the visual resolver's fallback semantics."""
+        portal.apply_geometry_profile(
+            {pg.PORTAL_TWO_PANE_HEADER_HEIGHT_PX: "not-a-number"}
+        )
+        self.assertEqual(portal.GEOMETRY.header_height_px, 52.0)
+
+    def test_two_pane_geometry_keys_are_not_canonical_product_tokens(self) -> None:
+        """The two-pane geometry surface is exemplar-local by design: its keys
+        must never leak into the canonical product token vocabulary (the runtime
+        has no two-pane concept, so they would be dead product surface)."""
+        for key in pg.EXEMPLAR_GEOMETRY_DEFAULTS:
+            self.assertTrue(key.startswith("portal.two_pane."))
+            self.assertNotIn(key, portal_tokens.CANONICAL_DEFAULTS)
 
 
 class CadencePresentAckTests(unittest.TestCase):
