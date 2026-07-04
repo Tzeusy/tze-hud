@@ -224,7 +224,7 @@ pub const PORTAL_TOKEN_SCROLL_INDICATOR_MIN_HEIGHT_PX: &str =
 /// both sides automatically (hud-dcynv consolidation).
 mod defaults {
     pub const FRAME_BACKGROUND: &str = "#111720";
-    pub const FRAME_OPACITY: &str = "0.90";
+    pub const FRAME_OPACITY: &str = "0.98";
     pub const FRAME_BORDER_COLOR: &str = "#2A3344";
 
     pub const HEADER_TEXT_COLOR: &str = "#F5F8FF";
