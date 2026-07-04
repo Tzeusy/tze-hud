@@ -50,16 +50,32 @@ use tze_hud_projection::ProjectedPortalState;
 use tze_hud_projection::resident_grpc::{
     PortalVisualTokens, ResidentGrpcPortalAdapter, ResidentGrpcPortalConfig,
 };
+use tze_hud_protocol::proto::EventBatch;
+use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
 use tze_hud_protocol::proto::session::{
     ClientMessage, LeaseRenew, LeaseRequest, LeaseResponse, MutationResult, ServerMessage,
     SessionInit, client_message::Payload as ClientPayload, hud_session_client::HudSessionClient,
     server_message::Payload as ServerPayload,
 };
+use tze_hud_protocol::subscriptions::category;
 
 /// Canonical v1 capability scope required for the resident portal adapter to
 /// create and update its own raw tiles. Kept minimal (no input/topology/zone
 /// scopes) so the resident session is least-privilege.
 pub const PORTAL_CAPABILITIES: [&str; 2] = ["create_tiles", "modify_own_tiles"];
+
+/// Capability that authorises the resident session to *receive* input events
+/// (composer draft / submit / cancel) over the session stream, and the gate the
+/// runtime enforces before delivering any `INPUT_EVENTS` batch
+/// (`tze_hud_protocol::subscriptions`).
+///
+/// Requested (alongside a matching `INPUT_EVENTS` subscription) **only** when the
+/// bridge is wired with an input sink — i.e. the runtime wants bridged composer
+/// input routed back to the driving session (hud-omfqi). Unlike
+/// [`PORTAL_CAPABILITIES`], its denial is **non-fatal**: the bridge still
+/// publishes portal output, it just refuses to route input (fail-closed — no
+/// capability, no input).
+pub const INPUT_CAPABILITY: &str = "access_input_events";
 
 /// A message fed to the resident gRPC bridge task by the per-projection transport
 /// router (hud-g7ool).
@@ -92,6 +108,107 @@ pub enum BridgeMessage {
         /// Authority projection id whose remote portal must be released.
         projection_id: String,
     },
+}
+
+/// A composer input event received *inbound* over the bridge stream, destined
+/// for the driving session's pending-input inbox — the same sink a non-bridged
+/// portal's composer input reaches via
+/// [`tze_hud_projection::ProjectionAuthority::enqueue_input`] (hud-omfqi).
+///
+/// Before this, the bridge's read loops discarded every non-response payload, so
+/// composer text typed on a bridged portal (advertised via `accepts_composer_input`)
+/// was silently dropped. The bridge now subscribes to `INPUT_EVENTS` (when input
+/// routing is granted) and forwards the composer variants of each inbound
+/// `EventBatch` here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResidentBridgeInput {
+    /// Authority projection the input belongs to (resolved by the bridge from its
+    /// interaction-enabled projection set — see [`resolve_input_projection`]).
+    pub projection_id: String,
+    /// The composer event payload.
+    pub kind: ResidentBridgeInputKind,
+}
+
+/// The composer event carried by a [`ResidentBridgeInput`], mirroring the
+/// on-wire `ComposerDraft{State,Submit,Cancel}` variants delivered by the
+/// runtime (`windowed::input_dispatch::deliver_composer_batch`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResidentBridgeInputKind {
+    /// State-stream draft display update (per-keystroke; latest-wins).
+    DraftState {
+        text: String,
+        cursor: u64,
+        at_capacity: bool,
+        sequence: u64,
+    },
+    /// Transactional submission — the submitted composer text. This is the event
+    /// that the driving session turns into a pending-input item.
+    Submit { text: String, sequence: u64 },
+    /// Transactional cancel (draft cleared without submission).
+    Cancel { sequence: u64 },
+}
+
+/// Extract the composer variants of an inbound [`EventBatch`] into
+/// [`ResidentBridgeInput`]s attributed to `projection_id`.
+///
+/// Non-composer input variants (pointer, key, focus, …) are ignored: the bridge
+/// only routes composer draft/submit/cancel back to the driving session. Batch
+/// ordering is preserved (RFC 0004 §8.4).
+fn event_batch_to_bridge_inputs(
+    batch: &EventBatch,
+    projection_id: &str,
+) -> Vec<ResidentBridgeInput> {
+    batch
+        .events
+        .iter()
+        .filter_map(|env| {
+            let kind = match env.event.as_ref()? {
+                InputEvent::ComposerDraftState(e) => ResidentBridgeInputKind::DraftState {
+                    text: e.text.clone(),
+                    cursor: e.cursor,
+                    at_capacity: e.at_capacity,
+                    sequence: e.sequence,
+                },
+                InputEvent::ComposerDraftSubmit(e) => ResidentBridgeInputKind::Submit {
+                    text: e.text.clone(),
+                    sequence: e.sequence,
+                },
+                InputEvent::ComposerDraftCancel(e) => ResidentBridgeInputKind::Cancel {
+                    sequence: e.sequence,
+                },
+                // Non-composer input variant — not routed back to the session.
+                _ => return None,
+            };
+            Some(ResidentBridgeInput {
+                projection_id: projection_id.to_string(),
+                kind,
+            })
+        })
+        .collect()
+}
+
+/// Resolve which projection an inbound composer event belongs to.
+///
+/// The wire event carries only the runtime-assigned composer node id (which the
+/// bridge never learns — `AddNode` returns no created id) and the shared session
+/// namespace, so neither disambiguates a projection. The bridge therefore
+/// attributes inbound input to the **sole interaction-enabled projection** it is
+/// serving: `interaction` maps each projection to its last-published
+/// `interaction_enabled` flag.
+///
+/// - Exactly one interaction-enabled projection → attribute to it.
+/// - Zero, or more than one → return `None` (drop, fail-closed): a composer
+///   event can only originate from an interaction-enabled portal, and multi-
+///   projection attribution is not resolvable from the wire (documented v1 limit;
+///   per-projection routing is reserved for the external-authority epic).
+fn resolve_input_projection(interaction: &HashMap<String, bool>) -> Option<String> {
+    let mut enabled = interaction.iter().filter(|&(_, &on)| on).map(|(id, _)| id);
+    let first = enabled.next()?;
+    if enabled.next().is_some() {
+        None
+    } else {
+        Some(first.clone())
+    }
 }
 
 /// Default lease TTL requested for a resident portal lease.
@@ -266,6 +383,18 @@ pub struct ResidentGrpcPortalBridge {
     namespace: String,
     /// Capabilities the server granted at handshake.
     granted_capabilities: Vec<String>,
+    /// Sink for inbound composer input events, when input routing is wired
+    /// (hud-omfqi). `None` disables input routing entirely (least-privilege
+    /// default): the handshake requests no input capability/subscription and the
+    /// read loops keep discarding non-response payloads.
+    input_tx: Option<mpsc::Sender<ResidentBridgeInput>>,
+    /// Whether the runtime actually granted [`INPUT_CAPABILITY`]. Input is routed
+    /// only when this is true (fail-closed on capability denial), regardless of
+    /// whether an `input_tx` was supplied.
+    input_granted: bool,
+    /// Per-projection last-published `interaction_enabled`, used to attribute and
+    /// gate inbound composer input (see [`resolve_input_projection`]).
+    interaction: HashMap<String, bool>,
 }
 
 impl ResidentGrpcPortalBridge {
@@ -276,6 +405,7 @@ impl ResidentGrpcPortalBridge {
     pub async fn connect(
         config: &ResidentGrpcBridgeConfig,
         visual_tokens: PortalVisualTokens,
+        input_tx: Option<mpsc::Sender<ResidentBridgeInput>>,
     ) -> Result<Self, ResidentGrpcBridgeError> {
         if config.psk.trim().is_empty() {
             return Err(ResidentGrpcBridgeError::MissingPsk);
@@ -288,6 +418,22 @@ impl ResidentGrpcPortalBridge {
         let (tx, rx) = mpsc::channel::<ClientMessage>(OUTBOUND_CHANNEL_CAPACITY);
         let inbound = ReceiverStream::new(rx);
 
+        // Input routing is opt-in and least-privilege: only when the bridge is
+        // wired with an input sink do we request the input capability +
+        // subscription, so a bridge that never routes input stays scoped to
+        // create/modify (hud-omfqi).
+        let route_input = input_tx.is_some();
+        let requested_capabilities: Vec<String> = PORTAL_CAPABILITIES
+            .iter()
+            .map(|s| s.to_string())
+            .chain(route_input.then(|| INPUT_CAPABILITY.to_string()))
+            .collect();
+        let initial_subscriptions: Vec<String> = if route_input {
+            vec![category::INPUT_EVENTS.to_string()]
+        } else {
+            Vec::new()
+        };
+
         // SessionInit MUST be the first message on the stream (RFC 0005 §4.1).
         let init = ClientMessage {
             sequence: 1,
@@ -296,8 +442,8 @@ impl ResidentGrpcPortalBridge {
                 agent_id: config.agent_id.clone(),
                 agent_display_name: format!("{} (resident gRPC portal)", config.agent_id),
                 pre_shared_key: config.psk.clone(),
-                requested_capabilities: PORTAL_CAPABILITIES.iter().map(|s| s.to_string()).collect(),
-                initial_subscriptions: vec![],
+                requested_capabilities,
+                initial_subscriptions,
                 resume_token: vec![],
                 agent_timestamp_wall_us: now_wall_us(),
                 min_protocol_version: 1000,
@@ -347,6 +493,22 @@ impl ResidentGrpcPortalBridge {
             }
         }
 
+        // Input routing is gated on an ACTUAL grant, not merely the request:
+        // fail-closed if the runtime withheld the input capability. Denial is
+        // non-fatal — the bridge still publishes portal output; it just won't
+        // route input back (hud-omfqi).
+        let input_granted = route_input
+            && established
+                .granted_capabilities
+                .iter()
+                .any(|c| c == INPUT_CAPABILITY);
+        if route_input && !input_granted {
+            tracing::warn!(
+                "resident gRPC portal bridge requested input routing but the runtime withheld \
+                 {INPUT_CAPABILITY}; bridged composer input will NOT be routed (fail-closed)"
+            );
+        }
+
         Ok(Self {
             tx,
             stream,
@@ -357,6 +519,9 @@ impl ResidentGrpcPortalBridge {
             sequence: 1,
             namespace: established.namespace,
             granted_capabilities: established.granted_capabilities,
+            input_tx: if input_granted { input_tx } else { None },
+            input_granted,
+            interaction: HashMap::new(),
         })
     }
 
@@ -378,6 +543,12 @@ impl ResidentGrpcPortalBridge {
         state: &ProjectedPortalState,
     ) -> Result<(), ResidentGrpcBridgeError> {
         self.ensure_projection(projection_id).await?;
+
+        // Track interaction so inbound composer input can be attributed and gated
+        // (hud-omfqi): input is only ever routed for an interaction-enabled
+        // projection.
+        self.interaction
+            .insert(projection_id.to_string(), state.interaction_enabled);
 
         let needs_create = self
             .adapters
@@ -484,6 +655,7 @@ impl ResidentGrpcPortalBridge {
         }
         self.adapters.remove(projection_id);
         self.leases.remove(projection_id);
+        self.interaction.remove(projection_id);
         Ok(())
     }
 
@@ -596,6 +768,7 @@ impl ResidentGrpcPortalBridge {
                 );
                 self.leases.remove(&projection_id);
                 self.adapters.remove(&projection_id);
+                self.interaction.remove(&projection_id);
             }
         }
         Ok(())
@@ -637,6 +810,12 @@ impl ResidentGrpcPortalBridge {
                         err.code, err.message
                     )));
                 }
+                // Composer input can interleave a request/response window; route it
+                // instead of discarding (hud-omfqi), then keep reading.
+                Some(ServerPayload::EventBatch(batch)) => {
+                    self.forward_event_batch(&batch);
+                    continue;
+                }
                 // LeaseStateChange / SceneSnapshot may interleave; keep reading.
                 _ => continue,
             }
@@ -666,9 +845,88 @@ impl ResidentGrpcPortalBridge {
                         err.code, err.message
                     )));
                 }
+                // Composer input can interleave a request/response window; route it
+                // instead of discarding (hud-omfqi), then keep reading.
+                Some(ServerPayload::EventBatch(batch)) => {
+                    self.forward_event_batch(&batch);
+                    continue;
+                }
                 _ => continue,
             }
         }
+    }
+
+    /// Whether the bridge is actively routing inbound composer input: a sink is
+    /// wired AND the runtime granted [`INPUT_CAPABILITY`]. Used by the driver loop
+    /// to decide whether to poll the stream for inbound input between requests.
+    fn input_routing_active(&self) -> bool {
+        self.input_granted && self.input_tx.is_some()
+    }
+
+    /// Forward the composer variants of an inbound [`EventBatch`] to the input
+    /// sink, attributed to the sole interaction-enabled projection.
+    ///
+    /// Fail-closed and defensive-in-depth:
+    /// - no-op unless input routing is active (capability granted + sink wired);
+    /// - no-op when the owning projection cannot be resolved (zero / ambiguous
+    ///   interaction-enabled projections — see [`resolve_input_projection`]).
+    ///
+    /// Delivery is `try_send`: the sink is bounded and input is latest-relevant,
+    /// so a full sink drops the event (logged) rather than stalling the read loop.
+    fn forward_event_batch(&self, batch: &EventBatch) {
+        if !self.input_routing_active() {
+            return;
+        }
+        let Some(sink) = self.input_tx.as_ref() else {
+            return;
+        };
+        let Some(projection_id) = resolve_input_projection(&self.interaction) else {
+            tracing::debug!(
+                "resident gRPC portal bridge received composer input with no unambiguous \
+                 interaction-enabled projection; dropping (fail-closed)"
+            );
+            return;
+        };
+        for input in event_batch_to_bridge_inputs(batch, &projection_id) {
+            if let Err(err) = sink.try_send(input) {
+                tracing::warn!(
+                    projection_id = %projection_id,
+                    error = %err,
+                    "resident gRPC portal bridge input sink unavailable; dropping composer input"
+                );
+            }
+        }
+    }
+
+    /// Await and process one inbound server message, routing composer input to the
+    /// sink (via [`Self::forward_event_batch`]). Non-input payloads are skipped.
+    ///
+    /// Returns `Ok(())` once a message is processed; a stream/session failure
+    /// surfaces as a reconnectable `Err` so the driver loop reconnects. Cancel-safe
+    /// (the driver loop `select!`s this against publish/renew): dropping the future
+    /// before it resolves loses no buffered message, because a `Streaming::next`
+    /// item is not consumed until it yields `Ready`.
+    async fn poll_inbound_input(&mut self) -> Result<(), ResidentGrpcBridgeError> {
+        let msg = self
+            .stream
+            .next()
+            .await
+            .ok_or(ResidentGrpcBridgeError::StreamClosed("inbound input"))?
+            .map_err(|e| ResidentGrpcBridgeError::Transport(e.to_string()))?;
+        match msg.payload {
+            Some(ServerPayload::EventBatch(batch)) => self.forward_event_batch(&batch),
+            // A terminal session error is authoritative — surface it so the driver
+            // loop reconnects rather than spinning on a dead stream.
+            Some(ServerPayload::SessionError(err)) => {
+                return Err(ResidentGrpcBridgeError::Handshake(format!(
+                    "session error while polling inbound input: {}: {}",
+                    err.code, err.message
+                )));
+            }
+            // Lease/scene/mutation noise between requests — ignore.
+            _ => {}
+        }
+        Ok(())
     }
 }
 
@@ -732,6 +990,17 @@ trait ResidentPortalTransport: Sized {
     /// Earliest lease-renewal deadline, or `None` when no leases are held.
     fn next_renew_deadline(&self) -> Option<Instant>;
 
+    /// Whether the transport is actively routing inbound composer input (input
+    /// capability granted + sink wired). When `false`, the driver loop does not
+    /// poll [`Self::poll_inbound_input`] (no input subscription in flight).
+    fn input_routing_active(&self) -> bool;
+
+    /// Await and process one inbound message, routing composer input to the sink.
+    /// Reconnectable `Err` on stream/session failure. Cancel-safe.
+    fn poll_inbound_input(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<(), ResidentGrpcBridgeError>> + Send;
+
     /// Cleanly tear down the transport.
     fn shutdown(self) -> impl std::future::Future<Output = ()> + Send;
 }
@@ -761,6 +1030,16 @@ impl ResidentPortalTransport for ResidentGrpcPortalBridge {
 
     fn next_renew_deadline(&self) -> Option<Instant> {
         ResidentGrpcPortalBridge::next_renew_deadline(self)
+    }
+
+    fn input_routing_active(&self) -> bool {
+        ResidentGrpcPortalBridge::input_routing_active(self)
+    }
+
+    fn poll_inbound_input(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<(), ResidentGrpcBridgeError>> + Send {
+        ResidentGrpcPortalBridge::poll_inbound_input(self)
     }
 
     fn shutdown(self) -> impl std::future::Future<Output = ()> + Send {
@@ -867,8 +1146,28 @@ async fn run_bridge_loop<T, C, Fut>(
                     None => std::future::pending::<()>().await,
                 }
             };
+            // Only poll the stream for inbound composer input when input routing is
+            // active (capability granted + sink wired); otherwise the branch is
+            // disabled so an input-less bridge never touches the read path (hud-omfqi).
+            let input_active = bridge.input_routing_active();
 
             tokio::select! {
+                // Route inbound composer input arriving between requests. Cancel-safe:
+                // if a publish/detach/renew wins, the dropped `poll_inbound_input`
+                // future loses no buffered stream item.
+                inbound = bridge.poll_inbound_input(), if input_active => {
+                    match inbound {
+                        Ok(()) => {}
+                        Err(e) if is_reconnectable(&e) => {
+                            tracing::warn!(error = %e, "resident gRPC portal bridge inbound input read failed; reconnecting");
+                            failures += 1;
+                            continue 'reconnect;
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "resident gRPC portal bridge inbound input read error");
+                        }
+                    }
+                }
                 incoming = state_rx.recv() => {
                     let Some(message) = incoming else {
                         // Feed closed: clean shutdown.
@@ -937,10 +1236,17 @@ async fn run_bridge_loop<T, C, Fut>(
 /// path it survives transient transport/stream errors via bounded backoff
 /// reconnect and renews its lease before the TTL expires, giving up cleanly once
 /// the reconnect budget is exhausted (the in-process path is unaffected).
+///
+/// When `input_tx` is `Some`, the bridge requests the input capability +
+/// `INPUT_EVENTS` subscription at handshake and routes inbound composer input
+/// (typed/submitted text on a bridged portal) to that sink — the same
+/// pending-input inbox a non-bridged portal reaches (hud-omfqi). `None` keeps the
+/// bridge least-privilege (no input capability requested, input path inert).
 pub fn spawn_resident_grpc_bridge(
     runtime: &tokio::runtime::Handle,
     config: ResidentGrpcBridgeConfig,
     visual_tokens: PortalVisualTokens,
+    input_tx: Option<mpsc::Sender<ResidentBridgeInput>>,
 ) -> ResidentGrpcBridgeHandle {
     let (state_tx, state_rx) = mpsc::channel::<BridgeMessage>(STATE_CHANNEL_CAPACITY);
 
@@ -948,7 +1254,8 @@ pub fn spawn_resident_grpc_bridge(
         let connect = move || {
             let config = config.clone();
             let visual_tokens = visual_tokens.clone();
-            async move { ResidentGrpcPortalBridge::connect(&config, visual_tokens).await }
+            let input_tx = input_tx.clone();
+            async move { ResidentGrpcPortalBridge::connect(&config, visual_tokens, input_tx).await }
         };
         run_bridge_loop(connect, ReconnectPolicy::default(), state_rx).await;
     });
@@ -1069,7 +1376,9 @@ mod tests {
     async fn empty_psk_fails_closed_before_connect() {
         let config = ResidentGrpcBridgeConfig::new("http://[::1]:1", "   ", "resident-portal");
         let err =
-            match ResidentGrpcPortalBridge::connect(&config, PortalVisualTokens::default()).await {
+            match ResidentGrpcPortalBridge::connect(&config, PortalVisualTokens::default(), None)
+                .await
+            {
                 Ok(_) => panic!("empty PSK must fail closed"),
                 Err(e) => e,
             };
@@ -1081,7 +1390,9 @@ mod tests {
         let (endpoint, _server) = start_server().await;
         let config = ResidentGrpcBridgeConfig::new(endpoint, "not-the-psk", "resident-portal");
         let err =
-            match ResidentGrpcPortalBridge::connect(&config, PortalVisualTokens::default()).await {
+            match ResidentGrpcPortalBridge::connect(&config, PortalVisualTokens::default(), None)
+                .await
+            {
                 Ok(_) => panic!("wrong PSK must be rejected"),
                 Err(e) => e,
             };
@@ -1105,9 +1416,10 @@ mod tests {
         let (endpoint, _server) = start_server().await;
         let config = ResidentGrpcBridgeConfig::new(endpoint, TEST_PSK, "resident-portal");
 
-        let mut bridge = ResidentGrpcPortalBridge::connect(&config, PortalVisualTokens::default())
-            .await
-            .expect("authenticated connect must succeed");
+        let mut bridge =
+            ResidentGrpcPortalBridge::connect(&config, PortalVisualTokens::default(), None)
+                .await
+                .expect("authenticated connect must succeed");
 
         // Capability scope was actually granted by the runtime.
         for cap in PORTAL_CAPABILITIES {
@@ -1159,6 +1471,15 @@ mod tests {
         /// When set, a lease deadline of `now + d` is armed on first publish and
         /// re-armed on each renewal (so the loop does not busy-renew).
         renew_after: Arc<Mutex<Option<Duration>>>,
+        /// Whether the fake transport reports input routing as active (drives the
+        /// `poll_inbound_input` select gate). Off by default (fail-closed).
+        input_active: Arc<AtomicBool>,
+        /// Scripted inbound composer input events; each `poll_inbound_input`
+        /// forwards the next one to `input_sink`, then pends once exhausted.
+        inbound_input: Arc<Mutex<VecDeque<ResidentBridgeInput>>>,
+        /// Sink the fake forwards inbound input to (the run_bridge_loop return
+        /// path under test).
+        input_sink: Arc<Mutex<Option<mpsc::Sender<ResidentBridgeInput>>>>,
     }
 
     struct FakeTransport {
@@ -1232,6 +1553,32 @@ mod tests {
 
         fn next_renew_deadline(&self) -> Option<Instant> {
             self.renew_at
+        }
+
+        fn input_routing_active(&self) -> bool {
+            self.world.input_active.load(Ordering::SeqCst)
+        }
+
+        fn poll_inbound_input(
+            &mut self,
+        ) -> impl std::future::Future<Output = Result<(), ResidentGrpcBridgeError>> + Send {
+            let world = self.world.clone();
+            async move {
+                // Yield the next scripted inbound input, forwarding it to the sink;
+                // once the script is exhausted, never resolve (mirrors an idle
+                // stream so the driver loop's select! ignores this branch).
+                let next = world.inbound_input.lock().unwrap().pop_front();
+                match next {
+                    Some(input) => {
+                        let sink = world.input_sink.lock().unwrap().clone();
+                        if let Some(sink) = sink {
+                            let _ = sink.send(input).await;
+                        }
+                        Ok(())
+                    }
+                    None => std::future::pending().await,
+                }
+            }
         }
 
         async fn shutdown(self) {}
@@ -1500,5 +1847,247 @@ mod tests {
 
         drop(tx);
         handle.await.unwrap();
+    }
+
+    // ── Inbound composer input routing (hud-omfqi) ───────────────────────────
+
+    use tze_hud_protocol::proto::input_envelope::Event as ProtoInputEvent;
+    use tze_hud_protocol::proto::{
+        ComposerDraftCancelEvent, ComposerDraftStateEvent, ComposerDraftSubmitEvent, InputEnvelope,
+    };
+
+    fn composer_batch(events: Vec<ProtoInputEvent>) -> EventBatch {
+        EventBatch {
+            frame_number: 0,
+            batch_ts_us: 1,
+            events: events
+                .into_iter()
+                .map(|e| InputEnvelope { event: Some(e) })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn event_batch_to_bridge_inputs_extracts_only_composer_variants_in_order() {
+        let node = vec![1u8; 16];
+        let batch = composer_batch(vec![
+            ProtoInputEvent::ComposerDraftState(ComposerDraftStateEvent {
+                node_id: node.clone(),
+                text: "he".to_string(),
+                cursor: 2,
+                at_capacity: false,
+                sequence: 7,
+            }),
+            // A non-composer input variant must be ignored.
+            ProtoInputEvent::KeyDown(tze_hud_protocol::proto::KeyDownEvent::default()),
+            ProtoInputEvent::ComposerDraftSubmit(ComposerDraftSubmitEvent {
+                node_id: node.clone(),
+                text: "hello".to_string(),
+                sequence: 8,
+            }),
+            ProtoInputEvent::ComposerDraftCancel(ComposerDraftCancelEvent {
+                node_id: node,
+                sequence: 9,
+            }),
+        ]);
+
+        let inputs = event_batch_to_bridge_inputs(&batch, "proj-x");
+        assert_eq!(
+            inputs,
+            vec![
+                ResidentBridgeInput {
+                    projection_id: "proj-x".to_string(),
+                    kind: ResidentBridgeInputKind::DraftState {
+                        text: "he".to_string(),
+                        cursor: 2,
+                        at_capacity: false,
+                        sequence: 7,
+                    },
+                },
+                ResidentBridgeInput {
+                    projection_id: "proj-x".to_string(),
+                    kind: ResidentBridgeInputKind::Submit {
+                        text: "hello".to_string(),
+                        sequence: 8,
+                    },
+                },
+                ResidentBridgeInput {
+                    projection_id: "proj-x".to_string(),
+                    kind: ResidentBridgeInputKind::Cancel { sequence: 9 },
+                },
+            ],
+            "only composer variants are routed, ordering preserved, KeyDown dropped"
+        );
+    }
+
+    #[test]
+    fn resolve_input_projection_requires_exactly_one_interaction_enabled() {
+        // Zero interaction-enabled → unresolved (fail-closed).
+        let mut map = HashMap::new();
+        assert_eq!(resolve_input_projection(&map), None);
+        map.insert("a".to_string(), false);
+        assert_eq!(resolve_input_projection(&map), None);
+
+        // Exactly one → attributed.
+        map.insert("b".to_string(), true);
+        assert_eq!(resolve_input_projection(&map), Some("b".to_string()));
+
+        // Ambiguous (two enabled) → unresolved (fail-closed).
+        map.insert("c".to_string(), true);
+        assert_eq!(resolve_input_projection(&map), None);
+    }
+
+    /// Handshake requests the input capability + `INPUT_EVENTS` subscription when
+    /// wired with a sink, and the runtime grant activates input routing (hud-omfqi).
+    #[tokio::test]
+    async fn bridge_requests_and_is_granted_input_capability_when_sink_wired() {
+        let (endpoint, _server) = start_server().await;
+        let config = ResidentGrpcBridgeConfig::new(endpoint, TEST_PSK, "resident-portal");
+        let (input_tx, _input_rx) = mpsc::channel::<ResidentBridgeInput>(8);
+
+        let bridge = ResidentGrpcPortalBridge::connect(
+            &config,
+            PortalVisualTokens::default(),
+            Some(input_tx),
+        )
+        .await
+        .expect("authenticated connect must succeed");
+
+        assert!(
+            bridge
+                .granted_capabilities()
+                .iter()
+                .any(|c| c == INPUT_CAPABILITY),
+            "runtime must grant {INPUT_CAPABILITY} when the bridge requests input routing"
+        );
+        assert!(
+            bridge.input_routing_active(),
+            "input routing must be active once the capability is granted + sink wired"
+        );
+        bridge.shutdown().await;
+    }
+
+    /// Without a sink the bridge stays least-privilege: it neither requests nor is
+    /// granted the input capability, and input routing is inert (fail-closed).
+    #[tokio::test]
+    async fn bridge_without_sink_is_least_privilege_no_input_capability() {
+        let (endpoint, _server) = start_server().await;
+        let config = ResidentGrpcBridgeConfig::new(endpoint, TEST_PSK, "resident-portal");
+
+        let bridge =
+            ResidentGrpcPortalBridge::connect(&config, PortalVisualTokens::default(), None)
+                .await
+                .expect("authenticated connect must succeed");
+
+        assert!(
+            !bridge
+                .granted_capabilities()
+                .iter()
+                .any(|c| c == INPUT_CAPABILITY),
+            "a sink-less bridge must not request/hold {INPUT_CAPABILITY}"
+        );
+        assert!(
+            !bridge.input_routing_active(),
+            "input routing must be inert without a sink"
+        );
+        bridge.shutdown().await;
+    }
+
+    /// The acceptance test: inbound composer input over the bridge reaches the
+    /// input sink (instead of being discarded) when input routing is active.
+    #[tokio::test]
+    async fn run_bridge_loop_forwards_inbound_composer_input_to_sink() {
+        let world = FakeWorld::default();
+        world.input_active.store(true, Ordering::SeqCst);
+        let (sink_tx, mut sink_rx) = mpsc::channel::<ResidentBridgeInput>(8);
+        *world.input_sink.lock().unwrap() = Some(sink_tx);
+        world
+            .inbound_input
+            .lock()
+            .unwrap()
+            .push_back(ResidentBridgeInput {
+                projection_id: "p".to_string(),
+                kind: ResidentBridgeInputKind::Submit {
+                    text: "typed on the bridged portal".to_string(),
+                    sequence: 3,
+                },
+            });
+
+        let (tx, rx) = mpsc::channel::<BridgeMessage>(8);
+        let connect = {
+            let world = world.clone();
+            move || {
+                let world = world.clone();
+                async move {
+                    world.connect_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, ResidentGrpcBridgeError>(FakeTransport::new(world.clone()))
+                }
+            }
+        };
+        let handle = tokio::spawn(run_bridge_loop(connect, ReconnectPolicy::default(), rx));
+
+        let delivered = tokio::time::timeout(Duration::from_secs(5), sink_rx.recv())
+            .await
+            .expect("inbound composer input must reach the sink (not be discarded)")
+            .expect("sink sender must remain open");
+        assert_eq!(
+            delivered,
+            ResidentBridgeInput {
+                projection_id: "p".to_string(),
+                kind: ResidentBridgeInputKind::Submit {
+                    text: "typed on the bridged portal".to_string(),
+                    sequence: 3,
+                },
+            }
+        );
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    /// Fail-closed: when input routing is inactive the loop never polls the inbound
+    /// path, so scripted composer input is not delivered to the sink.
+    #[tokio::test]
+    async fn run_bridge_loop_drops_inbound_input_when_routing_inactive() {
+        let world = FakeWorld::default();
+        // input_active defaults to false (fail-closed).
+        let (sink_tx, mut sink_rx) = mpsc::channel::<ResidentBridgeInput>(8);
+        *world.input_sink.lock().unwrap() = Some(sink_tx);
+        world
+            .inbound_input
+            .lock()
+            .unwrap()
+            .push_back(ResidentBridgeInput {
+                projection_id: "p".to_string(),
+                kind: ResidentBridgeInputKind::Submit {
+                    text: "should never arrive".to_string(),
+                    sequence: 1,
+                },
+            });
+
+        let (tx, rx) = mpsc::channel::<BridgeMessage>(8);
+        let connect = {
+            let world = world.clone();
+            move || {
+                let world = world.clone();
+                async move {
+                    world.connect_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, ResidentGrpcBridgeError>(FakeTransport::new(world.clone()))
+                }
+            }
+        };
+        let handle = tokio::spawn(run_bridge_loop(connect, ReconnectPolicy::default(), rx));
+
+        // Give the loop a chance to run, then close the feed to end it cleanly.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        drop(tx);
+        handle.await.unwrap();
+
+        assert!(
+            sink_rx.try_recv().is_err(),
+            "no input may reach the sink while input routing is inactive (fail-closed)"
+        );
     }
 }

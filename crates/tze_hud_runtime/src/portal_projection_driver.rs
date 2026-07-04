@@ -861,6 +861,37 @@ impl InProcessPortalDriver {
         Some(result.feedback)
     }
 
+    /// Ingest a composer submission that arrived over the resident gRPC bridge for
+    /// `projection_id` (hud-omfqi).
+    ///
+    /// A bridged portal tile is materialised by the bridge's own gRPC session, so
+    /// its viewer keystrokes never reach [`Self::submit_composer_batch_for_tile`]
+    /// (which resolves by in-process tile id). Instead the bridge routes the
+    /// submitted text back here, and this routes it through the SAME adapter →
+    /// [`ProjectionAuthority`] sink a non-bridged submission reaches (echo viewer
+    /// entry + enqueue pending input), so the driving session sees it.
+    ///
+    /// Returns `None` when no projection with an adapter is attached for
+    /// `projection_id` (already detached).
+    pub fn ingest_bridged_composer_submit(
+        &mut self,
+        projection_id: &str,
+        text: String,
+        submitted_at_wall_us: u64,
+        content_classification: ContentClassification,
+    ) -> Option<PortalInputFeedback> {
+        let entry = self.drive.entries.get_mut(projection_id)?;
+        let result = entry.adapter.submit_composer_text(
+            &mut self.authority,
+            projection_id,
+            text,
+            submitted_at_wall_us,
+            None,
+            content_classification,
+        );
+        Some(result.feedback)
+    }
+
     /// Apply a new design-token override map, propagating to all live adapters.
     pub fn apply_token_map(&mut self, overrides: DesignTokenMap) {
         self.drive.apply_token_map(overrides);
