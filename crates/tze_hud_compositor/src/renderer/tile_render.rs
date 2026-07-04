@@ -1277,12 +1277,14 @@ impl Compositor {
 
         let line_height_multiplier =
             crate::markdown::MarkdownTokens::default().line_height_multiplier;
-        let composer_font_size_px = resolve_composer_overlay_tokens(&self.token_map).font_size_px;
+        let composer_tokens = resolve_composer_overlay_tokens(&self.token_map);
+        let composer_font_size_px = composer_tokens.font_size_px;
         let draft_box = Self::composer_input_box(
             region,
             composer_font_size_px,
             line_height_multiplier,
             self.composer_layout.visible_lines,
+            composer_tokens.anchor,
         );
         let line_h = (echo_tokens.font_size_px * line_height_multiplier).max(1.0);
         let margin = COMPOSER_TEXT_MARGIN;
