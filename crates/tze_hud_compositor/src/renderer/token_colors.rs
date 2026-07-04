@@ -549,6 +549,28 @@ pub(super) fn resolve_scroll_indicator_tokens(
     }
 }
 
+/// Resolve the transcript optimal-measure cap (`portal.transcript.max_measure_px`).
+///
+/// A portal transcript otherwise wraps to the full node width, which on a wide
+/// tile produces overlong, hard-to-read lines. This token caps the effective
+/// wrapping measure so body text holds a comfortable line length regardless of
+/// how wide the surface is dragged.
+///
+/// `0` (the default) means **unbounded** — the transcript keeps wrapping to the
+/// full node width, so the default profile is unchanged. Any positive value is
+/// the maximum wrap width in physical pixels; the render/prime paths clamp the
+/// effective measure to `min(node_width, max_measure_px)` via
+/// [`super::text::clamp_transcript_measure`]. Missing, unparsable,
+/// non-finite, or negative values fall back to `0.0` (unbounded).
+#[inline]
+pub(super) fn resolve_transcript_max_measure_px(token_map: &HashMap<String, String>) -> f32 {
+    token_map
+        .get("portal.transcript.max_measure_px")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(0.0)
+}
+
 /// Resolved focus-ring visual tokens (linear sRGB color + width in px).
 ///
 /// The keyboard focus ring is drawn by [`Compositor::render_node`] around the

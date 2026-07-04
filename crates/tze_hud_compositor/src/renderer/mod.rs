@@ -1529,6 +1529,12 @@ impl Compositor {
         // viewer-local font scaling as the render path so truncation keys match.
         let font_clamp = self.portal_font_clamp_range();
 
+        // Transcript optimal-measure cap (hud-rivcy): resolve once and apply the
+        // SAME clamp the render path (`collect_text_items_from_node`) applies, so
+        // the primed truncation key (which includes `bounds_width`) matches what
+        // gets shaped. Gated per-tile to portal surfaces below.
+        let transcript_max_measure_px = resolve_transcript_max_measure_px(&self.token_map);
+
         // Safe: checked is_none() above and returned; rasterizer stays Some
         // (this method holds &mut self exclusively).
         let rasterizer = self
@@ -1552,10 +1558,19 @@ impl Compositor {
             // tile) resolves the portal token set; any other markdown surface
             // resolves the generic set.  The whole subtree shares the tile's
             // scope, so select once and thread it down the recursion.
-            let md_tokens = if scene.tile_scroll_config(tile.id).is_some() {
+            let is_portal_surface = scene.tile_scroll_config(tile.id).is_some();
+            let md_tokens = if is_portal_surface {
                 &self.markdown_tokens
             } else {
                 &self.markdown_tokens_generic
+            };
+            // Only portal surfaces are transcripts; pass 0.0 (no clamp) for
+            // other markdown tiles so the collector is a no-op there. Mirrors
+            // the render-path gate in `collect_text_items`.
+            let transcript_measure_px = if is_portal_surface {
+                transcript_max_measure_px
+            } else {
+                0.0
             };
             if let Some(root_id) = tile.root_node {
                 collect_ellipsis_text_items_from_node(
@@ -1569,6 +1584,7 @@ impl Compositor {
                     &self.node_key_cache,
                     md_tokens,
                     font_clamp,
+                    transcript_measure_px,
                     &mut live_items,
                 );
             }
