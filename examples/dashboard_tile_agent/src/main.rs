@@ -1931,6 +1931,17 @@ mod tests {
     use tze_hud_runtime::HeadlessRuntime;
     use tze_hud_runtime::headless::HeadlessConfig;
 
+    /// Serializes tests that construct a real headless wgpu compositor.
+    ///
+    /// Mirrors `tze_hud_runtime::test_support::HEADLESS_RUNTIME_MUTEX`: on
+    /// headless Linux, concurrent `HeadlessRuntime::new` calls (each stands up
+    /// a real wgpu/Vulkan device) can deadlock the GPU driver under the
+    /// default parallel libtest harness. Every test in this module builds a
+    /// `HeadlessRuntime` via `start_test_runtime`/`start_test_runtime_with_state`,
+    /// so this crate needs the same guard `tze_hud_runtime`'s own tests already
+    /// have (that one is `pub(crate)` and not reusable from here).
+    static HEADLESS_RUNTIME_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     const TEST_PSK: &str = "dashboard-tile-test-key";
     const TEST_AGENT_ID: &str = "test-dashboard-agent";
     const TEST_AGENT_DISPLAY_NAME: &str = "Test Dashboard Agent";
@@ -1960,6 +1971,7 @@ mod tests {
             psk: TEST_PSK.to_string(),
             config_toml: None, // dev-mode: unrestricted capabilities
         };
+        let _runtime_guard = HEADLESS_RUNTIME_MUTEX.lock().await;
         let runtime = HeadlessRuntime::new(config).await?;
         let server = runtime.start_grpc_server().await?;
         Ok(server)
@@ -2259,6 +2271,7 @@ mod tests {
             psk: TEST_PSK.to_string(),
             config_toml: None, // dev-mode: unrestricted capabilities
         };
+        let _runtime_guard = HEADLESS_RUNTIME_MUTEX.lock().await;
         let runtime = HeadlessRuntime::new(config).await?;
         let state = runtime.state.clone();
         let server = runtime.start_grpc_server().await?;
