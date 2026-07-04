@@ -793,6 +793,19 @@ pub(super) struct ComposerOverlayTokens {
     /// Sourced from the `portal.composer.anchor` token (`"top"` / `"bottom"`);
     /// defaults to `Bottom` so every existing bottom-strip profile is unchanged.
     pub(super) anchor: ComposerVerticalAnchor,
+    /// Horizontal + vertical content inset (physical px) between the composer
+    /// region edge and the draft text, applied uniformly on every side.
+    ///
+    /// This is the composer's slice of the shared `portal.spacing.content_inset_px`
+    /// token (hud-ar10c): the compositor's composer geometry
+    /// (`composer_input_box` box padding, the caret-follow window width, the draft
+    /// `pixel_x`/clip, and the viewer-echo zone width) all resolve their inset from
+    /// here instead of a hardcoded literal. Defaults to
+    /// [`COMPOSER_OVERLAY_DEFAULT_CONTENT_INSET_PX`] (6.0), which reproduces the
+    /// previous `COMPOSER_TEXT_MARGIN` literal so the default profile is unchanged;
+    /// caret-follow geometry keys off this value, so a profile that widens it shifts
+    /// the caret origin in lockstep.
+    pub(super) content_inset_px: f32,
 }
 
 /// Vertical anchoring of the composer input box within its region (hud-nottc).
@@ -815,6 +828,14 @@ const COMPOSER_OVERLAY_DEFAULT_FONT_SIZE_PX: f32 = 16.0;
 /// lines, then scrolls internally (design proposal default, hud-nx7yq.1). A small
 /// bound so a tall draft cannot swallow the transcript pane.
 const COMPOSER_OVERLAY_DEFAULT_MAX_LINES: u32 = 6;
+
+/// Default composer content inset in physical px, applied on every side between
+/// the composer region edge and the draft text. Sourced from
+/// `portal.spacing.content_inset_px`; this default mirrors the config-crate token
+/// default (`PortalPartTokens::content_inset_px` = 6) and the historical
+/// `COMPOSER_TEXT_MARGIN` literal, so an absent token reproduces the prior spacing
+/// exactly (no visual regression).
+const COMPOSER_OVERLAY_DEFAULT_CONTENT_INSET_PX: f32 = 6.0;
 
 pub(super) fn resolve_composer_overlay_tokens(
     token_map: &HashMap<String, String>,
@@ -888,6 +909,16 @@ pub(super) fn resolve_composer_overlay_tokens(
         .filter(|&v| v >= 1)
         .unwrap_or(COMPOSER_OVERLAY_DEFAULT_MAX_LINES);
 
+    // Content inset (default 6.0). Shared portal spacing token — the composer's
+    // horizontal + vertical padding between the region edge and the draft text.
+    // Reject non-finite / negative values so a malformed token cannot collapse or
+    // invert the box geometry; `0.0` (flush) is permitted.
+    let content_inset_px = token_map
+        .get("portal.spacing.content_inset_px")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|&v| v.is_finite() && v >= 0.0)
+        .unwrap_or(COMPOSER_OVERLAY_DEFAULT_CONTENT_INSET_PX);
+
     // Vertical anchor (default: Bottom — the bottom-chat strip). Only an explicit
     // `top` (case-insensitive) selects the top-anchored exemplar input pane; any
     // other / missing / malformed value falls back to Bottom so existing profiles
@@ -919,6 +950,7 @@ pub(super) fn resolve_composer_overlay_tokens(
         font_size_px,
         max_lines,
         anchor,
+        content_inset_px,
     }
 }
 
