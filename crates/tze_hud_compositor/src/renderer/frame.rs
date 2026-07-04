@@ -321,6 +321,14 @@ impl Compositor {
             }
         }
 
+        // ── Resize-grip affordance (vd-crude-resize-handle-grip) ───────────────
+        // A token-colored dot-grid mark at each portal (scrollable) tile's
+        // bottom-right resize corner, drawn above the tile content it decorates.
+        // Geometry-only; carries no transcript content (redaction-safe). Sized
+        // and colored from `portal.window.resize_grip.*`; no literal visual
+        // value at the call site.
+        self.append_resize_grip_vertices(scene, &mut vertices, sw, sh);
+
         // Update zone animation states (fade-in/fade-out) before rendering.
         self.update_zone_animations(scene);
         // §6.3 portal transition: advance per-portal-tile fade animations

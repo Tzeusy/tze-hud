@@ -43,7 +43,8 @@ use super::image_cache::{
 use super::token_colors::{
     ComposerOverlayTokens, ComposerVerticalAnchor, TILE_BG_DEFAULT, TILE_BG_STATIC_IMAGE,
     TILE_BG_TEXT_MARKDOWN, linear_to_srgb, resolve_composer_overlay_tokens,
-    resolve_focus_ring_tokens, resolve_tile_bg_token, resolve_viewer_echo_tokens,
+    resolve_focus_ring_tokens, resolve_resize_grip_tokens, resolve_tile_bg_token,
+    resolve_viewer_echo_tokens,
 };
 
 /// Horizontal inset (physical px) between the composer region edge and the draft
@@ -366,6 +367,90 @@ impl Compositor {
         let ring_color = self.gpu_color_raw(ring.color);
         for edge in Self::focus_ring_edge_rects(region, ring.width_px) {
             Self::append_clipped_rect_vertices(tile, edge, sw, sh, ring_color, vertices);
+        }
+    }
+
+    /// Dot rects for the portal resize-grip affordance: a diagonal dot-grid mark
+    /// in the bottom-right corner of `region`, occupying a `size_px` square.
+    ///
+    /// The dots form the lower-right triangle of a 3×3 grid (cells where
+    /// `col + row >= 2`), so the mark reads as a diagonal grip pointing at the
+    /// bottom-right resize corner — the conventional window-grip glyph:
+    ///
+    /// ```text
+    ///     · · ●
+    ///     · ● ●
+    ///     ● ● ●
+    /// ```
+    ///
+    /// Each dot is a square inset within its grid cell. Returns all-zero rects
+    /// (dropped by [`Self::append_clipped_rect_vertices`], which discards
+    /// zero-area rects) when `size_px <= 0` so callers need no separate guard.
+    pub(super) fn resize_grip_dot_rects(region: Rect, size_px: f32) -> [Rect; 6] {
+        let empty = [Rect::new(0.0, 0.0, 0.0, 0.0); 6];
+        if !size_px.is_finite() || size_px <= 0.0 || region.width <= 0.0 || region.height <= 0.0 {
+            return empty;
+        }
+        // Anchor the grip square at the bottom-right corner of the region.
+        let grip_x = region.x + region.width - size_px;
+        let grip_y = region.y + region.height - size_px;
+        let cell = size_px / 3.0;
+        // Dot square inset within its cell (half the cell, centred).
+        let dot = cell * 0.5;
+        let dot_off = (cell - dot) * 0.5;
+
+        // Lower-right triangle cells (col + row >= 2) of the 3×3 grid, in a
+        // fixed order so the emitted quads are deterministic for tests.
+        const CELLS: [(u8, u8); 6] = [(2, 0), (1, 1), (2, 1), (0, 2), (1, 2), (2, 2)];
+        let mut rects = empty;
+        for (i, (col, row)) in CELLS.iter().enumerate() {
+            let cell_x = grip_x + f32::from(*col) * cell;
+            let cell_y = grip_y + f32::from(*row) * cell;
+            rects[i] = Rect::new(cell_x + dot_off, cell_y + dot_off, dot, dot);
+        }
+        rects
+    }
+
+    /// Emit the portal resize-grip affordance (vd-crude-resize-handle-grip) into
+    /// `vertices`: a token-colored dot-grid mark at the bottom-right resize
+    /// corner of every visible portal (scrollable) tile.
+    ///
+    /// Portal tiles are the only resizable surfaces — the pointer resize bands
+    /// are scoped to the focused portal (see `tze_hud_input::hit_affordance`) —
+    /// so the grip is drawn only on tiles that carry a runtime scroll config.
+    /// Geometry-only; it carries no transcript content and is redaction-safe.
+    ///
+    /// The mark is sized from `portal.window.resize_grip.size_px` and colored
+    /// from `portal.window.resize_grip.color`. The pointer-hover tint
+    /// (`hover_color`) is resolved and selected via
+    /// [`ResizeGripTokens::mark_color`](super::token_colors::ResizeGripTokens::mark_color),
+    /// but the live per-tile hover signal is
+    /// not yet plumbed to the render site, so the resting color is used for now
+    /// (the hover swap is tracked as a follow-up). Dots are clipped to the
+    /// owning tile so an undersized tile never bleeds the mark outside its
+    /// bounds.
+    pub(super) fn append_resize_grip_vertices(
+        &self,
+        scene: &SceneGraph,
+        vertices: &mut Vec<RectVertex>,
+        sw: f32,
+        sh: f32,
+    ) {
+        let grip = resolve_resize_grip_tokens(&self.token_map);
+        if grip.size_px <= 0.0 {
+            return;
+        }
+        // Resting color; the hover tint is deferred until a per-tile hover
+        // signal is plumbed to the compositor (see follow-up).
+        let color = self.gpu_color_raw(grip.mark_color(false));
+        for tile in scene.visible_tiles() {
+            // Only portal (scrollable) tiles are resizable.
+            if scene.tile_scroll_config(tile.id).is_none() {
+                continue;
+            }
+            for dot in Self::resize_grip_dot_rects(tile.bounds, grip.size_px) {
+                Self::append_clipped_rect_vertices(tile, dot, sw, sh, color, vertices);
+            }
         }
     }
 
@@ -1768,6 +1853,126 @@ impl Compositor {
         for child_id in &node.children {
             self.render_node(*child_id, tile, scene, vertices, textured_cmds, sw, sh);
         }
+    }
+}
+
+#[cfg(test)]
+mod resize_grip_tests {
+    use super::*;
+    use crate::renderer::token_colors::{parse_hex_color, resolve_resize_grip_tokens};
+    use std::collections::HashMap;
+
+    /// The grip dots occupy a `size_px` square anchored at the region's
+    /// bottom-right corner and form a lower-right triangle (1 dot in the left
+    /// column, 2 in the middle, 3 in the right) — the diagonal grip glyph.
+    #[test]
+    fn dots_anchor_bottom_right_and_form_diagonal() {
+        let region = Rect::new(50.0, 40.0, 300.0, 200.0);
+        let size = 30.0;
+        let dots = Compositor::resize_grip_dot_rects(region, size);
+
+        // Grip square: bottom-right `size`×`size` corner of the region.
+        let grip_x = region.x + region.width - size; // 320
+        let grip_y = region.y + region.height - size; // 210
+        let corner_x = region.x + region.width; // 350
+        let corner_y = region.y + region.height; // 240
+
+        for d in &dots {
+            assert!(d.width > 0.0 && d.height > 0.0, "every dot must be non-empty");
+            assert!(
+                d.x >= grip_x - 1e-3 && d.x + d.width <= corner_x + 1e-3,
+                "dot x {} must sit inside the grip square [{grip_x}, {corner_x}]",
+                d.x
+            );
+            assert!(
+                d.y >= grip_y - 1e-3 && d.y + d.height <= corner_y + 1e-3,
+                "dot y {} must sit inside the grip square [{grip_y}, {corner_y}]",
+                d.y
+            );
+        }
+
+        // Column histogram: cell width is size/3, so a dot's column index is
+        // floor((x - grip_x) / cell). The diagonal grip has 1/2/3 dots in
+        // columns 0/1/2 respectively.
+        let cell = size / 3.0;
+        let mut per_col = [0u8; 3];
+        for d in &dots {
+            let col = (((d.x - grip_x) / cell).floor() as i32).clamp(0, 2) as usize;
+            per_col[col] += 1;
+        }
+        assert_eq!(
+            per_col,
+            [1, 2, 3],
+            "grip must taper as a diagonal: 1 dot left, 2 middle, 3 right"
+        );
+    }
+
+    /// A non-positive grip size yields all-zero rects (nothing drawn) so the
+    /// render site needs no separate guard.
+    #[test]
+    fn nonpositive_size_yields_empty_dots() {
+        let region = Rect::new(0.0, 0.0, 100.0, 100.0);
+        for size in [0.0, -5.0] {
+            let dots = Compositor::resize_grip_dot_rects(region, size);
+            assert!(
+                dots.iter().all(|d| d.width == 0.0 && d.height == 0.0),
+                "size {size} must produce only zero-area dots"
+            );
+        }
+    }
+
+    /// The resolver falls back to the tze_hud_config resize-grip defaults when
+    /// no override token is present: a positive size and a distinct, brighter
+    /// hover tint than the resting color.
+    #[test]
+    fn resolver_defaults_are_distinct_and_positive() {
+        let grip = resolve_resize_grip_tokens(&HashMap::new());
+        assert!(grip.size_px > 0.0, "default grip size must be positive");
+        assert_ne!(
+            grip.color, grip.hover_color,
+            "hover tint must differ from the resting grip color"
+        );
+        // The default hover (#8A93A6) is brighter than the resting grip
+        // (#5A6373) on every RGB channel.
+        for c in 0..3 {
+            assert!(
+                grip.hover_color[c] > grip.color[c],
+                "default hover channel {c} must be brighter than resting"
+            );
+        }
+    }
+
+    /// Override tokens flow through: size, resting color, and hover color are
+    /// each taken from the token map, and `mark_color` selects between resting
+    /// and hover by the pointer state.
+    #[test]
+    fn overrides_flow_through_and_hover_swaps_color() {
+        let mut map = HashMap::new();
+        map.insert(
+            "portal.window.resize_grip.size_px".to_owned(),
+            "20".to_owned(),
+        );
+        map.insert(
+            "portal.window.resize_grip.color".to_owned(),
+            "#101010".to_owned(),
+        );
+        map.insert(
+            "portal.window.resize_grip.hover_color".to_owned(),
+            "#f0f0f0".to_owned(),
+        );
+        let grip = resolve_resize_grip_tokens(&map);
+
+        assert!((grip.size_px - 20.0).abs() < 1e-4, "size override applied");
+
+        let want_rest = parse_hex_color("#101010").unwrap().to_array();
+        let want_hover = parse_hex_color("#f0f0f0").unwrap().to_array();
+        assert_eq!(grip.mark_color(false), want_rest, "resting color override");
+        assert_eq!(grip.mark_color(true), want_hover, "hover color override");
+        assert_ne!(
+            grip.mark_color(false),
+            grip.mark_color(true),
+            "hover state must swap the grip color"
+        );
     }
 }
 

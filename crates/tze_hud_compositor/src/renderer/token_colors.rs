@@ -609,6 +609,75 @@ pub(super) fn resolve_focus_ring_tokens(token_map: &HashMap<String, String>) -> 
     FocusRingTokens { color, width_px }
 }
 
+/// Resolved visual tokens for the portal resize-grip affordance
+/// (vd-crude-resize-handle-grip). The grip is a token-colored dot-grid mark at
+/// the portal's bottom-right resize corner; `hover_color` tints it when the
+/// pointer is over the resize band.
+///
+/// Colors are linear-sRGB `[r, g, b, a]` (converted from sRGB hex by
+/// `parse_hex_color`), ready for `gpu_color_raw`.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ResizeGripTokens {
+    /// Resting grip mark color.
+    pub(super) color: [f32; 4],
+    /// Grip mark tint while the pointer is over the resize band.
+    pub(super) hover_color: [f32; 4],
+    /// Grip square extent in physical pixels (the corner mark's width/height).
+    pub(super) size_px: f32,
+}
+
+impl ResizeGripTokens {
+    /// The grip mark color for the current pointer state: `hover_color` when the
+    /// pointer is over the portal's resize band, otherwise the resting `color`.
+    #[inline]
+    pub(super) fn mark_color(&self, hovered: bool) -> [f32; 4] {
+        if hovered {
+            self.hover_color
+        } else {
+            self.color
+        }
+    }
+}
+
+// Fallback resize-grip values — MUST stay in sync with `tze_hud_config`'s
+// `portal_tokens::defaults::WINDOW_RESIZE_GRIP_*`. The two crates are
+// intentionally independent (no compile-time link), so update both when a
+// default changes.
+const RESIZE_GRIP_DEFAULT_COLOR_HEX: &str = "#5A6373";
+const RESIZE_GRIP_DEFAULT_HOVER_HEX: &str = "#8A93A6";
+const RESIZE_GRIP_DEFAULT_SIZE_PX: f32 = 14.0;
+
+/// Resolve [`ResizeGripTokens`] from the compositor token map.
+///
+/// Keys follow the portal token namespace (`portal.window.resize_grip.*`).
+/// Falls back to the `tze_hud_config` portal-token defaults for any missing or
+/// unparsable token. The size falls back to a positive default and is never
+/// allowed to be non-finite or negative.
+#[inline]
+pub(super) fn resolve_resize_grip_tokens(token_map: &HashMap<String, String>) -> ResizeGripTokens {
+    let color = resolve_token_color(token_map, "portal.window.resize_grip.color")
+        .or_else(|| parse_hex_color(RESIZE_GRIP_DEFAULT_COLOR_HEX))
+        .unwrap_or(Rgba::WHITE)
+        .to_array();
+
+    let hover_color = resolve_token_color(token_map, "portal.window.resize_grip.hover_color")
+        .or_else(|| parse_hex_color(RESIZE_GRIP_DEFAULT_HOVER_HEX))
+        .unwrap_or(Rgba::WHITE)
+        .to_array();
+
+    let size_px = token_map
+        .get("portal.window.resize_grip.size_px")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(RESIZE_GRIP_DEFAULT_SIZE_PX);
+
+    ResizeGripTokens {
+        color,
+        hover_color,
+        size_px,
+    }
+}
+
 /// Resolved visual tokens for the runtime-authored viewer reply echo
 /// (hud-nx7yq.3) — a kind-distinct color plus font size for viewer history lines
 /// rendered above the composer strip on raw-tile portals.
