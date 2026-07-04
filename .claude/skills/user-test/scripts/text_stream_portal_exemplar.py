@@ -322,14 +322,27 @@ def join_transcript_entries(entries: list[str]) -> str:
     return f"\n{TRANSCRIPT_ENTRY_SEPARATOR}\n".join(kept)
 
 
-def append_transcript_entry(body: str, entry: str) -> str:
-    """Append a submitted viewer entry to the OUTPUT-pane transcript body.
+def append_input_history(input_history: list[str], entry: str) -> Optional[str]:
+    """Record a viewer's submitted composer entry into the INPUT-pane history.
 
-    The new entry lands after a `---` turn divider (hud-hsc1t); empty bodies
-    and whitespace-only entries collapse correctly because
-    join_transcript_entries drops blank segments (hud-xg9ok).
+    Two-pane portal contract (hud-egf39): the viewer's own submissions belong to
+    the LEFT input pane — the runtime renders them as viewer-echo turns beneath
+    the composer, with `---` dividers between adjacent entries (hud-hsc1t /
+    #1020). They MUST NOT be folded into the OUTPUT-pane transcript, which stays
+    agent-authored only. This supersedes the combined-transcript echo shipped in
+    #1027/#1031 (`append_transcript_entry` into `body_full`).
+
+    The entry is line-ending-normalized before recording. Whitespace-only
+    entries are dropped so a bare Enter creates no empty history turn.
+
+    Returns the normalized entry that was appended, or ``None`` if it was
+    dropped (empty/whitespace-only).
     """
-    return join_transcript_entries([body, entry])
+    normalized = normalize_composer_input(entry)
+    if not normalized.strip():
+        return None
+    input_history.append(normalized)
+    return normalized
 
 
 def load_transcript_slice(doc_path: str, max_lines: int) -> str:
@@ -2946,6 +2959,11 @@ async def portal_interaction_loop(
     composer_focused = False
     _, output_rect = portal_pane_rects()
     output_view_start = 0
+    # INPUT-pane history: the viewer's OWN submitted entries (hud-egf39). These
+    # are recorded here for the exemplar's own bookkeeping/verification; the
+    # runtime renders them beneath the composer as viewer-echo turns (#1020).
+    # They are NEVER appended to `body_full` (the agent-authored OUTPUT pane).
+    input_history: list[str] = []
     drag: Optional[dict[str, float | str]] = None
     last_output_scroll_y: Optional[float] = None
     last_draft_sequence: int = 0
@@ -3514,52 +3532,26 @@ async def portal_interaction_loop(
         request_composer_render()
 
     async def on_composer_draft_submit(text: str, sequence: int) -> None:
-        """Handle runtime-owned ComposerDraftSubmitEvent — echo into history.
+        """Handle runtime-owned ComposerDraftSubmitEvent — record into INPUT history.
 
-        The exemplar owns the OUTPUT-pane transcript, so a submitted draft must
-        be appended as a new turn entry and the pane republished at the tail;
-        clearing the composer alone makes viewer messages visually vanish
-        (hud-xg9ok).
+        Two-pane portal (hud-egf39): a viewer submission belongs to the LEFT
+        input pane's OWN history, not the OUTPUT transcript. The runtime already
+        renders it as a viewer-echo turn beneath the composer, with a `---`
+        divider between adjacent entries (#1020) — so the exemplar records the
+        submission in `input_history` (for bookkeeping/verification), clears the
+        composer, and leaves `body_full` (the agent-authored OUTPUT pane)
+        untouched. This reverts the OUTPUT-pane append shipped in #1027/#1031.
         """
-        nonlocal composer_text, composer_cursor, composer_cursor_goal_x, last_draft_sequence, body_full, last_output_scroll_y
+        nonlocal composer_text, composer_cursor, composer_cursor_goal_x, last_draft_sequence
         last_draft_sequence = sequence
-        submitted = normalize_composer_input(text)
-        if submitted.strip():
+        recorded = append_input_history(input_history, text)
+        if recorded is not None:
             emit_step_event(transcript, 10, "checkpoint", {
                 "code": "input:submit",
                 "title": "Composer submitted",
-                "action": "runtime-owned draft submitted; composer clears",
-                "expected_visual": "composer clears after submit",
-            }, submitted=text)
-            body_full = append_transcript_entry(body_full, submitted)
-            # In-place body swap (steady-state, no teardown flash — hud-ooeam);
-            # the helper re-registers the scroll content height in the same
-            # atomic batch. The runtime translates scrolled content itself
-            # (hud-w5ih), so the agent must NOT re-render a windowed slice —
-            # publish the full transcript and drive only the offset.
-            updated_in_place = await update_output_scroll_body_live(
-                client, lease_id, tiles.output_scroll, body_full, mutation_lock,
-            )
-            if not updated_in_place:
-                await set_output_root_with_runtime_ids(
-                    client, lease_id, tiles.output_scroll, body_full, mutation_lock,
-                )
-            # Jump-to-latest on own submit (chat-grade): runtime clamps to the
-            # registered content height.
-            tail_offset = scroll_max_y_for_text(body_full, output_rect.h, SCROLL_LINE_PX)
-            async with mutation_lock:
-                await client.submit_mutation_batch(
-                    lease_id,
-                    [set_scroll_offset_mutation(tiles.output_scroll, 0.0, tail_offset)],
-                    timeout=2.0,
-                )
-            last_output_scroll_y = tail_offset
-            emit_step_event(transcript, 10, "checkpoint", {
-                "code": "echo:appended",
-                "title": "Viewer entry appended to history",
-                "action": "submitted draft appended as a transcript turn; output pane republished at tail",
-                "expected_visual": "submitted text visible at the bottom of history below a divider",
-            }, entry_len=len(submitted))
+                "action": "runtime-owned draft submitted; recorded in INPUT-pane history, composer clears",
+                "expected_visual": "submitted text appears beneath the composer in the LEFT input pane (not the OUTPUT transcript)",
+            }, submitted=recorded, input_history_len=len(input_history))
         composer_text = ""
         composer_cursor = 0
         composer_cursor_goal_x = None
