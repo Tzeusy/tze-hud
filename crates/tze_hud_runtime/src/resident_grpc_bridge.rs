@@ -134,8 +134,8 @@ pub enum BridgeMessage {
 /// `EventBatch` here.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResidentBridgeInput {
-    /// Authority projection the input belongs to (resolved by the bridge from its
-    /// interaction-enabled projection set — see [`resolve_input_projection`]).
+    /// Authority projection the input belongs to (resolved by the bridge from
+    /// the event's wire `tile_id` — see [`resolve_input_projection_by_tile`]).
     pub projection_id: String,
     /// The composer event payload.
     pub kind: ResidentBridgeInputKind,
@@ -161,59 +161,105 @@ pub enum ResidentBridgeInputKind {
 }
 
 /// Extract the composer variants of an inbound [`EventBatch`] into
-/// [`ResidentBridgeInput`]s attributed to `projection_id`.
+/// [`ResidentBridgeInput`]s, attributing each event to a projection via its
+/// wire `tile_id` (hud-25g5i; see [`resolve_input_projection_by_tile`]).
 ///
 /// Non-composer input variants (pointer, key, focus, …) are ignored: the bridge
-/// only routes composer draft/submit/cancel back to the driving session. Batch
-/// ordering is preserved (RFC 0004 §8.4).
+/// only routes composer draft/submit/cancel back to the driving session. An
+/// event whose `tile_id` cannot be attributed to a known, interaction-enabled
+/// projection is dropped (fail-closed) rather than guessed. Batch ordering is
+/// preserved (RFC 0004 §8.4).
 fn event_batch_to_bridge_inputs(
     batch: &EventBatch,
-    projection_id: &str,
+    tile_index: &HashMap<Vec<u8>, String>,
+    interaction: &HashMap<String, bool>,
 ) -> Vec<ResidentBridgeInput> {
     batch
         .events
         .iter()
         .filter_map(|env| {
-            let kind = match env.event.as_ref()? {
-                InputEvent::ComposerDraftState(e) => ResidentBridgeInputKind::DraftState {
-                    text: e.text.clone(),
-                    cursor: e.cursor,
-                    at_capacity: e.at_capacity,
-                    sequence: e.sequence,
-                },
-                InputEvent::ComposerDraftSubmit(e) => ResidentBridgeInputKind::Submit {
-                    text: e.text.clone(),
-                    sequence: e.sequence,
-                },
-                InputEvent::ComposerDraftCancel(e) => ResidentBridgeInputKind::Cancel {
-                    sequence: e.sequence,
-                },
+            let (kind, tile_id): (ResidentBridgeInputKind, &[u8]) = match env.event.as_ref()? {
+                InputEvent::ComposerDraftState(e) => (
+                    ResidentBridgeInputKind::DraftState {
+                        text: e.text.clone(),
+                        cursor: e.cursor,
+                        at_capacity: e.at_capacity,
+                        sequence: e.sequence,
+                    },
+                    &e.tile_id,
+                ),
+                InputEvent::ComposerDraftSubmit(e) => (
+                    ResidentBridgeInputKind::Submit {
+                        text: e.text.clone(),
+                        sequence: e.sequence,
+                    },
+                    &e.tile_id,
+                ),
+                InputEvent::ComposerDraftCancel(e) => (
+                    ResidentBridgeInputKind::Cancel {
+                        sequence: e.sequence,
+                    },
+                    &e.tile_id,
+                ),
                 // Non-composer input variant — not routed back to the session.
                 _ => return None,
             };
+            let projection_id = resolve_input_projection_by_tile(tile_id, tile_index, interaction)?;
             Some(ResidentBridgeInput {
-                projection_id: projection_id.to_string(),
+                projection_id,
                 kind,
             })
         })
         .collect()
 }
 
-/// Resolve which projection an inbound composer event belongs to.
+/// Resolve which projection an inbound composer event belongs to, given its
+/// wire `tile_id` (hud-25g5i).
 ///
-/// The wire event carries only the runtime-assigned composer node id (which the
-/// bridge never learns — `AddNode` returns no created id) and the shared session
-/// namespace, so neither disambiguates a projection. The bridge therefore
-/// attributes inbound input to the **sole interaction-enabled projection** it is
-/// serving: `interaction` maps each projection to its last-published
+/// `tile_index` maps each known projection's remote tile id (as recorded from
+/// `ResidentGrpcPortalAdapter::tile_id` on tile creation) to its projection id;
+/// `interaction` maps each projection to its last-published
 /// `interaction_enabled` flag.
 ///
+/// - A non-empty `tile_id` that matches a known, interaction-enabled
+///   projection's tile → attribute to it. This is what makes multi-projection
+///   attribution possible: unlike the composer node id (never learned by the
+///   bridge — `AddNode` returns no created id) or the shared session
+///   namespace, `tile_id` disambiguates between sibling projections the same
+///   bridge serves.
+/// - A non-empty `tile_id` that is unknown, or known but not
+///   interaction-enabled → `None` (drop, fail-closed): composer input can only
+///   legitimately originate from an interaction-enabled portal.
+/// - An empty `tile_id` (e.g. a peer still on the pre-hud-25g5i wire contract)
+///   falls back to the **sole interaction-enabled projection** heuristic — the
+///   only case the bridge could previously resolve at all.
+fn resolve_input_projection_by_tile(
+    tile_id: &[u8],
+    tile_index: &HashMap<Vec<u8>, String>,
+    interaction: &HashMap<String, bool>,
+) -> Option<String> {
+    if tile_id.is_empty() {
+        return resolve_input_projection_by_sole_interaction(interaction);
+    }
+    let projection_id = tile_index.get(tile_id)?;
+    interaction
+        .get(projection_id)
+        .copied()
+        .unwrap_or(false)
+        .then(|| projection_id.clone())
+}
+
+/// Resolve which projection an inbound composer event belongs to when no
+/// `tile_id` is available to disambiguate — the bridge's only pre-hud-25g5i
+/// attribution path, kept as a fallback for [`resolve_input_projection_by_tile`].
+///
 /// - Exactly one interaction-enabled projection → attribute to it.
-/// - Zero, or more than one → return `None` (drop, fail-closed): a composer
-///   event can only originate from an interaction-enabled portal, and multi-
-///   projection attribution is not resolvable from the wire (documented v1 limit;
-///   per-projection routing is reserved for the external-authority epic).
-fn resolve_input_projection(interaction: &HashMap<String, bool>) -> Option<String> {
+/// - Zero, or more than one → return `None` (drop, fail-closed): without a
+///   `tile_id`, a composer event carries nothing that disambiguates between
+///   sibling interaction-enabled projections.
+fn resolve_input_projection_by_sole_interaction(
+    interaction: &HashMap<String, bool>,
+) -> Option<String> {
     let mut enabled = interaction.iter().filter(|&(_, &on)| on).map(|(id, _)| id);
     let first = enabled.next()?;
     if enabled.next().is_some() {
@@ -891,13 +937,32 @@ impl ResidentGrpcPortalBridge {
         self.input_granted && self.input_tx.is_some()
     }
 
+    /// Snapshot of each known projection's remote tile id, keyed by tile id
+    /// bytes, used to attribute inbound composer input by its wire `tile_id`
+    /// (hud-25g5i; see [`resolve_input_projection_by_tile`]).
+    ///
+    /// A projection whose tile has not yet been created (`tile_id() == None`,
+    /// e.g. before the first `publish_state` completes) has no entry — input
+    /// cannot be attributed to a tile that does not exist yet.
+    fn tile_index(&self) -> HashMap<Vec<u8>, String> {
+        self.adapters
+            .iter()
+            .filter_map(|(projection_id, adapter)| {
+                adapter
+                    .tile_id()
+                    .map(|tile_id| (tile_id.to_vec(), projection_id.clone()))
+            })
+            .collect()
+    }
+
     /// Forward the composer variants of an inbound [`EventBatch`] to the input
-    /// sink, attributed to the sole interaction-enabled projection.
+    /// sink, attributing each event to its owning projection by wire `tile_id`
+    /// (hud-25g5i).
     ///
     /// Fail-closed and defensive-in-depth:
     /// - no-op unless input routing is active (capability granted + sink wired);
-    /// - no-op when the owning projection cannot be resolved (zero / ambiguous
-    ///   interaction-enabled projections — see [`resolve_input_projection`]).
+    /// - per-event no-op when the owning projection cannot be resolved (unknown
+    ///   or non-interaction-enabled tile — see [`resolve_input_projection_by_tile`]).
     ///
     /// Delivery is `try_send`: the sink is bounded and input is latest-relevant,
     /// so a full sink drops the event (logged) rather than stalling the read loop.
@@ -908,14 +973,9 @@ impl ResidentGrpcPortalBridge {
         let Some(sink) = self.input_tx.as_ref() else {
             return;
         };
-        let Some(projection_id) = resolve_input_projection(&self.interaction) else {
-            tracing::debug!(
-                "resident gRPC portal bridge received composer input with no unambiguous \
-                 interaction-enabled projection; dropping (fail-closed)"
-            );
-            return;
-        };
-        for input in event_batch_to_bridge_inputs(batch, &projection_id) {
+        let tile_index = self.tile_index();
+        for input in event_batch_to_bridge_inputs(batch, &tile_index, &self.interaction) {
+            let projection_id = input.projection_id.clone();
             if let Err(err) = sink.try_send(input) {
                 tracing::warn!(
                     projection_id = %projection_id,
@@ -1502,6 +1562,87 @@ mod tests {
         bridge.shutdown().await;
     }
 
+    /// End-to-end proof of the hud-25g5i fix, exercised through the real
+    /// `ResidentGrpcPortalBridge::forward_event_batch` path: a bridge serving
+    /// *two* interaction-enabled projections previously had no way to
+    /// attribute inbound composer input —
+    /// `resolve_input_projection_by_sole_interaction` would see two enabled
+    /// projections and drop every event (fail-closed, but useless). With
+    /// `tile_id` now on the wire and recorded per adapter, `forward_event_batch`
+    /// routes each inbound event to the sibling projection whose tile it names.
+    ///
+    /// The two adapters are seeded directly (mirroring the post-`publish_state`
+    /// state `ensure_projection` + `record_created_tile` would leave behind)
+    /// rather than round-tripped through real `CreateTile` mutations: the test
+    /// server's z-order/bounds overlap policy for two simultaneously-created
+    /// tiles is an orthogonal, pre-existing geometry concern, not part of the
+    /// composer-input attribution this bead fixes.
+    #[tokio::test]
+    async fn bridge_attributes_inbound_composer_input_by_tile_across_two_interaction_enabled_projections()
+     {
+        let (endpoint, _server) = start_server().await;
+        let config = ResidentGrpcBridgeConfig::new(endpoint, TEST_PSK, "resident-portal");
+        let (input_tx, mut input_rx) = mpsc::channel::<ResidentBridgeInput>(8);
+
+        let mut bridge = ResidentGrpcPortalBridge::connect(
+            &config,
+            PortalVisualTokens::default(),
+            Some(input_tx),
+        )
+        .await
+        .expect("authenticated connect must succeed");
+
+        let tile_a = vec![0xAAu8; 16];
+        let tile_b = vec![0xBBu8; 16];
+        for (projection_id, tile_id) in [("proj-a", tile_a.clone()), ("proj-b", tile_b.clone())] {
+            let mut adapter = ResidentGrpcPortalAdapter::with_tokens(
+                ResidentGrpcPortalConfig::new(vec![1u8; 8]),
+                PortalVisualTokens::default(),
+            );
+            adapter.record_created_tile(tile_id);
+            bridge.adapters.insert(projection_id.to_string(), adapter);
+            bridge.interaction.insert(projection_id.to_string(), true);
+        }
+
+        let inbound = composer_batch(vec![
+            ProtoInputEvent::ComposerDraftSubmit(ComposerDraftSubmitEvent {
+                node_id: vec![1u8; 16],
+                text: "typed on a".to_string(),
+                sequence: 1,
+                tile_id: tile_a,
+            }),
+            ProtoInputEvent::ComposerDraftSubmit(ComposerDraftSubmitEvent {
+                node_id: vec![2u8; 16],
+                text: "typed on b".to_string(),
+                sequence: 1,
+                tile_id: tile_b,
+            }),
+        ]);
+        bridge.forward_event_batch(&inbound);
+
+        let first = input_rx.try_recv().expect("proj-a event must be routed");
+        assert_eq!(first.projection_id, "proj-a");
+        assert_eq!(
+            first.kind,
+            ResidentBridgeInputKind::Submit {
+                text: "typed on a".to_string(),
+                sequence: 1,
+            }
+        );
+
+        let second = input_rx.try_recv().expect("proj-b event must be routed");
+        assert_eq!(second.projection_id, "proj-b");
+        assert_eq!(
+            second.kind,
+            ResidentBridgeInputKind::Submit {
+                text: "typed on b".to_string(),
+                sequence: 1,
+            }
+        );
+
+        bridge.shutdown().await;
+    }
+
     // ── Reconnect / backoff / lease-renewal logic ────────────────────────────
     //
     // These tests exercise the long-lived driver loop ([`run_bridge_loop`]) with
@@ -1937,6 +2078,7 @@ mod tests {
     #[test]
     fn event_batch_to_bridge_inputs_extracts_only_composer_variants_in_order() {
         let node = vec![1u8; 16];
+        let tile = vec![0xAAu8; 16];
         let batch = composer_batch(vec![
             ProtoInputEvent::ComposerDraftState(ComposerDraftStateEvent {
                 node_id: node.clone(),
@@ -1944,6 +2086,7 @@ mod tests {
                 cursor: 2,
                 at_capacity: false,
                 sequence: 7,
+                tile_id: tile.clone(),
             }),
             // A non-composer input variant must be ignored.
             ProtoInputEvent::KeyDown(tze_hud_protocol::proto::KeyDownEvent::default()),
@@ -1951,14 +2094,18 @@ mod tests {
                 node_id: node.clone(),
                 text: "hello".to_string(),
                 sequence: 8,
+                tile_id: tile.clone(),
             }),
             ProtoInputEvent::ComposerDraftCancel(ComposerDraftCancelEvent {
                 node_id: node,
                 sequence: 9,
+                tile_id: tile.clone(),
             }),
         ]);
 
-        let inputs = event_batch_to_bridge_inputs(&batch, "proj-x");
+        let tile_index = HashMap::from([(tile, "proj-x".to_string())]);
+        let interaction = HashMap::from([("proj-x".to_string(), true)]);
+        let inputs = event_batch_to_bridge_inputs(&batch, &tile_index, &interaction);
         assert_eq!(
             inputs,
             vec![
@@ -1987,21 +2134,114 @@ mod tests {
         );
     }
 
+    /// The fix under test (hud-25g5i): a bridge serving *two* interaction-enabled
+    /// projections previously had to drop all composer input (ambiguous —
+    /// see `resolve_input_projection_by_sole_interaction`). With `tile_id` on the
+    /// wire, each event now routes to the correct sibling projection.
     #[test]
-    fn resolve_input_projection_requires_exactly_one_interaction_enabled() {
+    fn event_batch_to_bridge_inputs_attributes_by_tile_across_multiple_interaction_enabled_projections()
+     {
+        let tile_a = vec![0xAAu8; 16];
+        let tile_b = vec![0xBBu8; 16];
+        let batch = composer_batch(vec![
+            ProtoInputEvent::ComposerDraftSubmit(ComposerDraftSubmitEvent {
+                node_id: vec![1u8; 16],
+                text: "from a".to_string(),
+                sequence: 1,
+                tile_id: tile_a.clone(),
+            }),
+            ProtoInputEvent::ComposerDraftSubmit(ComposerDraftSubmitEvent {
+                node_id: vec![2u8; 16],
+                text: "from b".to_string(),
+                sequence: 1,
+                tile_id: tile_b.clone(),
+            }),
+        ]);
+
+        let tile_index = HashMap::from([
+            (tile_a, "proj-a".to_string()),
+            (tile_b, "proj-b".to_string()),
+        ]);
+        let interaction =
+            HashMap::from([("proj-a".to_string(), true), ("proj-b".to_string(), true)]);
+
+        let inputs = event_batch_to_bridge_inputs(&batch, &tile_index, &interaction);
+        assert_eq!(
+            inputs,
+            vec![
+                ResidentBridgeInput {
+                    projection_id: "proj-a".to_string(),
+                    kind: ResidentBridgeInputKind::Submit {
+                        text: "from a".to_string(),
+                        sequence: 1,
+                    },
+                },
+                ResidentBridgeInput {
+                    projection_id: "proj-b".to_string(),
+                    kind: ResidentBridgeInputKind::Submit {
+                        text: "from b".to_string(),
+                        sequence: 1,
+                    },
+                },
+            ],
+            "two interaction-enabled projections must each receive their own event, \
+             attributed by tile_id rather than dropped as ambiguous"
+        );
+    }
+
+    #[test]
+    fn resolve_input_projection_by_tile_drops_unknown_tile() {
+        let tile_index = HashMap::from([(vec![0xAAu8; 16], "proj-a".to_string())]);
+        let interaction = HashMap::from([("proj-a".to_string(), true)]);
+        assert_eq!(
+            resolve_input_projection_by_tile(&[0xFFu8; 16], &tile_index, &interaction),
+            None,
+            "a tile_id the bridge does not recognise must be dropped (fail-closed), not guessed"
+        );
+    }
+
+    #[test]
+    fn resolve_input_projection_by_tile_drops_non_interaction_enabled_tile() {
+        let tile_index = HashMap::from([(vec![0xAAu8; 16], "proj-a".to_string())]);
+        let interaction = HashMap::from([("proj-a".to_string(), false)]);
+        assert_eq!(
+            resolve_input_projection_by_tile(&[0xAAu8; 16], &tile_index, &interaction),
+            None,
+            "a resolved tile whose projection is not interaction-enabled must be dropped"
+        );
+    }
+
+    #[test]
+    fn resolve_input_projection_by_tile_falls_back_to_sole_interaction_when_tile_id_empty() {
+        let tile_index: HashMap<Vec<u8>, String> = HashMap::new();
+        let mut interaction = HashMap::new();
+        interaction.insert("only".to_string(), true);
+        assert_eq!(
+            resolve_input_projection_by_tile(&[], &tile_index, &interaction),
+            Some("only".to_string()),
+            "an empty tile_id (pre-hud-25g5i peer) must still resolve via the sole-\
+             interaction-enabled heuristic"
+        );
+    }
+
+    #[test]
+    fn resolve_input_projection_by_sole_interaction_requires_exactly_one_interaction_enabled() {
         // Zero interaction-enabled → unresolved (fail-closed).
         let mut map = HashMap::new();
-        assert_eq!(resolve_input_projection(&map), None);
+        assert_eq!(resolve_input_projection_by_sole_interaction(&map), None);
         map.insert("a".to_string(), false);
-        assert_eq!(resolve_input_projection(&map), None);
+        assert_eq!(resolve_input_projection_by_sole_interaction(&map), None);
 
         // Exactly one → attributed.
         map.insert("b".to_string(), true);
-        assert_eq!(resolve_input_projection(&map), Some("b".to_string()));
+        assert_eq!(
+            resolve_input_projection_by_sole_interaction(&map),
+            Some("b".to_string())
+        );
 
         // Ambiguous (two enabled) → unresolved (fail-closed).
         map.insert("c".to_string(), true);
-        assert_eq!(resolve_input_projection(&map), None);
+        assert_eq!(resolve_input_projection_by_sole_interaction(&map), None);
     }
 
     /// Handshake requests the input capability + `INPUT_EVENTS` subscription when

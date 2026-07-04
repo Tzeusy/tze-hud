@@ -198,11 +198,16 @@ pub(super) fn dispatch_keyboard_event(
 /// - `tx`: the shared broadcast sender; `None` when gRPC is disabled.
 /// - `namespace`: the agent namespace that owns the composer node.
 /// - `node_id_bytes`: 16-byte UUIDv7 of the focused composer node.
+/// - `tile_id_bytes`: 16-byte UUIDv7 of the owning portal tile. Carried on the
+///   wire (hud-25g5i) so a resident bridge serving more than one interaction-
+///   enabled projection can attribute inbound input to the correct one — see
+///   `resident_grpc_bridge::resolve_input_projection`.
 /// - `batch`: the coalesced draft batch to deliver.
 pub(super) fn deliver_composer_batch(
     tx: &Option<tokio::sync::broadcast::Sender<(String, EventBatch)>>,
     namespace: String,
     node_id_bytes: &[u8],
+    tile_id_bytes: &[u8],
     batch: tze_hud_input::DraftNotificationBatch,
 ) {
     let Some(tx) = tx else { return };
@@ -243,6 +248,7 @@ pub(super) fn deliver_composer_batch(
                     cursor: notif.cursor as u64,
                     at_capacity: notif.at_capacity,
                     sequence: notif.sequence,
+                    tile_id: tile_id_bytes.to_vec(),
                 },
             )),
         });
@@ -262,6 +268,7 @@ pub(super) fn deliver_composer_batch(
                     node_id: node_id_bytes.to_vec(),
                     text: sub.text,
                     sequence: sub.sequence,
+                    tile_id: tile_id_bytes.to_vec(),
                 },
             )),
         });
@@ -280,6 +287,7 @@ pub(super) fn deliver_composer_batch(
                 tze_hud_protocol::proto::ComposerDraftCancelEvent {
                     node_id: node_id_bytes.to_vec(),
                     sequence: cancel.sequence,
+                    tile_id: tile_id_bytes.to_vec(),
                 },
             )),
         });
@@ -971,9 +979,16 @@ mod tests {
             tokio::sync::broadcast::channel::<(String, tze_hud_protocol::proto::EventBatch)>(8);
         let tx_opt = Some(tx);
         let node_id_bytes = vec![0u8; 16];
+        let tile_id_bytes = vec![9u8; 16];
 
         let batch = make_latest_batch("hello", 5, 1);
-        deliver_composer_batch(&tx_opt, "test-agent".to_string(), &node_id_bytes, batch);
+        deliver_composer_batch(
+            &tx_opt,
+            "test-agent".to_string(),
+            &node_id_bytes,
+            &tile_id_bytes,
+            batch,
+        );
 
         let (ns, ev_batch) = rx.try_recv().expect("event must be sent");
         assert_eq!(ns, "test-agent");
@@ -988,6 +1003,10 @@ mod tests {
         assert_eq!(state.sequence, 1);
         assert!(!state.at_capacity);
         assert_eq!(state.node_id, node_id_bytes);
+        assert_eq!(
+            state.tile_id, tile_id_bytes,
+            "tile_id must be carried on the wire so a bridge can attribute input (hud-25g5i)"
+        );
     }
 
     /// Spec §4.3: a transactional submission produces a single
@@ -1000,9 +1019,16 @@ mod tests {
             tokio::sync::broadcast::channel::<(String, tze_hud_protocol::proto::EventBatch)>(8);
         let tx_opt = Some(tx);
         let node_id_bytes = vec![1u8; 16];
+        let tile_id_bytes = vec![8u8; 16];
 
         let batch = make_submit_batch("send this", 42);
-        deliver_composer_batch(&tx_opt, "portal-agent".to_string(), &node_id_bytes, batch);
+        deliver_composer_batch(
+            &tx_opt,
+            "portal-agent".to_string(),
+            &node_id_bytes,
+            &tile_id_bytes,
+            batch,
+        );
 
         let (ns, ev_batch) = rx.try_recv().expect("event must be sent");
         assert_eq!(ns, "portal-agent");
@@ -1015,6 +1041,7 @@ mod tests {
         assert_eq!(sub.text, "send this");
         assert_eq!(sub.sequence, 42);
         assert_eq!(sub.node_id, node_id_bytes);
+        assert_eq!(sub.tile_id, tile_id_bytes);
     }
 
     /// Spec §4.3: a cancel produces a single `ComposerDraftCancelEvent`.
@@ -1026,9 +1053,16 @@ mod tests {
             tokio::sync::broadcast::channel::<(String, tze_hud_protocol::proto::EventBatch)>(8);
         let tx_opt = Some(tx);
         let node_id_bytes = vec![2u8; 16];
+        let tile_id_bytes = vec![7u8; 16];
 
         let batch = make_cancel_batch(7);
-        deliver_composer_batch(&tx_opt, "test-agent".to_string(), &node_id_bytes, batch);
+        deliver_composer_batch(
+            &tx_opt,
+            "test-agent".to_string(),
+            &node_id_bytes,
+            &tile_id_bytes,
+            batch,
+        );
 
         let (ns, ev_batch) = rx.try_recv().expect("event must be sent");
         assert_eq!(ns, "test-agent");
@@ -1040,6 +1074,7 @@ mod tests {
         };
         assert_eq!(cancel.sequence, 7);
         assert_eq!(cancel.node_id, node_id_bytes);
+        assert_eq!(cancel.tile_id, tile_id_bytes);
     }
 
     /// Spec §4.3 / hud-qwqxy: a full submit cycle produces events in the
@@ -1062,6 +1097,7 @@ mod tests {
             tokio::sync::broadcast::channel::<(String, tze_hud_protocol::proto::EventBatch)>(8);
         let tx_opt = Some(tx);
         let node_id_bytes = vec![3u8; 16];
+        let tile_id_bytes = vec![6u8; 16];
 
         // Batch 1: latest(seq=3) + submission(seq=4)
         let mut batch1 = tze_hud_input::DraftNotificationBatch::new();
@@ -1077,7 +1113,13 @@ mod tests {
             sequence: 4,
         });
 
-        deliver_composer_batch(&tx_opt, "test-agent".to_string(), &node_id_bytes, batch1);
+        deliver_composer_batch(
+            &tx_opt,
+            "test-agent".to_string(),
+            &node_id_bytes,
+            &tile_id_bytes,
+            batch1,
+        );
 
         let (_ns, batch_out1) = rx.try_recv().expect("batch 1 must be sent");
         assert_eq!(
@@ -1112,7 +1154,13 @@ mod tests {
             sequence: 5,
         });
 
-        deliver_composer_batch(&tx_opt, "test-agent".to_string(), &node_id_bytes, batch2);
+        deliver_composer_batch(
+            &tx_opt,
+            "test-agent".to_string(),
+            &node_id_bytes,
+            &tile_id_bytes,
+            batch2,
+        );
 
         let (_ns, batch_out2) = rx
             .try_recv()
@@ -1139,7 +1187,13 @@ mod tests {
     fn deliver_composer_batch_no_op_when_tx_is_none() {
         let batch = make_latest_batch("text", 4, 1);
         // Should not panic
-        deliver_composer_batch(&None, "test-agent".to_string(), &[0u8; 16], batch);
+        deliver_composer_batch(
+            &None,
+            "test-agent".to_string(),
+            &[0u8; 16],
+            &[0u8; 16],
+            batch,
+        );
     }
 
     /// An empty batch produces no broadcast.
@@ -1152,6 +1206,7 @@ mod tests {
         deliver_composer_batch(
             &tx_opt,
             "test-agent".to_string(),
+            &[0u8; 16],
             &[0u8; 16],
             tze_hud_input::DraftNotificationBatch::new(),
         );
@@ -1181,7 +1236,13 @@ mod tests {
             text: "msg".to_string(),
             sequence: 10,
         });
-        deliver_composer_batch(&tx_opt, "agent".to_string(), &node_id_bytes, submit_batch);
+        deliver_composer_batch(
+            &tx_opt,
+            "agent".to_string(),
+            &node_id_bytes,
+            &[0u8; 16],
+            submit_batch,
+        );
 
         let mut clear_batch = tze_hud_input::DraftNotificationBatch::new();
         clear_batch.coalesce_state(tze_hud_input::DraftStateNotification {
@@ -1191,7 +1252,13 @@ mod tests {
             at_capacity: false,
             sequence: 11,
         });
-        deliver_composer_batch(&tx_opt, "agent".to_string(), &node_id_bytes, clear_batch);
+        deliver_composer_batch(
+            &tx_opt,
+            "agent".to_string(),
+            &node_id_bytes,
+            &[0u8; 16],
+            clear_batch,
+        );
 
         let (_ns, sub_out) = rx.try_recv().expect("submission event");
         let (_ns, clear_out) = rx.try_recv().expect("clear event");
