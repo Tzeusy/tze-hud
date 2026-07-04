@@ -218,6 +218,7 @@ COMPOSER_INPUT_CHILD_KEYS = (
     "hit",
     *COMPOSER_LINE_KEYS,
     "caret",
+    "history",
 )
 COMPOSER_NODE_IDS = {
     "root": uuid.uuid4().bytes,
@@ -225,7 +226,11 @@ COMPOSER_NODE_IDS = {
     "hit": uuid.uuid4().bytes,
     **{key: uuid.uuid4().bytes for key in COMPOSER_LINE_KEYS},
     "caret": uuid.uuid4().bytes,
+    "history": uuid.uuid4().bytes,
 }
+# Viewer-submitted entries, newest last — the INPUT-pane history (hud-egf39).
+# Module-global so remounts (pane resize, minimize/restore) re-render it.
+INPUT_HISTORY_ENTRIES: list[str] = []
 COMPOSER_RUNTIME_NODE_IDS: dict[str, bytes] = {}
 FRAME_RUNTIME_NODE_IDS: dict[str, bytes] = {}
 # Runtime-assigned node ids for the output-scroll body tile, captured at mount
@@ -265,6 +270,7 @@ def fresh_composer_node_ids() -> dict[str, bytes]:
         "hit": uuid.uuid4().bytes,
         **{key: uuid.uuid4().bytes for key in COMPOSER_LINE_KEYS},
         "caret": uuid.uuid4().bytes,
+        "history": uuid.uuid4().bytes,
     }
 
 # ─── Scroll contract tokens ──────────────────────────────────────────────────
@@ -1389,6 +1395,12 @@ def portal_pane_rects() -> tuple[PaneRect, PaneRect]:
     return input_composer, output_body
 
 
+# Max height of the composer box; the rest of the input pane below it renders
+# the viewer's own submitted-entry history (hud-egf39 split-history layout).
+COMPOSER_BOX_MAX_H = 320.0
+INPUT_HISTORY_GAP = 18.0
+
+
 def input_composer_local_rect() -> PaneRect:
     """Return the visible composer box relative to the enlarged input tile."""
     input_tile, _ = portal_pane_rects()
@@ -1398,13 +1410,56 @@ def input_composer_local_rect() -> PaneRect:
     composer_x = composer_inset
     composer_y = pane_y + 40.0
     composer_w = INPUT_PANE_W - composer_inset * 2.0
-    composer_h = pane_h - 40.0 - 44.0
+    composer_h = min(pane_h - 40.0 - 44.0, COMPOSER_BOX_MAX_H)
     return PaneRect(
         composer_x - input_tile.x,
         composer_y - input_tile.y,
         composer_w,
         composer_h,
     )
+
+
+def input_history_local_rect() -> PaneRect:
+    """Return the input-history area below the composer box (input-tile local).
+
+    Height 0 when the pane is too short to show history under the composer.
+    """
+    input_tile, _ = portal_pane_rects()
+    composer = input_composer_local_rect()
+    pane_y = HEADER_H + DIVIDER_H
+    pane_h = PORTAL_H - pane_y - FOOTER_H - DIVIDER_H
+    pane_bottom_local = (pane_y - input_tile.y) + pane_h - 44.0
+    history_y = composer.y + composer.h + INPUT_HISTORY_GAP
+    return PaneRect(
+        composer.x,
+        history_y,
+        composer.w,
+        max(0.0, pane_bottom_local - history_y),
+    )
+
+
+def input_history_tail_body(
+    entries: list[str], viewport_h: float, line_px: float
+) -> str:
+    """Join the most recent input-history entries that fit the viewport.
+
+    Newest entries win (chat-grade recency); each entry costs its own lines
+    plus one divider line between entries. Returns the divider-joined body
+    (oldest-first among the kept entries). No scroll interplay by design —
+    the input tile is not a second scroll surface (hud-egf39).
+    """
+    # Epsilon guards float artifacts (3 * 22.4 = 67.1999… must budget 3 lines).
+    budget = max(0, int(viewport_h / line_px + 1e-6)) if line_px > 0 else 0
+    kept: list[str] = []
+    used = 0
+    for entry in reversed([e for e in entries if e.strip()]):
+        lines = len(entry.splitlines())
+        cost = lines + (1 if kept else 0)
+        if used + cost > budget:
+            break
+        kept.append(entry)
+        used += cost
+    return join_transcript_entries(list(reversed(kept)))
 
 
 def scroll_max_y_for_text(content: str, viewport_h: float, line_px: float) -> float:
@@ -1705,7 +1760,34 @@ def build_input_scroll_nodes(
         visible_start_row=line_window.start_row,
         node_id=node_ids.get("caret"),
     )
-    return root, [clear_bg, hit, *line_nodes, caret]
+    history = build_input_history_node(node_id=node_ids.get("history"))
+    return root, [clear_bg, hit, *line_nodes, caret, history]
+
+
+def build_input_history_node(
+    *,
+    node_id: Optional[bytes] = None,
+) -> types_pb2.NodeProto:
+    """Viewer-submitted entry history below the composer (hud-egf39).
+
+    Renders the tail window of [`INPUT_HISTORY_ENTRIES`] joined with `---`
+    turn dividers so the compositor draws token-styled separators between the
+    viewer's own entries.
+    """
+    history_rect = input_history_local_rect()
+    body = input_history_tail_body(
+        INPUT_HISTORY_ENTRIES, history_rect.h, SCROLL_LINE_PX,
+    )
+    return make_text_node(
+        body,
+        history_rect.x,
+        history_rect.y,
+        history_rect.w,
+        max(1.0, history_rect.h),
+        INPUT_FONT,
+        BODY_RGBA,
+        node_id=node_id,
+    )
 
 
 def build_composer_clear_node(
@@ -2074,12 +2156,43 @@ async def set_input_root_with_runtime_ids(
             COMPOSER_RUNTIME_NODE_IDS["caret"] = input_child_ids[
                 2 + COMPOSER_VISIBLE_LINE_NODES
             ]
+            COMPOSER_RUNTIME_NODE_IDS["history"] = input_child_ids[
+                3 + COMPOSER_VISIBLE_LINE_NODES
+            ]
 
     if mutation_lock is not None:
         async with mutation_lock:
             await mount()
     else:
         await mount()
+
+
+async def update_input_history_live(
+    client: HudClient,
+    lease_id: bytes,
+    tile_id: bytes,
+    mutation_lock: Optional[asyncio.Lock] = None,
+) -> bool:
+    """Swap the INPUT-pane history text node in place (hud-egf39).
+
+    Returns ``False`` when the history node id has not been captured yet
+    (caller falls back to a full input-tile remount).
+    """
+    history_node_id = COMPOSER_RUNTIME_NODE_IDS.get("history")
+    if history_node_id is None:
+        return False
+    history_node = build_input_history_node()
+    mutations = [update_node_content_mutation(tile_id, history_node_id, history_node)]
+
+    async def update() -> None:
+        await client.submit_mutation_batch(lease_id, mutations, timeout=2.0)
+
+    if mutation_lock is not None:
+        async with mutation_lock:
+            await update()
+    else:
+        await update()
+    return True
 
 
 async def set_output_root_with_runtime_ids(
@@ -3521,7 +3634,7 @@ async def portal_interaction_loop(
         clearing the composer alone makes viewer messages visually vanish
         (hud-xg9ok).
         """
-        nonlocal composer_text, composer_cursor, composer_cursor_goal_x, last_draft_sequence, body_full, last_output_scroll_y
+        nonlocal composer_text, composer_cursor, composer_cursor_goal_x, last_draft_sequence
         last_draft_sequence = sequence
         submitted = normalize_composer_input(text)
         if submitted.strip():
@@ -3531,35 +3644,25 @@ async def portal_interaction_loop(
                 "action": "runtime-owned draft submitted; composer clears",
                 "expected_visual": "composer clears after submit",
             }, submitted=text)
-            body_full = append_transcript_entry(body_full, submitted)
-            # In-place body swap (steady-state, no teardown flash — hud-ooeam);
-            # the helper re-registers the scroll content height in the same
-            # atomic batch. The runtime translates scrolled content itself
-            # (hud-w5ih), so the agent must NOT re-render a windowed slice —
-            # publish the full transcript and drive only the offset.
-            updated_in_place = await update_output_scroll_body_live(
-                client, lease_id, tiles.output_scroll, body_full, mutation_lock,
+            # Split-history layout (hud-egf39, owner decision round-6): viewer
+            # submissions live in the INPUT pane below the composer; the
+            # OUTPUT pane stays agent-authored only. In-place node swap so the
+            # composer/caret nodes are untouched (no teardown flash).
+            INPUT_HISTORY_ENTRIES.append(submitted)
+            updated_in_place = await update_input_history_live(
+                client, lease_id, tiles.input_scroll, mutation_lock,
             )
             if not updated_in_place:
-                await set_output_root_with_runtime_ids(
-                    client, lease_id, tiles.output_scroll, body_full, mutation_lock,
+                await set_input_root_with_runtime_ids(
+                    client, lease_id, tiles.input_scroll, "", mutation_lock,
                 )
-            # Jump-to-latest on own submit (chat-grade): runtime clamps to the
-            # registered content height.
-            tail_offset = scroll_max_y_for_text(body_full, output_rect.h, SCROLL_LINE_PX)
-            async with mutation_lock:
-                await client.submit_mutation_batch(
-                    lease_id,
-                    [set_scroll_offset_mutation(tiles.output_scroll, 0.0, tail_offset)],
-                    timeout=2.0,
-                )
-            last_output_scroll_y = tail_offset
             emit_step_event(transcript, 10, "checkpoint", {
                 "code": "echo:appended",
-                "title": "Viewer entry appended to history",
-                "action": "submitted draft appended as a transcript turn; output pane republished at tail",
-                "expected_visual": "submitted text visible at the bottom of history below a divider",
-            }, entry_len=len(submitted))
+                "title": "Viewer entry appended to input history",
+                "action": "submitted draft appended to INPUT-pane history below the composer",
+                "expected_visual": "submitted text stacks under the composer with a divider between entries",
+            }, entry_len=len(submitted), entries=len(INPUT_HISTORY_ENTRIES),
+               in_place=updated_in_place)
         composer_text = ""
         composer_cursor = 0
         composer_cursor_goal_x = None

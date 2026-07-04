@@ -50,6 +50,37 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
         # The multi-line entry stays one turn: exactly one divider.
         self.assertEqual(appended.count("\n---\n"), 1)
 
+    def test_input_history_tail_keeps_newest_entries_that_fit(self) -> None:
+        entries = ["one", "two", "three", "four"]
+        # Budget of 3 lines: 'four'(1) + divider(1) + 'three'(1) fit; older dropped.
+        body = portal.input_history_tail_body(entries, 3 * portal.SCROLL_LINE_PX, portal.SCROLL_LINE_PX)
+        self.assertEqual(body, "three\n---\nfour")
+
+    def test_input_history_tail_multiline_entry_costs_its_lines(self) -> None:
+        entries = ["old", "line one\nline two"]
+        # Budget 2: only the newest 2-line entry fits (divider+old would need 4).
+        body = portal.input_history_tail_body(entries, 2 * portal.SCROLL_LINE_PX, portal.SCROLL_LINE_PX)
+        self.assertEqual(body, "line one\nline two")
+
+    def test_input_history_tail_empty_and_zero_budget(self) -> None:
+        self.assertEqual(portal.input_history_tail_body([], 500.0, portal.SCROLL_LINE_PX), "")
+        self.assertEqual(portal.input_history_tail_body(["x"], 0.0, portal.SCROLL_LINE_PX), "")
+
+    def test_input_history_rect_sits_below_composer_within_pane(self) -> None:
+        composer = portal.input_composer_local_rect()
+        history = portal.input_history_local_rect()
+        self.assertGreaterEqual(history.y, composer.y + composer.h)
+        self.assertEqual(history.x, composer.x)
+        self.assertEqual(history.w, composer.w)
+        self.assertGreaterEqual(history.h, 0.0)
+
+    def test_composer_box_capped_leaves_history_room_at_default_size(self) -> None:
+        composer = portal.input_composer_local_rect()
+        history = portal.input_history_local_rect()
+        self.assertLessEqual(composer.h, portal.COMPOSER_BOX_MAX_H)
+        # At the default portal size there must be real history room.
+        self.assertGreater(history.h, 100.0)
+
     def test_split_transcript_entries_uses_blank_line_boundaries(self) -> None:
         body = "alpha one\nalpha two\n\nbravo\n\n\ncharlie"
         entries = portal.split_transcript_entries(body)
