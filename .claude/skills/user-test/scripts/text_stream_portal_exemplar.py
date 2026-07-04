@@ -3521,7 +3521,7 @@ async def portal_interaction_loop(
         clearing the composer alone makes viewer messages visually vanish
         (hud-xg9ok).
         """
-        nonlocal composer_text, composer_cursor, composer_cursor_goal_x, last_draft_sequence, body_full
+        nonlocal composer_text, composer_cursor, composer_cursor_goal_x, last_draft_sequence, body_full, last_output_scroll_y
         last_draft_sequence = sequence
         submitted = normalize_composer_input(text)
         if submitted.strip():
@@ -3532,23 +3532,28 @@ async def portal_interaction_loop(
                 "expected_visual": "composer clears after submit",
             }, submitted=text)
             body_full = append_transcript_entry(body_full, submitted)
+            # In-place body swap (steady-state, no teardown flash — hud-ooeam);
+            # the helper re-registers the scroll content height in the same
+            # atomic batch. The runtime translates scrolled content itself
+            # (hud-w5ih), so the agent must NOT re-render a windowed slice —
+            # publish the full transcript and drive only the offset.
+            updated_in_place = await update_output_scroll_body_live(
+                client, lease_id, tiles.output_scroll, body_full, mutation_lock,
+            )
+            if not updated_in_place:
+                await set_output_root_with_runtime_ids(
+                    client, lease_id, tiles.output_scroll, body_full, mutation_lock,
+                )
+            # Jump-to-latest on own submit (chat-grade): runtime clamps to the
+            # registered content height.
             tail_offset = scroll_max_y_for_text(body_full, output_rect.h, SCROLL_LINE_PX)
             async with mutation_lock:
                 await client.submit_mutation_batch(
                     lease_id,
-                    [
-                        register_tile_scroll_mutation(
-                            tiles.output_scroll,
-                            scrollable_y=True,
-                            content_height=scroll_max_y_for_text(
-                                body_full, output_rect.h, SCROLL_LINE_PX,
-                            ),
-                        ),
-                        set_scroll_offset_mutation(tiles.output_scroll, 0.0, tail_offset),
-                    ],
+                    [set_scroll_offset_mutation(tiles.output_scroll, 0.0, tail_offset)],
                     timeout=2.0,
                 )
-            await render_output_scroll(tail_offset)
+            last_output_scroll_y = tail_offset
             emit_step_event(transcript, 10, "checkpoint", {
                 "code": "echo:appended",
                 "title": "Viewer entry appended to history",
@@ -3880,11 +3885,16 @@ async def portal_interaction_loop(
                 if last_output_scroll_y is not None and abs(pending_output_scroll_y - last_output_scroll_y) < 0.5:
                     continue
                 last_output_scroll_y = pending_output_scroll_y
-                await render_output_scroll(pending_output_scroll_y)
+                # The runtime already translated the scrolled content locally
+                # (hud-w5ih glyph tracking); re-rendering a windowed slice here
+                # fought that translation and made content jump between two
+                # positions on every wheel notch (round-6 'flicker/spazz',
+                # hud-991cj). Scroll is now observe-and-log only.
+                output_view_start = int(pending_output_scroll_y // SCROLL_LINE_PX)
                 emit_step_event(transcript, 8, "checkpoint", {
                     "code": "scroll:output",
                     "title": "Output transcript scrolled",
-                    "action": "portal received local-first scroll offset",
+                    "action": "portal received local-first scroll offset (runtime-translated; no agent re-render)",
                     "expected_visual": "output text stays clipped inside transcript box",
                 }, scroll_y=pending_output_scroll_y, viewport_start=output_view_start)
     finally:
