@@ -14,6 +14,7 @@ SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 import text_stream_portal_exemplar as portal  # noqa: E402
+import portal_part_tokens as portal_tokens  # noqa: E402
 
 
 class TextStreamPortalExemplarTests(unittest.TestCase):
@@ -1802,6 +1803,132 @@ class LeaseRenewalTests(unittest.TestCase):
         self.assertGreater(
             renew_calls[-1], ttl_s, "renewals must continue past the original TTL"
         )
+
+
+class PortalTokenResolutionTests(unittest.TestCase):
+    """hud-7jrj3: the exemplar sources every published visual value from
+    resolved portal tokens, and a profile swap reskins them end-to-end."""
+
+    def _find_rust_portal_tokens_source(self) -> Path:
+        """Locate crates/tze_hud_config/src/portal_tokens.rs by walking upward
+        from this test file — robust to worktree / checkout layout."""
+        rel = Path("crates/tze_hud_config/src/portal_tokens.rs")
+        for base in [Path(__file__).resolve(), *Path(__file__).resolve().parents]:
+            candidate = base / rel
+            if candidate.is_file():
+                return candidate
+        self.skipTest(f"Rust source {rel} not found (running outside the repo tree)")
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def test_python_defaults_mirror_rust_defaults(self) -> None:
+        """The Python canonical-default mirror must match the Rust `mod defaults`
+        block byte-for-byte, so the two token surfaces cannot silently drift."""
+        import re
+
+        source = self._find_rust_portal_tokens_source().read_text(encoding="utf-8")
+        # Extract the `mod defaults { ... }` block.
+        marker = "mod defaults {"
+        start = source.index(marker)
+        depth = 0
+        end = start
+        for idx in range(start + len(marker) - 1, len(source)):
+            ch = source[idx]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = idx
+                    break
+        block = source[start:end]
+        rust_defaults = dict(
+            re.findall(r'pub const (\w+): &str = "([^"]*)";', block)
+        )
+        self.assertTrue(rust_defaults, "failed to parse any Rust portal defaults")
+        # Every Rust default must be mirrored with the identical value in Python.
+        self.assertEqual(
+            rust_defaults,
+            portal_tokens._RUST_DEFAULTS,
+            "Python portal-token default mirror drifted from Rust "
+            "crates/tze_hud_config/src/portal_tokens.rs — update "
+            "portal_part_tokens._RUST_DEFAULTS to match.",
+        )
+
+    def test_resolver_falls_back_to_canonical_defaults(self) -> None:
+        tokens = portal_tokens.resolve_portal_tokens({})
+        # Canonical frame background #111720 → (0x11,0x17,0x20)/255, opaque.
+        self.assertEqual(
+            tuple(round(c, 4) for c in tokens.frame_background),
+            (round(0x11 / 255, 4), round(0x17 / 255, 4), round(0x20 / 255, 4), 1.0),
+        )
+        self.assertEqual(tokens.header_font_size_px, 16.0)
+        # An unparseable override is ignored in favor of the canonical default.
+        bad = portal_tokens.resolve_portal_tokens(
+            {portal_tokens.PORTAL_TOKEN_FRAME_BACKGROUND: "not-a-color"}
+        )
+        self.assertEqual(bad.frame_background, tokens.frame_background)
+
+    def test_exemplar_publish_path_sources_frame_from_tokens(self) -> None:
+        """The published portal frame color IS the resolved token, not a literal."""
+        portal.apply_visual_profile(None)  # ensure exemplar profile is active
+        root, _children = portal.build_portal_nodes(
+            title="t", subtitle="s", body="b", footer_meta="f",
+        )
+        published = (
+            root.solid_color.color.r, root.solid_color.color.g,
+            root.solid_color.color.b, root.solid_color.color.a,
+        )
+        self.assertEqual(
+            tuple(round(c, 6) for c in published),
+            tuple(round(c, 6) for c in portal.TOKENS.frame_background),
+            "portal frame must be published from the resolved frame_background token",
+        )
+
+    def test_profile_swap_reskins_published_values(self) -> None:
+        """Swapping the active profile changes the published visual values —
+        the end-to-end proof the exemplar is token-driven, not literal."""
+        try:
+            portal.apply_visual_profile(None)
+            base_root, _ = portal.build_portal_nodes(
+                title="t", subtitle="s", body="b", footer_meta="f",
+            )
+            base_frame = (base_root.solid_color.color.r, base_root.solid_color.color.g,
+                          base_root.solid_color.color.b, base_root.solid_color.color.a)
+            base_body_font = portal.BODY_FONT
+
+            # Apply the 'expanded' profile (warm frame + larger type).
+            portal.apply_visual_profile(
+                portal.profile_swap_overrides("expanded", 20.0, 18.0)
+            )
+            swapped_root, _ = portal.build_portal_nodes(
+                title="t", subtitle="s", body="b", footer_meta="f",
+            )
+            swapped_frame = (swapped_root.solid_color.color.r, swapped_root.solid_color.color.g,
+                             swapped_root.solid_color.color.b, swapped_root.solid_color.color.a)
+
+            self.assertNotEqual(
+                base_frame, swapped_frame,
+                "published frame color must change when the profile is swapped",
+            )
+            self.assertEqual(portal.BODY_FONT, 18.0,
+                             "body font must track the swapped profile's typography")
+            self.assertNotEqual(base_body_font, portal.BODY_FONT)
+            # The published frame still equals the (new) resolved token — no literal.
+            self.assertEqual(
+                tuple(round(c, 6) for c in swapped_frame),
+                tuple(round(c, 6) for c in portal.TOKENS.frame_background),
+            )
+        finally:
+            portal.apply_visual_profile(None)
+
+        # Restoring the exemplar profile returns the original published values.
+        restored_root, _ = portal.build_portal_nodes(
+            title="t", subtitle="s", body="b", footer_meta="f",
+        )
+        restored_frame = (restored_root.solid_color.color.r, restored_root.solid_color.color.g,
+                          restored_root.solid_color.color.b, restored_root.solid_color.color.a)
+        self.assertEqual(base_frame, restored_frame)
+        self.assertEqual(portal.BODY_FONT, 16.0)
 
 
 if __name__ == "__main__":
