@@ -10,7 +10,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tze_hud_scene::element_store::{ElementStore, ElementStoreEntry, ElementType};
+use tze_hud_scene::element_store::{
+    ElementStore, ElementStoreEntry, ElementType, MAX_UNSEEN_ORPHAN_OVERRIDE_RESTARTS,
+};
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::SceneId;
 
@@ -202,8 +204,20 @@ pub fn bootstrap_scene_element_store_with_path(
 
     let now_ms = now_wall_ms();
     let changed = reconcile_scene_ids(scene, &mut store, now_ms);
+    // Bounded retention for override-bearing orphan tile entries (hud-fwgv7).
+    // Runs before tiles are recreated (they are republished after bootstrap), so
+    // every override-bearing tile entry is an orphan here; `adopt_orphaned_tile_
+    // overrides` later reclaims the ones whose portals republish. Entries whose
+    // portal was closed permanently accumulate unseen restarts and are pruned.
+    let gc = store.gc_expired_orphan_tile_overrides(MAX_UNSEEN_ORPHAN_OVERRIDE_RESTARTS);
+    if !gc.pruned.is_empty() {
+        tracing::info!(
+            pruned = gc.pruned.len(),
+            "element_store: pruned override-bearing orphan tile entries past retention bound (hud-fwgv7)"
+        );
+    }
     relock_tiles_with_durable_override(scene, &store);
-    if changed || !existed {
+    if changed || gc.mutated || !existed {
         if let Err(err) = persist_element_store_to_path(&store, &path) {
             tracing::warn!(
                 path = %path.display(),
@@ -343,6 +357,7 @@ fn ensure_entry(
                     created_at: now_ms,
                     last_published_at: now_ms,
                     z_order: 0,
+                    unseen_restarts: 0,
                     geometry_override: None,
                 },
             );
@@ -463,6 +478,7 @@ mod tests {
                 created_at: now,
                 last_published_at: now,
                 z_order: 0,
+                unseen_restarts: 0,
                 geometry_override: None,
             },
         );
@@ -474,6 +490,7 @@ mod tests {
                 created_at: now + 1,
                 last_published_at: now + 1,
                 z_order: 0,
+                unseen_restarts: 0,
                 geometry_override: Some(GeometryPolicy::Relative {
                     x_pct: 0.1,
                     y_pct: 0.2,
@@ -520,6 +537,7 @@ mod tests {
                 created_at: 7,
                 last_published_at: 8,
                 z_order: 0,
+                unseen_restarts: 0,
                 geometry_override: None,
             },
         );
@@ -603,6 +621,7 @@ mod tests {
                 created_at: 100,
                 last_published_at: 200,
                 z_order: 0,
+                unseen_restarts: 0,
                 geometry_override: None,
             },
         );
@@ -614,6 +633,7 @@ mod tests {
                 created_at: 100,
                 last_published_at: 200,
                 z_order: 0,
+                unseen_restarts: 0,
                 geometry_override: None,
             },
         );
@@ -699,6 +719,7 @@ mod tests {
                 created_at: 1,
                 last_published_at: 1,
                 z_order: 0,
+                unseen_restarts: 0,
                 geometry_override: Some(override_policy),
             },
         );
@@ -710,6 +731,7 @@ mod tests {
                 created_at: 1,
                 last_published_at: 1,
                 z_order: 0,
+                unseen_restarts: 0,
                 geometry_override: None,
             },
         );
@@ -723,6 +745,7 @@ mod tests {
                 created_at: 1,
                 last_published_at: 1,
                 z_order: 0,
+                unseen_restarts: 0,
                 geometry_override: Some(override_policy),
             },
         );

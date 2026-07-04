@@ -1410,6 +1410,7 @@ async fn test_recreated_portal_tile_adopts_orphaned_durable_override() {
                 created_at: 100,
                 last_published_at: 100,
                 z_order: member_z_order,
+                unseen_restarts: 0,
                 geometry_override: Some(override_policy),
             },
         );
@@ -1594,6 +1595,7 @@ async fn test_list_elements_request_supports_filters_and_override_metadata() {
                 created_at: 101,
                 last_published_at: 202,
                 z_order: 0,
+                unseen_restarts: 0,
                 geometry_override: Some(GeometryPolicy::Relative {
                     x_pct: 0.25,
                     y_pct: 0.1,
@@ -1610,6 +1612,7 @@ async fn test_list_elements_request_supports_filters_and_override_metadata() {
                 created_at: 303,
                 last_published_at: 404,
                 z_order: 0,
+                unseen_restarts: 0,
                 geometry_override: None,
             },
         );
@@ -1621,6 +1624,7 @@ async fn test_list_elements_request_supports_filters_and_override_metadata() {
                 created_at: 505,
                 last_published_at: 606,
                 z_order: 0,
+                unseen_restarts: 0,
                 geometry_override: None,
             },
         );
@@ -1742,6 +1746,7 @@ async fn test_publish_to_tile_by_element_id_applies_override_and_updates_timesta
                 created_at: 1,
                 last_published_at: 1,
                 z_order: 0,
+                unseen_restarts: 0,
                 geometry_override: Some(GeometryPolicy::Relative {
                     x_pct: 0.4,
                     y_pct: 0.25,
@@ -1904,6 +1909,7 @@ async fn test_publish_to_tile_by_element_id_rejects_invalid_node_even_with_bound
                 created_at: 1,
                 last_published_at: 1,
                 z_order: 0,
+                unseen_restarts: 0,
                 geometry_override: None,
             },
         );
@@ -9695,6 +9701,7 @@ fn test_reset_geometry_override_clears_override_and_returns_previous() {
             created_at: 1000,
             last_published_at: 2000,
             z_order: 0,
+            unseen_restarts: 0,
             geometry_override: Some(override_policy),
         },
     );
@@ -9733,6 +9740,7 @@ fn test_reset_geometry_override_noop_when_no_override() {
             created_at: 1000,
             last_published_at: 2000,
             z_order: 0,
+            unseen_restarts: 0,
             geometry_override: None,
         },
     );
@@ -9937,6 +9945,7 @@ fn test_reset_geometry_override_carries_correct_previous_and_new() {
             created_at: 1000,
             last_published_at: 2000,
             z_order: 0,
+            unseen_restarts: 0,
             geometry_override: Some(override_policy),
         },
     );

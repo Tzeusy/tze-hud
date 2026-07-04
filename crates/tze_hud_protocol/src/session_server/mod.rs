@@ -258,6 +258,12 @@ pub(super) async fn persist_created_tile_entries(
                     entry.last_published_at = now;
                     changed = true;
                 }
+                // A just-published tile is live, so it starts a fresh retention
+                // window; clear any accumulated unseen-restart count (hud-fwgv7).
+                if entry.unseen_restarts != 0 {
+                    entry.unseen_restarts = 0;
+                    changed = true;
+                }
                 if entry.geometry_override.is_some() {
                     entry.geometry_override = None;
                     changed = true;
@@ -272,6 +278,7 @@ pub(super) async fn persist_created_tile_entries(
                         created_at: now,
                         last_published_at: now,
                         z_order,
+                        unseen_restarts: 0,
                         geometry_override: None,
                     },
                 );
