@@ -62,6 +62,7 @@ from hud_grpc_client import HudClient, _make_node  # noqa: E402
 from proto_gen import events_pb2, types_pb2  # noqa: E402
 
 import portal_part_tokens as ppt  # noqa: E402
+import portal_two_pane_geometry as pg  # noqa: E402
 
 
 # ─── Portal design tokens (resolved, not literal) ─────────────────────────────
@@ -114,6 +115,18 @@ EXEMPLAR_PROFILE_OVERRIDES: dict[str, str] = {
 ACTIVE_PROFILE_OVERRIDES: dict[str, str] = dict(EXEMPLAR_PROFILE_OVERRIDES)
 TOKENS: ppt.PortalPartTokens = ppt.resolve_portal_tokens(ACTIVE_PROFILE_OVERRIDES)
 
+# Two-pane chrome geometry (hud-q1qzw): the exemplar's split-layout geometry
+# (header height, pane split ratio, content inset, corner radius, …) resolves
+# from an exemplar-local geometry profile — the same three-layer resolve the
+# visual tokens use — so a geometry-profile swap reskins the chrome geometry,
+# not just colors/fonts. This is an exemplar-local surface on purpose: the
+# runtime has no two-pane concept, so these keys stay out of the canonical
+# product token vocabulary (see portal_two_pane_geometry). `GEOMETRY` is the
+# single source every geometry constant below reads from; `apply_geometry_profile`
+# rebinds both. Empty overrides ⇒ the reviewed defaults, i.e. no visual change.
+ACTIVE_GEOMETRY_OVERRIDES: dict[str, str] = {}
+GEOMETRY: pg.PortalTwoPaneGeometry = pg.resolve_two_pane_geometry(ACTIVE_GEOMETRY_OVERRIDES)
+
 
 def _rebind_visual_tokens() -> None:
     """Recompute every token-derived visual global from the current `TOKENS`.
@@ -121,10 +134,13 @@ def _rebind_visual_tokens() -> None:
     Colors are 4-tuples ``(r, g, b, a)`` in 0..1 (the form `make_solid_color_node`
     / `make_text_node` consume). Secondary label sizes are derived from the
     primary font tokens with fixed typographic steps, so they track a profile's
-    font-size overrides. Geometry (portal size, insets, header height) is NOT
-    tokenized here — the canonical `portal.spacing.*` tokens are calibrated for
-    the single-node Phase-1 pilot, not this two-pane chrome; two-pane geometry
-    tokens are a tracked follow-up.
+    font-size overrides. Two-pane chrome GEOMETRY (header height, pane split,
+    content inset, corner radius) is rebound separately by
+    `_rebind_geometry_tokens` from the exemplar-local geometry profile — the
+    canonical `portal.spacing.*` tokens are calibrated for the single-node
+    Phase-1 pilot, not this two-pane chrome, so it has its own profile surface
+    (see portal_two_pane_geometry). Portal frame size/placement stays literal
+    (a viewport-fit concern, not a skinnable property).
     """
     global BG_RGBA, HEADER_BG_RGBA, DIVIDER_RGBA, FOOTER_BG_RGBA
     global INPUT_PANE_BG_RGBA, OUTPUT_PANE_BG_RGBA, TEXT_WINDOW_BG_RGBA
@@ -208,7 +224,54 @@ def adopt_runtime_tokens(runtime_tokens: dict[str, str]) -> bool:
     return True
 
 
-# ─── Portal chrome geometry (exemplar-local layout; see follow-up on tokens) ──
+def _rebind_geometry_tokens() -> None:
+    """Recompute every geometry constant derived from the current `GEOMETRY`.
+
+    The two-pane chrome geometry constants (header/footer/divider heights,
+    content inset, corner radius, pane split) are module globals the layout path
+    reads at call time. This rebinds them from the resolved `GEOMETRY` so a
+    geometry-profile swap re-lays the chrome — the geometry analogue of
+    `_rebind_visual_tokens`. `INPUT_PANE_W` is a live-mutable global (the viewer
+    can drag the divider); a geometry swap resets it to the profile's split ratio.
+    """
+    global PORTAL_RADIUS, PADDING_X, HEADER_H, FOOTER_H, DIVIDER_H
+    global PANE_DIVIDER_W, MIN_PANE_W, INPUT_PANE_W, MINIMIZE_HIT_H
+
+    g = GEOMETRY
+    PORTAL_RADIUS = g.corner_radius_px
+    PADDING_X = g.content_inset_px
+    HEADER_H = g.header_height_px
+    FOOTER_H = g.footer_height_px
+    DIVIDER_H = g.divider_height_px
+    PANE_DIVIDER_W = g.pane_divider_width_px
+    MIN_PANE_W = g.min_pane_width_px
+    INPUT_PANE_W = (PORTAL_W - PANE_DIVIDER_W) * g.pane_split_ratio
+    MINIMIZE_HIT_H = HEADER_H
+
+
+def apply_geometry_profile(overrides: Optional[dict[str, str]]) -> pg.PortalTwoPaneGeometry:
+    """Swap the active two-pane geometry profile and re-lay the chrome geometry.
+
+    ``overrides`` is a ``{token_key: value}`` geometry profile. Passing ``None``
+    restores the exemplar defaults. Re-resolves `GEOMETRY` and rebinds the
+    geometry constants, so any subsequently rebuilt portal frame is laid out with
+    the new geometry — proving the two-pane chrome geometry is profile-driven
+    end-to-end, not literal.
+    """
+    global ACTIVE_GEOMETRY_OVERRIDES, GEOMETRY
+    ACTIVE_GEOMETRY_OVERRIDES = dict(overrides) if overrides is not None else {}
+    GEOMETRY = pg.resolve_two_pane_geometry(ACTIVE_GEOMETRY_OVERRIDES)
+    _rebind_geometry_tokens()
+    return GEOMETRY
+
+
+# ─── Portal chrome geometry ───────────────────────────────────────────────────
+#
+# Portal frame size + placement stays literal — it is a viewport-fit concern
+# (clamped to the display), not a skinnable chrome property. The two-pane chrome
+# geometry below (header/footer/divider, content inset, corner radius, pane
+# split) is resolved from `GEOMETRY` (the active geometry profile) and rebound by
+# `_rebind_geometry_tokens` on a profile swap — never a bare literal.
 
 PORTAL_W = 860.0
 PORTAL_H = 680.0
@@ -216,7 +279,7 @@ PORTAL_MIN_W = 640.0
 PORTAL_MIN_H = 480.0
 PORTAL_DEFAULT_WIDTH_PCT = PORTAL_W / 1920.0
 PORTAL_DEFAULT_HEIGHT_PCT = PORTAL_H / 1080.0
-PORTAL_RADIUS = 14.0
+PORTAL_RADIUS = GEOMETRY.corner_radius_px  # frame corner radius (two-pane profile)
 PORTAL_X_FROM_RIGHT = 28.0
 PORTAL_Y = 120.0
 PORTAL_Z = 220
@@ -259,17 +322,20 @@ EYEBROW_FONT = max(1.0, TOKENS.transcript_font_size_px - 5.0)
 INPUT_FONT = TOKENS.composer_font_size_px
 SUBMIT_HINT_FONT = max(1.0, TOKENS.composer_font_size_px - 5.0)
 
-PADDING_X = 18.0
-HEADER_H = 52.0
-FOOTER_H = 30.0
-DIVIDER_H = 1.0
+# Two-pane chrome geometry, resolved from the active geometry profile (never a
+# bare literal). `_rebind_geometry_tokens` re-binds these on a profile swap.
+PADDING_X = GEOMETRY.content_inset_px       # per-side content inset
+HEADER_H = GEOMETRY.header_height_px
+FOOTER_H = GEOMETRY.footer_height_px
+DIVIDER_H = GEOMETRY.divider_height_px
 ACTIVITY_DOT_SIZE = 8.0
 
-# Equal 50/50 split with a fat divider between panes. Runtime pointer capture
-# exists, but resize-on-drag still needs portal-side geometry mutation logic.
-PANE_DIVIDER_W = 6.0
-MIN_PANE_W = 240.0
-INPUT_PANE_W = (PORTAL_W - PANE_DIVIDER_W) / 2.0
+# Pane split with a fat divider between panes. The split ratio is profile-driven
+# (default 0.5 ⇒ the reviewed equal 50/50 split); runtime pointer capture exists,
+# but resize-on-drag still needs portal-side geometry mutation logic.
+PANE_DIVIDER_W = GEOMETRY.pane_divider_width_px
+MIN_PANE_W = GEOMETRY.min_pane_width_px
+INPUT_PANE_W = (PORTAL_W - PANE_DIVIDER_W) * GEOMETRY.pane_split_ratio
 # Pane divider hairline is token-sourced (rebound on profile swap); the grip
 # nub derives from the resize-grip token so it tracks the same profile.
 PANE_DIVIDER_RGBA = TOKENS.divider_color
@@ -966,7 +1032,7 @@ def set_portal_size(w: float, h: float, tab_width: float, tab_height: float) -> 
     if old_w > 0:
         set_input_pane_width(INPUT_PANE_W * (PORTAL_W / old_w))
     else:
-        set_input_pane_width((PORTAL_W - PANE_DIVIDER_W) / 2.0)
+        set_input_pane_width((PORTAL_W - PANE_DIVIDER_W) * GEOMETRY.pane_split_ratio)
 
 
 def target_host(target: str) -> str:
