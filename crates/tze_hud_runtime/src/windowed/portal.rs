@@ -22,6 +22,72 @@ use super::{WindowedConfig, WinitApp};
 /// used here instead of the compositor's wrap-accurate measurement.
 const INPUT_HISTORY_APPROX_LINE_HEIGHT_PX: f32 = 21.0;
 
+/// Approximate history font size (physical px) the compositor renders input-pane
+/// history at — mirrors `VIEWER_ECHO_DEFAULT_FONT_SIZE_PX` (15.0) in
+/// `crates/tze_hud_compositor/src/renderer/token_colors.rs`. Used only to derive
+/// the conservative per-character advance below (hud-3y7va).
+const INPUT_HISTORY_APPROX_FONT_SIZE_PX: f32 = 15.0;
+
+/// Conservative per-character advance (physical px) used to OVER-estimate how
+/// many wrapped visual rows a history entry occupies (hud-3y7va).
+///
+/// A larger-than-average advance narrows the estimated columns-per-row, biasing
+/// the wrapped-row count UP so the seeded scroll content-height reaches or
+/// exceeds the compositor's `real_max_scrollback` and the tail bottom-aligns
+/// exactly. The `0.75` factor is deliberately wider than the composer
+/// exemplar's own `0.57` monospace estimate (`COMPOSER_WRAP_CHAR_W`) so the
+/// over-count holds for mixed sans-serif history text; the compositor's exact
+/// per-frame clamp remains the visual authority, so over-counting only
+/// guarantees the tail-pin and never clips the newest reply.
+const INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX: f32 = INPUT_HISTORY_APPROX_FONT_SIZE_PX * 0.75;
+
+/// Composer/history horizontal text margin (physical px) mirroring the
+/// compositor's `COMPOSER_TEXT_MARGIN` in
+/// `crates/tze_hud_compositor/src/renderer/tile_render.rs`, used to derive the
+/// history band/wrap geometry the runtime seeds against (hud-3y7va).
+const INPUT_COMPOSER_TEXT_MARGIN_PX: f32 = 6.0;
+
+/// Conservative over-estimate of the number of wrapped visual rows the
+/// compositor lays a single history entry into (hud-3y7va).
+///
+/// The runtime has no text rasterizer, so it cannot measure the wrap-accurate
+/// row count `Compositor::prime_viewer_echo_layout` computes per frame. It
+/// approximates by filling each logical (`\n`-delimited) line into fixed-advance
+/// columns and rounding UP — deliberately biased to OVER-count (a
+/// wider-than-average `char_advance_px`, per-line ceil, an empty line counted as
+/// one row). Over-counting is safe and intended: the seeded content-height must
+/// reach or exceed the compositor's `real_max_scrollback` so the tail pins
+/// exactly, and the compositor's exact per-frame clamp is the visual authority.
+fn approx_wrapped_visual_rows(text: &str, wrap_width_px: f32, char_advance_px: f32) -> usize {
+    let cols = (wrap_width_px / char_advance_px).floor().max(1.0) as usize;
+    text.split('\n')
+        .map(|line| line.chars().count().max(1).div_ceil(cols))
+        .sum::<usize>()
+        .max(1)
+}
+
+/// Conservative UNDER-estimate of the compositor's history band height (region
+/// top → composer-box top) from the tile's full height (hud-3y7va).
+///
+/// The scrollable viewport for input history is the band ABOVE the composer box,
+/// not the whole tile. Under-estimating the band (a smaller reference viewport)
+/// biases the seeded scroll offset UP toward the tail, matching the intent that
+/// the runtime seed must never undershoot `real_max_scrollback`. The composer
+/// box at rest is one line plus symmetric vertical padding, mirroring
+/// `Compositor::composer_input_box` with `visible_lines == 1`; the result is
+/// floored at one line so the reference viewport is never zero or negative.
+fn input_history_band_height_px(tile_height_px: f32) -> f32 {
+    let composer_box_px = INPUT_HISTORY_APPROX_LINE_HEIGHT_PX + INPUT_COMPOSER_TEXT_MARGIN_PX * 2.0;
+    (tile_height_px - composer_box_px).max(INPUT_HISTORY_APPROX_LINE_HEIGHT_PX)
+}
+
+/// Wrap width (physical px) the compositor word-wraps history at — the tile
+/// width minus symmetric text margins, mirroring `viewer_echo_zone_width` in
+/// `crates/tze_hud_compositor/src/renderer/tile_render.rs` (hud-3y7va).
+fn input_history_wrap_width_px(tile_width_px: f32) -> f32 {
+    (tile_width_px - INPUT_COMPOSER_TEXT_MARGIN_PX * 2.0).max(1.0)
+}
+
 pub(super) fn build_portal_projection_driver(
     config: &WindowedConfig,
 ) -> Result<
@@ -1048,25 +1114,36 @@ impl WinitApp {
             && let Ok(mut scene) = state.scene.try_lock()
         {
             let _ = scene.register_tile_scroll_config(tile_id, TileScrollConfig::vertical());
-            let viewport_height_px = scene
+            let tile_bounds = scene
                 .tiles
                 .get(&tile_id)
-                .map(|t| t.bounds.height)
-                .unwrap_or(0.0);
-            if viewport_height_px > 0.0 {
-                // Approximate content height: the runtime has no token map or
-                // text rasterizer of its own, so it cannot measure the
-                // wrap-accurate height `Compositor::prime_viewer_echo_layout`
-                // computes per frame. This is a deliberate approximation
-                // (mirrors `text_stream_portal_exemplar.py`'s
-                // `scroll_max_y_for_text`, used for the OUTPUT pane's own
-                // scroll-config bookkeeping) — it only needs to keep the
-                // wheel-input clamp roughly right, because
-                // `input_history_block_top` re-clamps the DISPLAYED position
-                // to the compositor's exact band/content geometry every
-                // frame regardless of this value's precision.
-                let added_height_px =
-                    text.split('\n').count().max(1) as f32 * INPUT_HISTORY_APPROX_LINE_HEIGHT_PX;
+                .map(|t| (t.bounds.width, t.bounds.height));
+            if let Some((tile_width_px, tile_height_px)) = tile_bounds {
+                // Seed the scroll clamp against the history BAND (region top →
+                // composer-box top), NOT the whole tile, and against a
+                // conservative wrapped-visual-row OVER-estimate of the content
+                // height (hud-3y7va). The compositor's `input_history_block_top`
+                // clamps the displayed offset against
+                // `real_max_scrollback = wrap_accurate_block_height − band_height`
+                // and only bottom-aligns the tail when the offset reaches that
+                // bound. Seeding against the full tile height plus a `\n`-only
+                // line count under-estimated the offset on both counts, so the
+                // newest just-submitted lines clipped at rest — worse than the
+                // pre-scroll tail pin. Under-estimating the band and over-counting
+                // wrapped rows guarantees the seeded offset reaches or exceeds
+                // `real_max_scrollback`, so the compositor bottom-aligns exactly
+                // to the tail. Over-estimating is safe: the compositor's exact
+                // per-frame clamp is the visual authority, and it re-clamps the
+                // displayed position every frame regardless of this value's
+                // precision.
+                let band_height_px = input_history_band_height_px(tile_height_px);
+                let wrap_width_px = input_history_wrap_width_px(tile_width_px);
+                let added_rows = approx_wrapped_visual_rows(
+                    &text,
+                    wrap_width_px,
+                    INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX,
+                );
+                let added_height_px = added_rows as f32 * INPUT_HISTORY_APPROX_LINE_HEIGHT_PX;
                 let new_total_height_px = self
                     .state
                     .input_processor
@@ -1075,7 +1152,7 @@ impl WinitApp {
                 self.state.input_processor.notify_tile_content_appended(
                     tile_id,
                     new_total_height_px,
-                    viewport_height_px,
+                    band_height_px,
                     INPUT_HISTORY_APPROX_LINE_HEIGHT_PX,
                     &mut scene,
                 );
@@ -3165,6 +3242,141 @@ mod tests {
             scene.tile_follow_tail_at_tail(tile_id),
             "typing into the focused composer must snap the input-pane history \
              back to the tail"
+        );
+    }
+
+    // ── Input-history scroll seed: exact tail-pin (hud-3y7va) ──────────────────
+
+    /// A long reply with NO hard newlines soft-wraps into several visual rows the
+    /// compositor lays out, but the pre-fix `split('\n')` estimate counted it as
+    /// ONE row. `approx_wrapped_visual_rows` must OVER-count it into multiple
+    /// rows so the seeded scroll content-height reaches the compositor's
+    /// wrap-accurate block height (hud-3y7va).
+    #[test]
+    fn approx_wrapped_visual_rows_over_counts_soft_wrapped_line() {
+        let wrap_width = 388.0_f32; // a 400px tile − 2×6px margin
+        let long_line = "x".repeat(120);
+
+        // Regression baseline: the pre-fix count was exactly one.
+        assert_eq!(
+            long_line.split('\n').count(),
+            1,
+            "a 120-char unbroken line has a single logical line"
+        );
+
+        let rows = approx_wrapped_visual_rows(
+            &long_line,
+            wrap_width,
+            INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX,
+        );
+        assert!(
+            rows > 1,
+            "a 120-char unbroken line must be counted as >1 wrapped visual rows, got {rows}"
+        );
+
+        // Each hard-newline line contributes at least one row (empty lines too).
+        assert!(
+            approx_wrapped_visual_rows(
+                "a\nb\nc",
+                wrap_width,
+                INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX
+            ) >= 3,
+            "three hard-newline lines occupy at least three rows"
+        );
+        assert_eq!(
+            approx_wrapped_visual_rows(
+                "hi",
+                wrap_width,
+                INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX
+            ),
+            1,
+            "a short line occupies exactly one row"
+        );
+    }
+
+    /// The seeded band-height reference must stay strictly under the full tile
+    /// height (so the seeded offset never undershoots the tail) and never
+    /// collapse to zero for a tiny tile (hud-3y7va).
+    #[test]
+    fn input_history_band_height_under_estimates_tile_height() {
+        let band = input_history_band_height_px(300.0);
+        assert!(
+            band < 300.0,
+            "band {band} must stay under the full tile height (composer box excluded)"
+        );
+        assert!(band > 0.0, "band {band} must be positive");
+        assert_eq!(
+            input_history_band_height_px(5.0),
+            INPUT_HISTORY_APPROX_LINE_HEIGHT_PX,
+            "a tiny tile floors the reference viewport at one line"
+        );
+    }
+
+    /// Representative soft-wrapping history must seed a resting scroll offset that
+    /// reaches or exceeds the compositor's `real_max_scrollback`, so the
+    /// compositor clamp bottom-aligns EXACTLY to the tail rather than clipping the
+    /// newest just-submitted lines at rest (hud-3y7va, the regression from #1045).
+    ///
+    /// Asserted at the offset/content-height/clamp layer against a REALISTIC,
+    /// independent compositor model (average sans-serif glyph advance, resting
+    /// 1-line composer box), not pixels.
+    #[test]
+    fn soft_wrapped_history_seeds_offset_past_compositor_real_max_scrollback() {
+        let (scene, _tab_id, tile_id, _composer_id, _control_id) = portal_scene_with_control();
+        // `portal_scene_with_control` tile bounds are 400 × 300 (see its body).
+        let (mut app, _rx) =
+            make_windowed_keyboard_test_app(scene, FocusManager::new(), InputProcessor::new());
+
+        // Long single-line replies (no hard newlines): each soft-wraps into
+        // several visual rows the compositor lays out but `split('\n')` sees as
+        // one — the exact case that regressed.
+        let entries: Vec<String> = (0..10)
+            .map(|i| format!("reply {i}: {}", "wrapping viewer text ".repeat(6)))
+            .collect();
+        for entry in &entries {
+            app.append_raw_tile_viewer_echo(tile_id, entry.clone());
+        }
+
+        let seeded_offset = {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let scene = shared.scene.try_lock().unwrap();
+            assert!(
+                scene.tile_follow_tail_at_tail(tile_id),
+                "a freshly-seeded history must rest at the tail"
+            );
+            scene.tile_scroll_offset_local(tile_id).1
+        };
+
+        // Compositor model (independent of the runtime's conservative estimators):
+        // real_max_scrollback = wrap_accurate_block_height − band_height, and the
+        // compositor bottom-aligns the tail only when the displayed offset reaches
+        // that bound (see `input_history_block_top` / renderer/tests.rs
+        // `input_history_block_honors_tile_scroll_offset`).
+        const LINE_H: f32 = 21.0; // viewer-echo font 15 × line-height 1.4
+        const REALISTIC_ADVANCE_PX: f32 = 7.5; // ≈ 15 × 0.5 average glyph advance
+        let wrap_width = 400.0_f32 - 12.0; // tile width − 2×margin (viewer_echo_zone_width)
+        let cols = (wrap_width / REALISTIC_ADVANCE_PX).floor().max(1.0) as usize;
+        let realistic_rows: usize = entries
+            .iter()
+            .map(|e| {
+                e.split('\n')
+                    .map(|l| l.chars().count().max(1).div_ceil(cols))
+                    .sum::<usize>()
+            })
+            .sum();
+        let block_height = realistic_rows as f32 * LINE_H;
+        let band_height = 300.0_f32 - (LINE_H + 12.0); // region top → 1-line composer box top
+        let real_max_scrollback = (block_height - band_height).max(0.0);
+
+        assert!(
+            real_max_scrollback > 0.0,
+            "test setup: the history must overflow the band (real_max={real_max_scrollback})"
+        );
+        assert!(
+            seeded_offset >= real_max_scrollback,
+            "seeded offset {seeded_offset} must reach or exceed the compositor's \
+             real_max_scrollback {real_max_scrollback} so the tail bottom-aligns \
+             exactly; a smaller offset clips the newest reply at rest (hud-3y7va)"
         );
     }
 
