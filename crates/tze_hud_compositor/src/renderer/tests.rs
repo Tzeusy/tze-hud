@@ -1085,7 +1085,10 @@ async fn build_windowed_frame_decoupled_from_surface_then_presents() {
     // ── Present phase: consumes the build against the surface ──────────────
     let telemetry = compositor
         .present_windowed_frame(build, &surface as &dyn crate::surface::CompositorSurface);
-    assert!(telemetry.frame_time_us > 0, "present must record a frame time");
+    assert!(
+        telemetry.frame_time_us > 0,
+        "present must record a frame time"
+    );
     assert_eq!(
         telemetry.tile_count, built_tiles,
         "present must carry through the tile count recorded during build"

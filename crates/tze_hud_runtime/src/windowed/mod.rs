@@ -1142,8 +1142,7 @@ impl ApplicationHandler for WinitApp {
                             // vsync while the lock is held.
                             let scene_commit_at = Instant::now();
                             let (surf_w, surf_h) = surface_for_compositor.size();
-                            let build =
-                                compositor.build_windowed_frame(&mut scene, surf_w, surf_h);
+                            let build = compositor.build_windowed_frame(&mut scene, surf_w, surf_h);
                             // Hit-region refresh + hit-test snapshot are still
                             // computed under the lock, from the geometry we are
                             // about to present (build already populated the
