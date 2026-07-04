@@ -966,6 +966,7 @@ impl Compositor {
         let styled_runs: Box<[crate::text::StyledRunItem]> = {
             let anchor = cs.selection_anchor.min(cs.text.len());
             let cursor = cs.cursor_byte.min(cs.text.len());
+            let display_len = display_text.len();
             if anchor != cursor {
                 // Map original-text offsets to display-string offsets.
                 let (display_sel_start, display_sel_end) = if cursor <= anchor {
@@ -976,7 +977,6 @@ impl Compositor {
                     (anchor, cursor + caret_utf8_len)
                 };
                 // Clamp to display_text bounds (defensive).
-                let display_len = display_text.len();
                 let sel_start = display_sel_start.min(display_len);
                 let sel_end = display_sel_end.min(display_len);
                 if sel_start < sel_end {
@@ -992,6 +992,33 @@ impl Compositor {
                         // Standard multi-line text-selection shape: full-width
                         // interior lines when the selection wraps (hud-scgyw).
                         fill_line_width: true,
+                    }])
+                } else {
+                    Box::new([])
+                }
+            } else if caret_visible {
+                // No selection: color the caret glyph itself from the caret token
+                // (hud-khfgx, vd-caret-selection-placeholder-not-tokenized). The ▌
+                // glyph was inserted at `cursor` in `display_text` gated by the same
+                // `caret_visible` blink phase, so its display range is exactly
+                // `[cursor, cursor + caret_utf8_len)`. A foreground run over that
+                // range recolors only the caret; the default token equals the
+                // composer text color, so the default profile is unchanged. During
+                // an active selection the caret sits inside the selection highlight,
+                // so no caret run is emitted (avoids overlapping runs).
+                let caret_start = cursor.min(display_len);
+                let caret_end = (cursor + caret_utf8_len).min(display_len);
+                if caret_start < caret_end {
+                    Box::new([crate::text::StyledRunItem {
+                        start_byte: caret_start,
+                        end_byte: caret_end,
+                        weight: None,
+                        italic: false,
+                        monospace: false,
+                        color: Some(tokens.caret_color),
+                        background_color: None,
+                        size_scale: None,
+                        fill_line_width: false,
                     }])
                 } else {
                     Box::new([])

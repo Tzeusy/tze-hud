@@ -12919,6 +12919,75 @@ fn composer_at_capacity_token_is_distinct_from_background_and_propagates_overrid
     );
 }
 
+// ── Composer caret-color tokenization tests [hud-khfgx] ──────────────────
+
+/// The caret color defaults to the composer text color, so tokenizing the caret
+/// (vd-caret-selection-placeholder-not-tokenized) is a no-visual-regression change
+/// for the default profile: with no `portal.composer.caret_color` token, the
+/// resolved caret color equals the resolved composer text color (both in sRGB u8).
+///
+/// CPU-only — no GPU required.
+#[test]
+fn composer_caret_color_defaults_to_text_color() {
+    use super::token_colors::linear_to_srgb;
+    use std::collections::HashMap;
+
+    let empty: HashMap<String, String> = HashMap::new();
+    let t = resolve_composer_overlay_tokens(&empty);
+
+    let to_srgb_u8 = |v: f32| (linear_to_srgb(v.clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
+    let expected = [
+        to_srgb_u8(t.text_r),
+        to_srgb_u8(t.text_g),
+        to_srgb_u8(t.text_b),
+        (t.text_a.clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
+    ];
+    assert_eq!(
+        t.caret_color, expected,
+        "default caret color must equal the composer text color (no visual regression)"
+    );
+}
+
+/// A `portal.composer.caret_color` override propagates to
+/// `ComposerOverlayTokens::caret_color` so the caret can be accented independently
+/// of the composer text color.
+///
+/// CPU-only — no GPU required.
+#[test]
+fn composer_caret_color_token_override_propagates() {
+    use std::collections::HashMap;
+
+    let mut overrides: HashMap<String, String> = HashMap::new();
+    // Pure-green sentinel, distinct from the default near-white text color.
+    overrides.insert(
+        "portal.composer.caret_color".to_string(),
+        "#00FF00FF".to_string(),
+    );
+    let t = resolve_composer_overlay_tokens(&overrides);
+
+    assert_eq!(
+        t.caret_color[0], 0x00,
+        "overridden caret red channel must be 0x00, got {:?}",
+        t.caret_color
+    );
+    assert_eq!(
+        t.caret_color[1], 0xFF,
+        "overridden caret green channel must be 0xFF, got {:?}",
+        t.caret_color
+    );
+    assert_eq!(
+        t.caret_color[3], 0xFF,
+        "overridden caret alpha must be 0xFF, got {:?}",
+        t.caret_color
+    );
+    // The override must differ from the default (which tracks the text color).
+    let default = resolve_composer_overlay_tokens(&HashMap::new());
+    assert_ne!(
+        t.caret_color, default.caret_color,
+        "caret color override must differ from the default text-colored caret"
+    );
+}
+
 // ── Composer selection-range rendering tests [hud-bq0gl.9] ───────────────
 
 /// The default `selection_bg` token must have a non-zero alpha so selection

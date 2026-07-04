@@ -669,6 +669,15 @@ pub(super) struct ComposerOverlayTokens {
     /// [`StyledRunItem::background_color`] which expects the same encoding as
     /// the rest of the text pipeline's backdrop quads.
     pub(super) selection_bg: [u8; 4],
+    /// Caret glyph foreground color (sRGB u8).
+    ///
+    /// Sourced from `portal.composer.caret_color` so a profile can accent the
+    /// caret independently of the composer text color (hud-khfgx,
+    /// vd-caret-selection-placeholder-not-tokenized). Defaults to the composer
+    /// text color, so the default profile's caret is visually unchanged. Stored in
+    /// sRGB u8 to match [`StyledRunItem::color`], the same encoding as the text
+    /// pipeline's other foreground runs.
+    pub(super) caret_color: [u8; 4],
     /// Font size in pixels.
     pub(super) font_size_px: f32,
     /// Maximum number of text lines the composer box grows to before it scrolls
@@ -751,6 +760,28 @@ pub(super) fn resolve_composer_overlay_tokens(
         // Default: #3A7BD5 @ ~115/255 alpha (≈ 0.45) — a calm blue selection
         .unwrap_or([0x3A, 0x7B, 0xD5, 0x73]);
 
+    // Caret glyph color (default: the composer text color, so the default profile
+    // is visually unchanged; a profile may accent the caret independently).
+    // hud-khfgx: `portal.composer.caret_color`, same `#RRGGBB[AA]` format.
+    let to_srgb_u8 = |v: f32| (linear_to_srgb(v.clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
+    let to_alpha_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    let caret_color: [u8; 4] = resolve_token_color(token_map, "portal.composer.caret_color")
+        .map(|c| {
+            [
+                to_srgb_u8(c.r),
+                to_srgb_u8(c.g),
+                to_srgb_u8(c.b),
+                to_alpha_u8(c.a),
+            ]
+        })
+        // Default: the resolved composer text color (linear → sRGB u8).
+        .unwrap_or([
+            to_srgb_u8(text_r),
+            to_srgb_u8(text_g),
+            to_srgb_u8(text_b),
+            to_alpha_u8(text_a),
+        ]);
+
     // Font size (default: portal composer readable fallback)
     let font_size_px = token_map
         .get("portal.composer.font_size")
@@ -793,6 +824,7 @@ pub(super) fn resolve_composer_overlay_tokens(
         at_capacity_b,
         at_capacity_a,
         selection_bg,
+        caret_color,
         font_size_px,
         max_lines,
         anchor,
