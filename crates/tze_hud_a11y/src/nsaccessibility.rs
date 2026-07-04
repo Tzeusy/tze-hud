@@ -18,8 +18,6 @@
 //! - RFC 0004 §5.8 (Platform A11y API Integration)
 //! - https://developer.apple.com/documentation/appkit/nsaccessibility
 
-#![cfg(target_os = "macos")]
-
 use tze_hud_scene::{SceneGraph, SceneId};
 
 use crate::{AccessibilityTree, LivePoliteness, WarnOnce};
