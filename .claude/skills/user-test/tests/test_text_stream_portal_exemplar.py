@@ -398,6 +398,102 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
         self.assertTrue(proc.waited)
 
 
+class PaneResizeDividerTests(unittest.TestCase):
+    """Middle pane-divider drag-activation + width-partition math (hud-z8z7p).
+
+    Live round-6 (2026-07-04, tzehouse): the owner clicked mid-portal with no
+    drag intent and the divider committed a resize; the pane-resize:end event
+    also logged input=860 / output=818 (860+818=1678 vs portal_w=1720), so the
+    input pane read as 'permanently shrunk relative to the rest of the window'.
+    """
+
+    def setUp(self) -> None:
+        self._portal_w = portal.PORTAL_W
+        self._input_w = portal.INPUT_PANE_W
+
+    def tearDown(self) -> None:
+        portal.PORTAL_W = self._portal_w
+        portal.INPUT_PANE_W = self._input_w
+
+    # (a) drag-activation threshold — a bare click is a no-op.
+    def test_bare_click_does_not_cross_pane_drag_threshold(self) -> None:
+        # Zero and sub-threshold jitter (incl. the ~6px seen in the field) must
+        # NOT be treated as a resize.
+        self.assertFalse(portal.pane_drag_crosses_threshold(0.0))
+        self.assertFalse(portal.pane_drag_crosses_threshold(6.0))
+        self.assertFalse(portal.pane_drag_crosses_threshold(-6.0))
+        self.assertLess(6.0, portal.PANE_DRAG_START_THRESHOLD_PX)
+
+    def test_deliberate_drag_crosses_pane_drag_threshold(self) -> None:
+        self.assertTrue(portal.pane_drag_crosses_threshold(40.0))
+        self.assertTrue(portal.pane_drag_crosses_threshold(-40.0))
+        # Exactly at the threshold counts as a drag (>=).
+        self.assertTrue(
+            portal.pane_drag_crosses_threshold(portal.PANE_DRAG_START_THRESHOLD_PX)
+        )
+
+    def test_sub_threshold_click_leaves_input_pane_width_bit_identical(self) -> None:
+        # Model the apply-gate: below threshold the caller returns before ever
+        # calling set_input_pane_width, so the width stays byte-for-byte equal.
+        portal.PORTAL_W = 1720.0
+        portal.INPUT_PANE_W = 854.0
+        before = portal.INPUT_PANE_W
+        start_width, dx = before, 6.0
+        if portal.pane_drag_crosses_threshold(dx):
+            portal.set_input_pane_width(start_width + dx)  # pragma: no cover
+        self.assertEqual(portal.INPUT_PANE_W, before)
+        self.assertIs(portal.INPUT_PANE_W, before)
+
+    def test_above_threshold_drag_commits_width(self) -> None:
+        portal.PORTAL_W = 1720.0
+        portal.INPUT_PANE_W = 854.0
+        start_width, dx = portal.INPUT_PANE_W, 40.0
+        if portal.pane_drag_crosses_threshold(dx):
+            portal.set_input_pane_width(start_width + dx)
+        self.assertEqual(portal.INPUT_PANE_W, 894.0)
+
+    # (b) pane-width partition sums exactly to the portal frame.
+    def test_pane_partition_sums_to_portal_width(self) -> None:
+        portal_w = 1720.0
+        for input_w in (240.0, 500.0, 854.0, 860.0, 857.0, 1200.0, 1474.0):
+            input_pane_w, output_pane_w = portal.partition_pane_widths(portal_w, input_w)
+            self.assertEqual(input_pane_w, input_w)
+            self.assertAlmostEqual(
+                input_pane_w + portal.PANE_DIVIDER_W + output_pane_w,
+                portal_w,
+                places=9,
+                msg=f"panes must tile the frame exactly for input_w={input_w}",
+            )
+
+    def test_pane_partition_sums_across_portal_sizes(self) -> None:
+        for portal_w in (960.0, 1280.0, 1720.0, 1920.0, 3840.0):
+            input_w = (portal_w - portal.PANE_DIVIDER_W) / 2.0
+            input_pane_w, output_pane_w = portal.partition_pane_widths(portal_w, input_w)
+            self.assertAlmostEqual(
+                input_pane_w + portal.PANE_DIVIDER_W + output_pane_w,
+                portal_w,
+                places=9,
+            )
+
+    def test_output_pane_width_matches_pane_rect(self) -> None:
+        portal.PORTAL_W = 1720.0
+        portal.INPUT_PANE_W = 860.0
+        # Live output-pane width honours the partition invariant...
+        self.assertAlmostEqual(portal.output_pane_width(), 854.0, places=9)
+        self.assertAlmostEqual(
+            portal.INPUT_PANE_W + portal.PANE_DIVIDER_W + portal.output_pane_width(),
+            portal.PORTAL_W,
+            places=9,
+        )
+        # ...and the output *body* rect is the pane inset by 2*PADDING_X — this
+        # 36px inset (plus the 6px divider) is the '42px' that made 860/818 look
+        # like they failed to sum; it is a render inset, not lost frame width.
+        _, output_rect = portal.portal_pane_rects()
+        self.assertAlmostEqual(
+            output_rect.w, portal.output_pane_width() - portal.PADDING_X * 2.0, places=9
+        )
+
+
 class ComposerInputModeRoutingTests(unittest.TestCase):
     """Headless coverage for composer keyboard-routing wiring (hud-dwcr7).
 
