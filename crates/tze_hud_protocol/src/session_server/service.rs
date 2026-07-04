@@ -89,6 +89,20 @@ pub struct HudSessionImpl {
     pub element_repositioned_tx:
         tokio::sync::broadcast::Sender<crate::proto::ElementRepositionedEvent>,
 
+    /// Broadcast sender for `FramePresented` acknowledgments (hud-91uu6).
+    ///
+    /// Carries batch-correlated present timing: each event pairs the
+    /// MutationBatch.batch_ids composited into a presented frame with that
+    /// frame's number and present wall-clock. The render loop (headless or
+    /// windowed) drains the scene's present-ack queue at frame present and
+    /// sends here via [`Self::broadcast_frame_presented`]. Each session handler
+    /// subscribes and delivers only when the agent is subscribed to
+    /// `TELEMETRY_FRAMES` (which requires the `read_telemetry` capability).
+    ///
+    /// Subscription category: TELEMETRY_FRAMES (requires `read_telemetry`).
+    /// Message class: State-stream (coalesced/droppable under backpressure).
+    pub frame_presented_tx: tokio::sync::broadcast::Sender<crate::proto::FramePresented>,
+
     /// Frozen Windows media-ingress admission config. Defaults disabled.
     pub(super) media_ingress_config: Arc<tze_hud_scene::config::MediaIngressConfig>,
 }
@@ -107,6 +121,8 @@ impl HudSessionImpl {
         let (input_event_tx, _) =
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
         let (element_repositioned_tx, _) =
+            tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
+        let (frame_presented_tx, _) =
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
         Self {
             state: Arc::new(Mutex::new(SharedState {
@@ -132,6 +148,7 @@ impl HudSessionImpl {
             capability_revocation_tx,
             input_event_tx,
             element_repositioned_tx,
+            frame_presented_tx,
             media_ingress_config: Arc::new(tze_hud_scene::config::MediaIngressConfig::default()),
         }
     }
@@ -176,6 +193,8 @@ impl HudSessionImpl {
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
         let (element_repositioned_tx, _) =
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
+        let (frame_presented_tx, _) =
+            tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
         Self {
             state,
             psk: psk.to_string(),
@@ -185,6 +204,7 @@ impl HudSessionImpl {
             capability_revocation_tx,
             input_event_tx,
             element_repositioned_tx,
+            frame_presented_tx,
             media_ingress_config: Arc::new(media_ingress_config),
         }
     }
@@ -303,6 +323,21 @@ impl HudSessionImpl {
         event: crate::proto::ElementRepositionedEvent,
     ) -> usize {
         self.element_repositioned_tx.send(event).unwrap_or_default()
+    }
+
+    /// Broadcast a `FramePresented` acknowledgment to all active sessions
+    /// subscribed to `TELEMETRY_FRAMES` (hud-91uu6).
+    ///
+    /// Called by the render loop once per presented frame that carried one or
+    /// more accepted mutation batches, pairing those `batch_ids` with the
+    /// presented frame number and present wall-clock. Each session handler
+    /// delivers the event only when the agent is subscribed to
+    /// `TELEMETRY_FRAMES` (which requires the `read_telemetry` capability).
+    ///
+    /// Returns the number of active session handlers that received the broadcast
+    /// (0 if no sessions are connected).
+    pub fn broadcast_frame_presented(&self, event: crate::proto::FramePresented) -> usize {
+        self.frame_presented_tx.send(event).unwrap_or_default()
     }
 
     /// Reset an element's user geometry override to the fallback position and

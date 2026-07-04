@@ -424,3 +424,39 @@ message EventBatch {
   uint64                  batch_ts_us  = 2;  // Batch assembly timestamp (wall-clock UTC µs; RFC 0003 §1.1)
   repeated InputEnvelope  events       = 3;  // Ordered by timestamp_mono_us ascending
 }
+
+// ─── Frame-present acknowledgment (batch-correlated present timing) ────────────
+//
+// Correlates one or more MutationBatch.batch_ids to the wall-clock time their
+// composited frame was actually presented on screen. This closes the true
+// mutation-arrival → on-screen-present timing loop: MutationResult (session.proto)
+// acknowledges *acceptance* (scene commit), whereas FramePresented acknowledges
+// *presentation* (Stage 7 GPU submit complete) of the frame that carried those
+// batches. A client that timestamps its MutationBatch send can subtract to derive
+// true present latency (distinct from the transport-RTT proxy).
+//
+// Delivered on ServerMessage field 52 to agents subscribed to TELEMETRY_FRAMES
+// (requires the read_telemetry capability — same gate as RuntimeTelemetryFrame).
+// Message class: State-stream (coalesced/droppable under backpressure; RFC 0005 §3.2).
+// A consumer measuring present latency samples these — it MUST NOT assume every
+// accepted batch yields exactly one FramePresented under sustained backpressure.
+//
+// Direction: server → client only. Agents cannot reject — no response mechanism.
+//
+// Correlation: each entry in batch_ids is the raw 16-byte UUIDv7 SceneId echoed
+// from an accepted MutationBatch.batch_id (RFC 0005 §5.2). One presented frame may
+// carry several batches applied since the previous present, so batch_ids is
+// repeated and frame_number + present_wall_us are shared by all of them.
+message FramePresented {
+  // Compositor frame number that presented these batches (monotonically
+  // increasing; matches EventBatch.frame_number / FrameTelemetry.frame_number).
+  uint64 frame_number    = 1;
+
+  // Wall-clock time (UTC µs since Unix epoch) at which the frame completed
+  // Stage 7 (GPU submit / present). RFC 0003 §1.1 wall-clock domain.
+  uint64 present_wall_us = 2;
+
+  // Raw 16-byte UUIDv7 batch_ids composited into this presented frame, in the
+  // order they were applied to the scene. Echoes MutationBatch.batch_id.
+  repeated bytes batch_ids = 3;
+}

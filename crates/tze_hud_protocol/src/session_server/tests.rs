@@ -9923,6 +9923,151 @@ async fn test_element_repositioned_not_delivered_without_scene_topology_subscrip
     drop(tx); // close stream
 }
 
+// ─── FramePresented tests (hud-91uu6) ────────────────────────────────────
+
+/// Build a service + frame_presented broadcast channel behind a live server.
+async fn setup_test_with_frame_presented_tx() -> (
+    HudSessionClient<tonic::transport::Channel>,
+    tokio::task::JoinHandle<()>,
+    tokio::sync::broadcast::Sender<crate::proto::FramePresented>,
+) {
+    let scene = SceneGraph::new(1920.0, 1080.0);
+    let service = HudSessionImpl::new(scene, "test-key");
+    let frame_presented_tx = service.frame_presented_tx.clone();
+
+    let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let handle = tokio::spawn(async move {
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        tonic::transport::Server::builder()
+            .add_service(HudSessionServer::new(service))
+            .serve_with_incoming(incoming)
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    let client = HudSessionClient::connect(format!("http://[::1]:{}", addr.port()))
+        .await
+        .unwrap();
+
+    (client, handle, frame_presented_tx)
+}
+
+/// Handshake requesting `read_telemetry` and subscribing to `TELEMETRY_FRAMES`.
+/// Returns the client-send half and the server->client stream after draining the
+/// SessionEstablished + SceneSnapshot handshake messages.
+async fn handshake_telemetry(
+    client: &mut HudSessionClient<tonic::transport::Channel>,
+    agent_id: &str,
+    psk: &str,
+    subscribe_telemetry: bool,
+) -> (
+    tokio::sync::mpsc::Sender<ClientMessage>,
+    tonic::Streaming<ServerMessage>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+    let initial_subscriptions = if subscribe_telemetry {
+        vec!["TELEMETRY_FRAMES".to_string()]
+    } else {
+        vec![]
+    };
+    tx.send(ClientMessage {
+        sequence: 1,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(ClientPayload::SessionInit(SessionInit {
+            agent_id: agent_id.to_string(),
+            agent_display_name: agent_id.to_string(),
+            pre_shared_key: psk.to_string(),
+            requested_capabilities: vec!["read_telemetry".to_string()],
+            initial_subscriptions,
+            resume_token: Vec::new(),
+            agent_timestamp_wall_us: now_wall_us(),
+            min_protocol_version: 1000,
+            max_protocol_version: 1001,
+            auth_credential: None,
+        })),
+    })
+    .await
+    .unwrap();
+
+    let mut response_stream = client.session(stream).await.unwrap().into_inner();
+    // Drain SessionEstablished + SceneSnapshot.
+    response_stream.next().await;
+    response_stream.next().await;
+    (tx, response_stream)
+}
+
+fn sample_frame_presented(batch_id: SceneId) -> crate::proto::FramePresented {
+    crate::proto::FramePresented {
+        frame_number: 42,
+        present_wall_us: now_wall_us(),
+        batch_ids: vec![scene_id_to_bytes(batch_id)],
+    }
+}
+
+/// GIVEN agent subscribed to TELEMETRY_FRAMES (holds read_telemetry)
+/// WHEN a FramePresented is broadcast
+/// THEN the agent receives it with the correlated batch_id
+#[tokio::test]
+async fn test_frame_presented_delivered_to_telemetry_subscriber() {
+    let (mut client, _server, frame_presented_tx) = setup_test_with_frame_presented_tx().await;
+    let (_tx, mut stream) =
+        handshake_telemetry(&mut client, "telemetry-agent", "test-key", true).await;
+
+    // Let the session handler finish subscribing to the broadcast channel.
+    tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+
+    let batch_id = SceneId::new();
+    let _ = frame_presented_tx.send(sample_frame_presented(batch_id));
+
+    let msg = tokio::time::timeout(tokio::time::Duration::from_millis(500), stream.next())
+        .await
+        .expect("timed out waiting for FramePresented")
+        .expect("stream should not close")
+        .expect("should not error");
+
+    match msg.payload {
+        Some(ServerPayload::FramePresented(event)) => {
+            assert_eq!(
+                event.batch_ids,
+                vec![scene_id_to_bytes(batch_id)],
+                "present ack must carry the correlated batch_id"
+            );
+            assert_eq!(event.frame_number, 42);
+            assert!(event.present_wall_us > 0);
+        }
+        other => panic!("expected FramePresented, got {other:?}"),
+    }
+}
+
+/// GIVEN agent NOT subscribed to TELEMETRY_FRAMES
+/// WHEN a FramePresented is broadcast
+/// THEN the agent does not receive it (telemetry gate)
+#[tokio::test]
+async fn test_frame_presented_not_delivered_without_telemetry_subscription() {
+    let (mut client, _server, frame_presented_tx) = setup_test_with_frame_presented_tx().await;
+    let (tx, mut stream) =
+        handshake_telemetry(&mut client, "no-telemetry-agent", "test-key", false).await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+
+    let _ = frame_presented_tx.send(sample_frame_presented(SceneId::new()));
+
+    let result = tokio::time::timeout(tokio::time::Duration::from_millis(200), stream.next()).await;
+    // Timeout = no delivery = correct. If any message arrives it must not be a
+    // FramePresented (Heartbeat etc. are allowed).
+    if let Ok(Some(Ok(msg))) = result {
+        if let Some(ServerPayload::FramePresented(_)) = msg.payload {
+            panic!("FramePresented must NOT be delivered without TELEMETRY_FRAMES subscription");
+        }
+    }
+    drop(tx);
+}
+
 /// GIVEN element with override and known agent tile bounds
 /// WHEN the element store override is cleared and event is broadcast
 /// THEN event carries previous_geometry=old_override and new_geometry=fallback

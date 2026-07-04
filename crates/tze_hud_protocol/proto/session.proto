@@ -217,6 +217,14 @@ message ServerMessage {
     // Message class: Transactional (never coalesced or dropped).
     tze_hud.protocol.v1.ElementRepositionedEvent element_repositioned = 51;
 
+    // Frame-present acknowledgment (defined in events.proto) — correlates
+    // accepted MutationBatch.batch_ids to the wall-clock time their composited
+    // frame presented (Stage 7 complete). Enables true mutation-arrival →
+    // on-screen-present latency measurement.
+    // Subscription: TELEMETRY_FRAMES (requires read_telemetry capability).
+    // Message class: State-stream (coalesced/droppable under backpressure).
+    tze_hud.protocol.v1.FramePresented frame_presented = 52;
+
     // ── Media signaling (RFC 0014 §2.2.2; RFC 0005 Amendment A1 erratum) ────
     // Field range 60–79 (v2 phase 1 media plane). CRITICAL: RFC 0005 Amendment A1
     // originally allocated these at 50–52, but fields 50–51 were concurrently
