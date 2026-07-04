@@ -1411,7 +1411,14 @@ impl Compositor {
                         let markdown_cache = self.markdown_cache();
                         if let Some(key) = self.node_key_cache.get(&node_id) {
                             if let Some(parsed) = markdown_cache.get_by_key(key) {
-                                let line_height = tm.font_size_px * 1.4;
+                                // Match the portal-resize-scaled font the text
+                                // glyphs are laid out with (hud-6n9iv): at the
+                                // default scale this is byte-identical to
+                                // `tm.font_size_px`, but under a whole-portal
+                                // resize the panel tracks the scaled line pitch
+                                // instead of drifting from the code it backs.
+                                let line_height =
+                                    self.scaled_portal_font(tm.font_size_px, tile.id, scene) * 1.4;
                                 let panel_margin_x = 4.0_f32;
                                 let panel_pad_y = 2.0_f32;
                                 let plain = parsed.plain_text.as_ref();
@@ -1473,7 +1480,15 @@ impl Compositor {
                         let markdown_cache = self.markdown_cache();
                         if let Some(key) = self.node_key_cache.get(&node_id) {
                             if let Some(parsed) = markdown_cache.get_by_key(key) {
-                                let line_height = tm.font_size_px * 1.4;
+                                // Match the portal-resize-scaled font the text
+                                // glyphs use so the divider stays glued to the
+                                // entries it separates (hud-6n9iv). No-op at the
+                                // default scale (scaled_portal_font returns the
+                                // base font unchanged); under a whole-portal
+                                // resize the divider tracks the scaled line pitch
+                                // instead of detaching further down the transcript.
+                                let line_height =
+                                    self.scaled_portal_font(tm.font_size_px, tile.id, scene) * 1.4;
                                 let thickness =
                                     self.markdown_tokens.separator_thickness_px.max(1.0);
                                 let divider_color = self.gpu_color(Rgba {
