@@ -52,17 +52,18 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
 
     def test_input_history_fit_keeps_newest_entries_that_fit(self) -> None:
         entries = ["one", "two", "three", "four"]
-        # avail 6 lines → budget 5 (1 slack reserved): 'four'(1) +
-        # padded divider+'three'(3+1) fit; older dropped.
-        body, block_h = portal.input_history_fit(entries, 6 * portal.COMPOSER_LINE_PX, 500.0)
+        # avail 5 lines → budget 4 (1 slack reserved): 'four'(1) +
+        # boundary+'three'(1+1) fit (3 used); boundary+'two' would need 5.
+        body, block_h = portal.input_history_fit(entries, 5 * portal.COMPOSER_LINE_PX, 500.0)
         self.assertEqual(body, "three\n\n---\n\nfour")
-        self.assertEqual(block_h, 6 * portal.COMPOSER_LINE_PX + portal.INPUT_HISTORY_GAP)
+        self.assertEqual(block_h, 4 * portal.COMPOSER_LINE_PX + portal.INPUT_HISTORY_GAP)
 
     def test_input_history_fit_multiline_entry_costs_its_lines(self) -> None:
         entries = ["old", "line one\nline two"]
-        # avail 3 → budget 2: only the newest 2-line entry fits.
+        # avail 3 → budget 2: only the newest 2-line entry fits; its internal
+        # newline becomes a markdown hard break so it renders as two lines.
         body, _ = portal.input_history_fit(entries, 3 * portal.COMPOSER_LINE_PX, 500.0)
-        self.assertEqual(body, "line one\nline two")
+        self.assertEqual(body, "line one  \nline two")
 
     def test_input_history_fit_wrap_aware_long_line_costs_wrapped_lines(self) -> None:
         wrap_w = 20 * portal.COMPOSER_WRAP_CHAR_W  # ~20 chars per line

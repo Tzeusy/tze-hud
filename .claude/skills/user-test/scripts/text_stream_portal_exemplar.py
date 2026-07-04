@@ -1435,22 +1435,28 @@ def input_history_fit(
     (oldest-first among kept entries) and ``block_h`` is the vertical space it
     consumes including the gap below it (0.0 when nothing fits/exists).
     Wrap-aware: long lines cost their wrapped line count. Entries join with a
-    blank-line-padded divider (`\\n\\n---\\n\\n`, 3 lines) so adjacent turns
-    get breathing room, and one slack line pads the block so the bottom line
-    never clips into tail-ellipsis truncation. Epsilon guards float artifacts
-    (3 * 22.4 = 67.1999…).
+    blank-line-padded divider for breathing room, but the markdown renderer
+    collapses the blank lines into paragraph margins and draws the rule thin —
+    the whole boundary renders ≈1 line, so it is COSTED at 1 line (costing it
+    at 3 accumulated ~2 phantom lines per entry between history and caret,
+    round-6). Intra-entry newlines become markdown hard breaks (`  \\n`) so
+    Shift+Enter lines render as real lines. One slack line pads the block so
+    the bottom line never clips into tail-ellipsis truncation. Epsilon guards
+    float artifacts (3 * 22.4 = 67.1999…).
     """
     # Reserve the slack line up front so it never eats into the composer.
     budget = max(0, int(avail_h / COMPOSER_LINE_PX + 1e-6) - 1)
     kept: list[str] = []
     used = 0
     for entry in reversed([e for e in entries if e.strip()]):
-        cost = _wrapped_line_estimate(entry, wrap_w) + (3 if kept else 0)
+        cost = _wrapped_line_estimate(entry, wrap_w) + (1 if kept else 0)
         if used + cost > budget:
             break
         kept.append(entry)
         used += cost
-    body = f"\n\n{TRANSCRIPT_ENTRY_SEPARATOR}\n\n".join(reversed(kept))
+    body = f"\n\n{TRANSCRIPT_ENTRY_SEPARATOR}\n\n".join(
+        entry.replace("\n", "  \n") for entry in reversed(kept)
+    )
     if not body:
         return "", 0.0
     return body, (used + 1) * COMPOSER_LINE_PX + INPUT_HISTORY_GAP
