@@ -184,7 +184,7 @@ closeout report filed.*
 |---|---|
 | Artifact signing (cosign/gpg) | Explicitly optional/deferred for v1 in `release-provenance/proposal.md`; no key infrastructure yet. Not a bead. |
 | Headless smoke-boot of packaged exe (`release-provenance` task 3.3) | Marked optional; depends on feasibility of headless Windows exe execution in CI. |
-| Evidence-log host-IP hygiene | `docs/evidence/text-stream-portals/vmvalidate-20260704/*` records the disposable autonomous IaC test-VM address (`192.168.4.45`, sentinel Proxmox lab host), not the scrubbed production tailnet host. Out of scope for the D5 P0 scrub (which targeted the production host/user/key); noted only for future evidence-capture redaction hygiene. |
+| Evidence-log host-IP hygiene | `docs/evidence/text-stream-portals/vmvalidate-20260704/*` records the disposable autonomous IaC test-VM address (`192.0.2.45`, sentinel Proxmox lab host), not the scrubbed production tailnet host. Out of scope for the D5 P0 scrub (which targeted the production host/user/key); noted only for future evidence-capture redaction hygiene. |
 
 None of these introduce a time-bounded residual-risk window; unlike sibling epic
 hud-1aswu (owner-deferred F2 to 2026-09-12), this epic carries no analogous deferral.
