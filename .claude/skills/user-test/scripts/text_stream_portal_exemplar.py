@@ -1395,71 +1395,85 @@ def portal_pane_rects() -> tuple[PaneRect, PaneRect]:
     return input_composer, output_body
 
 
-# Max height of the composer box; the rest of the input pane below it renders
-# the viewer's own submitted-entry history (hud-egf39 split-history layout).
-COMPOSER_BOX_MAX_H = 320.0
+# Unified input window (hud-egf39, owner round-6 revision): the input pane is
+# ONE visual window — submitted-entry history renders at the TOP and the
+# composer region slides DOWN beneath it, so the caret naturally flows
+# downward as history builds. The composer never shrinks below this height.
+COMPOSER_MIN_H = 200.0
 INPUT_HISTORY_GAP = 18.0
 
 
-def input_composer_local_rect() -> PaneRect:
-    """Return the visible composer box relative to the enlarged input tile."""
+def _input_pane_content_box() -> PaneRect:
+    """Usable input-pane content box (input-tile local), pre-split."""
     input_tile, _ = portal_pane_rects()
     pane_y = HEADER_H + DIVIDER_H
     pane_h = PORTAL_H - pane_y - FOOTER_H - DIVIDER_H
     composer_inset = 14.0
-    composer_x = composer_inset
-    composer_y = pane_y + 40.0
-    composer_w = INPUT_PANE_W - composer_inset * 2.0
-    composer_h = min(pane_h - 40.0 - 44.0, COMPOSER_BOX_MAX_H)
     return PaneRect(
-        composer_x - input_tile.x,
-        composer_y - input_tile.y,
-        composer_w,
-        composer_h,
+        composer_inset - input_tile.x,
+        (pane_y + 40.0) - input_tile.y,
+        INPUT_PANE_W - composer_inset * 2.0,
+        pane_h - 40.0 - 44.0,
     )
 
 
-def input_history_local_rect() -> PaneRect:
-    """Return the input-history area below the composer box (input-tile local).
+def _wrapped_line_estimate(entry: str, wrap_w: float) -> int:
+    """Estimate rendered line count for an entry at the pane wrap width."""
+    chars_per_line = max(1, int(wrap_w / COMPOSER_WRAP_CHAR_W))
+    total = 0
+    for line in entry.splitlines() or [""]:
+        total += max(1, (len(line) + chars_per_line - 1) // chars_per_line)
+    return total
 
-    Height 0 when the pane is too short to show history under the composer.
+
+def input_history_fit(
+    entries: list[str], avail_h: float, wrap_w: float
+) -> tuple[str, float]:
+    """Newest-fit tail window of history entries for the given height budget.
+
+    Returns ``(body, block_h)`` where ``body`` is the divider-joined history
+    (oldest-first among kept entries) and ``block_h`` is the vertical space it
+    consumes including the gap below it (0.0 when nothing fits/exists).
+    Wrap-aware: long lines cost their wrapped line count, and each divider
+    costs one line. Epsilon guards float artifacts (3 * 22.4 = 67.1999…).
     """
-    input_tile, _ = portal_pane_rects()
-    composer = input_composer_local_rect()
-    pane_y = HEADER_H + DIVIDER_H
-    pane_h = PORTAL_H - pane_y - FOOTER_H - DIVIDER_H
-    pane_bottom_local = (pane_y - input_tile.y) + pane_h - 44.0
-    history_y = composer.y + composer.h + INPUT_HISTORY_GAP
-    return PaneRect(
-        composer.x,
-        history_y,
-        composer.w,
-        max(0.0, pane_bottom_local - history_y),
-    )
-
-
-def input_history_tail_body(
-    entries: list[str], viewport_h: float, line_px: float
-) -> str:
-    """Join the most recent input-history entries that fit the viewport.
-
-    Newest entries win (chat-grade recency); each entry costs its own lines
-    plus one divider line between entries. Returns the divider-joined body
-    (oldest-first among the kept entries). No scroll interplay by design —
-    the input tile is not a second scroll surface (hud-egf39).
-    """
-    # Epsilon guards float artifacts (3 * 22.4 = 67.1999… must budget 3 lines).
-    budget = max(0, int(viewport_h / line_px + 1e-6)) if line_px > 0 else 0
+    budget = max(0, int(avail_h / COMPOSER_LINE_PX + 1e-6))
     kept: list[str] = []
     used = 0
     for entry in reversed([e for e in entries if e.strip()]):
-        lines = len(entry.splitlines())
-        cost = lines + (1 if kept else 0)
+        cost = _wrapped_line_estimate(entry, wrap_w) + (1 if kept else 0)
         if used + cost > budget:
             break
         kept.append(entry)
         used += cost
-    return join_transcript_entries(list(reversed(kept)))
+    body = join_transcript_entries(list(reversed(kept)))
+    if not body:
+        return "", 0.0
+    return body, used * COMPOSER_LINE_PX + INPUT_HISTORY_GAP
+
+
+def _input_history_split() -> tuple[str, float, PaneRect]:
+    """Compute (history_body, history_block_h, content_box) once."""
+    box = _input_pane_content_box()
+    text_wrap_w = max(1.0, box.w - 24.0)
+    body, block_h = input_history_fit(
+        INPUT_HISTORY_ENTRIES,
+        max(0.0, box.h - COMPOSER_MIN_H - INPUT_HISTORY_GAP),
+        text_wrap_w,
+    )
+    return body, block_h, box
+
+
+def input_composer_local_rect() -> PaneRect:
+    """Composer box (input-tile local): sits below the accumulated history."""
+    _, block_h, box = _input_history_split()
+    return PaneRect(box.x, box.y + block_h, box.w, box.h - block_h)
+
+
+def input_history_local_rect() -> PaneRect:
+    """Input-history area (input-tile local): top of the pane, above composer."""
+    _, block_h, box = _input_history_split()
+    return PaneRect(box.x, box.y, box.w, max(0.0, block_h - INPUT_HISTORY_GAP))
 
 
 def scroll_max_y_for_text(content: str, viewport_h: float, line_px: float) -> float:
@@ -1768,16 +1782,14 @@ def build_input_history_node(
     *,
     node_id: Optional[bytes] = None,
 ) -> types_pb2.NodeProto:
-    """Viewer-submitted entry history below the composer (hud-egf39).
+    """Viewer-submitted entry history at the TOP of the input pane (hud-egf39).
 
-    Renders the tail window of [`INPUT_HISTORY_ENTRIES`] joined with `---`
-    turn dividers so the compositor draws token-styled separators between the
-    viewer's own entries.
+    Renders the newest-fit tail window of [`INPUT_HISTORY_ENTRIES`] joined
+    with `---` turn dividers; the composer region sits directly beneath it so
+    the caret flows downward as history builds (unified input window).
     """
+    body, _, _ = _input_history_split()
     history_rect = input_history_local_rect()
-    body = input_history_tail_body(
-        INPUT_HISTORY_ENTRIES, history_rect.h, SCROLL_LINE_PX,
-    )
     return make_text_node(
         body,
         history_rect.x,
@@ -2167,22 +2179,64 @@ async def set_input_root_with_runtime_ids(
         await mount()
 
 
-async def update_input_history_live(
+async def relayout_input_pane_live(
     client: HudClient,
     lease_id: bytes,
     tile_id: bytes,
+    composer_text: str,
+    composer_cursor: int,
+    *,
+    focused: bool,
+    caret_visible: bool,
     mutation_lock: Optional[asyncio.Lock] = None,
 ) -> bool:
-    """Swap the INPUT-pane history text node in place (hud-egf39).
+    """Re-issue the unified input window in ONE atomic batch (hud-egf39).
 
-    Returns ``False`` when the history node id has not been captured yet
-    (caller falls back to a full input-tile remount).
+    History block, composer clear background, composer hit region (the runtime
+    anchors its own draft render to this region, so moving it moves the
+    caret/draft down past the history), line nodes, and caret — all swapped in
+    place so the geometry shift never flashes. Returns ``False`` when node ids
+    are not captured yet (caller falls back to a full input-tile remount).
     """
-    history_node_id = COMPOSER_RUNTIME_NODE_IDS.get("history")
-    if history_node_id is None:
+    history_id = COMPOSER_RUNTIME_NODE_IDS.get("history")
+    clear_id = COMPOSER_RUNTIME_NODE_IDS.get("clear_bg")
+    hit_id = COMPOSER_RUNTIME_NODE_IDS.get("hit")
+    caret_id = COMPOSER_RUNTIME_NODE_IDS.get("caret")
+    line_ids = composer_runtime_line_node_ids()
+    if (
+        history_id is None or clear_id is None or hit_id is None
+        or caret_id is None or line_ids is None
+    ):
         return False
-    history_node = build_input_history_node()
-    mutations = [update_node_content_mutation(tile_id, history_node_id, history_node)]
+    composer_rect = input_composer_local_rect()
+    line_nodes, line_window = build_composer_line_nodes(
+        composer_text, composer_cursor, focused=focused,
+    )
+    caret_node = build_composer_caret_node(
+        composer_text,
+        composer_cursor,
+        focused=focused,
+        caret_visible=caret_visible,
+        visible_start_row=line_window.start_row,
+        node_id=caret_id,
+    )
+    mutations = [
+        update_node_content_mutation(
+            tile_id, history_id, build_input_history_node(node_id=history_id),
+        ),
+        update_node_content_mutation(
+            tile_id, clear_id, build_composer_clear_node(node_id=clear_id),
+        ),
+        update_node_content_mutation(
+            tile_id, hit_id, make_hit_region(
+                COMPOSER_INTERACTION_ID,
+                composer_rect.x, composer_rect.y, composer_rect.w, composer_rect.h,
+                accepts_composer_input=True,
+                node_id=hit_id,
+            ),
+        ),
+        *composer_update_mutations(tile_id, line_ids, caret_id, line_nodes, caret_node),
+    ]
 
     async def update() -> None:
         await client.submit_mutation_batch(lease_id, mutations, timeout=2.0)
@@ -3644,13 +3698,19 @@ async def portal_interaction_loop(
                 "action": "runtime-owned draft submitted; composer clears",
                 "expected_visual": "composer clears after submit",
             }, submitted=text)
-            # Split-history layout (hud-egf39, owner decision round-6): viewer
-            # submissions live in the INPUT pane below the composer; the
-            # OUTPUT pane stays agent-authored only. In-place node swap so the
-            # composer/caret nodes are untouched (no teardown flash).
+            # Unified input window (hud-egf39, owner round-6 revision): the
+            # submitted entry joins the history block at the TOP of the input
+            # pane and the composer region slides DOWN beneath it, so the
+            # caret flows downward as history builds. One atomic relayout —
+            # history + clear_bg + hit region (runtime draft render anchors to
+            # it) + lines + caret — no teardown flash.
             INPUT_HISTORY_ENTRIES.append(submitted)
-            updated_in_place = await update_input_history_live(
-                client, lease_id, tiles.input_scroll, mutation_lock,
+            updated_in_place = await relayout_input_pane_live(
+                client, lease_id, tiles.input_scroll,
+                "", 0,
+                focused=composer_focused,
+                caret_visible=composer_focused,
+                mutation_lock=mutation_lock,
             )
             if not updated_in_place:
                 await set_input_root_with_runtime_ids(
@@ -3658,9 +3718,9 @@ async def portal_interaction_loop(
                 )
             emit_step_event(transcript, 10, "checkpoint", {
                 "code": "echo:appended",
-                "title": "Viewer entry appended to input history",
-                "action": "submitted draft appended to INPUT-pane history below the composer",
-                "expected_visual": "submitted text stacks under the composer with a divider between entries",
+                "title": "Viewer entry appended to unified input window",
+                "action": "entry joined the history block; composer region slid down beneath it",
+                "expected_visual": "submitted text stacks above the caret; caret moves down past a divider",
             }, entry_len=len(submitted), entries=len(INPUT_HISTORY_ENTRIES),
                in_place=updated_in_place)
         composer_text = ""
