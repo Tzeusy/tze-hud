@@ -14844,3 +14844,104 @@ async fn test_portal_reveal_single_node_append_still_reveals() {
         "the reveal must fade only the appended suffix (start at the common prefix)"
     );
 }
+
+/// hud-g8xpg (review follow-up, red-first): when a portal tile carries two
+/// eligible markdown nodes with the SAME plain-text and only one of them is
+/// revealing, the fade must route by node identity — the settled sibling with
+/// identical text must stay fully opaque, not inherit the revealing node's
+/// partial-alpha suffix.
+///
+/// Regression for the tile-wide, plain-text-matched reveal post-pass:
+/// `apply_portal_reveal_fade` guarded solely on `item.text == reveal.plain_text`,
+/// so a reveal anchored to one node dimmed EVERY same-text `TextItem` in the tile
+/// (and, with two same-text reveals in flight, which fade won was
+/// non-deterministic in `HashMap` iteration order). Routing the fade by
+/// `(tile, node)` at collection time fixes both.
+#[tokio::test]
+async fn test_portal_reveal_identical_text_nodes_do_not_cross_fade() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+
+    let mut scene = SceneGraph::new(256.0, 256.0);
+    let (tile_id, root_id) = portal_reveal_tile(&mut scene);
+
+    // settled node already shows "ok"; grow node will grow "o" -> "ok" so it
+    // reveals while ending up with the SAME plain-text as the settled node.
+    let settled_id = portal_reveal_add_md(&mut scene, tile_id, root_id, "ok", Box::default(), 0.0);
+    let grow_id = portal_reveal_add_md(&mut scene, tile_id, root_id, "o", Box::default(), 24.0);
+
+    // Frame 1: both settled.
+    compositor.prime_markdown_cache(&scene);
+    compositor.update_portal_tile_reveals(&scene);
+
+    // Frame 2: grow node "o" -> "ok" (now identical plain-text to the settled node).
+    scene
+        .update_node_content(
+            tile_id,
+            grow_id,
+            portal_reveal_md_data("ok", Box::default(), 24.0),
+        )
+        .unwrap();
+    compositor.prime_markdown_cache(&scene);
+    compositor.update_portal_tile_reveals(&scene);
+
+    // Precondition: only the grown node is revealing; both track "ok".
+    assert!(
+        !compositor
+            .portal_tile_reveal_states
+            .get(&(tile_id, settled_id))
+            .expect("settled node state")
+            .is_revealing(),
+        "settled sibling must not be revealing"
+    );
+    assert!(
+        compositor
+            .portal_tile_reveal_states
+            .get(&(tile_id, grow_id))
+            .expect("grown node state")
+            .is_revealing(),
+        "grown node must be revealing"
+    );
+
+    // Render: collecting text items applies the reveal fade.
+    let items = compositor.collect_text_items(&scene, 256.0, 256.0);
+    let ok_items: Vec<&crate::text::TextItem> =
+        items.iter().filter(|it| it.text.as_ref() == "ok").collect();
+    assert_eq!(
+        ok_items.len(),
+        2,
+        "expected one TextItem per 'ok' node, got {}",
+        ok_items.len()
+    );
+
+    // The settled node sits at top=0, the grown node at top=24; route by pixel_y.
+    let settled_item = ok_items
+        .iter()
+        .min_by(|a, b| a.pixel_y.total_cmp(&b.pixel_y))
+        .unwrap();
+    let grown_item = ok_items
+        .iter()
+        .max_by(|a, b| a.pixel_y.total_cmp(&b.pixel_y))
+        .unwrap();
+
+    let min_run_alpha = |it: &crate::text::TextItem| -> u8 {
+        it.styled_runs
+            .iter()
+            .filter_map(|r| r.color.map(|c| c[3]))
+            .min()
+            .unwrap_or(255)
+    };
+
+    // The settled sibling must be fully opaque — it must NOT inherit the grown
+    // node's fade just because it lays out the same "ok" text.
+    assert_eq!(
+        min_run_alpha(settled_item),
+        255,
+        "settled same-text sibling must stay fully opaque, not cross-fade"
+    );
+
+    // The grown node must still fade its appended suffix (reveal not disabled).
+    assert!(
+        min_run_alpha(grown_item) < 255,
+        "the grown node's appended suffix must fade in"
+    );
+}
