@@ -1946,11 +1946,24 @@ impl InProcessPortalDriver {
         // flag is one-shot (set on the disconnect transition, cleared here and on
         // any normal render / reconnect), so an idle degraded tile is not
         // re-rendered every drain.
+        //
+        // Bridged projections are admitted too (hud-vne15): a bridged projection is
+        // materialised solely over the resident gRPC bridge and has no in-process
+        // tile (`tile_scene_id.is_none()`), so the tile-only filter would exclude it
+        // and its degraded state would never be forwarded to the bridge on a pure
+        // drop — the remote portal would keep its live paint. Admit an entry when it
+        // has a tile OR is bridged; the loop tees the degraded state for the bridged
+        // case and repaints the tile for the in-process case. The in-process-without-
+        // tile case stays excluded (nothing to dim), so that path is unchanged.
         let degraded_repaint_ids: Vec<String> = self
             .drive
             .entries
             .iter()
-            .filter(|(_, e)| e.needs_degraded_repaint && e.tile_scene_id.is_some())
+            .filter(|(id, e)| {
+                e.needs_degraded_repaint
+                    && (e.tile_scene_id.is_some()
+                        || self.effective_transport(id) == PortalTransport::ResidentGrpcBridge)
+            })
             .map(|(id, _)| id.clone())
             .collect();
         for proj_id in degraded_repaint_ids {
@@ -1961,15 +1974,20 @@ impl InProcessPortalDriver {
                 self.detach_projection(&proj_id);
                 continue;
             };
-            // Per-projection transport routing (hud-g7ool): a bridged projection's
-            // degraded state is forwarded over the bridge and its in-process
-            // repaint suppressed, mirroring the due-loop rule (tee iff bridged).
-            // NOTE: a bridged projection has no in-process tile, so it is excluded
-            // by the `tile_scene_id.is_some()` filter above and does not currently
-            // reach this pass — propagating degraded state to the bridge on a pure
-            // drop is tracked as a follow-up. The gate keeps the invariant explicit
-            // and correct for the in-process path (which is never teed).
+            // Per-projection transport routing (hud-g7ool / hud-vne15): a bridged
+            // projection's degraded state is forwarded over the bridge and its
+            // in-process repaint suppressed, mirroring the due-loop rule (tee iff
+            // bridged). A bridged projection has no in-process tile, so it now enters
+            // this pass via the tile-OR-bridged filter above; forwarding the degraded
+            // `ProjectedPortalState` as a `Publish` makes the remote portal reflect
+            // the degraded treatment (the bridge materialises whatever state carries
+            // `connection_degraded`). Clear the one-shot flag here: the in-process arm
+            // below is what clears it for the tiled path, so without this a tile-less
+            // bridged entry would re-tee a `Publish` every drain.
             if self.effective_transport(&proj_id) == PortalTransport::ResidentGrpcBridge {
+                if let Some(entry) = self.drive.entries.get_mut(&proj_id) {
+                    entry.needs_degraded_repaint = false;
+                }
                 if let Some(tx) = &self.resident_grpc_bridge_tx {
                     let _ = tx.try_send(BridgeMessage::Publish {
                         projection_id: proj_id.clone(),
@@ -5448,6 +5466,115 @@ mod tests {
         assert!(
             saw_detach,
             "detaching a bridged projection must emit a Detach tombstone to the bridge"
+        );
+    }
+
+    /// hud-vne15: a pure upstream drop of a BRIDGED projection must forward its
+    /// degraded state to the resident gRPC bridge, so the remote portal dims like
+    /// an in-process portal would.
+    ///
+    /// A bridged projection has no in-process tile (`tile_scene_id.is_none()`), so
+    /// before the fix it was excluded by the degraded-repaint pass's
+    /// `tile_scene_id.is_some()` filter and its degraded state was never teed —
+    /// the remote portal kept its live paint. The tile-OR-bridged filter now admits
+    /// it and the pass forwards a `Publish` carrying `connection_degraded = true`.
+    #[test]
+    fn bridged_projection_pure_drop_forwards_degraded_state_to_bridge() {
+        let mut driver = InProcessPortalDriver::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<BridgeMessage>(16);
+        driver.set_resident_grpc_bridge_tx(Some(tx));
+
+        let proj = "proj-bridged-drop";
+        let token = attach_and_get_token(&mut driver, proj);
+        driver.attach_projection(proj, Vec::new());
+        driver.set_projection_transport(proj, PortalTransport::ResidentGrpcBridge);
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        // Materialise once over the bridge (live), then drain that Publish so the
+        // channel only carries post-drop traffic below.
+        publish(&mut driver, proj, &token, "bridged line", 100);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+        while rx.try_recv().is_ok() {}
+
+        // This is precisely the excluded case: a bridged projection has no
+        // in-process tile, yet a pure drop flags it for a degraded repaint.
+        assert!(
+            driver
+                .drive
+                .entries
+                .get(proj)
+                .unwrap()
+                .tile_scene_id
+                .is_none(),
+            "a bridged projection must have no in-process tile"
+        );
+        assert!(
+            driver.mark_projection_disconnected_at(proj, 9_000),
+            "a pure drop must latch the bridged entry disconnected"
+        );
+        assert!(
+            driver
+                .drive
+                .entries
+                .get(proj)
+                .unwrap()
+                .needs_degraded_repaint,
+            "the drop must flag the bridged entry for a forced degraded repaint"
+        );
+
+        let version_before_drop_drain = scene.version;
+
+        // Drain with no new publish: the degraded-repaint pass must forward the
+        // degraded state to the bridge (not repaint an absent in-process tile).
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 10_000);
+
+        let mut degraded_publishes = 0;
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                BridgeMessage::Publish {
+                    projection_id,
+                    state,
+                } => {
+                    assert_eq!(projection_id, proj, "unexpected projection id in tee");
+                    assert!(
+                        state.connection_degraded,
+                        "the forwarded state must carry connection_degraded = true \
+                         so the remote portal dims"
+                    );
+                    degraded_publishes += 1;
+                }
+                other => panic!("unexpected bridge message on a pure drop: {other:?}"),
+            }
+        }
+        assert_eq!(
+            degraded_publishes, 1,
+            "a bridged pure drop must forward exactly one degraded Publish to the bridge"
+        );
+
+        // The in-process scene is untouched (bridged path never paints a tile).
+        assert_eq!(
+            scene.version, version_before_drop_drain,
+            "a bridged projection's degraded drain must not mutate the in-process scene"
+        );
+
+        // One-shot: the flag is consumed so an idle degraded bridged entry is not
+        // re-teed on every subsequent drain.
+        assert!(
+            !driver
+                .drive
+                .entries
+                .get(proj)
+                .unwrap()
+                .needs_degraded_repaint,
+            "the forwarded degraded state must clear the one-shot flag"
+        );
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 11_000);
+        assert!(
+            rx.try_recv().is_err(),
+            "an idle degraded bridged entry must not be re-teed on the next drain"
         );
     }
 
