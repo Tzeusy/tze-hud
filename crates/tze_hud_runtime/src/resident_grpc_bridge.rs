@@ -92,6 +92,11 @@ pub const INPUT_CAPABILITY: &str = "access_input_events";
 ///   from the replay set, so a bridged projection cannot leave a STALE remote
 ///   portal after its in-process cleanup — and a later reconnect does not
 ///   resurrect it.
+/// - [`BridgeMessage::SetVisualTokens`] carries re-resolved
+///   [`PortalVisualTokens`] after a design-token / profile hot-reload, so a
+///   bridged portal re-renders with the new active-profile tokens on its next
+///   publish — parity with the in-process adapters, which receive
+///   `set_visual_tokens` from the driver's `apply_token_map` (hud-fm0nf).
 #[derive(Debug)]
 pub enum BridgeMessage {
     /// Render `state` for `projection_id` over the bridge.
@@ -108,6 +113,13 @@ pub enum BridgeMessage {
         /// Authority projection id whose remote portal must be released.
         projection_id: String,
     },
+    /// Swap the resolved visual tokens applied to every (current and future)
+    /// projection adapter after a design-token / profile hot-reload (hud-fm0nf).
+    ///
+    /// Boxed for the same reason as `Publish`: a [`PortalVisualTokens`] is large
+    /// (~224 B) relative to the `Detach` variant, so an unboxed field would bloat
+    /// every queued message in the bounded channel.
+    SetVisualTokens(Box<PortalVisualTokens>),
 }
 
 /// A composer input event received *inbound* over the bridge stream, destined
@@ -659,6 +671,22 @@ impl ResidentGrpcPortalBridge {
         Ok(())
     }
 
+    /// Swap the resolved visual tokens applied to the bridge's projections after
+    /// a design-token / profile hot-reload (hud-fm0nf).
+    ///
+    /// Updates the stored tokens so any future adapter built by `ensure_projection`
+    /// inherits them, AND re-skins every already-created adapter so its next
+    /// render uses the new palette — parity with the in-process driver's
+    /// `apply_token_map`, which likewise updates its stored tokens and calls
+    /// `set_visual_tokens` on every live adapter. The remote tile re-renders on the
+    /// next publish (no forced repaint here, matching the in-process path).
+    fn set_visual_tokens(&mut self, tokens: PortalVisualTokens) {
+        self.visual_tokens = tokens;
+        for adapter in self.adapters.values_mut() {
+            adapter.set_visual_tokens(self.visual_tokens.clone());
+        }
+    }
+
     /// Acquire a capability-scoped lease for `projection_id` and construct its
     /// adapter, if not already present.
     async fn ensure_projection(
@@ -1001,6 +1029,10 @@ trait ResidentPortalTransport: Sized {
         &mut self,
     ) -> impl std::future::Future<Output = Result<(), ResidentGrpcBridgeError>> + Send;
 
+    /// Swap the resolved visual tokens applied to every projection adapter after
+    /// a design-token / profile hot-reload (hud-fm0nf).
+    fn set_visual_tokens(&mut self, tokens: PortalVisualTokens);
+
     /// Cleanly tear down the transport.
     fn shutdown(self) -> impl std::future::Future<Output = ()> + Send;
 }
@@ -1040,6 +1072,10 @@ impl ResidentPortalTransport for ResidentGrpcPortalBridge {
         &mut self,
     ) -> impl std::future::Future<Output = Result<(), ResidentGrpcBridgeError>> + Send {
         ResidentGrpcPortalBridge::poll_inbound_input(self)
+    }
+
+    fn set_visual_tokens(&mut self, tokens: PortalVisualTokens) {
+        ResidentGrpcPortalBridge::set_visual_tokens(self, tokens)
     }
 
     fn shutdown(self) -> impl std::future::Future<Output = ()> + Send {
@@ -1094,6 +1130,12 @@ async fn run_bridge_loop<T, C, Fut>(
     // Last-known state per projection, replayed after a reconnect so the portal
     // re-materialises without waiting for the next upstream update.
     let mut last_state: HashMap<String, ProjectedPortalState> = HashMap::new();
+    // Latest hot-reloaded visual tokens (hud-fm0nf). `None` until the first
+    // `SetVisualTokens`; the spawn-time tokens carried by `connect` remain
+    // authoritative until then. Re-applied to each freshly-connected transport so
+    // a token swap survives a subsequent reconnect (the connect closure still
+    // yields spawn-time tokens).
+    let mut latest_tokens: Option<PortalVisualTokens> = None;
     let mut failures: u32 = 0;
 
     'reconnect: loop {
@@ -1121,6 +1163,13 @@ async fn run_bridge_loop<T, C, Fut>(
             }
         };
         tracing::info!("resident gRPC portal bridge connected (two-adapter-families gate)");
+
+        // Re-apply the latest hot-reloaded tokens to the fresh transport so a
+        // token swap taken mid-session is not lost across a reconnect (the
+        // connect closure only ever yields the spawn-time tokens) (hud-fm0nf).
+        if let Some(tokens) = &latest_tokens {
+            bridge.set_visual_tokens(tokens.clone());
+        }
 
         // Replay last-known state. The budget is NOT reset until a publish/renew
         // actually succeeds, so a session that dies during replay still counts.
@@ -1190,6 +1239,15 @@ async fn run_bridge_loop<T, C, Fut>(
                                     tracing::warn!(projection_id = %projection_id, error = %e, "resident gRPC portal bridge publish rejected");
                                 }
                             }
+                        }
+                        BridgeMessage::SetVisualTokens(tokens) => {
+                            // Design-token / profile hot-reload (hud-fm0nf): re-skin
+                            // the live transport now, and remember the tokens so a
+                            // later reconnect re-applies them. No transport I/O, so
+                            // this cannot fail or trigger a reconnect. The remote
+                            // tile re-renders on the next publish (in-process parity).
+                            bridge.set_visual_tokens((*tokens).clone());
+                            latest_tokens = Some(*tokens);
                         }
                         BridgeMessage::Detach { projection_id } => {
                             // Detach/release tombstone (hud-sjdkk): drop the projection
@@ -1480,6 +1538,10 @@ mod tests {
         /// Sink the fake forwards inbound input to (the run_bridge_loop return
         /// path under test).
         input_sink: Arc<Mutex<Option<mpsc::Sender<ResidentBridgeInput>>>>,
+        /// Number of `set_visual_tokens` calls seen (hud-fm0nf).
+        set_tokens_calls: Arc<AtomicUsize>,
+        /// The most recent tokens handed to `set_visual_tokens` (hud-fm0nf).
+        last_tokens: Arc<Mutex<Option<PortalVisualTokens>>>,
     }
 
     struct FakeTransport {
@@ -1579,6 +1641,11 @@ mod tests {
                     None => std::future::pending().await,
                 }
             }
+        }
+
+        fn set_visual_tokens(&mut self, tokens: PortalVisualTokens) {
+            self.world.set_tokens_calls.fetch_add(1, Ordering::SeqCst);
+            *self.world.last_tokens.lock().unwrap() = Some(tokens);
         }
 
         async fn shutdown(self) {}
@@ -2089,5 +2156,134 @@ mod tests {
             sink_rx.try_recv().is_err(),
             "no input may reach the sink while input routing is inactive (fail-closed)"
         );
+    }
+
+    /// A distinct sentinel palette that differs from the spawn-time default, so a
+    /// test can prove the bridge actually adopted the hot-reloaded tokens.
+    fn sentinel_tokens() -> PortalVisualTokens {
+        PortalVisualTokens {
+            transcript_font_size_px: 99.0, // sentinel — not the default size
+            ..PortalVisualTokens::default()
+        }
+    }
+
+    /// hud-fm0nf: a `BridgeMessage::SetVisualTokens` (design-token / profile
+    /// hot-reload) must re-skin the live transport so a bridged portal renders
+    /// with the new active-profile tokens on its next publish — parity with the
+    /// in-process adapters that receive `set_visual_tokens` from the driver.
+    #[tokio::test(start_paused = true)]
+    async fn set_visual_tokens_message_reskins_live_transport() {
+        let world = FakeWorld::default();
+        let (tx, rx) = mpsc::channel::<BridgeMessage>(8);
+        let connect = {
+            let world = world.clone();
+            move || {
+                let world = world.clone();
+                async move {
+                    world.connect_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, ResidentGrpcBridgeError>(FakeTransport::new(world.clone()))
+                }
+            }
+        };
+        let handle = tokio::spawn(run_bridge_loop(connect, ReconnectPolicy::default(), rx));
+
+        let sentinel = sentinel_tokens();
+        tx.send(BridgeMessage::SetVisualTokens(Box::new(sentinel.clone())))
+            .await
+            .unwrap();
+
+        let mut iters = 0;
+        while world.set_tokens_calls.load(Ordering::SeqCst) < 1 && iters < 50 {
+            tokio::task::yield_now().await;
+            iters += 1;
+        }
+
+        assert_eq!(
+            world.set_tokens_calls.load(Ordering::SeqCst),
+            1,
+            "a SetVisualTokens message must reach the live transport once"
+        );
+        assert_eq!(
+            world.last_tokens.lock().unwrap().as_ref(),
+            Some(&sentinel),
+            "the transport must receive the hot-reloaded sentinel palette"
+        );
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    /// hud-fm0nf: a token swap taken mid-session must be re-applied to the fresh
+    /// transport after a reconnect — the connect closure only ever yields the
+    /// spawn-time tokens, so `run_bridge_loop` must remember and re-apply the
+    /// latest hot-reloaded palette itself.
+    #[tokio::test(start_paused = true)]
+    async fn hot_reloaded_tokens_survive_reconnect() {
+        let world = FakeWorld::default();
+        // Arm one transport failure so a publish forces a reconnect after the
+        // token swap has been applied to the first transport.
+        world.publish_fail_queue.lock().unwrap().push_back(true);
+
+        let (tx, rx) = mpsc::channel::<BridgeMessage>(8);
+        let connect = {
+            let world = world.clone();
+            move || {
+                let world = world.clone();
+                async move {
+                    world.connect_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, ResidentGrpcBridgeError>(FakeTransport::new(world.clone()))
+                }
+            }
+        };
+        let handle = tokio::spawn(run_bridge_loop(connect, ReconnectPolicy::default(), rx));
+
+        // Hot-reload tokens on the first (live) transport.
+        let sentinel = sentinel_tokens();
+        tx.send(BridgeMessage::SetVisualTokens(Box::new(sentinel.clone())))
+            .await
+            .unwrap();
+        let mut iters = 0;
+        while world.set_tokens_calls.load(Ordering::SeqCst) < 1 && iters < 50 {
+            tokio::task::yield_now().await;
+            iters += 1;
+        }
+        assert_eq!(world.set_tokens_calls.load(Ordering::SeqCst), 1);
+
+        // A publish now fails on the first transport, forcing a reconnect.
+        tx.send(BridgeMessage::Publish {
+            projection_id: "p".to_string(),
+            state: Box::new(sample_state()),
+        })
+        .await
+        .unwrap();
+
+        let mut iters = 0;
+        while world.connect_calls.load(Ordering::SeqCst) < 2 && iters < 100 {
+            tokio::time::advance(Duration::from_millis(600)).await;
+            tokio::task::yield_now().await;
+            iters += 1;
+        }
+        assert_eq!(
+            world.connect_calls.load(Ordering::SeqCst),
+            2,
+            "the failed publish must have forced exactly one reconnect"
+        );
+
+        // The reconnect must re-apply the hot-reloaded tokens to the fresh
+        // transport (a second set_visual_tokens call), not silently revert to the
+        // spawn-time palette.
+        assert!(
+            world.set_tokens_calls.load(Ordering::SeqCst) >= 2,
+            "the latest tokens must be re-applied to the reconnected transport, got {} calls",
+            world.set_tokens_calls.load(Ordering::SeqCst)
+        );
+        assert_eq!(
+            world.last_tokens.lock().unwrap().as_ref(),
+            Some(&sentinel),
+            "the reconnected transport must carry the hot-reloaded sentinel palette"
+        );
+
+        drop(tx);
+        handle.await.unwrap();
     }
 }
