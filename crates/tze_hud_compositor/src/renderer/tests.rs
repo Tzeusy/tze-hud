@@ -12473,6 +12473,145 @@ fn portal_divider_canonical_tokens_reach_markdown_tokens() {
     assert_eq!(mt.separator_thickness_px, 1.0);
 }
 
+/// Turn-divider (`---` thematic-break) quads emitted by `render_node` must track
+/// the tile's display scroll offset exactly like the text glyphs do (hud-6n9iv):
+/// at a nonzero scroll the divider's pixel-top must equal its unscrolled top
+/// minus the offset, and a divider scrolled above the tile top must be clipped
+/// to the tile bounds (never painted outside the pane, matching the text viewport
+/// clip). Drives the real `render_node` separator path (no readback).
+#[tokio::test]
+async fn transcript_divider_rects_track_tile_scroll_offset() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(400, 400).await);
+
+    // The separator path is gated on a live text rasterizer (the divider quads
+    // ride the same `text_rasterizer.is_some()` branch as the glyphs). When the
+    // headless environment has no font stack the rasterizer is absent and
+    // `render_node` takes the placeholder fallback instead — skip rather than
+    // assert against the wrong path. CI provisions fonts, so it runs there.
+    if compositor.text_rasterizer.is_none() {
+        eprintln!("skipping: no text rasterizer (separator path unavailable headless)");
+        return;
+    }
+
+    // Portal divider tokens so the separator path emits quads at all.
+    let mut map = std::collections::HashMap::new();
+    map.insert("portal.divider.color".to_owned(), "#FF0000".to_owned());
+    map.insert("portal.divider.thickness_px".to_owned(), "2".to_owned());
+    compositor.set_token_map(map);
+
+    let sw = 400.0_f32;
+    let sh = 400.0_f32;
+    let mut scene = SceneGraph::new(sw, sh);
+    let tab_id = scene.create_tab("divider-scroll", 0).unwrap();
+    let lease_id = scene.grant_lease("divider-scroll", 120_000, vec![]);
+    let tile_y = 30.0_f32;
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "divider-scroll",
+            lease_id,
+            Rect::new(20.0, tile_y, 300.0, 300.0),
+            1,
+        )
+        .unwrap();
+    scene
+        .register_tile_scroll_config(
+            tile_id,
+            TileScrollConfig {
+                scrollable_x: false,
+                scrollable_y: true,
+                content_width: None,
+                content_height: Some(1200.0),
+            },
+        )
+        .unwrap();
+
+    // A transcript with one thematic break between two entries.
+    let node = Node {
+        id: SceneId::new(),
+        children: vec![],
+        data: NodeData::TextMarkdown(TextMarkdownNode {
+            content: "Entry A\n\n---\n\nEntry B".to_string(),
+            bounds: Rect::new(0.0, 0.0, 300.0, 1200.0),
+            font_size_px: 16.0,
+            font_family: FontFamily::SystemMonospace,
+            color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+            background: None,
+            alignment: TextAlign::Start,
+            overflow: TextOverflow::Clip,
+            color_runs: Box::default(),
+        }),
+    };
+    scene.set_tile_root(tile_id, node).unwrap();
+    compositor.prime_markdown_cache(&scene);
+
+    let tile = scene.tiles.get(&tile_id).unwrap().clone();
+    let root_id = tile.root_node.unwrap();
+
+    // Recover the divider quad's top edge in pixel space from the emitted NDC
+    // vertices. With `background: None` and no code tokens, the only quads
+    // `render_node` emits for this node are the divider rects, so the maximum
+    // NDC y (`top = 1 - 2*y/sh`) is the topmost divider's top edge.
+    let divider_top_px = |scene: &SceneGraph| -> Option<f32> {
+        let mut verts: Vec<crate::pipeline::RectVertex> = Vec::new();
+        let mut cmds = Vec::new();
+        compositor.render_node(root_id, &tile, scene, &mut verts, &mut cmds, sw, sh);
+        verts
+            .iter()
+            .map(|v| v.position[1])
+            .fold(None, |acc: Option<f32>, y| {
+                Some(acc.map_or(y, |a| a.max(y)))
+            })
+            .map(|top_ndc| (1.0 - top_ndc) * sh / 2.0)
+    };
+
+    // Unscrolled baseline.
+    scene
+        .set_tile_scroll_offset_local(tile_id, 0.0, 0.0)
+        .unwrap();
+    let base = divider_top_px(&scene).expect("divider emitted at scroll 0");
+
+    // A modest scroll keeps the divider inside the tile viewport: its top must
+    // move up by exactly the scroll offset (tracking the glyphs).
+    let scroll = 40.0_f32;
+    scene
+        .set_tile_scroll_offset_local(tile_id, 0.0, scroll)
+        .unwrap();
+    let scrolled = divider_top_px(&scene).expect("divider still visible after modest scroll");
+    assert!(
+        (base - scrolled - scroll).abs() < 0.5,
+        "divider must track scroll: base={base}, scrolled={scrolled}, expected delta {scroll}"
+    );
+
+    // Scrolling the divider above the pane top must clip it out entirely — it may
+    // not paint outside the tile bounds.
+    scene
+        .set_tile_scroll_offset_local(tile_id, 0.0, 400.0)
+        .unwrap();
+    assert!(
+        divider_top_px(&scene).is_none(),
+        "divider scrolled above the tile top must be clipped, not painted outside the pane"
+    );
+
+    // Whole-portal resize: the divider must ride the SAME scaled line pitch the
+    // glyphs are laid out with, so it stays glued to its entries instead of
+    // detaching further down the transcript (hud-6n9iv). At a >1 font scale the
+    // (line_index + 0.5) * line_height offset grows, so the unscrolled divider
+    // top must move DOWN relative to the default-scale position. If the divider
+    // ignored the scale (used the raw `tm.font_size_px`) the two would be equal —
+    // this guards against reverting to the unscaled line height.
+    scene
+        .set_tile_scroll_offset_local(tile_id, 0.0, 0.0)
+        .unwrap();
+    scene.set_tile_font_scale(tile_id, 1.5);
+    let scaled_top = divider_top_px(&scene).expect("divider still emitted under resize");
+    assert!(
+        scaled_top > base + 5.0,
+        "divider must track the scaled line pitch under portal resize: \
+         base(scale 1.0)={base}, scaled(scale 1.5)={scaled_top}"
+    );
+}
+
 /// `resolve_composer_overlay_tokens` must return valid, non-degenerate token
 /// values for an empty token map (all defaults applied).
 ///
