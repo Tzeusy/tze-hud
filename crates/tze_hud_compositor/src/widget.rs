@@ -2462,6 +2462,21 @@ pub fn rasterize_widget_render_plan(
 
 // ─── WidgetRenderer (GPU state) ───────────────────────────────────────────────
 
+/// Precomputed, scene-free draw geometry for a single widget instance (hud-uyhpn).
+///
+/// Produced by [`WidgetRenderer::collect_widget_draw_quads`] under the scene lock
+/// and consumed by [`WidgetRenderer::composite_prepared`] after the lock drops.
+/// Carries only the resolved pixel origin plus the instance name used to look up
+/// the (compositor-owned) cached texture at draw time.
+pub struct WidgetDrawQuad {
+    /// Widget instance name — the key into `WidgetRenderer::textures`.
+    pub instance_name: String,
+    /// Resolved (pre-snap) pixel x origin.
+    pub raw_x: f32,
+    /// Resolved (pre-snap) pixel y origin.
+    pub raw_y: f32,
+}
+
 /// The compositor-owned widget rendering state.
 ///
 /// Created once per compositor and kept for the lifetime of the runtime.
@@ -2939,6 +2954,117 @@ impl WidgetRenderer {
             );
 
             // Build NDC quad vertices with UV coordinates.
+            let vertices = widget_quad_vertices(px, py, pw, ph, surf_w, surf_h);
+            let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("widget_quad_buf"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+
+            render_pass.set_bind_group(0, &entry.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, vertex_buf.slice(..));
+            render_pass.draw(0..6, 0..1);
+        }
+    }
+
+    /// Precompute the per-instance draw geometry for the widget pass (hud-uyhpn).
+    ///
+    /// This is the scene-reading half of [`Self::composite_widgets`]: it resolves
+    /// each drawable instance's pixel origin from the registry (instance geometry
+    /// override, with a definition-default / full-screen fallback) into an owned
+    /// [`WidgetDrawQuad`]. Only instances that have an active publish AND a cached
+    /// texture are emitted — matching the `continue` / `any_textured` gating of
+    /// the original single-pass compositing.
+    ///
+    /// The matching draw half is [`Self::composite_prepared`], which needs only
+    /// these owned quads (no `&WidgetRegistry`) and so runs after the scene lock
+    /// is dropped.
+    pub fn collect_widget_draw_quads(
+        &self,
+        registry: &WidgetRegistry,
+        surf_w: f32,
+        surf_h: f32,
+    ) -> Vec<WidgetDrawQuad> {
+        let mut instances: Vec<&tze_hud_scene::types::WidgetInstance> = registry
+            .instances
+            .values()
+            .filter(|instance| {
+                registry
+                    .active_publishes
+                    .get(&instance.instance_name)
+                    .is_some_and(|publishes| !publishes.is_empty())
+            })
+            .collect();
+        instances.sort_by_key(|_i| WIDGET_TILE_Z_MIN);
+
+        let mut quads = Vec::new();
+        for instance in instances {
+            // Only instances with a cached texture are drawable (composite_widgets
+            // `continue`s otherwise); skip them here so the draw half never needs
+            // to consult the registry.
+            if !self.textures.contains_key(&instance.instance_name) {
+                continue;
+            }
+            let (raw_x, raw_y, _pw, _ph) =
+                resolve_pixel_geometry(&instance.geometry_override, surf_w, surf_h).unwrap_or_else(
+                    || {
+                        let def = registry
+                            .definitions
+                            .get(&instance.widget_type_name)
+                            .map(|d| &d.default_geometry_policy);
+                        if let Some(geo) = def {
+                            resolve_pixel_geometry(&Some(*geo), surf_w, surf_h)
+                                .unwrap_or((0.0, 0.0, surf_w, surf_h))
+                        } else {
+                            (0.0, 0.0, surf_w, surf_h)
+                        }
+                    },
+                );
+            quads.push(WidgetDrawQuad {
+                instance_name: instance.instance_name.clone(),
+                raw_x,
+                raw_y,
+            });
+        }
+        quads
+    }
+
+    /// Draw precomputed widget quads into an already-open render pass (hud-uyhpn).
+    ///
+    /// The scene-free counterpart to [`Self::composite_widgets`]: it looks up each
+    /// quad's cached texture entry (compositor-owned, not scene state), pixel-snaps
+    /// against the texture dimensions, and draws. Geometry was resolved earlier by
+    /// [`Self::collect_widget_draw_quads`].
+    pub fn composite_prepared<'rp>(
+        &'rp self,
+        render_pass: &mut wgpu::RenderPass<'rp>,
+        quads: &[WidgetDrawQuad],
+        surf_w: f32,
+        surf_h: f32,
+        device: &wgpu::Device,
+    ) {
+        use wgpu::util::DeviceExt;
+
+        if quads.is_empty() {
+            return;
+        }
+        render_pass.set_pipeline(&self.texture_pipeline);
+
+        for quad in quads {
+            let entry = match self.textures.get(&quad.instance_name) {
+                Some(e) => e,
+                None => continue,
+            };
+            // Pixel-snap widget quads so text-heavy SVGs remain crisp on screen.
+            let (px, py, pw, ph) = snap_composite_rect(
+                quad.raw_x,
+                quad.raw_y,
+                entry.width as f32,
+                entry.height as f32,
+                surf_w,
+                surf_h,
+            );
+
             let vertices = widget_quad_vertices(px, py, pw, ph, surf_w, surf_h);
             let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("widget_quad_buf"),

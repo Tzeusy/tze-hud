@@ -1,5 +1,70 @@
 use super::*;
 
+/// All CPU-side, scene-free frame data produced under the scene lock by
+/// [`Compositor::build_windowed_frame`] and consumed lock-free by
+/// [`Compositor::present_windowed_frame`] (hud-uyhpn).
+///
+/// The windowed frame loop builds this value while holding the scene lock, then
+/// DROPS the lock before calling `present_windowed_frame`, which performs the
+/// vsync-blocking `acquire_frame()` + encode + submit + `device.poll(Wait)`.
+/// Because every field here is owned (no `&SceneGraph` borrow survives), the
+/// entire GPU present tail runs without the scene lock held — collapsing the
+/// former ~full-refresh-interval lock hold (which starved the main-thread
+/// interaction path's `spin_acquire` and dropped drag-move samples) down to the
+/// cheap scene-read build phase.
+pub struct WindowedFrameBuild {
+    /// Frame telemetry accumulated during the build (tile/node/lease counts,
+    /// frame number). `present_windowed_frame` fills in the encode/submit/total
+    /// timings and returns it.
+    telemetry: FrameTelemetry,
+    /// Surface dimensions this frame was built for.
+    surf_w: u32,
+    surf_h: u32,
+    /// Flat-rect geometry (Background → tiles → Content → Chrome) and the vertex
+    /// offset just past the Background zones (for the split flat-rect pass).
+    vertices: Vec<RectVertex>,
+    bg_vertex_count: usize,
+    /// Textured image draw commands (composited above the color geometry).
+    textured_cmds: Vec<TexturedDrawCmd>,
+    /// Scene-free encode inputs (rounded-rect cmds + prepared text).
+    encode_inputs: EncodeInputs,
+    /// Precomputed drag-handle chrome vertices.
+    drag_handle_vertices: Vec<RectVertex>,
+    /// Precomputed keyboard focus-ring chrome vertices.
+    focus_ring_vertices: Vec<RectVertex>,
+    /// Precomputed drag-handle reset context-menu chrome vertices.
+    context_menu_vertices: Vec<RectVertex>,
+    /// Precomputed per-instance widget draw quads.
+    widget_quads: Vec<crate::widget::WidgetDrawQuad>,
+    /// Decoded video-frame draw commands (v2_preview only).
+    #[cfg(feature = "v2_preview")]
+    video_cmds: Vec<VideoFrameDrawCmd>,
+    /// Wall-clock start of the frame, for the total frame-time telemetry.
+    frame_start: std::time::Instant,
+}
+
+#[cfg(test)]
+impl WindowedFrameBuild {
+    /// Total flat-rect vertices built this frame (test / diagnostic accessor).
+    ///
+    /// Exposed so a test can assert that [`Compositor::build_windowed_frame`]
+    /// produces scene geometry WITHOUT ever acquiring the surface — the structural
+    /// property that lets the windowed loop drop the scene lock before present.
+    pub(crate) fn vertex_count(&self) -> usize {
+        self.vertices.len()
+    }
+
+    /// Precomputed drag-handle chrome vertices this frame (test accessor).
+    pub(crate) fn drag_handle_vertex_count(&self) -> usize {
+        self.drag_handle_vertices.len()
+    }
+
+    /// Tile count recorded in this frame's telemetry (test accessor).
+    pub(crate) fn tile_count(&self) -> u32 {
+        self.telemetry.tile_count
+    }
+}
+
 impl Compositor {
     /// Build the shared per-frame vertex / textured-command lists from the scene.
     ///
@@ -259,30 +324,34 @@ impl Compositor {
         (vertices, textured_cmds, bg_vertex_count)
     }
 
-    /// Render one frame of the scene to the surface.
+    /// Build all CPU-side, scene-free frame data under the scene lock (hud-uyhpn).
     ///
-    /// This method is surface-agnostic: it works with any type implementing
-    /// `CompositorSurface`.  The same code path executes in headless and windowed
-    /// modes — only the surface implementation differs.
+    /// This is the scene-reading half of the windowed present path. It performs
+    /// EVERY read of (and the few writes back into) `scene` that a frame needs —
+    /// vertex/geometry build, scroll-offset publish, encode-input collection
+    /// (rounded rects + text prepare), drag-handle / focus-ring / context-menu /
+    /// widget geometry, and drag-handle hit-region population — and returns an
+    /// owned [`WindowedFrameBuild`]. It does NOT touch the swapchain surface.
     ///
-    /// Per runtime-kernel/spec.md Requirement: Headless Mode (line 198):
-    /// "No conditional compilation for the render path."
+    /// The caller (the windowed frame loop) drops the scene lock immediately
+    /// after this returns and then calls [`Compositor::present_windowed_frame`],
+    /// so the vsync-blocking acquire/submit/poll never runs while the scene lock
+    /// is held. This is the core of the drag-input-starvation fix: the lock hold
+    /// collapses to this cheap build phase instead of spanning a full refresh
+    /// interval.
     ///
-    /// For headless pixel readback, use `render_frame_headless()` instead,
-    /// which includes the `copy_to_buffer` step internally so that
-    /// `surface.read_pixels()` returns the current frame's data.
-    /// `render_frame()` does NOT copy pixels to the readback buffer — the
-    /// encoder is created and consumed internally and is not exposed.
-    ///
-    /// Returns telemetry for this frame.
-    ///
-    /// On a successful present, refreshes drag-handle hit regions in `scene`
-    /// from the same geometry used for rendering.
-    pub fn render_frame(
+    /// Note (behaviour delta, intentional): drag-handle hit regions are now
+    /// populated here — from the geometry we are about to present — rather than
+    /// only on a successful present. The regions describe where handles ARE
+    /// (a pure function of the scene geometry), independent of whether this
+    /// particular frame reaches the surface, so refreshing them unconditionally
+    /// keeps hit-testing correct even on a skipped-present frame.
+    pub fn build_windowed_frame(
         &mut self,
         scene: &mut SceneGraph,
-        surface: &dyn CompositorSurface,
-    ) -> FrameTelemetry {
+        surf_w: u32,
+        surf_h: u32,
+    ) -> WindowedFrameBuild {
         let frame_start = std::time::Instant::now();
         self.frame_number += 1;
 
@@ -295,9 +364,9 @@ impl Compositor {
         let mut telemetry = FrameTelemetry::new(self.frame_number);
 
         // ── Phase-1 markdown cache prime (hud-380dl: commit-time prime) ─────
-        // The markdown cache MUST be primed at commit time (before render_frame
-        // is called) by an explicit `prime_markdown_cache` call at the scene-commit
-        // site (Stage 3/4 of the pipeline).  By the time render_frame executes,
+        // The markdown cache MUST be primed at commit time (before this build
+        // runs) by an explicit `prime_markdown_cache` call at the scene-commit
+        // site (Stage 3/4 of the pipeline).  By the time the build executes,
         // the cache is already populated and this block is a no-op.
         //
         // Safety fallback: if the render path somehow reaches a frame where the
@@ -309,11 +378,11 @@ impl Compositor {
         //
         // A debug assertion fires in test/dev builds if we ever reach this path
         // in steady state, catching regressions where a call site forgot to call
-        // prime_markdown_cache before render_frame.
+        // prime_markdown_cache before the build.
         if scene.version != self.markdown_cache_scene_version {
             debug_assert!(
                 false,
-                "render_frame: markdown cache was not commit-primed for scene version {} \
+                "build_windowed_frame: markdown cache was not commit-primed for scene version {} \
                  (cache version {}); falling back to in-render prime [hud-380dl]",
                 scene.version, self.markdown_cache_scene_version,
             );
@@ -323,11 +392,10 @@ impl Compositor {
         }
 
         // ── Phase-1 truncation cache prime (hud-wgq7j / hud-v2z6u) ─────────────
-        // The truncation cache MUST be primed at commit time (before render_frame
-        // is called) by an explicit `prime_truncation_cache` call at the
-        // scene-commit site, mirroring the markdown cache contract.  By the time
-        // render_frame executes, the cache is already populated and this block is
-        // a no-op.
+        // The truncation cache MUST be primed at commit time (before this build
+        // runs) by an explicit `prime_truncation_cache` call at the scene-commit
+        // site, mirroring the markdown cache contract.  By the time the build
+        // executes, the cache is already populated and this block is a no-op.
         //
         // Safety fallback: if we reach this path with a stale cache (e.g. the
         // very first frame before any commit-time prime, or a call site that
@@ -347,7 +415,7 @@ impl Compositor {
             tracing::trace!(
                 scene_version = scene.version,
                 cache_version = self.truncation_cache_scene_version,
-                "render_frame: truncation cache lags scene (commit-prime not yet \
+                "build_windowed_frame: truncation cache lags scene (commit-prime not yet \
                  applied or cadence-deferred); applying cadence-gated in-render prime"
             );
             self.prime_truncation_cache(scene);
@@ -358,7 +426,6 @@ impl Compositor {
         // this scene→vertex stage across all three render entry points; it also
         // populates the tile/node/lease telemetry counts and, in overlay mode,
         // the alpha-zeroing full-screen quad.
-        let (surf_w, surf_h) = surface.size();
         let sw = surf_w as f32;
         let sh = surf_h as f32;
         let (vertices, textured_cmds, bg_vertex_count) =
@@ -378,7 +445,87 @@ impl Compositor {
         // ── Widget texture sync: rasterize dirty SVGs BEFORE frame acquisition.
         // SVG rasterization can be slow; if a resize event arrives while we hold
         // the surface texture, the texture is destroyed and queue.submit panics.
+        // Kept in the build phase (under the lock) since it reads scene state.
         self.sync_widget_textures(scene, self.degradation_level);
+
+        // ── Scene-free encode inputs (rounded-rect cmds + prepared text) ─────
+        // This is the second big scene read; collecting it here (rather than
+        // inside the former post-acquire `encode_frame`) is what lets the encode
+        // stage run lock-free.
+        let encode_inputs = self.collect_encode_inputs(scene, surf_w, surf_h);
+
+        // ── Decoded video-frame draw commands (v2_preview only) ──────────────
+        #[cfg(feature = "v2_preview")]
+        let video_cmds = self.collect_video_frame_cmds(scene, sw, sh);
+
+        // ── Widget draw geometry (precomputed from the registry) ─────────────
+        let widget_quads = self.collect_widget_draw_geometry(scene, sw, sh);
+
+        // ── Keyboard focus ring (chrome layer, hud-k6yvb) ───────────────────
+        let mut focus_ring_vertices: Vec<RectVertex> = Vec::new();
+        self.append_focus_ring_vertices(scene, &mut focus_ring_vertices, sw, sh);
+
+        // ── Chrome context menu (hud-zc7f) ─────────────────────────────────
+        let context_menu_vertices = self.collect_context_menu_vertices(scene, sw, sh);
+
+        // Populate drag-handle hit regions from the geometry we are about to
+        // present so the next input snapshot matches this frame (see the method
+        // doc-comment for why this is unconditional now). Consumes `drag_handles`.
+        self.populate_drag_handle_hit_regions_from(scene, drag_handles);
+
+        WindowedFrameBuild {
+            telemetry,
+            surf_w,
+            surf_h,
+            vertices,
+            bg_vertex_count,
+            textured_cmds,
+            encode_inputs,
+            drag_handle_vertices,
+            focus_ring_vertices,
+            context_menu_vertices,
+            widget_quads,
+            #[cfg(feature = "v2_preview")]
+            video_cmds,
+            frame_start,
+        }
+    }
+
+    /// Present a previously-built frame to the surface, lock-free (hud-uyhpn).
+    ///
+    /// This is the GPU half of the windowed present path. It acquires the
+    /// swapchain frame, encodes every pass from the owned [`WindowedFrameBuild`]
+    /// (never touching `&SceneGraph`), submits, presents, and waits — all with
+    /// the scene lock already released by the caller. Returns the completed
+    /// per-frame telemetry.
+    ///
+    /// Skips the frame gracefully (returning early with total-time telemetry) if
+    /// the surface is unavailable, and contains the hud-pi5wx submit/present
+    /// panic so the compositor thread survives a mid-frame swapchain reconfigure.
+    pub fn present_windowed_frame(
+        &mut self,
+        build: WindowedFrameBuild,
+        surface: &dyn CompositorSurface,
+    ) -> FrameTelemetry {
+        let WindowedFrameBuild {
+            mut telemetry,
+            surf_w,
+            surf_h,
+            vertices,
+            bg_vertex_count,
+            textured_cmds,
+            encode_inputs,
+            drag_handle_vertices,
+            focus_ring_vertices,
+            context_menu_vertices,
+            widget_quads,
+            #[cfg(feature = "v2_preview")]
+            video_cmds,
+            frame_start,
+        } = build;
+
+        let sw = surf_w as f32;
+        let sh = surf_h as f32;
 
         // Acquire frame through the surface trait (surface-agnostic).
         // The CompositorFrame._guard keeps the backing resource alive until drop.
@@ -394,10 +541,10 @@ impl Compositor {
             }
         };
 
-        let (mut encoder, encode_us) = self.encode_frame(
+        let (mut encoder, encode_us) = self.encode_from_inputs(
             &vertices,
             &frame.view,
-            scene,
+            &encode_inputs,
             surf_w,
             surf_h,
             self.overlay_mode,
@@ -412,27 +559,23 @@ impl Compositor {
         // Only active when `v2_preview` is enabled; no-op otherwise.
         #[cfg(feature = "v2_preview")]
         {
-            let video_cmds = self.collect_video_frame_cmds(scene, sw, sh);
             self.encode_video_frame_pass(&mut encoder, &frame.view, &video_cmds, sw, sh);
         }
 
         // ── Widget pass: composite pre-synced textures above zone content ────
-        self.encode_widget_pass(&mut encoder, &frame.view, &scene.widget_registry, sw, sh);
+        self.encode_widget_pass_prepared(&mut encoder, &frame.view, &widget_quads, sw, sh);
         self.encode_drag_handle_pass(&mut encoder, &frame.view, &drag_handle_vertices);
 
         // ── Keyboard focus ring (chrome layer, hud-k6yvb) ───────────────────
         // Drawn above all agent content (input-model §416) for the current focus
         // owner — node OR tile-level, any tile — via the same LoadOp::Load chrome
         // pass the drag handles use.
-        let mut focus_ring_vertices: Vec<RectVertex> = Vec::new();
-        self.append_focus_ring_vertices(scene, &mut focus_ring_vertices, sw, sh);
         if !focus_ring_vertices.is_empty() {
             self.encode_drag_handle_pass(&mut encoder, &frame.view, &focus_ring_vertices);
         }
 
         // ── Chrome context menu (hud-zc7f) ─────────────────────────────────
         // Render the drag-handle reset context menu on top of everything.
-        let context_menu_vertices = self.collect_context_menu_vertices(scene, sw, sh);
         if !context_menu_vertices.is_empty() {
             self.encode_drag_handle_pass(&mut encoder, &frame.view, &context_menu_vertices);
         }
@@ -467,15 +610,43 @@ impl Compositor {
             return telemetry;
         }
 
-        // Reuse the freshly computed drag-handle geometry so the next input
-        // snapshot matches the frame just presented without a second traversal.
-        self.populate_drag_handle_hit_regions_from(scene, drag_handles);
-
         // Evict terminal video surface entries periodically to prevent unbounded growth.
         self.maybe_prune_terminal_video_surfaces();
 
         telemetry.frame_time_us = frame_start.elapsed().as_micros() as u64;
         telemetry
+    }
+
+    /// Render one frame of the scene to the surface (single-lock convenience).
+    ///
+    /// This is a thin wrapper that runs [`Compositor::build_windowed_frame`]
+    /// immediately followed by [`Compositor::present_windowed_frame`]. The
+    /// production windowed loop does NOT use this wrapper — it calls the two
+    /// halves separately so it can drop the scene lock in between (hud-uyhpn).
+    /// Retained for tests and any caller that holds the scene throughout.
+    ///
+    /// This method is surface-agnostic: it works with any type implementing
+    /// `CompositorSurface`.  The same code path executes in headless and windowed
+    /// modes — only the surface implementation differs.
+    ///
+    /// Per runtime-kernel/spec.md Requirement: Headless Mode (line 198):
+    /// "No conditional compilation for the render path."
+    ///
+    /// For headless pixel readback, use `render_frame_headless()` instead,
+    /// which includes the `copy_to_buffer` step internally so that
+    /// `surface.read_pixels()` returns the current frame's data.
+    /// `render_frame()` does NOT copy pixels to the readback buffer — the
+    /// encoder is created and consumed internally and is not exposed.
+    ///
+    /// Returns telemetry for this frame.
+    pub fn render_frame(
+        &mut self,
+        scene: &mut SceneGraph,
+        surface: &dyn CompositorSurface,
+    ) -> FrameTelemetry {
+        let (surf_w, surf_h) = surface.size();
+        let build = self.build_windowed_frame(scene, surf_w, surf_h);
+        self.present_windowed_frame(build, surface)
     }
 
     /// Render one frame and copy pixel data into the headless readback buffer.
