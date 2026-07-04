@@ -737,6 +737,7 @@ async fn test_viewer_echo_stack_tracks_live_composer_box() {
         lhm,
         1.0,
         ComposerVerticalAnchor::Bottom,
+        6.0, // default content inset
     )
     .y;
     assert!(
@@ -754,6 +755,7 @@ async fn test_viewer_echo_stack_tracks_live_composer_box() {
         lhm,
         4.0,
         ComposerVerticalAnchor::Bottom,
+        6.0, // default content inset
     )
     .y;
     assert!(
@@ -837,6 +839,7 @@ fn echo_geometry(compositor: &Compositor) -> (f32, f32) {
         lhm,
         1.0,
         ComposerVerticalAnchor::Bottom,
+        6.0, // default content inset
     )
     .y;
     let echo_line_h = (echo_font * lhm).max(1.0);
@@ -12056,6 +12059,7 @@ fn multiline_input_box_grows_upward_pinned_bottom() {
         NX_LH_MULT,
         1.0,
         ComposerVerticalAnchor::Bottom,
+        margin,
     );
     let expected_one_h = line_height + margin * 2.0;
     assert!(
@@ -12073,6 +12077,7 @@ fn multiline_input_box_grows_upward_pinned_bottom() {
         NX_LH_MULT,
         3.0,
         ComposerVerticalAnchor::Bottom,
+        margin,
     );
     let expected_three_h = line_height * 3.0 + margin * 2.0;
     assert!(
@@ -12102,6 +12107,7 @@ fn multiline_input_box_clamped_to_region() {
         NX_LH_MULT,
         20.0,
         ComposerVerticalAnchor::Bottom,
+        6.0, // default content inset
     );
     assert!(
         box_rect.height <= region.height + 0.01,
@@ -12122,8 +12128,14 @@ fn top_anchored_input_box_pins_to_region_top_and_grows_down() {
     let line_height = font * NX_LH_MULT;
     let margin = 6.0; // COMPOSER_TEXT_MARGIN
 
-    let one =
-        Compositor::composer_input_box(region, font, NX_LH_MULT, 1.0, ComposerVerticalAnchor::Top);
+    let one = Compositor::composer_input_box(
+        region,
+        font,
+        NX_LH_MULT,
+        1.0,
+        ComposerVerticalAnchor::Top,
+        margin,
+    );
     // Empty / single-line draft: box top IS the region top (pane content origin),
     // not pinned to the region bottom.
     assert_eq!(one.y, region.y, "top-anchored box pins to the region TOP");
@@ -12132,8 +12144,14 @@ fn top_anchored_input_box_pins_to_region_top_and_grows_down() {
         "one-line height"
     );
 
-    let three =
-        Compositor::composer_input_box(region, font, NX_LH_MULT, 3.0, ComposerVerticalAnchor::Top);
+    let three = Compositor::composer_input_box(
+        region,
+        font,
+        NX_LH_MULT,
+        3.0,
+        ComposerVerticalAnchor::Top,
+        margin,
+    );
     // Grows DOWNWARD: taller box, SAME top edge (the first line does not teleport).
     assert_eq!(
         three.y, region.y,
@@ -12151,6 +12169,7 @@ fn top_anchored_input_box_pins_to_region_top_and_grows_down() {
         NX_LH_MULT,
         1.0,
         ComposerVerticalAnchor::Bottom,
+        margin,
     );
     assert!(
         bottom_one.y > one.y + 100.0,
@@ -12395,6 +12414,90 @@ fn multiline_max_lines_token_default_and_clamp() {
     let mut m0 = HashMap::new();
     m0.insert("portal.composer.max_lines".to_owned(), "0".to_owned());
     assert_eq!(resolve_composer_overlay_tokens(&m0).max_lines, 6);
+}
+
+/// hud-ar10c: the composer content inset is token-driven via
+/// `portal.spacing.content_inset_px`. The resolver defaults to 6.0 (the historical
+/// `COMPOSER_TEXT_MARGIN` literal, so the default profile is unchanged), parses a
+/// finite non-negative override, and rejects malformed / negative / non-finite
+/// values back to the default. The resolved value must flow into the composer box
+/// geometry: `composer_input_box`'s vertical padding is `content_inset * 2`, so a
+/// widened inset grows the box by exactly twice the delta, and the default inset
+/// reproduces the prior box height.
+#[test]
+fn composer_content_inset_token_drives_box_geometry() {
+    use std::collections::HashMap;
+
+    // Default (empty map) → 6.0.
+    let def = resolve_composer_overlay_tokens(&HashMap::new());
+    assert_eq!(
+        def.content_inset_px, 6.0,
+        "default content inset is 6.0 (matches the prior COMPOSER_TEXT_MARGIN)"
+    );
+
+    // Explicit finite override is taken verbatim.
+    let mut m = HashMap::new();
+    m.insert(
+        "portal.spacing.content_inset_px".to_owned(),
+        "12".to_owned(),
+    );
+    assert_eq!(resolve_composer_overlay_tokens(&m).content_inset_px, 12.0);
+
+    // Zero (flush) is permitted.
+    let mut mz = HashMap::new();
+    mz.insert("portal.spacing.content_inset_px".to_owned(), "0".to_owned());
+    assert_eq!(resolve_composer_overlay_tokens(&mz).content_inset_px, 0.0);
+
+    // Negative / non-finite / malformed → rejected, falls back to the default.
+    for bad in ["-4", "NaN", "inf", "wat", ""] {
+        let mut mb = HashMap::new();
+        mb.insert("portal.spacing.content_inset_px".to_owned(), bad.to_owned());
+        assert_eq!(
+            resolve_composer_overlay_tokens(&mb).content_inset_px,
+            6.0,
+            "malformed inset {bad:?} falls back to the default"
+        );
+    }
+
+    // The resolved inset flows into the box geometry. `composer_input_box` pads
+    // the box height by `content_inset * 2` on top of the text lines, so a wider
+    // inset grows the box by exactly twice the delta while the default reproduces
+    // the prior height.
+    let region = Rect::new(0.0, 0.0, 600.0, 1000.0); // tall enough to avoid clamp
+    let font = 16.0;
+    let lhm = crate::markdown::MarkdownTokens::default().line_height_multiplier;
+    let line_height = font * lhm;
+
+    let box_default = Compositor::composer_input_box(
+        region,
+        font,
+        lhm,
+        1.0,
+        ComposerVerticalAnchor::Bottom,
+        def.content_inset_px,
+    );
+    assert!(
+        (box_default.height - (line_height + 6.0 * 2.0)).abs() < 0.01,
+        "default inset reproduces the prior one-line box height"
+    );
+
+    let wide_inset = resolve_composer_overlay_tokens(&m).content_inset_px; // 12.0
+    let box_wide = Compositor::composer_input_box(
+        region,
+        font,
+        lhm,
+        1.0,
+        ComposerVerticalAnchor::Bottom,
+        wide_inset,
+    );
+    assert!(
+        (box_wide.height - (line_height + 12.0 * 2.0)).abs() < 0.01,
+        "wider inset grows the box height by twice the inset"
+    );
+    assert!(
+        (box_wide.height - box_default.height - 2.0 * (12.0 - 6.0)).abs() < 0.01,
+        "box height delta equals twice the inset delta"
+    );
 }
 
 /// The default `ComposerLayout` is the inert single-line profile, so a frame with

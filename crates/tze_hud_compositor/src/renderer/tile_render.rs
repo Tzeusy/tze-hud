@@ -47,12 +47,16 @@ use super::token_colors::{
     resolve_viewer_echo_tokens,
 };
 
-/// Horizontal inset (physical px) between the composer region edge and the draft
-/// text, on both the left and right.  Shared by [`Compositor::collect_composer_text_item`]
-/// (where it positions the draft and its clip) and [`Compositor::prime_composer_scroll_offset`]
-/// (where it defines the caret-follow window and keep-visible margin), so the two
-/// stay in lockstep.  Matches the composer strip's visual padding.
-const COMPOSER_TEXT_MARGIN: f32 = 6.0;
+// The composer's content inset (historically the `COMPOSER_TEXT_MARGIN = 6.0`
+// literal) is now token-driven: it resolves from the shared
+// `portal.spacing.content_inset_px` token into
+// [`ComposerOverlayTokens::content_inset_px`] (hud-ar10c) and is threaded through
+// the composer geometry (`composer_input_box`, the caret-follow window, the draft
+// `pixel_x`/clip, and `viewer_echo_zone_width`) so no spacing literal survives in
+// the composer render path. The token defaults to 6.0, reproducing the prior
+// spacing exactly (no visual regression). This is caret-follow-geometry-sensitive:
+// the caret x-origin is `region.x + content_inset`, so the inset and the caret
+// stay in lockstep.
 
 /// Compute divider rectangles for transcript turn separators (hud-nx7yq.4).
 ///
@@ -651,6 +655,7 @@ impl Compositor {
             line_height_multiplier,
             self.composer_layout.visible_lines,
             tokens.anchor,
+            tokens.content_inset_px,
         );
 
         // Background fill.
@@ -753,10 +758,11 @@ impl Compositor {
         line_height_multiplier: f32,
         visible_lines: f32,
         anchor: ComposerVerticalAnchor,
+        content_inset_px: f32,
     ) -> Rect {
         let line_height = (font_size_px * line_height_multiplier).max(1.0);
         let lines = visible_lines.max(1.0);
-        let box_height = (line_height * lines + COMPOSER_TEXT_MARGIN * 2.0)
+        let box_height = (line_height * lines + content_inset_px * 2.0)
             .min(region.height)
             .max(1.0);
         let box_y = match anchor {
@@ -848,9 +854,13 @@ impl Compositor {
         let tokens = resolve_composer_overlay_tokens(&self.token_map);
         let font_size_px = tokens.font_size_px;
         let max_lines = tokens.max_lines.max(1);
+        // Token-driven composer content inset (hud-ar10c); the caret-follow window
+        // and keep-visible margin below key off the same value the draft render
+        // uses, so caret geometry stays in lockstep with the box padding.
+        let content_inset = tokens.content_inset_px;
         // Visible text window = region interior width (region width minus the left
         // and right text margins).  This is the same `bw` collect uses.
-        let window_width = (region.width - COMPOSER_TEXT_MARGIN * 2.0).max(1.0);
+        let window_width = (region.width - content_inset * 2.0).max(1.0);
         let line_height_multiplier =
             crate::markdown::MarkdownTokens::default().line_height_multiplier;
         let line_height = (font_size_px * line_height_multiplier).max(1.0);
@@ -874,7 +884,7 @@ impl Compositor {
                     caret_x,
                     content_width,
                     window_width,
-                    COMPOSER_TEXT_MARGIN,
+                    content_inset,
                 ),
                 content_width,
                 visible_lines: 1.0,
@@ -902,8 +912,7 @@ impl Compositor {
         // the caret line clipped outside the visible box. `composer_input_box`
         // clamps the box height to the region too, so this keeps visible_lines,
         // the box, and vscroll mutually consistent and the caret always in view.
-        let region_fit_lines =
-            composer_region_fit_lines(region.height, line_height, COMPOSER_TEXT_MARGIN);
+        let region_fit_lines = composer_region_fit_lines(region.height, line_height, content_inset);
         let effective_max_lines = (max_lines as usize).min(region_fit_lines).max(1);
         let visible_lines = composer_visible_line_count(total_lines, effective_max_lines);
         let first_visible =
@@ -993,6 +1002,7 @@ impl Compositor {
             crate::markdown::MarkdownTokens::default().line_height_multiplier,
             layout.visible_lines,
             tokens.anchor,
+            tokens.content_inset_px,
         );
 
         // Insert the caret glyph at the cursor byte offset, gated by the blink
@@ -1008,7 +1018,7 @@ impl Compositor {
             has_selection || caret_visible_at(self.composer_caret_blink_start.elapsed());
         let display_text = composer_display_text_blink(&cs.text, cs.cursor_byte, caret_visible);
 
-        let text_margin = COMPOSER_TEXT_MARGIN;
+        let text_margin = tokens.content_inset_px;
 
         // Horizontal caret-follow (hud-zlfi4, single-line profile only): shift the
         // draft LEFT by the per-frame scroll offset primed in
@@ -1192,8 +1202,8 @@ impl Compositor {
     /// composer region), i.e. the region interior minus the horizontal text
     /// margins.  Shared by the prime (wrap measurement) and collect (render) so
     /// the measured line count and the rendered wrap agree.
-    fn viewer_echo_zone_width(region: Rect) -> f32 {
-        (region.width - COMPOSER_TEXT_MARGIN * 2.0).max(1.0)
+    fn viewer_echo_zone_width(region: Rect, content_inset_px: f32) -> f32 {
+        (region.width - content_inset_px * 2.0).max(1.0)
     }
 
     /// The retained viewer-echo entries for `tile` joined oldest-first with `\n`,
@@ -1240,6 +1250,10 @@ impl Compositor {
         }
         let lhm = crate::markdown::MarkdownTokens::default().line_height_multiplier;
         let echo_font = resolve_viewer_echo_tokens(&self.token_map).font_size_px;
+        // Token-driven composer content inset (hud-ar10c): the echo wrap-measure
+        // zone width must match the render path's zone width in
+        // `collect_viewer_echo_text_items`, which insets by the same value.
+        let content_inset = resolve_composer_overlay_tokens(&self.token_map).content_inset_px;
 
         // Gather (tile, zone_width, per-entry texts) under &self first, then
         // measure under &mut self.text_rasterizer — the two borrows do not overlap.
@@ -1254,7 +1268,11 @@ impl Compositor {
             let Some(entries) = self.viewer_echo_entry_texts(tile.id) else {
                 continue;
             };
-            jobs.push((tile.id, Self::viewer_echo_zone_width(region), entries));
+            jobs.push((
+                tile.id,
+                Self::viewer_echo_zone_width(region, content_inset),
+                entries,
+            ));
         }
 
         let mut results: Vec<(SceneId, Vec<usize>)> = Vec::with_capacity(jobs.len());
@@ -1338,11 +1356,12 @@ impl Compositor {
             line_height_multiplier,
             self.composer_layout.visible_lines,
             composer_tokens.anchor,
+            composer_tokens.content_inset_px,
         );
         let line_h = (tokens.font_size_px * line_height_multiplier).max(1.0);
-        let margin = COMPOSER_TEXT_MARGIN;
+        let margin = composer_tokens.content_inset_px;
         let opacity = self.tile_effective_opacity(tile, scene);
-        let zone_width = Self::viewer_echo_zone_width(region);
+        let zone_width = Self::viewer_echo_zone_width(region, composer_tokens.content_inset_px);
 
         // The band available for history: from the region top down to the box top.
         let band_top = region.y;
@@ -1455,10 +1474,11 @@ impl Compositor {
             line_height_multiplier,
             self.composer_layout.visible_lines,
             composer_tokens.anchor,
+            composer_tokens.content_inset_px,
         );
         let line_h = (echo_tokens.font_size_px * line_height_multiplier).max(1.0);
-        let margin = COMPOSER_TEXT_MARGIN;
-        let zone_width = Self::viewer_echo_zone_width(region);
+        let margin = composer_tokens.content_inset_px;
+        let zone_width = Self::viewer_echo_zone_width(region, composer_tokens.content_inset_px);
 
         let band_top = region.y;
         if draft_box.y - band_top <= 0.0 {
