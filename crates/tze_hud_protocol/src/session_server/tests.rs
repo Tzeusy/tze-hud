@@ -484,6 +484,78 @@ async fn test_handshake_init_established_and_snapshot() {
     }
 }
 
+/// hud-16um0: when the runtime exposes resolved portal tokens in `SharedState`,
+/// the `SessionEstablished` handshake carries them verbatim in
+/// `portal_part_tokens.tokens`, so a client renders the runtime's active-profile
+/// look instead of a client-side mirror.
+#[tokio::test]
+async fn test_handshake_carries_resolved_portal_tokens() {
+    let scene = SceneGraph::new(800.0, 600.0);
+    let service = HudSessionImpl::new(scene, "test-key");
+    // Seed the resolved-token map the windowed runtime would populate at startup.
+    {
+        let mut st = service.state.lock().await;
+        st.resolved_portal_tokens = HashMap::from([
+            (
+                "portal.frame.background".to_string(),
+                "#0000004D".to_string(),
+            ),
+            ("portal.header.font_size".to_string(), "18".to_string()),
+        ]);
+    }
+
+    let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _server = tokio::spawn(async move {
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        tonic::transport::Server::builder()
+            .add_service(HudSessionServer::new(service))
+            .serve_with_incoming(incoming)
+            .await
+            .unwrap();
+    });
+    let mut client = connect_test_client_with_retry(addr.port()).await;
+
+    let (_tx, messages, _stream) = handshake(&mut client, "test-agent", "test-key").await;
+    match &messages[0].payload {
+        Some(ServerPayload::SessionEstablished(established)) => {
+            let tokens = established
+                .portal_part_tokens
+                .as_ref()
+                .expect("handshake must carry portal_part_tokens when runtime exposes them");
+            assert_eq!(
+                tokens.tokens.get("portal.frame.background"),
+                Some(&"#0000004D".to_string()),
+                "resolved frame background must be forwarded verbatim"
+            );
+            assert_eq!(
+                tokens.tokens.get("portal.header.font_size"),
+                Some(&"18".to_string()),
+                "resolved header font size must be forwarded verbatim"
+            );
+        }
+        other => panic!("Expected SessionEstablished, got: {other:?}"),
+    }
+}
+
+/// hud-16um0: a runtime that does NOT expose portal tokens (empty map — the
+/// headless/test default) omits the handshake field, so older-client fallback
+/// to the local mirror stays the wire behaviour.
+#[tokio::test]
+async fn test_handshake_omits_portal_tokens_when_unexposed() {
+    let (mut client, _server) = setup_test().await;
+    let (_tx, messages, _stream) = handshake(&mut client, "test-agent", "test-key").await;
+    match &messages[0].payload {
+        Some(ServerPayload::SessionEstablished(established)) => {
+            assert!(
+                established.portal_part_tokens.is_none(),
+                "portal_part_tokens must be absent when the runtime exposes no tokens"
+            );
+        }
+        other => panic!("Expected SessionEstablished, got: {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn test_handshake_auth_failure() {
     let (mut client, _server) = setup_test().await;
@@ -3152,6 +3224,7 @@ async fn test_fifo_preserved_when_mutation_arrives_during_drain_window() {
         degradation_level: crate::session::RuntimeDegradationLevel::Normal,
         media_ingress_active: None,
         input_capture_tx: None,
+        resolved_portal_tokens: std::collections::HashMap::new(),
     }));
 
     // Build a session whose freeze_queue already has one entry (simulates the
@@ -3283,6 +3356,7 @@ async fn test_freeze_retransmit_deduped_applied_exactly_once() {
         degradation_level: crate::session::RuntimeDegradationLevel::Normal,
         media_ingress_active: None,
         input_capture_tx: None,
+        resolved_portal_tokens: std::collections::HashMap::new(),
     }));
 
     let mut session = StreamSession {

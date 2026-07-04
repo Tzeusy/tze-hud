@@ -608,6 +608,9 @@ class HudClient:
         # MUTATION_REJECTED / "lease expired" mid-run (hud-hk8kl).
         self.last_granted_lease_ttl_ms: int = 0
         self.granted_capabilities: list[str] = []
+        # Runtime-resolved portal design tokens from the handshake (hud-16um0);
+        # populated by connect(), empty when the runtime does not expose them.
+        self.resolved_portal_tokens: dict[str, str] = {}
         self.scene_snapshot_json: Optional[str] = None
         self.scene_display_area: Optional[tuple[float, float]] = None
         self._response_queue: asyncio.Queue = asyncio.Queue()
@@ -686,6 +689,14 @@ class HudClient:
         self.namespace = est.namespace
         self.heartbeat_interval_ms = est.heartbeat_interval_ms
         self.granted_capabilities = list(est.granted_capabilities)
+        # Runtime-resolved portal design tokens (hud-16um0). When the runtime
+        # exposes them, this is the ACTIVE profile's fully-resolved portal token
+        # map ({key: value_string}); empty when the runtime predates the field,
+        # in which case a client falls back to its local default mirror.
+        if est.HasField("portal_part_tokens"):
+            self.resolved_portal_tokens = dict(est.portal_part_tokens.tokens)
+        else:
+            self.resolved_portal_tokens = {}
         print(f"  [grpc] Session established: namespace={self.namespace}, "
               f"caps={self.granted_capabilities}", flush=True)
 

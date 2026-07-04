@@ -70,6 +70,7 @@ pub(super) fn make_shared_state() -> Arc<TokioMutex<SharedState>> {
         degradation_level: RuntimeDegradationLevel::Normal,
         media_ingress_active: None,
         input_capture_tx: None,
+        resolved_portal_tokens: std::collections::HashMap::new(),
     }))
 }
 

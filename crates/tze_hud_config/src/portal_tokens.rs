@@ -916,6 +916,203 @@ pub fn resolve_portal_tokens(token_map: &DesignTokenMap) -> PortalPartTokens {
     }
 }
 
+// ── Resolved string map (wire delivery) ────────────────────────────────────────
+
+/// Canonical `(wire token key, default value string)` pairs — the single source
+/// of truth pairing each portal token key with the same default string
+/// [`resolve_portal_tokens`] falls back to. Kept adjacent to that resolver so the
+/// two are read together; [`resolve_portal_token_strings`] is derived from it and
+/// a coverage tripwire test asserts its length matches the resolved field count.
+const PORTAL_TOKEN_DEFAULT_STRINGS: &[(&str, &str)] = &[
+    (PORTAL_TOKEN_FRAME_BACKGROUND, defaults::FRAME_BACKGROUND),
+    (PORTAL_TOKEN_FRAME_OPACITY, defaults::FRAME_OPACITY),
+    (
+        PORTAL_TOKEN_FRAME_BORDER_COLOR,
+        defaults::FRAME_BORDER_COLOR,
+    ),
+    (PORTAL_TOKEN_HEADER_TEXT_COLOR, defaults::HEADER_TEXT_COLOR),
+    (PORTAL_TOKEN_HEADER_FONT_SIZE, defaults::HEADER_FONT_SIZE),
+    (
+        PORTAL_TOKEN_COMPOSER_BACKGROUND,
+        defaults::COMPOSER_BACKGROUND,
+    ),
+    (
+        PORTAL_TOKEN_COMPOSER_TEXT_COLOR,
+        defaults::COMPOSER_TEXT_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_COMPOSER_FONT_SIZE,
+        defaults::COMPOSER_FONT_SIZE,
+    ),
+    (
+        PORTAL_TOKEN_COMPOSER_AT_CAPACITY_COLOR,
+        defaults::COMPOSER_AT_CAPACITY_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_TRANSCRIPT_BACKGROUND,
+        defaults::TRANSCRIPT_BACKGROUND,
+    ),
+    (
+        PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR,
+        defaults::TRANSCRIPT_TEXT_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_TRANSCRIPT_FONT_SIZE,
+        defaults::TRANSCRIPT_FONT_SIZE,
+    ),
+    (
+        PORTAL_TOKEN_TRANSCRIPT_DIM_TEXT_COLOR,
+        defaults::TRANSCRIPT_DIM_TEXT_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_TRANSCRIPT_DIM_BACKGROUND,
+        defaults::TRANSCRIPT_DIM_BACKGROUND,
+    ),
+    (
+        PORTAL_TOKEN_STALE_MARKER_COLOR,
+        defaults::STALE_MARKER_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR,
+        defaults::LIFECYCLE_ACTIVE_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_LIFECYCLE_ATTACHED_COLOR,
+        defaults::LIFECYCLE_ATTACHED_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_LIFECYCLE_ATTENTION_COLOR,
+        defaults::LIFECYCLE_ATTENTION_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_LIFECYCLE_INACTIVE_COLOR,
+        defaults::LIFECYCLE_INACTIVE_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_LIFECYCLE_ACCENT_WIDTH_PX,
+        defaults::LIFECYCLE_ACCENT_WIDTH_PX,
+    ),
+    (PORTAL_TOKEN_DIVIDER_COLOR, defaults::DIVIDER_COLOR),
+    (
+        PORTAL_TOKEN_COLLAPSED_BACKGROUND,
+        defaults::COLLAPSED_BACKGROUND,
+    ),
+    (
+        PORTAL_TOKEN_COLLAPSED_TEXT_COLOR,
+        defaults::COLLAPSED_TEXT_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_COLLAPSED_FONT_SIZE,
+        defaults::COLLAPSED_FONT_SIZE,
+    ),
+    (PORTAL_TOKEN_TRANSITION_IN_MS, defaults::TRANSITION_IN_MS),
+    (PORTAL_TOKEN_TRANSITION_OUT_MS, defaults::TRANSITION_OUT_MS),
+    (
+        PORTAL_TOKEN_WINDOW_MIN_WIDTH_PX,
+        defaults::WINDOW_MIN_WIDTH_PX,
+    ),
+    (
+        PORTAL_TOKEN_WINDOW_MIN_HEIGHT_PX,
+        defaults::WINDOW_MIN_HEIGHT_PX,
+    ),
+    (
+        PORTAL_TOKEN_WINDOW_RESIZE_STEP_PX,
+        defaults::WINDOW_RESIZE_STEP_PX,
+    ),
+    (
+        PORTAL_TOKEN_WINDOW_RESIZE_AFFORDANCE_PX,
+        defaults::WINDOW_RESIZE_AFFORDANCE_PX,
+    ),
+    (
+        PORTAL_TOKEN_SCROLL_INDICATOR_COLOR,
+        defaults::SCROLL_INDICATOR_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_SCROLL_INDICATOR_WIDTH_PX,
+        defaults::SCROLL_INDICATOR_WIDTH_PX,
+    ),
+    (
+        PORTAL_TOKEN_SCROLL_INDICATOR_MIN_HEIGHT_PX,
+        defaults::SCROLL_INDICATOR_MIN_HEIGHT_PX,
+    ),
+    (
+        PORTAL_TOKEN_COMPOSER_CARET_COLOR,
+        defaults::COMPOSER_CARET_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_COMPOSER_SELECTION_COLOR,
+        defaults::COMPOSER_SELECTION_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_COMPOSER_PLACEHOLDER_COLOR,
+        defaults::COMPOSER_PLACEHOLDER_COLOR,
+    ),
+    (PORTAL_TOKEN_FOCUS_RING_COLOR, defaults::FOCUS_RING_COLOR),
+    (
+        PORTAL_TOKEN_FOCUS_RING_WIDTH_PX,
+        defaults::FOCUS_RING_WIDTH_PX,
+    ),
+    (
+        PORTAL_TOKEN_WINDOW_RESIZE_GRIP_COLOR,
+        defaults::WINDOW_RESIZE_GRIP_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_WINDOW_RESIZE_GRIP_HOVER_COLOR,
+        defaults::WINDOW_RESIZE_GRIP_HOVER_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_WINDOW_RESIZE_GRIP_SIZE_PX,
+        defaults::WINDOW_RESIZE_GRIP_SIZE_PX,
+    ),
+    (
+        PORTAL_TOKEN_SPACING_CONTENT_INSET_PX,
+        defaults::SPACING_CONTENT_INSET_PX,
+    ),
+    (
+        PORTAL_TOKEN_SPACING_HEADER_HEIGHT_PX,
+        defaults::SPACING_HEADER_HEIGHT_PX,
+    ),
+    (
+        PORTAL_TOKEN_SPACING_SECTION_GAP_PX,
+        defaults::SPACING_SECTION_GAP_PX,
+    ),
+    (
+        PORTAL_TOKEN_TRANSCRIPT_MAX_MEASURE_PX,
+        defaults::TRANSCRIPT_MAX_MEASURE_PX,
+    ),
+];
+
+/// Resolve every canonical portal token key to its runtime value STRING, for
+/// delivery over the session handshake (RFC 0005 `SessionEstablished`, hud-16um0).
+///
+/// For each canonical key the value is the active profile's override (verbatim,
+/// as the resolver would consume it) when present in `token_map`, otherwise the
+/// canonical default string. The result is therefore FULLY resolved — every
+/// portal key is present — so a client that parses it (e.g. the text-stream
+/// portal exemplar's `resolve_portal_tokens`) reproduces the runtime's live
+/// [`PortalPartTokens`] without consulting its own default mirror.
+///
+/// Override strings are forwarded verbatim rather than validated: an
+/// unparseable override is handled identically by the parsing client, which
+/// falls back to the (drift-guarded, byte-identical) default — matching
+/// [`resolve_portal_tokens`]'s warn-and-default behaviour on the runtime side.
+/// The returned [`BTreeMap`](std::collections::BTreeMap) is deterministically
+/// ordered for stable tests and logs; callers may collect into any map.
+pub fn resolve_portal_token_strings(
+    token_map: &DesignTokenMap,
+) -> std::collections::BTreeMap<String, String> {
+    PORTAL_TOKEN_DEFAULT_STRINGS
+        .iter()
+        .map(|(key, default)| {
+            let value = token_map
+                .get(*key)
+                .cloned()
+                .unwrap_or_else(|| (*default).to_string());
+            ((*key).to_string(), value)
+        })
+        .collect()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1745,6 +1942,95 @@ mod tests {
         assert!(
             (tokens.transcript_max_measure_px - 640.0).abs() < 1e-4,
             "transcript measure cap override must propagate"
+        );
+    }
+
+    // ── Resolved string map (handshake delivery, hud-16um0) ───────────────
+
+    /// Coverage tripwire: the string-map table must pair every field the
+    /// resolver reads. If a token is added to `resolve_portal_tokens` without a
+    /// `PORTAL_TOKEN_DEFAULT_STRINGS` entry, this count check fails and forces
+    /// the table (and thus the handshake payload) to be updated.
+    #[test]
+    fn resolve_portal_token_strings_covers_every_key() {
+        // Number of distinct portal token keys resolved by resolve_portal_tokens.
+        const EXPECTED_KEYS: usize = 45;
+        assert_eq!(
+            PORTAL_TOKEN_DEFAULT_STRINGS.len(),
+            EXPECTED_KEYS,
+            "PORTAL_TOKEN_DEFAULT_STRINGS must contain one entry per resolved portal \
+             token; update it (and the Python mirror + drift-guard) when tokens change"
+        );
+        let resolved = resolve_portal_token_strings(&empty_map());
+        assert_eq!(
+            resolved.len(),
+            EXPECTED_KEYS,
+            "no duplicate keys in the table"
+        );
+    }
+
+    /// Empty token map → the string map equals the canonical default strings
+    /// verbatim (the default palette, the form a parsing client consumes).
+    #[test]
+    fn resolve_portal_token_strings_defaults_verbatim() {
+        let resolved = resolve_portal_token_strings(&empty_map());
+        for (key, default) in PORTAL_TOKEN_DEFAULT_STRINGS {
+            assert_eq!(
+                resolved.get(*key).map(String::as_str),
+                Some(*default),
+                "default string for {key} must be forwarded verbatim"
+            );
+        }
+    }
+
+    /// Round-trip faithfulness: parsing the resolved string map back through
+    /// `resolve_portal_tokens` reproduces exactly what the runtime resolved for
+    /// the same input — for both defaults AND a fully-overridden profile. This
+    /// is the contract the exemplar relies on: consuming the handshake map is
+    /// identical to consuming a local profile override map.
+    #[test]
+    fn resolve_portal_token_strings_round_trips_through_resolver() {
+        // A distinct, valid sentinel per key so a missing table entry would be
+        // caught: colors get an 8-digit hex, numerics a decimal string.
+        let mut overrides = DesignTokenMap::new();
+        for (i, (key, default)) in PORTAL_TOKEN_DEFAULT_STRINGS.iter().enumerate() {
+            let is_color = default.starts_with('#');
+            let sentinel = if is_color {
+                // Vary channels by index; keep it a valid #RRGGBBAA.
+                format!(
+                    "#{:02X}{:02X}{:02X}FF",
+                    (i * 3) % 256,
+                    (i * 5) % 256,
+                    (i * 7) % 256
+                )
+            } else {
+                // transition_* require positive integers; use a safe integer.
+                format!("{}", 11 + i)
+            };
+            overrides.insert((*key).to_string(), sentinel);
+        }
+
+        // Direct resolve of the override map (what the runtime computes).
+        let direct = resolve_portal_tokens(&overrides);
+
+        // Resolve to strings, then parse the strings back through the resolver
+        // (what a client does with the handshake map).
+        let string_map = resolve_portal_token_strings(&overrides);
+        let round_tripped_map: DesignTokenMap = string_map.into_iter().collect();
+        let via_strings = resolve_portal_tokens(&round_tripped_map);
+
+        assert_eq!(
+            direct, via_strings,
+            "resolve_portal_token_strings must round-trip to the same PortalPartTokens \
+             the runtime resolved directly (handshake payload is faithful)"
+        );
+
+        // And the sentinels must have actually taken effect (guards against the
+        // degenerate all-defaults case masking a coverage gap).
+        assert_ne!(
+            direct,
+            PortalPartTokens::default(),
+            "sentinel overrides must diverge from defaults for the round-trip to be meaningful"
         );
     }
 }
