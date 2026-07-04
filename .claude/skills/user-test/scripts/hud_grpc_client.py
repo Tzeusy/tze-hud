@@ -618,6 +618,20 @@ class HudClient:
         self._send_queue: Optional[asyncio.Queue] = None
         self._transport_closed = False
         self._session_close_sent = False
+        # ── Batch-correlated present acknowledgment (hud-vjlqh / hud-91uu6) ────
+        # FramePresented events (ServerMessage field 52) delivered to sessions
+        # subscribed to TELEMETRY_FRAMES pair one or more MutationBatch.batch_ids
+        # with the wall-clock time their composited frame was presented on
+        # screen. We capture them off the read loop (rather than the generic
+        # response queue) so a present-latency consumer can correlate a batch it
+        # sent to the true present time, distinct from the transport-RTT proxy.
+        self._frame_presented_events: list[Any] = []
+        # batch_id (bytes) → send wall-clock (UTC µs, _now_wall_us domain — the
+        # same domain as FramePresented.present_wall_us). Bounded to the most
+        # recent sends so a long run does not grow this unbounded.
+        self._batch_send_wall_us: "dict[bytes, int]" = {}
+        self._batch_send_order: list[bytes] = []
+        self.last_mutation_batch_id: Optional[bytes] = None
 
     async def __aenter__(self):
         await self.connect()
@@ -712,8 +726,14 @@ class HudClient:
         try:
             async for msg in self._stream:
                 self._server_seq = msg.sequence
-                if msg.WhichOneof("payload") == "event_batch":
+                which = msg.WhichOneof("payload")
+                if which == "event_batch":
                     await self._event_queue.put(msg.event_batch)
+                elif which == "frame_presented":
+                    # Present-ack (hud-vjlqh): capture off to the side so it does
+                    # not interfere with the request/response matching in
+                    # _wait_for. State-stream/droppable — a plain list is fine.
+                    self._frame_presented_events.append(msg.frame_presented)
                 else:
                     await self._response_queue.put(msg)
         except grpc.aio.AioRpcError as e:
@@ -775,8 +795,62 @@ class HudClient:
         )
         if self._send_queue is None:
             raise RuntimeError("client transport has not been initialized")
+        # Record the send wall-clock of every mutation batch so a present-latency
+        # consumer can correlate the batch to its FramePresented (hud-vjlqh). The
+        # timestamp is UTC µs (same domain as FramePresented.present_wall_us).
+        batch = payload_kwargs.get("mutation_batch")
+        if batch is not None and batch.batch_id:
+            self._record_batch_send(bytes(batch.batch_id), msg.timestamp_wall_us)
         await self._send_queue.put(msg)
         return sequence
+
+    # ── Present-ack correlation (hud-vjlqh / hud-91uu6) ───────────────────────
+    _MAX_TRACKED_BATCH_SENDS = 512
+
+    def _record_batch_send(self, batch_id: bytes, send_wall_us: int) -> None:
+        """Remember a mutation batch's send wall-clock, bounded to the most
+        recent sends so a long run does not grow the map unbounded."""
+        if batch_id not in self._batch_send_wall_us:
+            self._batch_send_order.append(batch_id)
+            if len(self._batch_send_order) > self._MAX_TRACKED_BATCH_SENDS:
+                evicted = self._batch_send_order.pop(0)
+                self._batch_send_wall_us.pop(evicted, None)
+        self._batch_send_wall_us[batch_id] = send_wall_us
+        self.last_mutation_batch_id = batch_id
+
+    def batch_send_wall_us(self, batch_id: bytes) -> Optional[int]:
+        """Send wall-clock (UTC µs) recorded for a mutation batch, if tracked."""
+        return self._batch_send_wall_us.get(bytes(batch_id))
+
+    def present_wall_us_for_batch(self, batch_id: bytes) -> Optional[int]:
+        """Return the present wall-clock (UTC µs) of the FramePresented whose
+        batch_ids contains ``batch_id``, or None if not yet observed. When more
+        than one frame carried the batch (should not happen — a batch presents
+        once) the earliest present is returned."""
+        target = bytes(batch_id)
+        for event in self._frame_presented_events:
+            if any(bytes(b) == target for b in event.batch_ids):
+                return event.present_wall_us
+        return None
+
+    async def wait_for_frame_presented(
+        self, batch_id: bytes, timeout: float = 2.0, poll_s: float = 0.01,
+    ) -> Optional[int]:
+        """Await the present wall-clock (UTC µs) for ``batch_id``.
+
+        Returns None if no matching FramePresented arrives within ``timeout``.
+        A None result is expected and non-fatal: the runtime only emits
+        FramePresented from the headless present path today (windowed emission is
+        deferred, hud-4va6q), and delivery further requires the session to hold
+        the read_telemetry capability and a TELEMETRY_FRAMES subscription."""
+        deadline = time.monotonic() + timeout
+        while True:
+            present = self.present_wall_us_for_batch(batch_id)
+            if present is not None:
+                return present
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(poll_s)
 
     async def _shutdown_transport(self):
         """Cancel background tasks and close the gRPC channel."""
