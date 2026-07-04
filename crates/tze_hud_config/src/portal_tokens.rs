@@ -66,6 +66,23 @@
 //! | `portal.scroll_indicator.color` | scroll indicator | thumb color (RGBA hex) |
 //! | `portal.scroll_indicator.width_px` | scroll indicator | track width in px |
 //! | `portal.scroll_indicator.min_height_px` | scroll indicator | minimum thumb height in px |
+//!
+//! ### Compliance amendment (portal visual-token gaps, hud-khfgx)
+//!
+//! | Key | Part | Property |
+//! |-----|------|----------|
+//! | `portal.composer.caret_color` | composer | caret glyph color (RGBA hex) |
+//! | `portal.composer.selection_color` | composer | selection highlight (RGBA hex, alpha-bearing) |
+//! | `portal.composer.placeholder_color` | composer | empty-draft placeholder text (RGBA hex) |
+//! | `portal.focus_ring.color` | focus ring | ring stroke color (RGBA hex) |
+//! | `portal.focus_ring.width_px` | focus ring | ring stroke width in px |
+//! | `portal.window.resize_grip.color` | resize grip | grip mark color (RGBA hex) |
+//! | `portal.window.resize_grip.hover_color` | resize grip | hover tint (RGBA hex) |
+//! | `portal.window.resize_grip.size_px` | resize grip | grip square extent in px |
+//! | `portal.spacing.content_inset_px` | spacing | content inset/padding in px |
+//! | `portal.spacing.header_height_px` | spacing | header strip height in px |
+//! | `portal.spacing.section_gap_px` | spacing | inter-section vertical gap in px |
+//! | `portal.transcript.max_measure_px` | transcript | line measure cap in px (`0` = unbounded) |
 
 use crate::tokens::{DesignTokenMap, Rgba, parse_color_hex, parse_numeric};
 use tracing::warn;
@@ -208,6 +225,78 @@ pub const PORTAL_TOKEN_SCROLL_INDICATOR_WIDTH_PX: &str = "portal.scroll_indicato
 pub const PORTAL_TOKEN_SCROLL_INDICATOR_MIN_HEIGHT_PX: &str =
     "portal.scroll_indicator.min_height_px";
 
+// ── Composer caret / selection / placeholder tokens ──────────────────────────
+//
+// Compliance (vd-caret-selection-placeholder-not-tokenized): the composer's caret
+// glyph, selection highlight, and empty-draft placeholder are visual values that
+// MUST resolve from design tokens rather than sharing the composer text color or
+// living as inline compositor literals. A profile can now restyle each of the
+// three independently. `selection_color` mirrors the compositor's existing inline
+// default so this is a no-visual-regression tokenization; `caret_color` defaults
+// to the composer text color so the default profile is visually unchanged.
+
+/// Composer caret glyph color (RGBA hex). Sourced independently from the composer
+/// text color so a profile can accent the caret. Defaults to the composer text
+/// color for a no-visual-regression default.
+pub const PORTAL_TOKEN_COMPOSER_CARET_COLOR: &str = "portal.composer.caret_color";
+/// Composer selection-highlight background color (RGBA hex, alpha-bearing). Mirrors
+/// the compositor's existing calm-blue selection tint.
+pub const PORTAL_TOKEN_COMPOSER_SELECTION_COLOR: &str = "portal.composer.selection_color";
+/// Composer empty-draft placeholder text color (RGBA hex). Dimmed relative to the
+/// live composer text so an empty prompt reads as a hint, not typed content.
+pub const PORTAL_TOKEN_COMPOSER_PLACEHOLDER_COLOR: &str = "portal.composer.placeholder_color";
+
+// ── Focus-ring tokens (vd-focus-ring-outside-portal-tokens) ──────────────────
+//
+// The keyboard focus ring's color/width previously came only from
+// `tze_hud_input::DEFAULT_FOCUS_RING_*`, outside profile control. These portal
+// keys bring the ring under the portal token surface; the compositor already
+// resolves `portal.focus_ring.*` from its token map, and these defaults mirror the
+// `tze_hud_input` focus-ring blue (linear ≈ 0.2/0.5/1.0) at 2px so the visible
+// ring is unchanged by default.
+
+/// Keyboard focus-ring stroke color (RGBA hex).
+pub const PORTAL_TOKEN_FOCUS_RING_COLOR: &str = "portal.focus_ring.color";
+/// Keyboard focus-ring stroke width in px.
+pub const PORTAL_TOKEN_FOCUS_RING_WIDTH_PX: &str = "portal.focus_ring.width_px";
+
+// ── Resize-grip affordance tokens (vd-crude-resize-handle-grip) ──────────────
+//
+// The pointer resize affordance is a bare capture band with no legible grip. These
+// tokens describe a dot-grid grip mark (color + hover tint + extent) so the
+// affordance can be drawn from tokens instead of a plain tinted square. The grip
+// RENDER itself is net-new (nothing is drawn today) and lands separately; these
+// keys define the styling surface it and the exemplar consume.
+
+/// Resize-grip mark color (RGBA hex) — the dot-grid/diagonal grip glyph.
+pub const PORTAL_TOKEN_WINDOW_RESIZE_GRIP_COLOR: &str = "portal.window.resize_grip.color";
+/// Resize-grip hover tint (RGBA hex) — brighter accent while the pointer is over
+/// the resize affordance.
+pub const PORTAL_TOKEN_WINDOW_RESIZE_GRIP_HOVER_COLOR: &str =
+    "portal.window.resize_grip.hover_color";
+/// Resize-grip visual extent in px (the square the grip mark occupies at the
+/// corner). Distinct from `portal.window.resize_affordance_px`, which sizes the
+/// invisible pointer capture band.
+pub const PORTAL_TOKEN_WINDOW_RESIZE_GRIP_SIZE_PX: &str = "portal.window.resize_grip.size_px";
+
+// ── Spatial-rhythm + transcript-measure tokens (vd-no-token-rhythm-padding-measure) ─
+//
+// Portal padding, header height, inter-section gap, and the transcript's optimal
+// line measure were ad-hoc numeric literals. These tokens make the portal's
+// spatial rhythm profile-controlled. Defaults match the current composer inset;
+// `max_measure_px = 0` means "unbounded" (no readability cap), preserving today's
+// full-width transcript wrapping until a profile opts into a narrower measure.
+
+/// Content inset (px) applied inside portal surfaces (composer/transcript padding).
+pub const PORTAL_TOKEN_SPACING_CONTENT_INSET_PX: &str = "portal.spacing.content_inset_px";
+/// Portal header strip height in px.
+pub const PORTAL_TOKEN_SPACING_HEADER_HEIGHT_PX: &str = "portal.spacing.header_height_px";
+/// Vertical gap (px) between stacked portal sections (header / transcript / composer).
+pub const PORTAL_TOKEN_SPACING_SECTION_GAP_PX: &str = "portal.spacing.section_gap_px";
+/// Maximum transcript line measure in px before wrapping (readability cap).
+/// `0` means unbounded — wrap to the full transcript width (current behavior).
+pub const PORTAL_TOKEN_TRANSCRIPT_MAX_MEASURE_PX: &str = "portal.transcript.max_measure_px";
+
 // ── Portal token fallback defaults ───────────────────────────────────────────
 
 /// Default values for portal tokens (used when token is absent from resolved map).
@@ -286,6 +375,38 @@ mod defaults {
     pub const SCROLL_INDICATOR_COLOR: &str = "#4A5568";
     pub const SCROLL_INDICATOR_WIDTH_PX: &str = "4";
     pub const SCROLL_INDICATOR_MIN_HEIGHT_PX: &str = "24";
+
+    // Composer caret / selection / placeholder defaults.
+    /// Caret glyph color — equal to `COMPOSER_TEXT_COLOR` so the default profile's
+    /// caret is visually unchanged; a profile may override to accent the caret.
+    pub const COMPOSER_CARET_COLOR: &str = "#E0E8F4";
+    /// Selection highlight — calm blue at ~0.45 alpha; mirrors the compositor's
+    /// existing inline default (`#3A7BD5` @ 0x73).
+    pub const COMPOSER_SELECTION_COLOR: &str = "#3A7BD573";
+    /// Empty-draft placeholder text — dimmed slate (matches the disconnect dim
+    /// text) so an empty prompt reads as a hint.
+    pub const COMPOSER_PLACEHOLDER_COLOR: &str = "#6B7689";
+
+    // Focus-ring defaults — mirror `tze_hud_input::DEFAULT_FOCUS_RING_*`
+    // (linear ≈ 0.2/0.5/1.0 at 2px). Expressed as the same sRGB fractions.
+    pub const FOCUS_RING_COLOR: &str = "#3380FF";
+    pub const FOCUS_RING_WIDTH_PX: &str = "2";
+
+    // Resize-grip affordance defaults — a muted-slate dot grip that brightens on
+    // hover, occupying a 14px corner square.
+    pub const WINDOW_RESIZE_GRIP_COLOR: &str = "#5A6373";
+    pub const WINDOW_RESIZE_GRIP_HOVER_COLOR: &str = "#8A93A6";
+    pub const WINDOW_RESIZE_GRIP_SIZE_PX: &str = "14";
+
+    // Spatial-rhythm + transcript-measure defaults.
+    /// Content inset — matches the composer text margin the compositor uses today.
+    pub const SPACING_CONTENT_INSET_PX: &str = "6";
+    /// Header strip height.
+    pub const SPACING_HEADER_HEIGHT_PX: &str = "28";
+    /// Inter-section vertical gap.
+    pub const SPACING_SECTION_GAP_PX: &str = "8";
+    /// Transcript measure cap — `0` = unbounded (wrap to full width, today's behavior).
+    pub const TRANSCRIPT_MAX_MEASURE_PX: &str = "0";
 }
 
 // ── PortalPartTokens ──────────────────────────────────────────────────────────
@@ -377,6 +498,39 @@ pub struct PortalPartTokens {
     pub scroll_indicator_width_px: f32,
     /// Minimum scroll indicator thumb height in px (§6b.5).
     pub scroll_indicator_min_height_px: f32,
+
+    // Composer caret / selection / placeholder (vd-caret-selection-placeholder-not-tokenized).
+    /// Caret glyph color — sourced independently from the composer text color.
+    pub composer_caret_color: Rgba,
+    /// Selection-highlight background color (alpha-bearing).
+    pub composer_selection_color: Rgba,
+    /// Empty-draft placeholder text color (dimmed hint).
+    pub composer_placeholder_color: Rgba,
+
+    // Keyboard focus ring (vd-focus-ring-outside-portal-tokens).
+    /// Focus-ring stroke color — under portal profile control, no longer only
+    /// `tze_hud_input::DEFAULT_FOCUS_RING_COLOR`.
+    pub focus_ring_color: Rgba,
+    /// Focus-ring stroke width in px.
+    pub focus_ring_width_px: f32,
+
+    // Resize-grip affordance (vd-crude-resize-handle-grip).
+    /// Resize-grip mark color (the dot-grid grip glyph).
+    pub resize_grip_color: Rgba,
+    /// Resize-grip hover tint.
+    pub resize_grip_hover_color: Rgba,
+    /// Resize-grip visual extent in px (the grip square at the corner).
+    pub resize_grip_size_px: f32,
+
+    // Spatial rhythm + transcript measure (vd-no-token-rhythm-padding-measure).
+    /// Content inset (px) inside portal surfaces.
+    pub content_inset_px: f32,
+    /// Header strip height in px.
+    pub header_height_px: f32,
+    /// Vertical gap (px) between stacked portal sections.
+    pub section_gap_px: f32,
+    /// Transcript optimal-measure cap in px; `0.0` = unbounded (full-width wrap).
+    pub transcript_max_measure_px: f32,
 }
 
 impl Default for PortalPartTokens {
@@ -462,6 +616,34 @@ impl Default for PortalPartTokens {
                 .expect("scroll indicator width default is valid numeric"),
             scroll_indicator_min_height_px: parse_numeric(defaults::SCROLL_INDICATOR_MIN_HEIGHT_PX)
                 .expect("scroll indicator min height default is valid numeric"),
+
+            composer_caret_color: parse_color_hex(defaults::COMPOSER_CARET_COLOR)
+                .expect("composer caret color default is valid hex"),
+            composer_selection_color: parse_color_hex(defaults::COMPOSER_SELECTION_COLOR)
+                .expect("composer selection color default is valid hex"),
+            composer_placeholder_color: parse_color_hex(defaults::COMPOSER_PLACEHOLDER_COLOR)
+                .expect("composer placeholder color default is valid hex"),
+
+            focus_ring_color: parse_color_hex(defaults::FOCUS_RING_COLOR)
+                .expect("focus ring color default is valid hex"),
+            focus_ring_width_px: parse_numeric(defaults::FOCUS_RING_WIDTH_PX)
+                .expect("focus ring width default is valid numeric"),
+
+            resize_grip_color: parse_color_hex(defaults::WINDOW_RESIZE_GRIP_COLOR)
+                .expect("resize grip color default is valid hex"),
+            resize_grip_hover_color: parse_color_hex(defaults::WINDOW_RESIZE_GRIP_HOVER_COLOR)
+                .expect("resize grip hover color default is valid hex"),
+            resize_grip_size_px: parse_numeric(defaults::WINDOW_RESIZE_GRIP_SIZE_PX)
+                .expect("resize grip size default is valid numeric"),
+
+            content_inset_px: parse_numeric(defaults::SPACING_CONTENT_INSET_PX)
+                .expect("content inset default is valid numeric"),
+            header_height_px: parse_numeric(defaults::SPACING_HEADER_HEIGHT_PX)
+                .expect("header height default is valid numeric"),
+            section_gap_px: parse_numeric(defaults::SPACING_SECTION_GAP_PX)
+                .expect("section gap default is valid numeric"),
+            transcript_max_measure_px: parse_numeric(defaults::TRANSCRIPT_MAX_MEASURE_PX)
+                .expect("transcript max measure default is valid numeric"),
         }
     }
 }
@@ -680,6 +862,56 @@ pub fn resolve_portal_tokens(token_map: &DesignTokenMap) -> PortalPartTokens {
         scroll_indicator_min_height_px: resolve_f32!(
             PORTAL_TOKEN_SCROLL_INDICATOR_MIN_HEIGHT_PX,
             defaults.scroll_indicator_min_height_px
+        ),
+
+        // Composer caret / selection / placeholder
+        composer_caret_color: resolve_color!(
+            PORTAL_TOKEN_COMPOSER_CARET_COLOR,
+            defaults.composer_caret_color
+        ),
+        composer_selection_color: resolve_color!(
+            PORTAL_TOKEN_COMPOSER_SELECTION_COLOR,
+            defaults.composer_selection_color
+        ),
+        composer_placeholder_color: resolve_color!(
+            PORTAL_TOKEN_COMPOSER_PLACEHOLDER_COLOR,
+            defaults.composer_placeholder_color
+        ),
+
+        // Focus ring
+        focus_ring_color: resolve_color!(PORTAL_TOKEN_FOCUS_RING_COLOR, defaults.focus_ring_color),
+        focus_ring_width_px: resolve_f32!(
+            PORTAL_TOKEN_FOCUS_RING_WIDTH_PX,
+            defaults.focus_ring_width_px
+        ),
+
+        // Resize grip
+        resize_grip_color: resolve_color!(
+            PORTAL_TOKEN_WINDOW_RESIZE_GRIP_COLOR,
+            defaults.resize_grip_color
+        ),
+        resize_grip_hover_color: resolve_color!(
+            PORTAL_TOKEN_WINDOW_RESIZE_GRIP_HOVER_COLOR,
+            defaults.resize_grip_hover_color
+        ),
+        resize_grip_size_px: resolve_f32!(
+            PORTAL_TOKEN_WINDOW_RESIZE_GRIP_SIZE_PX,
+            defaults.resize_grip_size_px
+        ),
+
+        // Spatial rhythm + transcript measure
+        content_inset_px: resolve_f32!(
+            PORTAL_TOKEN_SPACING_CONTENT_INSET_PX,
+            defaults.content_inset_px
+        ),
+        header_height_px: resolve_f32!(
+            PORTAL_TOKEN_SPACING_HEADER_HEIGHT_PX,
+            defaults.header_height_px
+        ),
+        section_gap_px: resolve_f32!(PORTAL_TOKEN_SPACING_SECTION_GAP_PX, defaults.section_gap_px),
+        transcript_max_measure_px: resolve_f32!(
+            PORTAL_TOKEN_TRANSCRIPT_MAX_MEASURE_PX,
+            defaults.transcript_max_measure_px
         ),
     }
 }
@@ -1327,5 +1559,192 @@ mod tests {
                 "bad transition_out_ms ({bad_value:?}) must fall back to default"
             );
         }
+    }
+
+    // ── Compliance amendment tokens (hud-khfgx) ──────────────────────────────
+    //
+    // Caret/selection/placeholder + focus-ring + resize-grip + spacing/measure.
+    // Each group asserts (a) sane defaults and (b) profile-override propagation
+    // through `resolve_portal_tokens` — the pre-promotion §6.1 contract.
+
+    #[test]
+    fn caret_selection_placeholder_defaults_are_valid() {
+        let tokens = resolve_portal_tokens(&empty_map());
+        let defaults = PortalPartTokens::default();
+
+        // Caret defaults to the composer text color (no-visual-regression default).
+        assert_eq!(
+            tokens.composer_caret_color, defaults.composer_text_color,
+            "default caret color must equal the composer text color"
+        );
+        // Selection highlight is visible (non-zero alpha) and translucent (< 1.0)
+        // so the selected glyphs read through it.
+        assert!(
+            tokens.composer_selection_color.a > 0.0 && tokens.composer_selection_color.a < 1.0,
+            "selection highlight must be a visible translucent tint"
+        );
+        // Placeholder is dimmer than the live composer text so it reads as a hint,
+        // not typed content.
+        assert_ne!(
+            tokens.composer_placeholder_color, tokens.composer_text_color,
+            "placeholder color must differ from the live composer text color"
+        );
+    }
+
+    #[test]
+    fn caret_selection_placeholder_overrides_propagate() {
+        let mut overrides = DesignTokenMap::new();
+        overrides.insert(
+            PORTAL_TOKEN_COMPOSER_CARET_COLOR.to_string(),
+            "#FF00FF".to_string(),
+        );
+        overrides.insert(
+            PORTAL_TOKEN_COMPOSER_SELECTION_COLOR.to_string(),
+            "#00FF0080".to_string(),
+        );
+        overrides.insert(
+            PORTAL_TOKEN_COMPOSER_PLACEHOLDER_COLOR.to_string(),
+            "#123456".to_string(),
+        );
+        let resolved = resolve_tokens(&empty_map(), &overrides);
+        let tokens = resolve_portal_tokens(&resolved);
+
+        assert!(
+            (tokens.composer_caret_color.r - 1.0).abs() < 1e-3
+                && tokens.composer_caret_color.g.abs() < 1e-3
+                && (tokens.composer_caret_color.b - 1.0).abs() < 1e-3,
+            "caret color override must propagate (magenta)"
+        );
+        assert!(
+            (tokens.composer_selection_color.a - 0x80 as f32 / 255.0).abs() < 1e-2,
+            "selection color alpha override must propagate"
+        );
+        assert!(
+            tokens.composer_placeholder_color.r > 0.0,
+            "placeholder color override must propagate"
+        );
+    }
+
+    #[test]
+    fn focus_ring_defaults_and_override_propagate() {
+        let defaults = resolve_portal_tokens(&empty_map());
+        // Default ring is opaque and 2px, mirroring the tze_hud_input focus-ring.
+        assert!(
+            (defaults.focus_ring_width_px - 2.0).abs() < 1e-4,
+            "default focus-ring width must be 2px"
+        );
+        assert!(
+            defaults.focus_ring_color.a > 0.0,
+            "default focus-ring color must be visible"
+        );
+
+        let mut overrides = DesignTokenMap::new();
+        overrides.insert(
+            PORTAL_TOKEN_FOCUS_RING_COLOR.to_string(),
+            "#FF0000".to_string(),
+        );
+        overrides.insert(
+            PORTAL_TOKEN_FOCUS_RING_WIDTH_PX.to_string(),
+            "3.5".to_string(),
+        );
+        let resolved = resolve_tokens(&empty_map(), &overrides);
+        let tokens = resolve_portal_tokens(&resolved);
+        assert!(
+            (tokens.focus_ring_color.r - 1.0).abs() < 1e-3
+                && tokens.focus_ring_color.g.abs() < 1e-3,
+            "focus-ring color override must propagate (red)"
+        );
+        assert!(
+            (tokens.focus_ring_width_px - 3.5).abs() < 1e-4,
+            "focus-ring width override must propagate"
+        );
+    }
+
+    #[test]
+    fn resize_grip_defaults_and_override_propagate() {
+        let defaults = resolve_portal_tokens(&empty_map());
+        assert!(
+            defaults.resize_grip_size_px > 0.0,
+            "resize-grip size must have a positive default"
+        );
+        // Hover tint differs from the resting grip color so hover is perceptible.
+        assert_ne!(
+            defaults.resize_grip_color, defaults.resize_grip_hover_color,
+            "resize-grip hover tint must differ from the resting grip color"
+        );
+
+        let mut overrides = DesignTokenMap::new();
+        overrides.insert(
+            PORTAL_TOKEN_WINDOW_RESIZE_GRIP_COLOR.to_string(),
+            "#101010".to_string(),
+        );
+        overrides.insert(
+            PORTAL_TOKEN_WINDOW_RESIZE_GRIP_HOVER_COLOR.to_string(),
+            "#F0F0F0".to_string(),
+        );
+        overrides.insert(
+            PORTAL_TOKEN_WINDOW_RESIZE_GRIP_SIZE_PX.to_string(),
+            "20".to_string(),
+        );
+        let resolved = resolve_tokens(&empty_map(), &overrides);
+        let tokens = resolve_portal_tokens(&resolved);
+        assert!(
+            (tokens.resize_grip_size_px - 20.0).abs() < 1e-4,
+            "resize-grip size override must propagate"
+        );
+        assert!(
+            tokens.resize_grip_hover_color.r > tokens.resize_grip_color.r,
+            "resize-grip hover override must be brighter than the resting override"
+        );
+    }
+
+    #[test]
+    fn spacing_and_measure_defaults_and_override_propagate() {
+        let defaults = resolve_portal_tokens(&empty_map());
+        assert!(
+            defaults.content_inset_px > 0.0,
+            "content inset must have a positive default"
+        );
+        assert!(
+            defaults.header_height_px > 0.0,
+            "header height must have a positive default"
+        );
+        assert!(
+            defaults.section_gap_px > 0.0,
+            "section gap must have a positive default"
+        );
+        // 0 = unbounded: today's full-width transcript wrapping is preserved until
+        // a profile opts into a narrower measure.
+        assert_eq!(
+            defaults.transcript_max_measure_px, 0.0,
+            "transcript measure cap must default to 0 (unbounded)"
+        );
+
+        let mut overrides = DesignTokenMap::new();
+        overrides.insert(
+            PORTAL_TOKEN_SPACING_CONTENT_INSET_PX.to_string(),
+            "12".to_string(),
+        );
+        overrides.insert(
+            PORTAL_TOKEN_SPACING_HEADER_HEIGHT_PX.to_string(),
+            "40".to_string(),
+        );
+        overrides.insert(
+            PORTAL_TOKEN_SPACING_SECTION_GAP_PX.to_string(),
+            "16".to_string(),
+        );
+        overrides.insert(
+            PORTAL_TOKEN_TRANSCRIPT_MAX_MEASURE_PX.to_string(),
+            "640".to_string(),
+        );
+        let resolved = resolve_tokens(&empty_map(), &overrides);
+        let tokens = resolve_portal_tokens(&resolved);
+        assert!((tokens.content_inset_px - 12.0).abs() < 1e-4);
+        assert!((tokens.header_height_px - 40.0).abs() < 1e-4);
+        assert!((tokens.section_gap_px - 16.0).abs() < 1e-4);
+        assert!(
+            (tokens.transcript_max_measure_px - 640.0).abs() < 1e-4,
+            "transcript measure cap override must propagate"
+        );
     }
 }
