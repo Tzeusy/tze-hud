@@ -127,7 +127,7 @@ fn replace_file_atomically(src: &Path, dst: &Path) -> io::Result<()> {
             PCWSTR(dst_w.as_ptr()),
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
         )
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{err}")))?;
+        .map_err(|err| io::Error::other(format!("{err}")))?;
     }
     Ok(())
 }
