@@ -663,7 +663,14 @@ async fn test_viewer_echo_stack_tracks_live_composer_box() {
     // Resting (single-line) box: echo sits strictly above the box top.
     compositor.composer_layout.visible_lines = 1.0;
     let y_rest = echo_y(&compositor, &scene);
-    let box_top_1 = Compositor::composer_input_box(region, composer_font, lhm, 1.0, ComposerVerticalAnchor::Bottom).y;
+    let box_top_1 = Compositor::composer_input_box(
+        region,
+        composer_font,
+        lhm,
+        1.0,
+        ComposerVerticalAnchor::Bottom,
+    )
+    .y;
     assert!(
         y_rest + echo_line_h <= box_top_1 + 0.5,
         "resting: echo bottom {} must be at/above the 1-line box top {box_top_1}",
@@ -673,7 +680,14 @@ async fn test_viewer_echo_stack_tracks_live_composer_box() {
     // Grow the draft to 4 lines: the echo must ride UP and stay above the taller box.
     compositor.composer_layout.visible_lines = 4.0;
     let y_grown = echo_y(&compositor, &scene);
-    let box_top_4 = Compositor::composer_input_box(region, composer_font, lhm, 4.0, ComposerVerticalAnchor::Bottom).y;
+    let box_top_4 = Compositor::composer_input_box(
+        region,
+        composer_font,
+        lhm,
+        4.0,
+        ComposerVerticalAnchor::Bottom,
+    )
+    .y;
     assert!(
         y_grown < y_rest,
         "echo must move up as the composer box grows (grown {y_grown} < resting {y_rest})"
@@ -749,7 +763,14 @@ fn echo_geometry(compositor: &Compositor) -> (f32, f32) {
         super::token_colors::resolve_composer_overlay_tokens(&compositor.token_map).font_size_px;
     let echo_font =
         super::token_colors::resolve_viewer_echo_tokens(&compositor.token_map).font_size_px;
-    let box_top = Compositor::composer_input_box(region, composer_font, lhm, 1.0, ComposerVerticalAnchor::Bottom).y;
+    let box_top = Compositor::composer_input_box(
+        region,
+        composer_font,
+        lhm,
+        1.0,
+        ComposerVerticalAnchor::Bottom,
+    )
+    .y;
     let echo_line_h = (echo_font * lhm).max(1.0);
     (box_top, echo_line_h)
 }
@@ -11961,7 +11982,13 @@ fn multiline_input_box_grows_upward_pinned_bottom() {
     let line_height = font * NX_LH_MULT;
     let margin = 6.0; // COMPOSER_TEXT_MARGIN
 
-    let one = Compositor::composer_input_box(region, font, NX_LH_MULT, 1.0, ComposerVerticalAnchor::Bottom);
+    let one = Compositor::composer_input_box(
+        region,
+        font,
+        NX_LH_MULT,
+        1.0,
+        ComposerVerticalAnchor::Bottom,
+    );
     let expected_one_h = line_height + margin * 2.0;
     assert!(
         (one.height - expected_one_h).abs() < 0.01,
@@ -11972,7 +11999,13 @@ fn multiline_input_box_grows_upward_pinned_bottom() {
         "one-line box is pinned to the region bottom"
     );
 
-    let three = Compositor::composer_input_box(region, font, NX_LH_MULT, 3.0, ComposerVerticalAnchor::Bottom);
+    let three = Compositor::composer_input_box(
+        region,
+        font,
+        NX_LH_MULT,
+        3.0,
+        ComposerVerticalAnchor::Bottom,
+    );
     let expected_three_h = line_height * 3.0 + margin * 2.0;
     assert!(
         (three.height - expected_three_h).abs() < 0.01,
@@ -11995,7 +12028,13 @@ fn multiline_input_box_grows_upward_pinned_bottom() {
 #[test]
 fn multiline_input_box_clamped_to_region() {
     let region = Rect::new(0.0, 0.0, 400.0, 50.0);
-    let box_rect = Compositor::composer_input_box(region, 16.0, NX_LH_MULT, 20.0, ComposerVerticalAnchor::Bottom);
+    let box_rect = Compositor::composer_input_box(
+        region,
+        16.0,
+        NX_LH_MULT,
+        20.0,
+        ComposerVerticalAnchor::Bottom,
+    );
     assert!(
         box_rect.height <= region.height + 0.01,
         "clamped to region height"
@@ -12028,7 +12067,10 @@ fn top_anchored_input_box_pins_to_region_top_and_grows_down() {
     let three =
         Compositor::composer_input_box(region, font, NX_LH_MULT, 3.0, ComposerVerticalAnchor::Top);
     // Grows DOWNWARD: taller box, SAME top edge (the first line does not teleport).
-    assert_eq!(three.y, region.y, "top edge stays fixed as the box grows down");
+    assert_eq!(
+        three.y, region.y,
+        "top edge stays fixed as the box grows down"
+    );
     assert!(three.height > one.height, "box grew with more lines");
     assert_eq!(three.x, region.x);
     assert_eq!(three.width, region.width);
