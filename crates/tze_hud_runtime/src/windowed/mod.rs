@@ -188,6 +188,9 @@ mod widgets;
 #[cfg(test)]
 mod test_support;
 
+#[cfg(test)]
+mod event_loop_harness;
+
 pub use self::config::{
     DEFAULT_RESIDENT_GRPC_AGENT_ID, DEFAULT_RESIDENT_GRPC_LEASE_TTL_MS,
     ResidentGrpcCredentialSource, ResidentGrpcPortalSettings, WindowedBenchmarkConfig,
