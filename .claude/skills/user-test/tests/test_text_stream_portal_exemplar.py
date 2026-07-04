@@ -1931,5 +1931,99 @@ class PortalTokenResolutionTests(unittest.TestCase):
         self.assertEqual(portal.BODY_FONT, 16.0)
 
 
+class CadencePresentAckTests(unittest.TestCase):
+    """The cadence runtime-overhead axis is non-vacuous only when present_ms is a
+    TRUE on-screen present time (FramePresented, hud-91uu6) rather than the
+    transport-RTT proxy where present≈rtt made overhead≈0 (hud-vjlqh)."""
+
+    def test_present_ms_from_frame_ack_derives_run_relative_present(self) -> None:
+        # Publish 100ms into the run; batch sent at wall 1_000_000us; the frame
+        # carrying it presented 8ms later -> present_ms = 100 + 8 = 108ms.
+        present_ms = portal.present_ms_from_frame_ack(100.0, 1_000_000, 1_008_000)
+        self.assertIsNotNone(present_ms)
+        self.assertAlmostEqual(present_ms, 108.0, places=6)
+
+    def test_present_ms_from_frame_ack_rejects_clock_skew(self) -> None:
+        # Present precedes send (cross-host skew / mismatched domain) -> None so
+        # the caller falls back to the proxy instead of a negative latency.
+        self.assertIsNone(
+            portal.present_ms_from_frame_ack(100.0, 1_008_000, 1_000_000)
+        )
+
+    def test_frame_ack_present_is_distinct_from_rtt_proxy(self) -> None:
+        # One cadence cycle: publish at t=100ms, transport RTT (send->ack) 2ms,
+        # but the frame carrying the batch presented 9ms after send.
+        publish_ms = 100.0
+        rtt_ms = 2.0
+        send_wall_us = 5_000_000
+        present_wall_us = send_wall_us + 9_000  # 9ms true present latency
+
+        proxy_present_ms = publish_ms + rtt_ms  # old vacuous proxy (present≈rtt)
+        frame_ack_present_ms = portal.present_ms_from_frame_ack(
+            publish_ms, send_wall_us, present_wall_us,
+        )
+        self.assertIsNotNone(frame_ack_present_ms)
+        # The presented-path present_ms is NOT the RTT-proxy present_ms.
+        self.assertNotAlmostEqual(
+            frame_ack_present_ms, proxy_present_ms, places=3
+        )
+
+        def overhead(present_ms: float) -> float:
+            ev = portal.build_cadence_rtt_evidence(
+                rtt_baseline_ms=rtt_ms,
+                appends=[{
+                    "cycle": 1, "body_lines": 8,
+                    "publish_ms": publish_ms, "present_ms": present_ms,
+                    "rtt_ms": rtt_ms,
+                }],
+                cadence_cycles=1, cadence_interval_ms=100,
+            )
+            return ev["appends"][0]
+
+        proxy_append = overhead(proxy_present_ms)
+        frame_ack_append = overhead(frame_ack_present_ms)
+        # Proxy: present≈rtt -> runtime overhead ~0 (the vacuous axis).
+        self.assertAlmostEqual(proxy_append["overhead_ms"], 0.0, places=3)
+        # Frame-ack: present_latency=9ms, overhead=9-2=7ms > 0 (non-vacuous).
+        self.assertEqual(frame_ack_append["present_latency_ms"], 9.0)
+        self.assertAlmostEqual(frame_ack_append["overhead_ms"], 7.0, places=3)
+        self.assertGreater(frame_ack_append["overhead_ms"], 0.0)
+
+    def test_client_correlates_batch_id_to_frame_presented(self) -> None:
+        from hud_grpc_client import HudClient
+        from proto_gen import events_pb2
+
+        client = HudClient("localhost:1", psk="x")
+        batch_id = b"\x11" * 16
+        client._record_batch_send(batch_id, 7_000_000)
+        self.assertEqual(client.batch_send_wall_us(batch_id), 7_000_000)
+        self.assertEqual(client.last_mutation_batch_id, batch_id)
+        # No present-ack observed yet.
+        self.assertIsNone(client.present_wall_us_for_batch(batch_id))
+        # A FramePresented carrying the batch, as the read loop would append.
+        client._frame_presented_events.append(
+            events_pb2.FramePresented(
+                frame_number=42, present_wall_us=7_012_000, batch_ids=[batch_id],
+            )
+        )
+        self.assertEqual(client.present_wall_us_for_batch(batch_id), 7_012_000)
+        # An unrelated batch does not match.
+        self.assertIsNone(client.present_wall_us_for_batch(b"\x22" * 16))
+
+    def test_batch_send_tracking_is_bounded(self) -> None:
+        from hud_grpc_client import HudClient
+
+        client = HudClient("localhost:1", psk="x")
+        cap = client._MAX_TRACKED_BATCH_SENDS
+        for n in range(cap + 5):
+            client._record_batch_send(n.to_bytes(16, "big"), n)
+        self.assertLessEqual(len(client._batch_send_wall_us), cap)
+        # Oldest sends evicted; newest retained.
+        self.assertIsNone(client.batch_send_wall_us((0).to_bytes(16, "big")))
+        self.assertEqual(
+            client.batch_send_wall_us((cap + 4).to_bytes(16, "big")), cap + 4,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

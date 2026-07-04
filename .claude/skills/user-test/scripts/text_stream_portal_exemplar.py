@@ -2878,6 +2878,11 @@ REFERENCE_GPU_DRIVER = "32.0.15.9636"
 # high_mutation input-to-next-present p99 budget (Windows locked lane), used as
 # the presented-append runtime-overhead budget for the cadence axis.
 HIGH_MUTATION_PRESENT_BUDGET_MS = 16.6
+# Per-cycle wait for a batch's FramePresented present-ack before the cadence axis
+# falls back to the transport-RTT present proxy (hud-vjlqh). Generous relative to
+# a frame interval so a headless present-ack is reliably observed, but bounded so
+# a run against a runtime that never emits present-acks is not stalled per cycle.
+PRESENT_ACK_TIMEOUT_S = 0.5
 EVIDENCE_SCHEMA_VERSION = 2
 
 
@@ -2926,6 +2931,36 @@ def reference_hardware_tag(
         "os": f"{platform.system()} {platform.release()}".strip(),
         "is_reference": is_reference,
     }
+
+
+def present_ms_from_frame_ack(
+    publish_ms: float,
+    send_wall_us: int,
+    present_wall_us: int,
+) -> Optional[float]:
+    """Derive a run-relative ``present_ms`` from a live FramePresented present-ack.
+
+    The cadence axis was near-vacuous while ``present_ms`` was sampled from the
+    same publish-await as ``rtt_ms`` (present≈rtt ⇒ runtime overhead≈0, hud-vjlqh).
+    A true present-ack (hud-91uu6, ServerMessage.frame_presented) reports the
+    wall-clock (UTC µs) at which the frame carrying a batch was actually presented
+    on screen. Subtracting the batch's send wall-clock yields the TRUE
+    mutation-arrival→on-screen-present latency, which we re-express in the
+    run-relative ``present_ms`` timebase (``publish_ms`` is run-relative) so the
+    existing ``present_latency_ms = present_ms - publish_ms`` evidence math holds
+    while now measuring real present latency instead of the transport-RTT proxy.
+
+    Both timestamps are the UTC-µs wall-clock domain (RFC 0003 §1.1): the send
+    stamp is the client ``timestamp_wall_us``; the present stamp is the runtime's
+    ``SystemTime`` at GPU submit. On a single host these share a clock. Returns
+    ``None`` when the present precedes the send — cross-host clock skew or a
+    mismatched domain — so the caller falls back to the proxy present_ms rather
+    than reporting a nonsensical negative latency.
+    """
+    latency_ms = (present_wall_us - send_wall_us) / 1000.0
+    if latency_ms < 0.0:
+        return None
+    return publish_ms + latency_ms
 
 
 def build_cadence_rtt_evidence(
@@ -4842,6 +4877,16 @@ async def run_cadence(
        samples_ms=[round(s, 3) for s in baseline_samples])
 
     # ── Streaming cadence with per-append publish→present timestamps ───────
+    # Only attempt live present-ack correlation when the runtime granted
+    # read_telemetry (otherwise no FramePresented is ever delivered — hud-vjlqh).
+    # Even when granted, the windowed runtime does not yet emit present-acks
+    # (deferred, hud-4va6q): if the first cycle sees none we stop paying the full
+    # per-cycle wait so a live windowed run is not stalled ~PRESENT_ACK_TIMEOUT_S
+    # every cycle. Headless runs, which do emit, keep correlating throughout.
+    present_ack_supported = "read_telemetry" in getattr(
+        client, "granted_capabilities", [],
+    )
+    present_ack_seen = False
     appends: list[dict[str, Any]] = []
     run_t0 = time.monotonic()
     for i in range(cadence_cycles):
@@ -4860,18 +4905,51 @@ async def run_cadence(
             include_tile_setup=False,
             mutation_lock=mutation_lock,
         )
-        # The script-adapter present proxy is the round-trip completion: the
-        # runtime has accepted and (latest-wins) presented the coalesced window
-        # by the time the mutation batch acks. A live run wired to a runtime
-        # present-ack would replace `present_ms` with the true present time.
-        present_ms = (time.monotonic() - run_t0) * 1000.0
+        # rtt_ms is the transport round-trip: send → mutation-batch ack. This is
+        # what publish_portal awaits.
         rtt_ms = (time.monotonic() - t0) * 1000.0
         rtt_ms_list.append(rtt_ms)
+
+        # True present time (hud-vjlqh): correlate the last mutation batch of this
+        # publish to its FramePresented present-ack (hud-91uu6) and derive
+        # present_ms from the on-screen present wall-clock. This measures the real
+        # mutation-arrival→on-screen-present latency instead of the transport-RTT
+        # proxy where present≈rtt made the runtime-overhead axis ~vacuous. When no
+        # present-ack arrives (windowed runtime — emission deferred, hud-4va6q — or
+        # read_telemetry/TELEMETRY_FRAMES not granted) fall back to the proxy: the
+        # round-trip completion, by which the runtime has accepted and (latest-wins)
+        # presented the coalesced window.
+        present_ms = (time.monotonic() - run_t0) * 1000.0
+        present_source = "rtt-proxy"
+        batch_id = client.last_mutation_batch_id
+        if present_ack_supported and batch_id is not None:
+            # Full wait while acks are (or may still be) arriving; once the first
+            # cycle proves the runtime never emits them, use a near-zero poll for
+            # the rest so we still catch any already-queued ack without stalling.
+            ack_timeout = (
+                PRESENT_ACK_TIMEOUT_S if (present_ack_seen or i == 0) else 0.0
+            )
+            present_wall_us = await client.wait_for_frame_presented(
+                batch_id, timeout=ack_timeout,
+            )
+            send_wall_us = client.batch_send_wall_us(batch_id)
+            if present_wall_us is not None and send_wall_us is not None:
+                derived = present_ms_from_frame_ack(
+                    publish_ms, send_wall_us, present_wall_us,
+                )
+                if derived is not None:
+                    present_ms = derived
+                    present_source = "frame-ack"
+                    present_ack_seen = True
+
         appends.append({
             "cycle": i + 1,
             "body_lines": end,
             "publish_ms": round(publish_ms, 3),
             "present_ms": round(present_ms, 3),
+            # "frame-ack" = derived from a live FramePresented present-ack (true
+            # present latency); "rtt-proxy" = fell back to the transport round-trip.
+            "present_source": present_source,
             # Per-cycle transport RTT used to isolate runtime overhead from
             # transport jitter in build_cadence_rtt_evidence (hud-lod76).
             "rtt_ms": round(rtt_ms, 3),
@@ -4883,7 +4961,8 @@ async def run_cadence(
             "action": f"publish cycle {i + 1}/{cadence_cycles}",
             "expected_visual": "body updated; footer counter incremented",
         }, rtt_ms=round(rtt_ms, 2), cycle=i + 1, body_lines=end,
-           publish_ms=round(publish_ms, 3), present_ms=round(present_ms, 3))
+           publish_ms=round(publish_ms, 3), present_ms=round(present_ms, 3),
+           present_source=present_source)
 
         if i < cadence_cycles - 1:
             # Sleep minus elapsed, floored at 0 to preserve inter-cycle pacing
@@ -5212,8 +5291,17 @@ async def run_scenario(args: argparse.Namespace) -> int:
         args.target,
         psk=psk,
         agent_id=args.agent_id,
-        capabilities=["create_tiles", "modify_own_tiles", "access_input_events"],
-        initial_subscriptions=["SCENE_TOPOLOGY", "INPUT_EVENTS", "FOCUS_EVENTS"],
+        # read_telemetry + TELEMETRY_FRAMES let the cadence axis consume live
+        # FramePresented present-acks (hud-vjlqh); when the runtime does not grant
+        # them (or does not emit present-acks on this path) the cadence axis falls
+        # back to the transport-RTT present proxy. Harmless for the other phases.
+        capabilities=[
+            "create_tiles", "modify_own_tiles", "access_input_events",
+            "read_telemetry",
+        ],
+        initial_subscriptions=[
+            "SCENE_TOPOLOGY", "INPUT_EVENTS", "FOCUS_EVENTS", "TELEMETRY_FRAMES",
+        ],
     )
     heartbeat_task: Optional[asyncio.Task] = None
     interaction_task: Optional[asyncio.Task] = None
