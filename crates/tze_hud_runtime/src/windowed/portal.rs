@@ -3380,6 +3380,173 @@ mod tests {
         );
     }
 
+    /// An authority-attached submission routes to the ProjectionAuthority, so the
+    /// raw-tile echo path (which resets on its own) is SKIPPED. The keyboard
+    /// submit-terminal reset must still snap a scrolled-back input-history back to
+    /// the tail so the just-submitted reply is revealed (hud-npcdf).
+    #[test]
+    fn authority_attached_submit_snaps_scrolled_back_history_to_tail() {
+        use tze_hud_input::{FocusManager, InputProcessor, RawCharacterEvent};
+        use tze_hud_projection::{
+            AttachRequest, ContentClassification, OperationEnvelope, OutputKind,
+            ProjectionOperation, ProviderKind, PublishOutputRequest,
+        };
+        use tze_hud_scene::types::HitRegionNode;
+        use tze_hud_scene::{Node, NodeData, Rect, SceneGraph, SceneId};
+
+        // Attach a projection and drain a publish to MATERIALISE an
+        // authority-backed portal tile (binding it in the driver). A submission on
+        // this tile is routed to the authority, so `route_portal_composer_batch`
+        // returns true and `append_raw_tile_viewer_echo` never runs — isolating
+        // the keyboard submit-terminal reset as the only thing that can pin the
+        // tail.
+        let mut driver = crate::portal_projection_driver::InProcessPortalDriver::new();
+        let projection_id = "proj-npcdf";
+        let envelope = |op: ProjectionOperation, request_id: &str| OperationEnvelope {
+            operation: op,
+            projection_id: projection_id.to_string(),
+            request_id: request_id.to_string(),
+            client_timestamp_wall_us: 1,
+        };
+        let attach = driver.authority_mut().handle_attach(
+            AttachRequest {
+                envelope: envelope(ProjectionOperation::Attach, "attach-1"),
+                provider_kind: ProviderKind::Claude,
+                display_name: "Test".to_string(),
+                workspace_hint: None,
+                repository_hint: None,
+                icon_profile_hint: None,
+                content_classification: ContentClassification::Private,
+                hud_target: None,
+                idempotency_key: None,
+            },
+            "test-caller",
+            1000,
+        );
+        assert!(attach.accepted, "attach must be accepted");
+        let token = attach.owner_token.expect("owner_token after attach");
+        driver.attach_projection(projection_id, Vec::new());
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        let published = driver.authority_mut().handle_publish_output(
+            PublishOutputRequest {
+                envelope: envelope(ProjectionOperation::PublishOutput, "pub-1"),
+                owner_token: token.clone(),
+                output_text: "assistant ready".to_string(),
+                output_kind: OutputKind::Assistant,
+                content_classification: ContentClassification::Private,
+                logical_unit_id: Some("unit-1".to_string()),
+                coalesce_key: None,
+            },
+            "test-caller",
+            100,
+        );
+        assert!(published.accepted, "publish must be accepted");
+        driver.drain(&mut scene, &mut processor, Some(tab_id));
+
+        let tile_id = *scene
+            .tiles
+            .keys()
+            .next()
+            .expect("drain must materialise a portal tile");
+        let tile_bounds = scene.tiles.get(&tile_id).unwrap().bounds;
+
+        // Give the materialised tile a focusable composer so Enter routes to the
+        // draft (the driver-created tile carries no composer node of its own).
+        let composer_id = SceneId::new();
+        scene.nodes.insert(
+            composer_id,
+            Node {
+                id: composer_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(0.0, 0.0, 400.0, 60.0),
+                    interaction_id: "portal-composer".to_string(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    accepts_composer_input: true,
+                    ..Default::default()
+                }),
+            },
+        );
+        scene.tiles.get_mut(&tile_id).unwrap().root_node = Some(composer_id);
+
+        let mut focus_manager = FocusManager::new();
+        focus_manager.add_tab(tab_id);
+        processor.navigate_focus(&mut focus_manager, &mut scene, tab_id, false);
+        assert!(
+            processor.is_composer_active(),
+            "test setup: focusing the composer must activate the draft"
+        );
+
+        // Seed an overflowing history so there is a nonzero scrollable range
+        // (mirrors the authority echo growing the transcript).
+        processor.notify_tile_content_appended(tile_id, 30.0 * 21.0, 200.0, 21.0, &mut scene);
+
+        let (mut app, _rx) = make_windowed_keyboard_test_app(scene, focus_manager, processor);
+        app.state.portal_projection_driver = driver;
+
+        // Type a character (non-empty draft required for a real submission). This
+        // resets to the tail, matching a viewer actively drafting.
+        app.dispatch_character_event_inner(
+            &RawCharacterEvent {
+                character: "h".to_string(),
+                timestamp_mono_us: tze_hud_scene::MonoUs(1),
+            },
+            Some(tab_id),
+        );
+
+        // Scroll the viewer back up, away from the tail (a point in the tile body,
+        // below the composer's 60px-tall hit region).
+        {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let mut scene = shared.scene.try_lock().unwrap();
+            let _ = app.state.input_processor.process_scroll_event(
+                &tze_hud_input::ScrollEvent {
+                    x: tile_bounds.x + 200.0,
+                    y: tile_bounds.y + tile_bounds.height - 20.0,
+                    delta_x: 0.0,
+                    delta_y: -50.0,
+                },
+                &mut scene,
+            );
+            assert!(
+                !scene.tile_follow_tail_at_tail(tile_id),
+                "test setup: scrolling up must leave the tile ScrolledBack"
+            );
+        }
+
+        // Submit with Enter. The submission routes to the authority (echo path
+        // skipped), so only the keyboard submit-terminal reset can pin the tail.
+        app.dispatch_key_down_event_inner(
+            &RawKeyDownEvent {
+                key_code: "Enter".to_string(),
+                key: "Enter".to_string(),
+                modifiers: tze_hud_input::KeyboardModifiers::NONE,
+                repeat: false,
+                timestamp_mono_us: tze_hud_scene::MonoUs(2),
+            },
+            Some(tab_id),
+        );
+
+        assert!(
+            app.state.viewer_echo_queue.lock().unwrap().is_empty(),
+            "an authority-attached submission must NOT enqueue a raw-tile echo — \
+             confirming the tail reset came from the keyboard submit-terminal path, \
+             not append_raw_tile_viewer_echo"
+        );
+        let shared = app.state.shared_state.try_lock().unwrap();
+        let scene = shared.scene.try_lock().unwrap();
+        assert!(
+            scene.tile_follow_tail_at_tail(tile_id),
+            "an authority-attached submission must snap the input-pane history back \
+             to the tail on submit (hud-npcdf)"
+        );
+    }
+
     #[test]
     fn shell_reserved_ctrl_tab_does_not_resize_focused_portal() {
         use tze_hud_input::{InputProcessor, KeyboardModifiers};

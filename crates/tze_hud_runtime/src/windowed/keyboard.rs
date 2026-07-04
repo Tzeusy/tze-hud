@@ -606,13 +606,30 @@ impl WinitApp {
             // we can suppress the push below (clear must win over push; hud-r3ax6).
             let mut key_down_is_terminal = false;
             if let Some(b) = batch {
-                key_down_is_terminal = b.cancel.is_some() || b.submission.is_some();
+                let is_submission = b.submission.is_some();
+                key_down_is_terminal = b.cancel.is_some() || is_submission;
                 if let Some(context) = delivery_context {
                     self.route_and_deliver_composer_batch(context, b);
                 }
                 if key_down_is_terminal {
                     // Submit or cancel: clear the local echo overlay.
                     self.clear_local_composer_echo();
+                }
+                // hud-npcdf: a submission sets `key_down_is_terminal`, so the
+                // reset-to-tail in the `!key_down_is_terminal` branch below is
+                // skipped — and a ProjectionAuthority-attached tile echoes its own
+                // submission async via `portal_projection_driver`'s
+                // `notify_tile_content_appended`, which honors `ScrolledBack` and
+                // does not reset. A scrolled-back viewer's just-submitted reply
+                // would then stay off-screen. Snap the input-pane history back to
+                // the tail on SUBMIT (not cancel) so the reply the viewer just
+                // sent is revealed. The raw-tile path already resets inside
+                // `append_raw_tile_viewer_echo`; `reset_input_history_scroll_to_tail`
+                // is idempotent, so the redundant call there is harmless.
+                if is_submission {
+                    if let Some(tile_id) = history_tile_id {
+                        self.reset_input_history_scroll_to_tail(tile_id);
+                    }
                 }
             }
             if consumed {
@@ -1219,13 +1236,26 @@ impl WinitApp {
             // so we can suppress the push below (clear must win; hud-r3ax6).
             let mut char_is_terminal = false;
             if let Some(b) = batch {
-                char_is_terminal = b.cancel.is_some() || b.submission.is_some();
+                let is_submission = b.submission.is_some();
+                char_is_terminal = b.cancel.is_some() || is_submission;
                 if char_is_terminal {
                     // Submit or cancel: clear the local echo overlay.
                     self.clear_local_composer_echo();
                 }
                 if let Some(context) = delivery_context {
                     self.route_and_deliver_composer_batch(context, b);
+                }
+                // hud-npcdf: mirror the KeyDown submit-terminal reset so a
+                // submission arriving on the character path (e.g. an
+                // authority-attached tile) also snaps the input-pane history back
+                // to the tail — the async authority echo honors `ScrolledBack` and
+                // would otherwise strand the just-submitted reply off-screen.
+                // Idempotent alongside the raw-tile reset in
+                // `append_raw_tile_viewer_echo`.
+                if is_submission {
+                    if let Some(tile_id) = history_tile_id {
+                        self.reset_input_history_scroll_to_tail(tile_id);
+                    }
                 }
             }
             // Truncate for debug logs: raw.character carries clipboard text and
