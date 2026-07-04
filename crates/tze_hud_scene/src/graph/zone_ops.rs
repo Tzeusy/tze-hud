@@ -263,12 +263,22 @@ impl SceneGraph {
     ///
     /// Callers that do not hold a lease (e.g., system/chrome publishers) should
     /// use the unchecked `publish_to_zone` directly.
+    ///
+    /// `ttl_us` is the caller-supplied content time-to-live (microseconds). When
+    /// `Some`, it is converted here into an absolute `expires_at_wall_us`
+    /// (`clock.now_us() + ttl_us`) and stored on the publish record so the
+    /// per-frame expiry sweep clears the content at its deadline. Passing the
+    /// TTL as a relative duration (rather than an absolute time computed by the
+    /// caller) keeps the expiry in the scene's own clock domain, which the sweep
+    /// reads via the same `clock`. `None` means no content expiry (the record
+    /// persists until overwritten or the zone default applies).
     pub fn publish_to_zone_with_lease(
         &mut self,
         zone_name: &str,
         content: ZoneContent,
         publisher_namespace: &str,
         merge_key: Option<String>,
+        ttl_us: Option<u64>,
     ) -> Result<(), ValidationError> {
         use crate::lease::orphan::ZonePublishResult;
 
@@ -310,13 +320,16 @@ impl SceneGraph {
             }
         }
 
-        // Lease is Active — delegate to unchecked publish.
+        // Lease is Active — delegate to unchecked publish. Convert the relative
+        // TTL into an absolute wall-clock deadline in the scene's clock domain so
+        // `drain_expired_zone_publications` (which reads the same clock) sweeps it.
+        let expires_at_wall_us = ttl_us.map(|t| self.clock.now_us().saturating_add(t));
         self.publish_to_zone(
             zone_name,
             content,
             publisher_namespace,
             merge_key,
-            None,
+            expires_at_wall_us,
             None,
         )
     }
@@ -333,12 +346,17 @@ impl SceneGraph {
     /// An empty `breakpoints` vec reveals all text immediately.
     ///
     /// Non-`StreamText` content types MUST pass `breakpoints = Vec::new()`.
+    ///
+    /// `ttl_us` behaves as in [`publish_to_zone_with_lease`]: when `Some`, it is
+    /// converted into an absolute `expires_at_wall_us` in the scene clock domain
+    /// so the per-frame sweep clears the streamed content at its deadline.
     pub fn publish_to_zone_with_lease_and_breakpoints(
         &mut self,
         zone_name: &str,
         content: ZoneContent,
         publisher_namespace: &str,
         merge_key: Option<String>,
+        ttl_us: Option<u64>,
         breakpoints: Vec<u64>,
     ) -> Result<(), ValidationError> {
         use crate::lease::orphan::ZonePublishResult;
@@ -380,13 +398,15 @@ impl SceneGraph {
             }
         }
 
-        // Lease is Active — publish with breakpoints.
+        // Lease is Active — publish with breakpoints. Convert the relative TTL
+        // into an absolute wall-clock deadline in the scene's clock domain.
+        let expires_at_wall_us = ttl_us.map(|t| self.clock.now_us().saturating_add(t));
         self.publish_to_zone_with_breakpoints(
             zone_name,
             content,
             publisher_namespace,
             merge_key,
-            None,
+            expires_at_wall_us,
             None,
             breakpoints,
         )

@@ -639,6 +639,14 @@ pub fn handle_publish_to_zone(
         p.ttl_us.div_ceil(1_000)
     };
 
+    // Content-level TTL for the zone publish record (distinct from the lease
+    // TTL above). A zero `ttl_us` means "no content expiry" — the publication
+    // persists until overwritten — so we pass `None`; a positive value becomes
+    // an absolute `expires_at_wall_us` inside the publish engine. Without this,
+    // `ttl_us` only bounded the lease and expired content stayed painted
+    // indefinitely (hud-vfwb1).
+    let content_ttl_us = if p.ttl_us == 0 { None } else { Some(p.ttl_us) };
+
     // Grant lease for MCP session tracking. Zone publishing requires an active
     // lease (spec §Zone Publish Requires Active Lease); we grant one here so
     // that publish_to_zone_with_lease can verify it.
@@ -673,6 +681,7 @@ pub fn handle_publish_to_zone(
             content,
             &p.namespace,
             p.merge_key.clone(),
+            content_ttl_us,
             p.breakpoints,
         )?;
     } else {
@@ -681,6 +690,7 @@ pub fn handle_publish_to_zone(
             content,
             &p.namespace,
             p.merge_key.clone(),
+            content_ttl_us,
         )?;
     }
 
@@ -3302,6 +3312,103 @@ mod tests {
         assert_eq!(result.ttl_us, 120_000_000u64);
     }
 
+    /// Regression (hud-vfwb1): a zone publish carrying an explicit `ttl_us` MUST
+    /// set a content-level expiry on the `ZonePublishRecord`, so the per-frame
+    /// sweep (`drain_expired_zone_publications`) removes the content once the
+    /// deadline passes.
+    ///
+    /// Before the fix, `handle_publish_to_zone` applied `ttl_us` only to the
+    /// lease grant and left `ZonePublishRecord.expires_at_wall_us = None`, so a
+    /// subtitle published with `ttl_us` stayed painted indefinitely — nothing
+    /// ever marked it expired, and with no subsequent publish it was never swept
+    /// (the idle present-gate had nothing dirty to react to). This test drives a
+    /// deterministic TestClock past the TTL and asserts the record both carries
+    /// the expiry and is swept, bumping `scene.version` to re-arm the gate.
+    #[test]
+    fn test_publish_to_zone_ttl_sets_content_expiry_and_is_swept() {
+        use std::sync::Arc;
+
+        // TestClock: value is milliseconds; now_us() = ms * 1000. Start at 1s.
+        let clock = tze_hud_scene::TestClock::new(1_000);
+        let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, Arc::new(clock.clone()));
+        let zone = "subtitle".to_string();
+        scene.zone_registry.zones.insert(
+            zone.clone(),
+            ZoneDefinition {
+                id: SceneId::new(),
+                name: zone.clone(),
+                description: "Subtitle overlay zone".to_string(),
+                geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.0,
+                    y_pct: 0.9,
+                    width_pct: 1.0,
+                    height_pct: 0.1,
+                },
+                accepted_media_types: vec![ZoneMediaType::StreamText],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::LatestWins,
+                max_publishers: 4,
+                transport_constraint: None,
+                auto_clear_ms: None,
+                ephemeral: false,
+                layer_attachment: LayerAttachment::Content,
+            },
+        );
+
+        // Live repro: subtitle published with ttl_us = 20_000_000 (20 s).
+        handle_publish_to_zone(
+            json!({"zone_name": zone, "content": "expiring subtitle", "ttl_us": 20_000_000u64}),
+            &mut scene,
+        )
+        .unwrap();
+
+        // The publish record MUST carry an absolute content-level expiry derived
+        // from ttl_us: now_us (1_000_000) + ttl_us (20_000_000) = 21_000_000.
+        let rec = &scene.zone_registry.active_publishes.get(&zone).unwrap()[0];
+        assert_eq!(
+            rec.expires_at_wall_us,
+            Some(21_000_000),
+            "ttl_us must be converted into an absolute content expiry on the record"
+        );
+
+        // Before the deadline (advance to 20 s < 21 s): sweep keeps it.
+        clock.advance(19_000);
+        assert_eq!(
+            scene.drain_expired_zone_publications(),
+            0,
+            "publication must survive before its TTL deadline"
+        );
+        assert_eq!(
+            scene
+                .zone_registry
+                .active_publishes
+                .get(&zone)
+                .unwrap()
+                .len(),
+            1,
+            "subtitle must still be present 1 s before its TTL"
+        );
+
+        // Past the deadline (advance to 22 s > 21 s): sweep removes it and bumps
+        // scene.version so the idle present-gate re-arms and repaints.
+        let version_before = scene.version;
+        clock.advance(2_000);
+        assert_eq!(
+            scene.drain_expired_zone_publications(),
+            1,
+            "expired subtitle must be swept once its TTL deadline passes"
+        );
+        let after = scene.zone_registry.active_publishes.get(&zone);
+        assert!(
+            after.is_none() || after.unwrap().is_empty(),
+            "zone must hold no active publications after TTL expiry"
+        );
+        assert!(
+            scene.version > version_before,
+            "expiry sweep must bump scene.version to re-arm the idle present-gate"
+        );
+    }
+
     #[test]
     fn test_publish_to_zone_with_merge_key() {
         let (mut scene, _, zone) = scene_with_zone();
@@ -4030,6 +4137,7 @@ mod tests {
             &zone,
             ZoneContent::StreamText("should fail".to_string()),
             ns,
+            None,
             None,
         );
         assert!(
