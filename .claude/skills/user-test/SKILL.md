@@ -52,16 +52,20 @@ contract as tzehouse: `hud-user` (SCP), `admin-user` (autologon desktop owner,
 process control), both keyed with `~/.ssh/hud-ssh-key`. `C:\tze_hud` exists;
 firewall already allows 22/9090/50051 inbound.
 
-Resolve the address at test time (DHCP; reachable via Sentinel's tailnet
-subnet route):
+Resolve the address (and self-heal the whole surface — VM start, stale
+gpu.lock clearing per hud-7gp40, HUD task relaunch) with the canonical helper:
 
 ```bash
-WIN_HOST=$(ssh root@sentinel.parrot-hen.ts.net \
-  "qm agent 110 network-get-interfaces" | python3 -c "import json,sys; \
-print(next(a['ip-address'] for i in json.load(sys.stdin) \
-for a in i.get('ip-addresses',[]) \
-if a['ip-address-type']=='ipv4' and not a['ip-address'].startswith('127')))")
+eval "$(.claude/skills/user-test/scripts/hud_vm_env.sh)"
+# exports TZE_HUD_TEST_HOST, HUD_MCP_URL, HUD_MCP_PSK, MCP_TEST_PSK,
+# TZE_HUD_MCP_RESIDENT_PRINCIPAL
+WIN_HOST=$TZE_HUD_TEST_HOST
 ```
+
+Availability is layered: Proxmox `onboot=1` + a sentinel systemd keepalive
+timer restart the VM (guest-initiated shutdowns bypass onboot), autologon +
+the ONLOGON `TzeHudFullscreen` task restart the HUD, and the helper covers
+whatever remains at call time.
 
 Launch contract (verified 2026-07-04, end-to-end: SCP deploy → task launch →
 networked MCP publish → subtitle rendered on the VM console):

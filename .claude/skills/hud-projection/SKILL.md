@@ -21,6 +21,29 @@ Hard boundaries:
 - The `ProjectionAuthority` runs **in-process** inside the tze_hud runtime (not as an external daemon). It owns projection state outside the LLM token context: HUD connection metadata, advisory portal lease identity, bounded transcript/window state, pending HUD input, acknowledgement state, lifecycle state, unread state, privacy classification, and reconnect bookkeeping.
 - The projection MCP surface is a facade into the runtime's in-process authority, not the runtime v1 MCP zone publishing bridge. **The full facade is wired in-process**: all seven `portal_projection_*` tools are served by the runtime MCP server (`crates/tze_hud_mcp/src/server.rs` ~643-683) and forward to the in-process authority over `portal_op_tx`. They are classified Resident tools, so the runtime rejects them with `CAPABILITY_REQUIRED` unless the caller holds `resident_mcp` (`crates/tze_hud_mcp/src/server.rs` ~218-232, ~321-352). An external session obtains `resident_mcp` by authenticating as the **resident principal**: the runtime mints the capability only when the MCP bearer matches BOTH the configured `TZE_HUD_MCP_RESIDENT_PRINCIPAL` AND the PSK, each compared constant-time (so it can never silently grant `resident_mcp` to every authenticated caller). Set `TZE_HUD_MCP_RESIDENT_PRINCIPAL` equal to the PSK and send the PSK as the bearer. The portal-projection tools are a projection facade distinct from the runtime's zone/widget publishing tools — do not confuse them with `th-hud-publish`.
 
+## Choosing A Target Runtime
+
+Projection needs a live windowed runtime with MCP enabled. Two standing targets:
+
+- **A human's screen** (e.g. tzehouse) — when the point is a person seeing the
+  projection. Endpoint/PSK per that host's config.
+- **The autonomous testhost** (`hud-windows` VM on sentinel Proxmox) — for any
+  local noninteractive work that needs a real projection surface (integration
+  tests, portal exemplar runs, transcript-render validation). Resolve and
+  self-heal it with:
+
+  ```bash
+  eval "$(.claude/skills/user-test/scripts/hud_vm_env.sh)"
+  # exports HUD_MCP_URL and TZE_HUD_MCP_RESIDENT_PRINCIPAL (== PSK == bearer),
+  # starting the VM and/or HUD task if down
+  ```
+
+  Caveats on the VM: WARP rendering (no GPU fidelity), and until runtime bug
+  hud-d5rcd is fixed, call MCP `create_tab {"name":"Main"}` once before portal
+  work — config `[[tabs]]` alone don't materialize and mutations fail with
+  "No active tab". A registered agent (`agent-alpha`) is pre-provisioned for
+  resident gRPC sessions.
+
 ## Source Of Truth
 
 When changing behavior or resolving ambiguity, read:

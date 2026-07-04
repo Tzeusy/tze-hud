@@ -42,6 +42,14 @@ Copy `settings.template.json` from this skill directory to your project's `.clau
 
 Replace `<HUD_HOST>` with the hostname or IP of the machine running the HUD (e.g., `192.168.1.50`, `mypc.tail1234.ts.net`). Set `HUD_MCP_PSK` in your shell environment to the pre-shared key configured on the HUD instance.
 
+**Autonomous / noninteractive target:** when no human display is required (or
+the user's machine is offline), resolve the always-on `hud-windows` VM instead:
+
+```bash
+eval "$(.claude/skills/user-test/scripts/hud_vm_env.sh)"
+# -> HUD_MCP_URL + HUD_MCP_PSK exported; VM/HUD self-healed if down
+```
+
 ### 2. Verify Connectivity
 
 After configuring, the MCP tools `list_zones` and `publish_to_zone` should appear as available tools. Call `list_zones` to verify the connection is live.
