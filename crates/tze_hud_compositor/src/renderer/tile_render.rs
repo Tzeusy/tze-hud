@@ -1010,8 +1010,11 @@ impl Compositor {
         let mut counts: Vec<(SceneId, usize)> = Vec::with_capacity(jobs.len());
         if let Some(tr) = self.text_rasterizer.as_mut() {
             for (tile_id, zone_width, joined) in &jobs {
-                let (total_lines, _) =
-                    tr.measure_composer_wrapped(joined, 0, *zone_width, echo_font, lhm);
+                // Break-anywhere line count (WRAPPED_TEXT_WRAP): an over-long
+                // single-word reply is counted as the multiple in-box lines it
+                // paints as, not one clipped line (hud-n0x4u).
+                let total_lines =
+                    tr.measure_wrapped_line_count(joined, *zone_width, echo_font, lhm);
                 counts.push((*tile_id, total_lines.max(1)));
             }
         }
@@ -1107,8 +1110,10 @@ impl Compositor {
             text: Arc::from(joined.as_str()),
             pixel_x: region.x + margin,
             pixel_y: block_top,
-            // Wrap to the zone width (Wrap::Word in the render path) so long
-            // replies wrap instead of overflowing, and embedded `\n`s break.
+            // Wrap to the zone width (WRAPPED_TEXT_WRAP in the render path) so
+            // long replies wrap instead of overflowing — including a single
+            // over-long word, broken at the glyph level (hud-n0x4u) — and
+            // embedded `\n`s break.
             bounds_width: zone_width,
             bounds_height: block_height,
             // Scissor to the band between the region top and the live box top:
