@@ -20,7 +20,8 @@ use super::token_colors::{
     NOTIFICATION_DISMISS_FONT_SIZE_PX, NOTIFICATION_DISMISS_FONT_WEIGHT,
     NOTIFICATION_DISMISS_GAP_PX, NOTIFICATION_ICON_GAP_PX, NOTIFICATION_ICON_SIZE_PX,
     NOTIFICATION_INTER_LINE_GAP, NOTIFICATION_TITLE_WEIGHT, is_alert_banner_zone,
-    notification_dismiss_bounds, resolve_composer_overlay_tokens, resolve_viewer_echo_tokens,
+    notification_dismiss_bounds, resolve_composer_overlay_tokens,
+    resolve_transcript_max_measure_px, resolve_viewer_echo_tokens,
 };
 
 /// Default line-height multiplier (`font_size_px × 1.4 = line_height_px`).
@@ -334,6 +335,12 @@ impl super::Compositor {
     pub(super) fn collect_text_items(&self, scene: &SceneGraph, sw: f32, sh: f32) -> Vec<TextItem> {
         let mut items: Vec<TextItem> = Vec::new();
 
+        // Transcript optimal-measure cap (hud-rivcy): resolve once per frame; a
+        // positive value narrows portal-surface transcript wrapping, `0` leaves
+        // it unbounded. Gated to portal (scrollable) tiles per-tile below, the
+        // same surface signal that selects the portal markdown token scope.
+        let transcript_max_measure_px = resolve_transcript_max_measure_px(&self.token_map);
+
         // ── TextMarkdownNode tiles ────────────────────────────────────────────
         for tile in &Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene) {
             if let Some(root_id) = tile.root_node {
@@ -383,8 +390,23 @@ impl super::Compositor {
                 // Track item count before so the tile's whole-tile opacity can be
                 // folded into exactly the glyphs this tile just contributed.
                 let items_before = items.len();
+                // Only portal (scrollable) surfaces are transcripts; other
+                // markdown tiles wrap to full width unchanged. Pass 0.0 (no
+                // clamp) for non-portal tiles so the collector is a no-op there.
+                let transcript_measure_px = if scene.tile_scroll_config(tile.id).is_some() {
+                    transcript_max_measure_px
+                } else {
+                    0.0
+                };
                 self.collect_text_items_from_node(
-                    root_id, tile, scene, scroll_x, scroll_y, at_tail, &mut items,
+                    root_id,
+                    tile,
+                    scene,
+                    scroll_x,
+                    scroll_y,
+                    at_tail,
+                    transcript_measure_px,
+                    &mut items,
                 );
 
                 // Fractional opacity: blend every glyph (transcript, cached
@@ -1163,6 +1185,7 @@ impl super::Compositor {
     // This mirrors the parameter shape of the free-function twin
     // `collect_ellipsis_text_items_from_node` which also carries the same lint.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn collect_text_items_from_node(
         &self,
         node_id: SceneId,
@@ -1171,6 +1194,7 @@ impl super::Compositor {
         scroll_x: f32,
         scroll_y: f32,
         at_tail: bool,
+        transcript_measure_px: f32,
         items: &mut Vec<TextItem>,
     ) {
         let node = match scene.nodes.get(&node_id) {
@@ -1283,6 +1307,15 @@ impl super::Compositor {
             // token legible range. No-op at the default scale. Must mirror the
             // ellipsis collector so truncation keys match this shaped font.
             item.font_size_px = self.scaled_portal_font(item.font_size_px, tile.id, scene);
+            // Optimal-measure clamp (hud-rivcy): cap the transcript's effective
+            // wrap width to `portal.transcript.max_measure_px` (0 = unbounded,
+            // pre-gated by the caller to portal surfaces). Applied BEFORE the
+            // clip computation below so `clip_bounds_width` (derived from
+            // `item.bounds_width`) tracks the clamped measure, and BEFORE the
+            // item is shaped so the wrap width and truncation key both reflect
+            // the cap — matching the prime path in
+            // `collect_ellipsis_text_items_from_node`.
+            item.bounds_width = clamp_transcript_measure(item.bounds_width, transcript_measure_px);
             // Override viewport for at-tail Ellipsis tiles (hud-lu50e).
             // The prime path (collect_ellipsis_text_items_from_node) already
             // primes TailAnchored keys for these tiles; the per-frame key must
@@ -1327,7 +1360,14 @@ impl super::Compositor {
 
         for child_id in &node.children {
             self.collect_text_items_from_node(
-                *child_id, tile, scene, scroll_x, scroll_y, at_tail, items,
+                *child_id,
+                tile,
+                scene,
+                scroll_x,
+                scroll_y,
+                at_tail,
+                transcript_measure_px,
+                items,
             );
         }
     }
@@ -1347,6 +1387,31 @@ pub(super) fn scale_portal_font_px(base_font_px: f32, scale: f32, min: f32, max:
     }
     let (lo, hi) = if min <= max { (min, max) } else { (max, min) };
     (base_font_px * scale).clamp(lo, hi)
+}
+
+/// Clamp a transcript node's wrapping measure to the optimal-measure cap
+/// (`portal.transcript.max_measure_px`, hud-rivcy).
+///
+/// A portal transcript wraps its body text to `bounds_width` (the node width).
+/// On a wide surface that yields overlong, hard-to-read lines; this cap holds a
+/// comfortable line length by shrinking the effective wrap measure.
+///
+/// `max_measure_px == 0.0` means **unbounded** — returns `bounds_width`
+/// unchanged, preserving today's behavior (no regression on the default
+/// profile). A positive `max_measure_px` returns `min(bounds_width,
+/// max_measure_px)`: the cap only ever *narrows* the measure, never widens a
+/// node that is already narrower than the cap.
+///
+/// The same clamp is applied on BOTH the frame render path
+/// (`collect_text_items_from_node`) and the truncation-prime path
+/// (`collect_ellipsis_text_items_from_node`) so the primed truncation key
+/// (which includes `bounds_width`) matches what the render path shapes.
+pub(super) fn clamp_transcript_measure(bounds_width: f32, max_measure_px: f32) -> f32 {
+    if max_measure_px > 0.0 {
+        bounds_width.min(max_measure_px)
+    } else {
+        bounds_width
+    }
 }
 
 /// Apply the per-segment streaming-reveal fade to a portal-tile markdown
@@ -1488,6 +1553,7 @@ pub(super) fn collect_ellipsis_text_items_from_node(
     node_key_cache: &HashMap<SceneId, [u8; 32]>,
     markdown_tokens: &crate::markdown::MarkdownTokens,
     font_clamp: (f32, f32),
+    transcript_measure_px: f32,
     items: &mut Vec<TextItem>,
 ) {
     let node = match scene.nodes.get(&node_id) {
@@ -1548,6 +1614,12 @@ pub(super) fn collect_ellipsis_text_items_from_node(
                 font_clamp.0,
                 font_clamp.1,
             );
+            // Optimal-measure clamp (hud-rivcy): apply the SAME transcript wrap
+            // cap as the render path so this primed truncation key (which
+            // includes `bounds_width`) matches what `collect_text_items_from_node`
+            // shapes. `transcript_measure_px` is pre-gated by the caller to
+            // portal surfaces (0.0 = no clamp elsewhere).
+            item.bounds_width = clamp_transcript_measure(item.bounds_width, transcript_measure_px);
             // Override viewport based on the tile's follow-tail state.
             if at_tail {
                 item.viewport = crate::overflow::TruncationViewport::TailAnchored;
@@ -1568,6 +1640,7 @@ pub(super) fn collect_ellipsis_text_items_from_node(
             node_key_cache,
             markdown_tokens,
             font_clamp,
+            transcript_measure_px,
             items,
         );
     }
@@ -1722,6 +1795,125 @@ mod portal_reveal_render_tests {
             format!("{:?}", item.styled_runs),
             format!("{:?}", after.styled_runs),
             "settled reveal must not alter styled runs"
+        );
+    }
+}
+
+#[cfg(test)]
+mod transcript_measure_tests {
+    use super::clamp_transcript_measure;
+    use crate::renderer::token_colors::resolve_transcript_max_measure_px;
+    use std::collections::HashMap;
+
+    // ── clamp_transcript_measure: pure logic (no GPU, hud-rivcy) ──────────────
+
+    #[test]
+    fn clamp_unbounded_returns_full_width() {
+        // 0 = unbounded: the measure is left at the full node width so the
+        // default profile (default token value "0") is unchanged.
+        assert!((clamp_transcript_measure(400.0, 0.0) - 400.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn clamp_narrows_when_cap_below_width() {
+        // Cap < node width: the effective measure shrinks to the cap.
+        assert!((clamp_transcript_measure(400.0, 120.0) - 120.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn clamp_never_widens_when_cap_above_width() {
+        // Cap >= node width: a node already narrower than the cap is left
+        // untouched (the clamp only ever narrows, never widens).
+        assert!((clamp_transcript_measure(200.0, 640.0) - 200.0).abs() < 1e-4);
+        // Exactly equal is a no-op.
+        assert!((clamp_transcript_measure(300.0, 300.0) - 300.0).abs() < 1e-4);
+    }
+
+    // ── resolve_transcript_max_measure_px: token resolution (hud-rivcy) ───────
+
+    #[test]
+    fn resolve_defaults_to_unbounded_when_absent() {
+        let map = HashMap::new();
+        assert_eq!(resolve_transcript_max_measure_px(&map), 0.0);
+    }
+
+    #[test]
+    fn resolve_parses_positive_measure() {
+        let mut map = HashMap::new();
+        map.insert(
+            "portal.transcript.max_measure_px".to_string(),
+            "640".to_string(),
+        );
+        assert!((resolve_transcript_max_measure_px(&map) - 640.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn resolve_rejects_negative_and_nonfinite() {
+        for bad in ["-1", "nan", "inf", "not-a-number", ""] {
+            let mut map = HashMap::new();
+            map.insert(
+                "portal.transcript.max_measure_px".to_string(),
+                bad.to_string(),
+            );
+            assert_eq!(
+                resolve_transcript_max_measure_px(&map),
+                0.0,
+                "value {bad:?} must fall back to unbounded (0.0)"
+            );
+        }
+    }
+
+    /// End-to-end wrap behavior (CPU shaping, no GPU): a transcript line shaped
+    /// at the clamped measure wraps into MORE visual lines than at the full node
+    /// width, while the unbounded (0) case shapes to the exact same line count as
+    /// the full width — proving the clamp is what drives the tighter wrap and
+    /// that `0` is a genuine no-regression pass-through.
+    #[test]
+    fn clamped_measure_wraps_tighter_than_full_width() {
+        let mut fs = crate::fonts::bundled_font_system();
+        let font_size_px = 16.0;
+        let lhm = 1.4;
+        let node_width = 400.0;
+        let cap = 120.0;
+        let line = "The quick brown fox jumps over the lazy dog near the \
+                    riverbank at dawn every single morning without fail.";
+
+        let full_measure = clamp_transcript_measure(node_width, 0.0);
+        let capped_measure = clamp_transcript_measure(node_width, cap);
+        assert!((full_measure - node_width).abs() < 1e-4);
+        assert!((capped_measure - cap).abs() < 1e-4);
+
+        let full_lines =
+            crate::text::composer_wrap_line_widths(&mut fs, line, full_measure, font_size_px, lhm)
+                .len();
+        let capped_lines = crate::text::composer_wrap_line_widths(
+            &mut fs,
+            line,
+            capped_measure,
+            font_size_px,
+            lhm,
+        )
+        .len();
+
+        assert!(
+            capped_lines > full_lines,
+            "clamped measure ({cap}px) must wrap into more lines than full width \
+             ({node_width}px); got capped={capped_lines} full={full_lines}"
+        );
+
+        // Unbounded (0) must reproduce the full-width wrap exactly — no regression.
+        let unbounded_measure = clamp_transcript_measure(node_width, 0.0);
+        let unbounded_lines = crate::text::composer_wrap_line_widths(
+            &mut fs,
+            line,
+            unbounded_measure,
+            font_size_px,
+            lhm,
+        )
+        .len();
+        assert_eq!(
+            unbounded_lines, full_lines,
+            "unbounded (0) measure must match full-width wrapping exactly"
         );
     }
 }
