@@ -160,3 +160,53 @@ Scope: promotion (rendering under hud-g1ena)
 
 - **WHEN** a previously connected portal's session drops
 - **THEN** the portal SHALL present the existing degraded/disconnected treatment and follow the existing orphan lifecycle
+
+## MODIFIED Requirements
+
+### Requirement: Viewer Reply Echo
+
+A text stream portal SHALL maintain two distinct, separately-bounded histories: an INPUT history of the viewer's own accepted submissions, and an OUTPUT transcript of agent-authored content only. The two histories are separate streams and SHALL NOT be materialized as a single combined transcript unit sequence.
+
+When a viewer submits a reply through a text stream portal composer and the submission is accepted, the runtime SHALL echo the submitted text into the portal's INPUT history as a viewer-authored turn, so the two-way conversation is visible on the surface rather than the viewer's own words disappearing into the adapter inbox. The INPUT history SHALL be presented in the portal's input region beneath a top-anchored composer, with successive viewer turns stacked and separated by token-styled turn dividers (the viewer-echo stack); the runtime SHALL retain only a bounded, newest-fit window of the INPUT history, obeying the Bounded Transcript Viewport rules for its own region rather than mirroring unbounded input history into scene nodes. An accepted viewer submission SHALL NOT be appended to the OUTPUT/agent transcript stream, and SHALL NOT jump, republish, or otherwise mutate the OUTPUT transcript's scroll position — the viewer's submitted words appear in the INPUT history only, never doubled into the agent-authored transcript.
+
+The viewer turn SHALL be authored by the runtime at submit time and SHALL be distinguishable from agent-authored transcript units by a dedicated viewer turn kind. The output-publication contract addresses the OUTPUT transcript only: an adapter MUST NOT author, publish, or otherwise forge a viewer turn through the output-publication contract, an adapter has no path to write into the INPUT history at all, and a publish that attempts to use the viewer turn kind SHALL be rejected. The echoed viewer turn SHALL carry the submission's content classification and SHALL obey the same redaction, safe-mode, freeze, and Bounded Transcript Viewport rules as agent-authored transcript content — it is not automatically safe because it is the viewer's own text. The viewer echo is local-first presentation, not a new attention event: it SHALL NOT increment the portal's unread-output count and SHALL NOT escalate interruption class, because the viewer has by definition already seen their own message, consistent with the Ambient Portal Attention Defaults requirement. The echo is a presentation of an already-accepted submission and SHALL NOT alter the existing submission contract: the submitted text SHALL still be delivered transactionally to the adapter's semantic input mechanism per the Cooperative Projection Input Mapping requirement, and a submission that is rejected SHALL NOT be echoed. Visual differentiation of viewer versus agent turns (the two-region layout, alignment, role accent, attribution affordance, and divider treatment) is governed by the portal's component-profile and design tokens and is not mandated at the pixel level by this requirement; the requirement establishes that viewer turns are first-class, kind-distinct units of the INPUT history, held separately from the agent-authored OUTPUT transcript.
+
+Source: RFC 0013 §3.3 and §4.3, `about/heart-and-soul/vision.md` ("a persistent on-screen portal where a person can converse"), `about/heart-and-soul/presence.md` (Interaction — local-first), owner live round-6 decision (2026-07-04, hud-egf39 / PR #1038: "route viewer submissions to INPUT-pane history, not OUTPUT transcript"), `crates/tze_hud_projection/src/contract.rs` (OutputKind::Viewer), `crates/tze_hud_projection/src/authority.rs` (append_viewer_echo on submit_portal_input), `crates/tze_hud_runtime/src/windowed/portal.rs` (append_raw_tile_viewer_echo → viewer_echo_queue → compositor viewer-echo stack, #1020/hud-hsc1t), `crates/tze_hud_runtime/src/portal_projection_driver.rs` (parse_output_kind rejects adapter-supplied viewer), exemplar `text_stream_portal_exemplar.py` (append_input_history records into input_history, never body_full)
+Scope: v1-mandatory
+
+#### Scenario: accepted reply appears in the input history
+
+- **WHEN** a viewer submits a reply that the portal accepts
+- **THEN** the submitted text SHALL appear in the portal's INPUT history as a viewer-authored, kind-distinct turn beneath the composer, stacked with token-styled turn dividers
+- **AND** the submission SHALL still be delivered transactionally to the adapter's semantic input mechanism per the existing Cooperative Projection Input Mapping requirement
+
+#### Scenario: viewer submission never enters the output transcript
+
+- **WHEN** a viewer reply is echoed into the INPUT history
+- **THEN** the submitted text SHALL NOT be appended to the OUTPUT/agent transcript stream
+- **AND** the OUTPUT transcript's scroll position SHALL NOT jump or republish as a side effect of the submission
+- **AND** the viewer's words SHALL appear once, in the INPUT history only, never doubled into the agent-authored transcript
+
+#### Scenario: viewer echo does not count as unread or escalate attention
+
+- **WHEN** a viewer reply is echoed into the INPUT history
+- **THEN** the portal's unread-output count SHALL NOT increase
+- **AND** the echo SHALL NOT raise the portal's interruption class beyond the ambient default
+
+#### Scenario: adapter cannot forge a viewer turn
+
+- **WHEN** an adapter publishes transcript output using the viewer turn kind
+- **THEN** the runtime SHALL reject the publish
+- **AND** the adapter SHALL have no path to write into the INPUT history; only the runtime's submit path SHALL author viewer turns
+
+#### Scenario: viewer echo redacts like transcript content
+
+- **WHEN** the current viewer's policy redacts the portal's transcript
+- **THEN** the echoed viewer turn in the INPUT history SHALL be redacted under the same policy as agent-authored content
+- **AND** it SHALL NOT bypass viewer-class filtering because it is the viewer's own submitted text
+
+#### Scenario: rejected submission is not echoed
+
+- **WHEN** a viewer submission is rejected (for example because the HUD is unavailable or the input queue is full)
+- **THEN** no viewer turn SHALL be appended to the INPUT history
+- **AND** the existing rejection feedback SHALL convey why the submission did not land

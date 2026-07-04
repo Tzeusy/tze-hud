@@ -15,6 +15,7 @@ Spec-only change (this change ships requirements and scenarios; rendering work f
 - Add **agent activity / streaming cue**: an ambient typing-style indicator and streaming cursor while the agent is actively appending, strictly subordinate to the attention model.
 - Add **first-run / empty-portal treatment**: a friendly, token-styled empty state replacing the literal `<empty projection stream>` placeholder.
 - Add **connecting-vs-disconnected distinction**: an attached-but-never-connected portal presents a distinct "connecting" treatment rather than reusing the degraded/disconnected treatment.
+- Modify **§Viewer Reply Echo** to specify the two-pane INPUT/OUTPUT split (owner live round-6, 2026-07-04, hud-egf39 / PR #1038): the portal tracks two separately-bounded histories — an INPUT history of the viewer's own submissions (rendered beneath a top-anchored composer, stacked with turn dividers via the viewer-echo stack) and an OUTPUT transcript of agent-authored content only. Viewer submissions echo into the INPUT history and MUST NOT be appended to the OUTPUT/agent transcript stream. This reframes the prior single-stream "echo into the retained transcript" wording; all other echo constraints (runtime-authored, kind-distinct, never unread, no attention escalation, redaction parity, transactional delivery, rejected-not-echoed) are preserved.
 
 ## Capabilities
 
@@ -24,11 +25,11 @@ Spec-only change (this change ships requirements and scenarios; rendering work f
 
 ### Modified Capabilities
 
-- `text-stream-portals`: adds the seven requirements above as new requirement sections; no existing requirement text changes semantics, but the new requirements anchor to and must stay consistent with §Viewer Reply Echo, §Ambient Portal Attention Defaults, §Transcript Interaction Contract, §Coherent Transcript Coalescing, and §Governance, Privacy, and Override Compliance.
+- `text-stream-portals`: adds the seven requirements above as new requirement sections and modifies one existing requirement (§Viewer Reply Echo) to reframe the single-stream echo model as the two-pane INPUT/OUTPUT split. The new requirements anchor to and must stay consistent with §Viewer Reply Echo (as modified), §Ambient Portal Attention Defaults, §Transcript Interaction Contract, §Coherent Transcript Coalescing, and §Governance, Privacy, and Override Compliance.
 
 ## Impact
 
-- **Spec**: `openspec/specs/text-stream-portals/spec.md` gains ~7 requirement sections via this change's delta.
+- **Spec**: `openspec/specs/text-stream-portals/spec.md` gains ~7 requirement sections and one modified requirement (§Viewer Reply Echo, two-pane split) via this change's delta.
 - **Code (deferred to promotion epic hud-g1ena / hud-s4lrw)**: transcript presentation in the compositor portal render path, `ProjectedPortalState` → render-batch projection (`crates/tze_hud_runtime/src/portal_projection_driver.rs`, `crates/tze_hud_projection/src/authority.rs` state already exists), portal part tokens for the new cues.
 - **Beads**: epic hud-g0c9g (this is its STEP 1); rendering beads to be filed under promotion after this change lands.
 - **Non-goals**: no new adapter/MCP surface, no notification behavior, no read-receipts back to the adapter (viewer "seen" state is not disclosed to the agent in this change).

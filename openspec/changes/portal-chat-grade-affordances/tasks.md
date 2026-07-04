@@ -7,6 +7,7 @@ This change is SPEC-FIRST (epic hud-g0c9g STEP 1). Sections 1–2 are this chang
 - [x] 1.1 Author delta spec `specs/text-stream-portals/spec.md` with the seven ADDED requirements (delivery ack, unread divider+count, jump-to-latest, timestamps, activity/streaming cue, empty-state, connecting distinction)
 - [x] 1.2 `openspec validate portal-chat-grade-affordances --strict` passes
 - [x] 1.3 Cross-check delta consistency against §Viewer Reply Echo, §Ambient Portal Attention Defaults, §Transcript Interaction Contract, §Bounded Transcript Viewport, §Governance/Privacy (no contradictions introduced)
+- [x] 1.4 Add MODIFIED §Viewer Reply Echo reframing single-stream echo as the two-pane INPUT/OUTPUT split (owner round-6, hud-egf39/#1038); INPUT history under a top-anchored composer with turn dividers, OUTPUT transcript agent-authored only, viewer submissions never appended to OUTPUT (hud-til02)
 
 ## 2. Land + sync
 
