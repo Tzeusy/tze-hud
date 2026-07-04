@@ -12559,12 +12559,16 @@ async fn transcript_divider_rects_track_tile_scroll_offset() {
         verts
             .iter()
             .map(|v| v.position[1])
-            .fold(None, |acc: Option<f32>, y| Some(acc.map_or(y, |a| a.max(y))))
+            .fold(None, |acc: Option<f32>, y| {
+                Some(acc.map_or(y, |a| a.max(y)))
+            })
             .map(|top_ndc| (1.0 - top_ndc) * sh / 2.0)
     };
 
     // Unscrolled baseline.
-    scene.set_tile_scroll_offset_local(tile_id, 0.0, 0.0).unwrap();
+    scene
+        .set_tile_scroll_offset_local(tile_id, 0.0, 0.0)
+        .unwrap();
     let base = divider_top_px(&scene).expect("divider emitted at scroll 0");
 
     // A modest scroll keeps the divider inside the tile viewport: its top must
@@ -12596,7 +12600,9 @@ async fn transcript_divider_rects_track_tile_scroll_offset() {
     // top must move DOWN relative to the default-scale position. If the divider
     // ignored the scale (used the raw `tm.font_size_px`) the two would be equal —
     // this guards against reverting to the unscaled line height.
-    scene.set_tile_scroll_offset_local(tile_id, 0.0, 0.0).unwrap();
+    scene
+        .set_tile_scroll_offset_local(tile_id, 0.0, 0.0)
+        .unwrap();
     scene.set_tile_font_scale(tile_id, 1.5);
     let scaled_top = divider_top_px(&scene).expect("divider still emitted under resize");
     assert!(
