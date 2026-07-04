@@ -91,6 +91,64 @@ pub(super) fn transcript_separator_rects(
     rects
 }
 
+/// Compute divider rectangles between adjacent viewer-echo entries (hud-hsc1t).
+///
+/// The runtime-authored viewer reply echo (hud-nx7yq.3) renders its retained
+/// entries as a single wrapped block bottom-anchored above the composer box.
+/// Unlike the adapter transcript — which encodes entry boundaries as `---`
+/// thematic breaks the markdown pass turns into dividers — the echo block joins
+/// its entries with plain `\n`, so without this helper the pilot-path viewer
+/// history reads as one undivided run (the "no dividers between history entries"
+/// live report).
+///
+/// Given the per-entry WRAPPED visual-line counts (oldest→newest), this places a
+/// `thickness`-tall rule on the boundary line between each adjacent pair — the
+/// same token-styled divider the transcript turn separators use (§Transcript Turn
+/// Separators). `block_top` is the display-space y of the block's first line;
+/// `[band_top, band_bottom]` is the visible band above the composer box, so a
+/// boundary whose history has scrolled out of the band is dropped (matching the
+/// oldest-clips-first text bound). N entries yield at most N−1 dividers; the
+/// separators are content-free geometry and reveal nothing under redaction.
+///
+/// Free-standing (no `self`, no GPU) so the cumulative-line math is unit-testable
+/// without a headless compositor, mirroring [`transcript_separator_rects`].
+// The args are the per-entry line counts plus the block/band geometry scalars;
+// bundling them into a struct would add indirection without reducing fan-out.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn viewer_echo_divider_rects(
+    entry_line_counts: &[usize],
+    origin_x: f32,
+    block_top: f32,
+    width: f32,
+    line_height: f32,
+    thickness: f32,
+    band_top: f32,
+    band_bottom: f32,
+) -> Vec<Rect> {
+    let w = width.max(0.0);
+    if w <= 0.0 || thickness <= 0.0 || entry_line_counts.len() < 2 {
+        return Vec::new();
+    }
+    let mut rects = Vec::with_capacity(entry_line_counts.len() - 1);
+    let mut cumulative = 0usize;
+    // Only interior boundaries: skip the final entry (no divider after the newest).
+    for count in &entry_line_counts[..entry_line_counts.len() - 1] {
+        cumulative += *count;
+        // The boundary sits at the top of the next entry's first line.
+        let boundary_y = block_top + cumulative as f32 * line_height;
+        if boundary_y < band_top || boundary_y > band_bottom {
+            continue;
+        }
+        rects.push(Rect::new(
+            origin_x,
+            boundary_y - thickness / 2.0,
+            w,
+            thickness,
+        ));
+    }
+    rects
+}
+
 impl Compositor {
     // ─── Drag-boost helpers ───────────────────────────────────────────────────
 
@@ -151,7 +209,7 @@ impl Compositor {
         Some(Rect::new(left, top, right - left, bottom - top))
     }
 
-    fn append_clipped_rect_vertices(
+    pub(super) fn append_clipped_rect_vertices(
         tile: &Tile,
         rect: Rect,
         sw: f32,
@@ -975,25 +1033,40 @@ impl Compositor {
         )
     }
 
+    /// The retained viewer-echo entry texts for `tile`, oldest-first, each as its
+    /// own owned `String` so the layout prime can measure per-entry wrapped line
+    /// counts for the turn dividers (hud-hsc1t).
+    fn viewer_echo_entry_texts(&self, tile_id: SceneId) -> Option<Vec<String>> {
+        let entries = self.viewer_echoes.entries_for(tile_id)?;
+        Some(entries.iter().map(|e| e.text.clone()).collect())
+    }
+
     /// Measure the wrapped visual-line count of each tile's viewer-echo history
-    /// once per frame (hud-pncm3), storing it in `viewer_echo_line_counts`.
+    /// once per frame (hud-pncm3), storing the total in `viewer_echo_line_counts`
+    /// and the per-entry counts in `viewer_echo_entry_line_counts` (hud-hsc1t).
     ///
     /// Word-wrap measurement needs the `&mut` text rasterizer (font metrics),
     /// which the `&self` `collect_viewer_echo_text_items` cannot reach — so it is
     /// primed here, mirroring `prime_composer_scroll_offset`. Must run once per
     /// frame BEFORE the text pass. Off the transcript hot path: it runs only when
     /// echoes exist and over a bounded (`MAX_VIEWER_ECHO_ENTRIES`) history.
+    ///
+    /// Each entry is measured independently because the entries join with a hard
+    /// `\n` — so the summed per-entry count equals the joined-block count, and the
+    /// cumulative boundaries the divider pass reads stay consistent with the total
+    /// block height the text pass reads.
     pub(crate) fn prime_viewer_echo_layout(&mut self, scene: &SceneGraph) {
         self.viewer_echo_line_counts.clear();
+        self.viewer_echo_entry_line_counts.clear();
         if self.viewer_echoes.is_empty() || self.text_rasterizer.is_none() {
             return;
         }
         let lhm = crate::markdown::MarkdownTokens::default().line_height_multiplier;
         let echo_font = resolve_viewer_echo_tokens(&self.token_map).font_size_px;
 
-        // Gather (tile, zone_width, joined_text) under &self first, then measure
-        // under &mut self.text_rasterizer — the two borrows do not overlap.
-        let mut jobs: Vec<(SceneId, f32, String)> = Vec::new();
+        // Gather (tile, zone_width, per-entry texts) under &self first, then
+        // measure under &mut self.text_rasterizer — the two borrows do not overlap.
+        let mut jobs: Vec<(SceneId, f32, Vec<String>)> = Vec::new();
         for tile in scene.visible_tiles() {
             let Some(composer_node) = Self::find_composer_node_in_tile(tile, scene) else {
                 continue;
@@ -1001,25 +1074,35 @@ impl Compositor {
             let Some(region) = Self::composer_region_bounds(tile, scene, composer_node) else {
                 continue;
             };
-            let Some(joined) = self.viewer_echo_joined_text(tile.id) else {
+            let Some(entries) = self.viewer_echo_entry_texts(tile.id) else {
                 continue;
             };
-            jobs.push((tile.id, Self::viewer_echo_zone_width(region), joined));
+            jobs.push((tile.id, Self::viewer_echo_zone_width(region), entries));
         }
 
-        let mut counts: Vec<(SceneId, usize)> = Vec::with_capacity(jobs.len());
+        let mut results: Vec<(SceneId, Vec<usize>)> = Vec::with_capacity(jobs.len());
         if let Some(tr) = self.text_rasterizer.as_mut() {
-            for (tile_id, zone_width, joined) in &jobs {
-                // Break-anywhere line count (WRAPPED_TEXT_WRAP): an over-long
-                // single-word reply is counted as the multiple in-box lines it
-                // paints as, not one clipped line (hud-n0x4u).
-                let total_lines =
-                    tr.measure_wrapped_line_count(joined, *zone_width, echo_font, lhm);
-                counts.push((*tile_id, total_lines.max(1)));
+            for (tile_id, zone_width, entries) in &jobs {
+                // Break-anywhere per-entry line count (WRAPPED_TEXT_WRAP, hud-n0x4u):
+                // an over-long single-word reply in one entry is counted as the
+                // multiple in-box lines it paints as, not one clipped line — so the
+                // cumulative boundaries the divider pass derives stay aligned with
+                // the painted wrap (hud-hsc1t).
+                let per_entry: Vec<usize> = entries
+                    .iter()
+                    .map(|entry| {
+                        tr.measure_wrapped_line_count(entry, *zone_width, echo_font, lhm)
+                            .max(1)
+                    })
+                    .collect();
+                results.push((*tile_id, per_entry));
             }
         }
-        for (tile_id, count) in counts {
-            self.viewer_echo_line_counts.insert(tile_id, count);
+        for (tile_id, per_entry) in results {
+            let total: usize = per_entry.iter().sum::<usize>().max(1);
+            self.viewer_echo_line_counts.insert(tile_id, total);
+            self.viewer_echo_entry_line_counts
+                .insert(tile_id, per_entry);
         }
     }
 
@@ -1137,6 +1220,91 @@ impl Compositor {
             viewport: crate::overflow::TruncationViewport::HeadAnchored,
         });
         items
+    }
+
+    /// Collect token-styled divider rects between adjacent viewer-echo entries
+    /// for `tile` (hud-hsc1t), in display space, clipped to the same band the
+    /// echo text occupies. Empty when the divider token is absent, the tile has
+    /// fewer than two retained entries, or the composer anchor is unavailable.
+    ///
+    /// Mirrors the block geometry of [`Self::collect_viewer_echo_text_items`] so
+    /// the divider lands exactly on the boundary between each pair of rendered
+    /// entries, then defers the cumulative-line math to the pure
+    /// [`viewer_echo_divider_rects`] helper. Content-free geometry: the rects
+    /// carry no text and reveal nothing under redaction.
+    pub(super) fn collect_viewer_echo_divider_rects(
+        &self,
+        tile: &Tile,
+        scene: &SceneGraph,
+    ) -> Vec<Rect> {
+        // Gate on the shared portal.divider.* token, exactly like the markdown
+        // transcript separators — no divider token ⇒ no separator geometry.
+        let Some(_sep_color) = self.markdown_tokens.separator_color else {
+            return Vec::new();
+        };
+        let thickness = self.markdown_tokens.separator_thickness_px.max(1.0);
+
+        let echo_tokens = resolve_viewer_echo_tokens(&self.token_map);
+        let Some(entries) = self.viewer_echo_entry_texts(tile.id) else {
+            return Vec::new();
+        };
+        if entries.len() < 2 {
+            return Vec::new();
+        }
+        let Some(composer_node) = Self::find_composer_node_in_tile(tile, scene) else {
+            return Vec::new();
+        };
+        let Some(region) = Self::composer_region_bounds(tile, scene, composer_node) else {
+            return Vec::new();
+        };
+
+        let line_height_multiplier =
+            crate::markdown::MarkdownTokens::default().line_height_multiplier;
+        let composer_font_size_px = resolve_composer_overlay_tokens(&self.token_map).font_size_px;
+        let draft_box = Self::composer_input_box(
+            region,
+            composer_font_size_px,
+            line_height_multiplier,
+            self.composer_layout.visible_lines,
+        );
+        let line_h = (echo_tokens.font_size_px * line_height_multiplier).max(1.0);
+        let margin = COMPOSER_TEXT_MARGIN;
+        let zone_width = Self::viewer_echo_zone_width(region);
+
+        let band_top = region.y;
+        if draft_box.y - band_top <= 0.0 {
+            return Vec::new();
+        }
+
+        // Per-entry wrapped counts: primed (wrap-accurate) or, absent a prime this
+        // frame, the logical `\n`-split count per entry. Either way their sum
+        // equals the total the text path uses, so boundaries stay consistent.
+        let per_entry: Vec<usize> = self
+            .viewer_echo_entry_line_counts
+            .get(&tile.id)
+            .cloned()
+            .unwrap_or_else(|| {
+                entries
+                    .iter()
+                    .map(|e| e.split('\n').count().max(1))
+                    .collect()
+            });
+        let total_lines: usize = per_entry.iter().sum::<usize>().max(1);
+        let block_height = (total_lines as f32 * line_h).max(line_h);
+        // Bottom-align: newest entry sits just above the composer box, oldest at
+        // the top and clipping first — identical to the text block.
+        let block_top = draft_box.y - block_height;
+
+        viewer_echo_divider_rects(
+            &per_entry,
+            region.x + margin,
+            block_top,
+            zone_width,
+            line_h,
+            thickness,
+            band_top,
+            draft_box.y,
+        )
     }
 
     /// Render a node and its children within a tile.

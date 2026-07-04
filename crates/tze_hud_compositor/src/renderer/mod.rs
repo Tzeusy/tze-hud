@@ -379,6 +379,15 @@ pub struct Compositor {
     /// to bottom-align the history block above the live composer box. Absent =>
     /// the collect path falls back to the logical (`\n`-split) line count.
     pub(crate) viewer_echo_line_counts: HashMap<SceneId, usize>,
+    /// Per-tile PER-ENTRY wrapped visual-line counts of the viewer-echo history,
+    /// oldest→newest, measured alongside [`Self::viewer_echo_line_counts`] in
+    /// `prime_viewer_echo_layout` (hud-hsc1t).
+    ///
+    /// Feeds `viewer_echo_divider_rects`, which places a token-styled divider on
+    /// the cumulative-line boundary between each adjacent pair of entries so the
+    /// pilot-path history reads as discrete turns. Absent => no per-entry divider
+    /// geometry that frame (the joined text still renders).
+    pub(crate) viewer_echo_entry_line_counts: HashMap<SceneId, Vec<usize>>,
     /// Shared handle carrying the current keyboard-focus owner from the runtime
     /// `FocusManager` (hud-k6yvb). Drained at frame start into `focus_ring_owner`;
     /// the chrome-layer ring pass draws the ring for whatever owner it names.
@@ -591,6 +600,7 @@ impl Compositor {
             viewer_echoes: viewer_echo::ViewerEchoStore::new(),
             composer_visual_layout: Arc::new(StdMutex::new(None)),
             viewer_echo_line_counts: HashMap::new(),
+            viewer_echo_entry_line_counts: HashMap::new(),
             focus_ring_owner_state: Arc::new(StdMutex::new(None)),
             focus_ring_owner: None,
             local_composer: None,
@@ -878,6 +888,7 @@ impl Compositor {
             viewer_echoes: viewer_echo::ViewerEchoStore::new(),
             composer_visual_layout: Arc::new(StdMutex::new(None)),
             viewer_echo_line_counts: HashMap::new(),
+            viewer_echo_entry_line_counts: HashMap::new(),
             focus_ring_owner_state: Arc::new(StdMutex::new(None)),
             focus_ring_owner: None,
             local_composer: None,

@@ -533,6 +533,72 @@ async fn test_viewer_echo_renders_kind_distinct_line_above_composer() {
     );
 }
 
+/// hud-hsc1t: a portal tile with ≥2 runtime-authored viewer echoes renders a
+/// token-styled turn divider on the boundary between each adjacent pair of
+/// entries, resolved from the shared `portal.divider.*` tokens (never hardcoded).
+/// One entry → no interior divider. Draw-list-level (no readback).
+#[tokio::test]
+async fn test_viewer_echo_renders_turn_dividers_between_entries() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(400, 300).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+    let (scene, tile_id) = viewer_echo_test_scene();
+
+    // Divider token present (as `set_token_map` populates from
+    // portal.divider.color / .thickness_px). Without it the pass is inert.
+    compositor.markdown_tokens.separator_color = Some(Rgba::new(0.27, 0.32, 0.43, 1.0));
+    compositor.markdown_tokens.separator_thickness_px = 2.0;
+
+    let tile = |scene: &SceneGraph| -> Tile { scene.visible_tiles()[0].clone() };
+
+    // A single echo entry yields no interior divider.
+    compositor
+        .viewer_echoes
+        .append(tile_id, "first reply".to_owned(), 1);
+    compositor.prime_viewer_echo_layout(&scene);
+    assert!(
+        compositor
+            .collect_viewer_echo_divider_rects(&tile(&scene), &scene)
+            .is_empty(),
+        "one entry has no interior divider"
+    );
+
+    // Two more entries → three total → two interior dividers.
+    compositor
+        .viewer_echoes
+        .append(tile_id, "second reply".to_owned(), 2);
+    compositor
+        .viewer_echoes
+        .append(tile_id, "third reply".to_owned(), 3);
+    compositor.prime_viewer_echo_layout(&scene);
+    let rects = compositor.collect_viewer_echo_divider_rects(&tile(&scene), &scene);
+    assert_eq!(
+        rects.len(),
+        2,
+        "three echo entries render two interior turn dividers"
+    );
+    for rect in &rects {
+        assert_eq!(
+            rect.height, 2.0,
+            "divider thickness comes from the portal.divider token, not a hardcode"
+        );
+        assert!(rect.width > 0.0, "divider spans the echo zone width");
+    }
+    // Dividers ascend (older boundary above newer boundary).
+    assert!(
+        rects[0].y < rects[1].y,
+        "boundaries ordered oldest→newest top→bottom"
+    );
+
+    // Clearing the divider token disables the pass entirely.
+    compositor.markdown_tokens.separator_color = None;
+    assert!(
+        compositor
+            .collect_viewer_echo_divider_rects(&tile(&scene), &scene)
+            .is_empty(),
+        "no divider token ⇒ no separator geometry"
+    );
+}
+
 /// hud-xgtuf: the viewer-echo stack must anchor to the TOP of the LIVE
 /// (`visible_lines`-aware) composer box, so a growing multi-line draft never
 /// grows into the echo history. As the composer box grows (1 → N lines) the echo
@@ -11972,6 +12038,64 @@ fn separator_rects_placed_on_break_lines() {
         (rects[1].y - 119.0).abs() < 0.01,
         "second divider y, got {}",
         rects[1].y
+    );
+}
+
+/// Viewer-echo history renders a token-styled divider between each adjacent
+/// pair of entries (hud-hsc1t): N entries → N−1 dividers at the cumulative
+/// wrapped-line boundary, centred on the boundary line.
+#[test]
+fn viewer_echo_divider_rects_between_adjacent_entries() {
+    // 3 entries with wrapped line counts [1, 2, 1]; block_top=100, lh=20, t=2.
+    // Boundary after entry0 → 100 + 1*20 = 120; after entry1 → 100 + 3*20 = 160.
+    let counts = [1usize, 2, 1];
+    let rects =
+        tile_render::viewer_echo_divider_rects(&counts, 10.0, 100.0, 200.0, 20.0, 2.0, 0.0, 1000.0);
+    assert_eq!(rects.len(), 2, "N-1 dividers between N entries");
+    assert!(
+        (rects[0].y - 119.0).abs() < 0.01,
+        "first boundary centred on y=120, got {}",
+        rects[0].y
+    );
+    assert_eq!(rects[0].x, 10.0, "spans from the block origin");
+    assert_eq!(rects[0].width, 200.0, "spans the zone width");
+    assert_eq!(rects[0].height, 2.0, "thickness drives height");
+    assert!(
+        (rects[1].y - 159.0).abs() < 0.01,
+        "second boundary centred on y=160, got {}",
+        rects[1].y
+    );
+}
+
+/// Boundaries scrolled above the visible band clip out; a single entry, zero
+/// width, or zero thickness produce no dividers.
+#[test]
+fn viewer_echo_divider_rects_clips_and_degenerate() {
+    let counts = [1usize, 1, 1];
+    // Boundaries at y=120 and y=140; band_top=130 clips the first.
+    let rects = tile_render::viewer_echo_divider_rects(
+        &counts, 0.0, 100.0, 200.0, 20.0, 2.0, 130.0, 1000.0,
+    );
+    assert_eq!(rects.len(), 1, "boundary above band_top is clipped");
+    assert!(
+        (rects[0].y - 139.0).abs() < 0.01,
+        "surviving divider is the in-band one, got {}",
+        rects[0].y
+    );
+    assert!(
+        tile_render::viewer_echo_divider_rects(&[3usize], 0.0, 0.0, 200.0, 20.0, 2.0, 0.0, 1000.0)
+            .is_empty(),
+        "single entry → no interior divider"
+    );
+    assert!(
+        tile_render::viewer_echo_divider_rects(&counts, 0.0, 0.0, 0.0, 20.0, 2.0, 0.0, 1000.0)
+            .is_empty(),
+        "zero width → no rects"
+    );
+    assert!(
+        tile_render::viewer_echo_divider_rects(&counts, 0.0, 0.0, 200.0, 20.0, 0.0, 0.0, 1000.0)
+            .is_empty(),
+        "zero thickness → no rects"
     );
 }
 
