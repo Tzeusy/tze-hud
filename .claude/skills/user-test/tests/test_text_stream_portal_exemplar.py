@@ -52,23 +52,24 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
 
     def test_input_history_fit_keeps_newest_entries_that_fit(self) -> None:
         entries = ["one", "two", "three", "four"]
-        # Budget of 3 lines: 'four'(1) + divider(1) + 'three'(1) fit; older dropped.
-        body, block_h = portal.input_history_fit(entries, 3 * portal.COMPOSER_LINE_PX, 500.0)
-        self.assertEqual(body, "three\n---\nfour")
-        self.assertEqual(block_h, 3 * portal.COMPOSER_LINE_PX + portal.INPUT_HISTORY_GAP)
+        # avail 6 lines → budget 5 (1 slack reserved): 'four'(1) +
+        # padded divider+'three'(3+1) fit; older dropped.
+        body, block_h = portal.input_history_fit(entries, 6 * portal.COMPOSER_LINE_PX, 500.0)
+        self.assertEqual(body, "three\n\n---\n\nfour")
+        self.assertEqual(block_h, 6 * portal.COMPOSER_LINE_PX + portal.INPUT_HISTORY_GAP)
 
     def test_input_history_fit_multiline_entry_costs_its_lines(self) -> None:
         entries = ["old", "line one\nline two"]
-        # Budget 2: only the newest 2-line entry fits (divider+old would need 4).
-        body, _ = portal.input_history_fit(entries, 2 * portal.COMPOSER_LINE_PX, 500.0)
+        # avail 3 → budget 2: only the newest 2-line entry fits.
+        body, _ = portal.input_history_fit(entries, 3 * portal.COMPOSER_LINE_PX, 500.0)
         self.assertEqual(body, "line one\nline two")
 
     def test_input_history_fit_wrap_aware_long_line_costs_wrapped_lines(self) -> None:
         wrap_w = 20 * portal.COMPOSER_WRAP_CHAR_W  # ~20 chars per line
         long_entry = "x" * 45  # wraps to 3 lines at 20 chars
-        body, _ = portal.input_history_fit([long_entry], 2 * portal.COMPOSER_LINE_PX, wrap_w)
-        self.assertEqual(body, "")  # needs 3 lines, only 2 budgeted
         body, _ = portal.input_history_fit([long_entry], 3 * portal.COMPOSER_LINE_PX, wrap_w)
+        self.assertEqual(body, "")  # needs 3 lines, only 2 budgeted after slack
+        body, _ = portal.input_history_fit([long_entry], 4 * portal.COMPOSER_LINE_PX, wrap_w)
         self.assertEqual(body, long_entry)
 
     def test_input_history_fit_empty_and_zero_budget(self) -> None:
