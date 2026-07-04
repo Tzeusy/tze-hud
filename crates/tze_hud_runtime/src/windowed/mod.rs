@@ -2062,12 +2062,19 @@ impl WindowedRuntime {
         // env hacks. The env-only path keeps targeting this runtime's loopback
         // gRPC server with the runtime PSK (its historical behaviour).
         //
-        // NOTE (routing follow-up): pointing the bridge at this runtime's own
-        // loopback gRPC server materialises the portal a second time in the same
-        // scene (duplicate tiles). The bridge's intended production target is a
-        // separate runtime (the aspirational external authority deployment model);
-        // simultaneous same-scene dual materialisation needs an authority-level
-        // transport-routing decision and is deferred.
+        // NOTE (routing, resolved by hud-g7ool + hud-hfuxy): pointing the bridge
+        // at this runtime's own loopback gRPC server used to materialise the
+        // portal a second time in the same scene (duplicate tiles). hud-g7ool
+        // added a per-projection transport discriminant (`PortalTransport`,
+        // suppressing the in-process direct-scene path for bridge-routed
+        // projections) and hud-hfuxy wires it: `dispatch_portal_op`'s Attach
+        // handler routes newly attached projections onto the bridge whenever
+        // this channel is installed below, so each projection is materialised
+        // exactly once. The bridge's intended production target remains a
+        // separate runtime (the aspirational external authority deployment
+        // model); per-projection fan-out to DISTINCT external runtimes is still
+        // reserved for that epic — this runtime only ever has one global bridge
+        // endpoint.
         // Return path for bridged composer input (hud-omfqi): when the bridge
         // routes input, it forwards inbound composer submissions here; the winit
         // thread drains this into the authority's pending-input inbox (the same
