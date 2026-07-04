@@ -169,15 +169,27 @@ pub struct Compositor {
     pub(crate) stream_reveal_states: HashMap<String, StreamRevealState>,
     /// Per-portal-tile streaming-reveal state (hud-bl7yi).
     ///
-    /// Keyed by tile `SceneId`. Fades **newly-appended** portal-tile transcript
-    /// content in segment-by-segment via [`StreamFadeRamp`] instead of snapping.
-    /// An entry is held for every scrollable (portal) tile with markdown content
-    /// — settled (non-animating) once its current content is fully revealed —
-    /// so the next frame can diff against the prior plain-text snapshot and start
-    /// a fresh reveal when content grows. Pruned when the tile disappears.
+    /// Keyed by `(tile SceneId, markdown-node SceneId)` — one entry **per
+    /// eligible markdown node** under a scrollable (portal) tile, NOT one per
+    /// tile (hud-tbdfx). Per-node keying makes the tracker robust to the *first
+    /// eligible node* changing between frames: a portal input tile carries both
+    /// a settled history markdown node and a composer draft node whose
+    /// pixel-bearing color runs toggle its eligibility, so a tile-keyed tracker
+    /// would flip between the two nodes' plain-texts and spuriously word-reveal
+    /// the entire history on every composer submit. With per-node keying each
+    /// node diffs only against its own prior snapshot, so a genuine append to
+    /// one node fades only that node's changed suffix and a node appearing /
+    /// disappearing never mimics growth of a different node.
+    ///
+    /// Fades **newly-appended** content segment-by-segment via [`StreamFadeRamp`]
+    /// instead of snapping. An entry is held for every eligible markdown node —
+    /// settled (non-animating) once its current content is fully revealed — so
+    /// the next frame can diff against the prior plain-text snapshot and start a
+    /// fresh reveal when that node's content grows. Pruned when the node (or its
+    /// tile) disappears.
     ///
     /// [`StreamFadeRamp`]: crate::renderer::easing::StreamFadeRamp
-    pub(crate) portal_tile_reveal_states: HashMap<SceneId, PortalTileStreamReveal>,
+    pub(crate) portal_tile_reveal_states: HashMap<(SceneId, SceneId), PortalTileStreamReveal>,
     /// Per-portal-tile smoothed scroll offset (smooth scroll / animated
     /// follow-tail, hud-bq0gl.10).
     ///

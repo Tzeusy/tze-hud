@@ -325,11 +325,21 @@ impl Compositor {
     /// legacy raw path) are skipped — their offsets index raw content, not the
     /// stripped plain-text, so a fade cannot be aligned safely.
     pub fn update_portal_tile_reveals(&mut self, scene: &SceneGraph) {
-        // Phase 1: snapshot (tile_id, plain_text) for every portal tile. Done in
-        // a separate pass so the immutable cache/scene borrow is released before
-        // we mutate `self.portal_tile_reveal_states`.
+        // Phase 1: snapshot (tile_id, node_id, plain_text) for **every eligible
+        // markdown node** under every portal tile — not just the first-eligible
+        // one (hud-tbdfx). Done in a separate pass so the immutable cache/scene
+        // borrow is released before we mutate `self.portal_tile_reveal_states`.
+        //
+        // Reveal state is keyed per `(tile_id, node_id)`. Keying per node (vs
+        // per tile) is what makes the tracker robust to the *first eligible*
+        // markdown node changing between frames: on a portal input tile the
+        // composer draft node's pixel-bearing color runs toggle its eligibility,
+        // so a tile-keyed tracker flips between the draft node's plain-text and
+        // the (larger) settled history node's plain-text and treats the swap as
+        // growth — spuriously word-revealing the whole history on every submit.
+        // Per-node keying diffs each node only against its own prior snapshot.
         let cache = self.markdown_cache();
-        let mut current: Vec<(SceneId, Arc<str>)> = Vec::new();
+        let mut current: Vec<(SceneId, SceneId, Arc<str>)> = Vec::new();
         for tile in scene.tiles.values() {
             if scene.tile_scroll_config(tile.id).is_none() {
                 continue; // not a portal/scrollable tile
@@ -337,32 +347,38 @@ impl Compositor {
             let Some(root) = tile.root_node else {
                 continue;
             };
-            if let Some(plain) = self.portal_tile_plain_text(scene, root, &cache) {
-                current.push((tile.id, plain));
-            }
+            self.collect_portal_tile_plain_texts(scene, tile.id, root, &cache, &mut current);
         }
 
-        // Prune reveal states for tiles no longer present. `current` holds only
-        // a handful of portal tiles, so a direct membership scan avoids the
-        // per-frame heap allocation a temporary `HashSet` would cost.
+        // Prune reveal states for `(tile, node)` pairs no longer present.
+        // `current` holds only a handful of nodes, so a direct membership scan
+        // avoids the per-frame heap allocation a temporary `HashSet` would cost.
         self.portal_tile_reveal_states
-            .retain(|tile_id, _| current.iter().any(|(id, _)| id == tile_id));
+            .retain(|(tile_id, node_id), _| {
+                current
+                    .iter()
+                    .any(|(tid, nid, _)| tid == tile_id && nid == node_id)
+            });
 
-        for (tile_id, plain) in current {
-            match self.portal_tile_reveal_states.get_mut(&tile_id) {
+        for (tile_id, node_id, plain) in current {
+            match self.portal_tile_reveal_states.get_mut(&(tile_id, node_id)) {
                 None => {
-                    // First sight — anchor without fading pre-existing content.
+                    // First sight of this node — anchor without fading
+                    // pre-existing content (a node that just became eligible,
+                    // e.g. the draft node losing its pixel runs, must NOT fade
+                    // its already-settled text in).
                     self.portal_tile_reveal_states
-                        .insert(tile_id, PortalTileStreamReveal::settled(plain));
+                        .insert((tile_id, node_id), PortalTileStreamReveal::settled(plain));
                 }
                 Some(state) => {
                     if state.plain_text.as_ref() == plain.as_ref() {
                         // No content change — advance any in-flight reveal.
                         state.advance();
                     } else if plain.len() > state.plain_text.len() {
-                        // Content grew → fade in the appended (changed-suffix)
-                        // region. `common_prefix_len` locates where the new
-                        // snapshot diverges; everything after fades segment-by-
+                        // This node's content grew → fade in the appended
+                        // (changed-suffix) region. `common_prefix_len` locates
+                        // where the new snapshot diverges from *this same node's*
+                        // prior snapshot; everything after fades segment-by-
                         // segment. (Transcript lines land mid-string before the
                         // trailing composer line, so we reveal the changed suffix
                         // rather than requiring a strict tail append.)
@@ -379,21 +395,28 @@ impl Compositor {
         }
     }
 
-    /// Resolve the markdown *plain-text* for the first `TextMarkdownNode` in the
-    /// subtree rooted at `node_id`, using the commit-time-primed markdown cache.
+    /// Collect `(tile_id, node_id, plain_text)` for **every eligible
+    /// `TextMarkdownNode`** in the subtree rooted at `node_id`, using the
+    /// commit-time-primed markdown cache (hud-tbdfx).
     ///
-    /// Returns `None` when the subtree has no eligible markdown node, the node
-    /// carries pixel-bearing color runs (legacy raw path — offsets index raw
-    /// content, not plain-text), or the cache has no entry for it yet (a cold
-    /// first frame; the next frame will pick it up). The returned `Arc<str>` is a
-    /// refcount bump on the cache's shared plain-text — no string copy.
-    fn portal_tile_plain_text(
+    /// A node contributes an entry when it is a `TextMarkdownNode` that does not
+    /// carry pixel-bearing color runs (the legacy raw path indexes raw content,
+    /// not the stripped plain-text, so a fade cannot be aligned) and the cache
+    /// already holds its parse (a cold first frame is picked up on the next).
+    /// The pushed `Arc<str>` is a refcount bump on the cache's shared plain-text
+    /// — no string copy. Traversal always descends into children so *all*
+    /// eligible nodes in the tile are tracked independently, not just the first.
+    fn collect_portal_tile_plain_texts(
         &self,
         scene: &SceneGraph,
+        tile_id: SceneId,
         node_id: SceneId,
         cache: &crate::markdown::MarkdownCache,
-    ) -> Option<Arc<str>> {
-        let node = scene.nodes.get(&node_id)?;
+        out: &mut Vec<(SceneId, SceneId, Arc<str>)>,
+    ) {
+        let Some(node) = scene.nodes.get(&node_id) else {
+            return;
+        };
         if let NodeData::TextMarkdown(tm) = &node.data {
             if !crate::text::markdown_node_has_pixel_runs(tm) {
                 let key = self
@@ -401,24 +424,22 @@ impl Compositor {
                     .get(&node_id)
                     .copied()
                     .unwrap_or_else(|| {
-                        // This helper resolves plain text for portal transcript tiles
-                        // only, so it keys with the portal token set (hud-3ryie).
+                        // Portal transcript nodes key with the portal token set
+                        // (hud-3ryie); the primed `node_key_cache` normally makes
+                        // this fallback unreachable.
                         crate::markdown::MarkdownCache::compute_key(
                             &tm.content,
                             &self.markdown_tokens,
                         )
                     });
                 if let Some(parsed) = cache.get_by_key(&key) {
-                    return Some(Arc::clone(&parsed.plain_text));
+                    out.push((tile_id, node_id, Arc::clone(&parsed.plain_text)));
                 }
             }
         }
         for child_id in &node.children {
-            if let Some(plain) = self.portal_tile_plain_text(scene, *child_id, cache) {
-                return Some(plain);
-            }
+            self.collect_portal_tile_plain_texts(scene, tile_id, *child_id, cache, out);
         }
-        None
     }
 
     /// Update per-publication fade-out animation state for Stack zone publications.

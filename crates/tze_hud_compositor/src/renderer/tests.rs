@@ -14562,3 +14562,386 @@ async fn hud_dat3x_transient_portal_fade_still_shapes_text() {
         item.opacity
     );
 }
+
+// ── Portal per-node streaming-reveal tracking (hud-tbdfx) ────────────────────
+//
+// These tests exercise `update_portal_tile_reveals`, which keys reveal state per
+// `(tile, markdown-node)` so the tracker is robust to which node in a portal
+// tile's subtree is "first eligible" from one frame to the next. They follow the
+// existing `require_gpu!` + `prime_markdown_cache` idiom; the logic under test is
+// pure CPU (no GPU draw) — the compositor is only needed for its markdown cache.
+// The scene graph is flat (`Node::children` is `Vec<SceneId>`), so a tree is
+// built with `add_node_to_tile` and mutated in place with `update_node_content`
+// (node ids stay stable across "frames", exactly as the resident bridge's
+// in-place content updates do).
+
+/// hud-tbdfx helper: `TextMarkdown` node-data for a portal transcript node.
+fn portal_reveal_md_data(
+    content: &str,
+    color_runs: Box<[tze_hud_scene::types::TextColorRun]>,
+    top: f32,
+) -> NodeData {
+    NodeData::TextMarkdown(TextMarkdownNode {
+        content: content.to_owned(),
+        bounds: Rect::new(0.0, top, 256.0, 200.0),
+        font_size_px: 14.0,
+        font_family: FontFamily::SystemMonospace,
+        color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+        background: None,
+        alignment: TextAlign::Start,
+        overflow: TextOverflow::Clip,
+        color_runs,
+    })
+}
+
+/// hud-tbdfx helper: create a scrollable (portal) tile with a non-markdown
+/// container root, returning `(tile_id, root_id)`.
+fn portal_reveal_tile(scene: &mut SceneGraph) -> (SceneId, SceneId) {
+    let tab_id = scene.create_tab("test", 0).unwrap();
+    let lease_id = scene.grant_lease("portal", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "portal",
+            lease_id,
+            Rect::new(0.0, 0.0, 256.0, 256.0),
+            1,
+        )
+        .unwrap();
+    scene
+        .register_tile_scroll_config(tile_id, tze_hud_scene::types::TileScrollConfig::vertical())
+        .unwrap();
+    let root_id = SceneId::new();
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: root_id,
+                children: vec![],
+                data: NodeData::SolidColor(SolidColorNode {
+                    color: Rgba::new(0.0, 0.0, 0.0, 1.0),
+                    bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
+                    radius: None,
+                }),
+            },
+        )
+        .unwrap();
+    (tile_id, root_id)
+}
+
+/// hud-tbdfx helper: add a markdown child node under `parent_id` and return its
+/// stable id.
+fn portal_reveal_add_md(
+    scene: &mut SceneGraph,
+    tile_id: SceneId,
+    parent_id: SceneId,
+    content: &str,
+    color_runs: Box<[tze_hud_scene::types::TextColorRun]>,
+    top: f32,
+) -> SceneId {
+    let id = SceneId::new();
+    scene
+        .add_node_to_tile(
+            tile_id,
+            Some(parent_id),
+            Node {
+                id,
+                children: vec![],
+                data: portal_reveal_md_data(content, color_runs, top),
+            },
+        )
+        .unwrap();
+    id
+}
+
+/// hud-tbdfx (red-first): a portal tile whose *first eligible* markdown node
+/// changes between frames must NOT start a spurious word-by-word reveal of
+/// already-settled content.
+///
+/// Reproduces the live tzehouse bug. The portal input tile carries a settled
+/// history markdown node plus a composer draft node whose pixel-bearing color
+/// runs toggle its eligibility. Under the old per-*tile* keying,
+/// `update_portal_tile_reveals` tracked only the first-eligible node's
+/// plain-text; when the draft node's runs flipped it from eligible to skipped,
+/// the tracked text swapped from the short draft to the long history and was
+/// mistaken for growth → the whole history re-revealed (~0.5s/word). Per-node
+/// keying (hud-tbdfx) diffs each node only against its own prior snapshot.
+#[tokio::test]
+async fn test_portal_reveal_node_flip_does_not_spuriously_reveal() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+
+    let mut scene = SceneGraph::new(256.0, 256.0);
+    let (tile_id, root_id) = portal_reveal_tile(&mut scene);
+
+    // History is longer than the draft, so a per-tile tracker that swaps from the
+    // draft's text to the history's text would see it as "growth". The draft node
+    // is added FIRST so it is the "first eligible" node while it stays eligible.
+    let draft_text = "hi";
+    let history_text = "one two three four five six seven";
+    let draft_id = portal_reveal_add_md(
+        &mut scene,
+        tile_id,
+        root_id,
+        draft_text,
+        Box::default(),
+        0.0,
+    );
+    let history_id = portal_reveal_add_md(
+        &mut scene,
+        tile_id,
+        root_id,
+        history_text,
+        Box::default(),
+        24.0,
+    );
+
+    // Frame 1: draft eligible (empty runs). Both nodes anchor settled.
+    compositor.prime_markdown_cache(&scene);
+    compositor.update_portal_tile_reveals(&scene);
+    assert!(
+        compositor
+            .portal_tile_reveal_states
+            .values()
+            .all(|s| !s.is_revealing()),
+        "first sight of every node must anchor settled, never revealing"
+    );
+
+    // Frame 2: the draft node gains a pixel-bearing color run → it becomes
+    // INELIGIBLE, so the "first eligible" node flips to the (unchanged) history
+    // node. Nothing may reveal.
+    let pixel_run = tze_hud_scene::types::TextColorRun {
+        start_byte: 0,
+        end_byte: 1,
+        color: Rgba::new(0.9, 0.1, 0.1, 1.0),
+    };
+    scene
+        .update_node_content(
+            tile_id,
+            draft_id,
+            portal_reveal_md_data(draft_text, Box::from([pixel_run]), 0.0),
+        )
+        .unwrap();
+    compositor.prime_markdown_cache(&scene);
+    compositor.update_portal_tile_reveals(&scene);
+
+    assert!(
+        compositor
+            .portal_tile_reveal_states
+            .values()
+            .all(|s| !s.is_revealing()),
+        "a first-eligible-node flip must NOT start a spurious reveal of settled history"
+    );
+    let hist = compositor
+        .portal_tile_reveal_states
+        .get(&(tile_id, history_id))
+        .expect("history node must retain its reveal state across the draft flip");
+    assert_eq!(
+        hist.reveal_start,
+        history_text.len(),
+        "settled history reveal_start must equal its full length (nothing to fade)"
+    );
+}
+
+/// hud-tbdfx (red-first): in a batched multi-node update where exactly one node
+/// grows, only THAT node's appended suffix fades — the other nodes stay settled,
+/// and the fade starts at the common prefix of the grown node's own prior text.
+///
+/// The old per-tile tracker only ever watched the first-eligible node, so growth
+/// of any later node was silently missed (no reveal at all).
+#[tokio::test]
+async fn test_portal_reveal_batched_multinode_reveals_only_grown_node() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+
+    let mut scene = SceneGraph::new(256.0, 256.0);
+    let (tile_id, root_id) = portal_reveal_tile(&mut scene);
+
+    let a_id = portal_reveal_add_md(&mut scene, tile_id, root_id, "alpha", Box::default(), 0.0);
+    let b_id = portal_reveal_add_md(&mut scene, tile_id, root_id, "beta", Box::default(), 24.0);
+
+    // Frame 1: both eligible, both settled.
+    compositor.prime_markdown_cache(&scene);
+    compositor.update_portal_tile_reveals(&scene);
+
+    // Frame 2: A unchanged, B grows "beta" → "beta gamma" (a genuine append).
+    scene
+        .update_node_content(
+            tile_id,
+            b_id,
+            portal_reveal_md_data("beta gamma", Box::default(), 24.0),
+        )
+        .unwrap();
+    compositor.prime_markdown_cache(&scene);
+    compositor.update_portal_tile_reveals(&scene);
+
+    let state_a = compositor
+        .portal_tile_reveal_states
+        .get(&(tile_id, a_id))
+        .expect("unchanged node A must keep its reveal state");
+    assert!(
+        !state_a.is_revealing(),
+        "the unchanged node must stay settled while a sibling grows"
+    );
+
+    let state_b = compositor
+        .portal_tile_reveal_states
+        .get(&(tile_id, b_id))
+        .expect("grown node B must have reveal state");
+    assert!(
+        state_b.is_revealing(),
+        "the grown node's appended suffix must fade in"
+    );
+    assert_eq!(
+        state_b.reveal_start,
+        "beta".len(),
+        "the fade must start at the common prefix of node B's OWN prior text"
+    );
+}
+
+/// hud-tbdfx regression guard: a single-node genuine append still reveals its
+/// appended suffix (per-node keying must not disable legitimate reveals).
+#[tokio::test]
+async fn test_portal_reveal_single_node_append_still_reveals() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+
+    let mut scene = SceneGraph::new(256.0, 256.0);
+    let (tile_id, root_id) = portal_reveal_tile(&mut scene);
+    let node_id = portal_reveal_add_md(&mut scene, tile_id, root_id, "hello", Box::default(), 0.0);
+
+    // Frame 1: settled.
+    compositor.prime_markdown_cache(&scene);
+    compositor.update_portal_tile_reveals(&scene);
+    assert!(
+        !compositor
+            .portal_tile_reveal_states
+            .get(&(tile_id, node_id))
+            .expect("node must have reveal state")
+            .is_revealing(),
+        "first sight must be settled"
+    );
+
+    // Frame 2: genuine append "hello" → "hello world".
+    scene
+        .update_node_content(
+            tile_id,
+            node_id,
+            portal_reveal_md_data("hello world", Box::default(), 0.0),
+        )
+        .unwrap();
+    compositor.prime_markdown_cache(&scene);
+    compositor.update_portal_tile_reveals(&scene);
+
+    let state = compositor
+        .portal_tile_reveal_states
+        .get(&(tile_id, node_id))
+        .expect("node must have reveal state after append");
+    assert!(
+        state.is_revealing(),
+        "a single-node genuine append must still start a reveal"
+    );
+    assert_eq!(
+        state.reveal_start,
+        "hello".len(),
+        "the reveal must fade only the appended suffix (start at the common prefix)"
+    );
+}
+
+/// hud-g8xpg (review follow-up, red-first): when a portal tile carries two
+/// eligible markdown nodes with the SAME plain-text and only one of them is
+/// revealing, the fade must route by node identity — the settled sibling with
+/// identical text must stay fully opaque, not inherit the revealing node's
+/// partial-alpha suffix.
+///
+/// Regression for the tile-wide, plain-text-matched reveal post-pass:
+/// `apply_portal_reveal_fade` guarded solely on `item.text == reveal.plain_text`,
+/// so a reveal anchored to one node dimmed EVERY same-text `TextItem` in the tile
+/// (and, with two same-text reveals in flight, which fade won was
+/// non-deterministic in `HashMap` iteration order). Routing the fade by
+/// `(tile, node)` at collection time fixes both.
+#[tokio::test]
+async fn test_portal_reveal_identical_text_nodes_do_not_cross_fade() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+
+    let mut scene = SceneGraph::new(256.0, 256.0);
+    let (tile_id, root_id) = portal_reveal_tile(&mut scene);
+
+    // settled node already shows "ok"; grow node will grow "o" -> "ok" so it
+    // reveals while ending up with the SAME plain-text as the settled node.
+    let settled_id = portal_reveal_add_md(&mut scene, tile_id, root_id, "ok", Box::default(), 0.0);
+    let grow_id = portal_reveal_add_md(&mut scene, tile_id, root_id, "o", Box::default(), 24.0);
+
+    // Frame 1: both settled.
+    compositor.prime_markdown_cache(&scene);
+    compositor.update_portal_tile_reveals(&scene);
+
+    // Frame 2: grow node "o" -> "ok" (now identical plain-text to the settled node).
+    scene
+        .update_node_content(
+            tile_id,
+            grow_id,
+            portal_reveal_md_data("ok", Box::default(), 24.0),
+        )
+        .unwrap();
+    compositor.prime_markdown_cache(&scene);
+    compositor.update_portal_tile_reveals(&scene);
+
+    // Precondition: only the grown node is revealing; both track "ok".
+    assert!(
+        !compositor
+            .portal_tile_reveal_states
+            .get(&(tile_id, settled_id))
+            .expect("settled node state")
+            .is_revealing(),
+        "settled sibling must not be revealing"
+    );
+    assert!(
+        compositor
+            .portal_tile_reveal_states
+            .get(&(tile_id, grow_id))
+            .expect("grown node state")
+            .is_revealing(),
+        "grown node must be revealing"
+    );
+
+    // Render: collecting text items applies the reveal fade.
+    let items = compositor.collect_text_items(&scene, 256.0, 256.0);
+    let ok_items: Vec<&crate::text::TextItem> =
+        items.iter().filter(|it| it.text.as_ref() == "ok").collect();
+    assert_eq!(
+        ok_items.len(),
+        2,
+        "expected one TextItem per 'ok' node, got {}",
+        ok_items.len()
+    );
+
+    // The settled node sits at top=0, the grown node at top=24; route by pixel_y.
+    let settled_item = ok_items
+        .iter()
+        .min_by(|a, b| a.pixel_y.total_cmp(&b.pixel_y))
+        .unwrap();
+    let grown_item = ok_items
+        .iter()
+        .max_by(|a, b| a.pixel_y.total_cmp(&b.pixel_y))
+        .unwrap();
+
+    let min_run_alpha = |it: &crate::text::TextItem| -> u8 {
+        it.styled_runs
+            .iter()
+            .filter_map(|r| r.color.map(|c| c[3]))
+            .min()
+            .unwrap_or(255)
+    };
+
+    // The settled sibling must be fully opaque — it must NOT inherit the grown
+    // node's fade just because it lays out the same "ok" text.
+    assert_eq!(
+        min_run_alpha(settled_item),
+        255,
+        "settled same-text sibling must stay fully opaque, not cross-fade"
+    );
+
+    // The grown node must still fade its appended suffix (reveal not disabled).
+    assert!(
+        min_run_alpha(grown_item) < 255,
+        "the grown node's appended suffix must fade in"
+    );
+}

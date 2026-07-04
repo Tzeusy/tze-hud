@@ -398,19 +398,11 @@ impl super::Compositor {
                     }
                 }
 
-                // Per-segment streaming-reveal fade (hud-bl7yi): while a portal
-                // tile's newly-appended content is revealing, ramp the leading
-                // segment's glyph alpha (StreamFadeRamp) instead of snapping it
-                // in. Steady tiles (`is_revealing() == false`) are untouched, so
-                // their draw output is byte-identical to the no-reveal path.
-                if let Some(reveal) = self.portal_tile_reveal_states.get(&tile.id) {
-                    if reveal.is_revealing() {
-                        let ramp = super::easing::StreamFadeRamp::default();
-                        for item in &mut items[items_before..] {
-                            apply_portal_reveal_fade(item, reveal, ramp);
-                        }
-                    }
-                }
+                // The per-segment streaming-reveal fade (hud-bl7yi) is applied
+                // inline in `collect_text_items_from_node`, routed by
+                // `(tile, node)` identity (hud-g8xpg), so it never cross-fades a
+                // settled node onto a same-text revealing sibling. Nothing to do
+                // here.
             }
         }
 
@@ -1312,6 +1304,24 @@ impl super::Compositor {
             item.clip_pixel_y = clip_top;
             item.clip_bounds_width = (clip_right - clip_left).max(1.0);
             item.clip_bounds_height = (clip_bottom - clip_top).max(1.0);
+
+            // Per-segment streaming-reveal fade (hud-bl7yi), routed by node
+            // identity (hud-g8xpg). Reveal state is keyed per `(tile, node)`, so
+            // look up *this* node's reveal directly instead of matching by
+            // plain-text in a tile-wide post-pass. Text-only matching cross-faded
+            // a settled node onto a revealing sibling that laid out the same
+            // string (e.g. two transcript lines both "ok"), and picked
+            // non-deterministically between two same-text reveals. The O(1)
+            // lookup here fades each glyph under at most its own node's reveal.
+            // Steady nodes (`is_revealing() == false`) are untouched, so their
+            // draw output stays byte-identical to the no-reveal path.
+            if let Some(reveal) = self.portal_tile_reveal_states.get(&(tile.id, node_id)) {
+                if reveal.is_revealing() {
+                    let ramp = super::easing::StreamFadeRamp::default();
+                    apply_portal_reveal_fade(&mut item, reveal, ramp);
+                }
+            }
+
             items.push(item);
         }
 
