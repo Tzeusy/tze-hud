@@ -461,6 +461,14 @@ mod tests {
     /// consuming (inner-style) dispatcher the queue fully drains AND every
     /// keystroke is applied to a real composer draft — while a guarded
     /// (public-style) dispatcher would rotate and never drain.
+    ///
+    /// NOTE (hud-nu0ea): the drain loop *reconstruction* below now has a
+    /// production-path counterpart. `event_loop_harness::tests::
+    /// drain_routes_characters_through_real_dispatch_into_composer_draft` drives
+    /// the genuine `WinitApp::drain_pending_keyboard_events` through the headless
+    /// event-loop harness (no reconstruction). This test is retained because it
+    /// additionally contrasts the buggy public-style dispatcher (the livelock)
+    /// against the fixed inner-style one in the same place.
     #[test]
     fn pending_keyboard_drain_consumes_queue_and_applies_all_keys() {
         use std::collections::VecDeque;
