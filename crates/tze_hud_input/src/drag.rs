@@ -514,6 +514,7 @@ mod tests {
                 created_at: 0,
                 last_published_at: 0,
                 z_order: 0,
+                unseen_restarts: 0,
                 geometry_override: None,
             },
         );
