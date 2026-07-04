@@ -391,6 +391,79 @@ async fn test_portal_tile_emits_resize_grip_in_overlay_mode() {
     }
 }
 
+/// hud-wgiys: the resize grip swaps to `hover_color` for the tile named by the
+/// runtime-plumbed `resize_grip_hover` slot, and stays resting for every other
+/// tile. Draw-list-level assertion on the emitted vertex colors.
+#[tokio::test]
+async fn test_resize_grip_swaps_to_hover_color_for_hovered_tile() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(400, 300).await);
+    compositor.overlay_mode = true;
+
+    let mut scene = SceneGraph::new(400.0, 300.0);
+    let tab_id = scene.create_tab("agent", 0).unwrap();
+    let lease_id = scene.grant_lease("agent", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "agent",
+            lease_id,
+            Rect::new(50.0, 40.0, 300.0, 200.0),
+            1,
+        )
+        .unwrap();
+    scene
+        .register_tile_scroll_config(tile_id, tze_hud_scene::types::TileScrollConfig::vertical())
+        .unwrap();
+
+    let grip = crate::renderer::token_colors::resolve_resize_grip_tokens(&compositor.token_map);
+    let resting = compositor.gpu_color_raw(grip.mark_color(false));
+    let hover = compositor.gpu_color_raw(grip.mark_color(true));
+    // The tokens must actually differ, or the test could not tell the swap apart.
+    assert!(
+        resting
+            .iter()
+            .zip(hover.iter())
+            .any(|(r, h)| (r - h).abs() > 1e-3),
+        "resting and hover grip colors must differ for a meaningful swap"
+    );
+
+    let colors_of = |compositor: &Compositor, scene: &SceneGraph| {
+        let mut verts: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.append_resize_grip_vertices(scene, &mut verts, 400.0, 300.0);
+        verts
+    };
+    let all_match = |verts: &[crate::pipeline::RectVertex], want: [f32; 4]| {
+        !verts.is_empty()
+            && verts.iter().all(|v| {
+                v.color
+                    .iter()
+                    .zip(want.iter())
+                    .all(|(a, b)| (a - b).abs() < 1e-3)
+            })
+    };
+
+    // No hover target → resting color.
+    compositor.resize_grip_hover = None;
+    assert!(
+        all_match(&colors_of(&compositor, &scene), resting),
+        "with no hover target the grip must render the resting color"
+    );
+
+    // Hover slot names this tile → hover color.
+    compositor.resize_grip_hover = Some(tile_id);
+    assert!(
+        all_match(&colors_of(&compositor, &scene), hover),
+        "hovering this tile's resize corner must swap the grip to hover_color"
+    );
+
+    // Hover slot names a different tile → this tile stays resting.
+    compositor.resize_grip_hover = Some(SceneId::new());
+    assert!(
+        all_match(&colors_of(&compositor, &scene), resting),
+        "a hover target on another tile must not light this tile's grip"
+    );
+}
+
 /// hud-k6yvb: a TILE-LEVEL focus owner (a non-passthrough tile with no focusable
 /// nodes) must get a visible ring around the whole tile from the chrome pass —
 /// the case #988 could not draw because tile-level focus has no scene state.

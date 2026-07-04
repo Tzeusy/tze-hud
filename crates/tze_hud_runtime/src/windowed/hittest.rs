@@ -1,5 +1,6 @@
 use tze_hud_compositor::{Compositor, CompositorSurface};
-use tze_hud_input::{PortalCursor, PortalRect, hit_affordance, portal_hover_cursor};
+use tze_hud_input::{PortalCursor, PortalRect, ResizeEdge, hit_affordance, portal_hover_cursor};
+use tze_hud_scene::SceneId;
 use tze_hud_scene::graph::SceneGraph;
 use winit::window::CursorIcon;
 
@@ -245,6 +246,18 @@ impl WinitApp {
     /// Returns `None` when no tab is active, no tile is focused, or the focused
     /// tile is not a portal (so non-portal focus never shows resize cursors).
     fn focused_portal_rect(&self) -> Option<PortalRect> {
+        self.focused_portal_tile_rect().map(|(_, rect)| rect)
+    }
+
+    /// Resolve both the focused portal tile's id and its display-space rect from
+    /// the lock-free hit-test snapshot, if a scrollable (portal) tile is focused
+    /// on the active tab.
+    ///
+    /// Backs [`WinitApp::focused_portal_rect`] (which drops the id) and
+    /// [`WinitApp::resize_grip_hover_target`] (which needs the id to name the
+    /// tile whose grip should light). Returns `None` when no tab is active, no
+    /// tile is focused, or the focused tile is not a portal.
+    fn focused_portal_tile_rect(&self) -> Option<(SceneId, PortalRect)> {
         let active_tab = self.state.active_tab_mirror.lock().ok().and_then(|g| *g)?;
         let focused_tile = self
             .state
@@ -257,12 +270,42 @@ impl WinitApp {
             .tiles
             .iter()
             .find(|t| t.has_scroll_config && t.tile_id_bytes == target)?;
-        Some(PortalRect {
-            x: entry.bounds.x,
-            y: entry.bounds.y,
-            width: entry.bounds.width,
-            height: entry.bounds.height,
-        })
+        Some((
+            focused_tile,
+            PortalRect {
+                x: entry.bounds.x,
+                y: entry.bounds.y,
+                width: entry.bounds.width,
+                height: entry.bounds.height,
+            },
+        ))
+    }
+
+    /// The focused portal tile whose bottom-right resize corner the pointer is
+    /// currently over, if any (hud-wgiys).
+    ///
+    /// Drives the compositor's resize-grip hover swap: the grip glyph is anchored
+    /// at the portal's bottom-right corner and reads as the `╲` resize handle, so
+    /// it lights only when the pointer is over that corner's resize band —
+    /// [`ResizeEdge::BottomRight`]. Reuses the same focused-portal rect and
+    /// affordance width as the resize cursor / affordance-capture paths, so the
+    /// grip highlight, the resize cursor, and the capture region all agree on
+    /// where the corner band is. Returns `None` for any other edge, a non-portal
+    /// focus, or no focus.
+    pub(super) fn resize_grip_hover_target(&self) -> Option<SceneId> {
+        let (focused_tile, rect) = self.focused_portal_tile_rect()?;
+        let affordance_px = tze_hud_config::resolve_portal_tokens(&self.state.global_tokens)
+            .window_resize_affordance_px;
+        matches!(
+            hit_affordance(
+                self.state.cursor_x,
+                self.state.cursor_y,
+                &rect,
+                affordance_px
+            ),
+            Some(ResizeEdge::BottomRight)
+        )
+        .then_some(focused_tile)
     }
 
     /// True when the pointer is over the focused portal's resize-affordance

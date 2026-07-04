@@ -64,6 +64,14 @@ use icon::*;
 // LocalComposerStateHandle) so callers via `tze_hud_compositor::renderer::*`
 // see unchanged paths.  The pub(crate) helpers are brought in separately.
 pub use focus_ring::{FocusRingOwner, FocusRingOwnerHandle};
+
+/// Shared single-slot handle carrying the tile whose resize-grip affordance the
+/// pointer is currently over (hud-wgiys). The runtime's windowed hit-test writes
+/// the focused portal's `SceneId` when the pointer is over its bottom-right
+/// resize corner (or `None` otherwise); the compositor drains it and swaps that
+/// tile's grip to `portal.window.resize_grip.hover_color`. Latest-wins — a plain
+/// overwrite-and-read, mirroring [`FocusRingOwnerHandle`].
+pub type ResizeGripHoverHandle = Arc<StdMutex<Option<SceneId>>>;
 use image_cache::apply_composer_slot;
 pub use image_cache::{
     ComposerVisualLayoutHandle, ImageTextureEntry, LocalComposerState, LocalComposerStateHandle,
@@ -407,6 +415,14 @@ pub struct Compositor {
     /// Most-recently drained focus-ring owner for this frame. `None` when focus is
     /// cleared / chrome / on another tab.
     pub(crate) focus_ring_owner: Option<focus_ring::FocusRingOwner>,
+    /// Shared handle carrying the portal tile whose resize-grip corner the pointer
+    /// is over (hud-wgiys). Drained at frame start into `resize_grip_hover`; the
+    /// grip pass paints that tile's mark in `hover_color`.
+    pub resize_grip_hover_state: ResizeGripHoverHandle,
+    /// Most-recently drained resize-grip hover target for this frame. `Some(tile)`
+    /// when the pointer is over that portal's bottom-right resize corner; `None`
+    /// otherwise (every grip renders resting).
+    pub(crate) resize_grip_hover: Option<SceneId>,
     /// Most-recently drained local composer state for this frame.
     ///
     /// Populated by draining `local_composer_state` at frame start.
@@ -643,6 +659,8 @@ impl Compositor {
             viewer_echo_entry_line_counts: HashMap::new(),
             focus_ring_owner_state: Arc::new(StdMutex::new(None)),
             focus_ring_owner: None,
+            resize_grip_hover_state: Arc::new(StdMutex::new(None)),
+            resize_grip_hover: None,
             local_composer: None,
             composer_caret_blink_start: std::time::Instant::now(),
             composer_layout: image_cache::ComposerLayout::default(),
@@ -931,6 +949,8 @@ impl Compositor {
             viewer_echo_entry_line_counts: HashMap::new(),
             focus_ring_owner_state: Arc::new(StdMutex::new(None)),
             focus_ring_owner: None,
+            resize_grip_hover_state: Arc::new(StdMutex::new(None)),
+            resize_grip_hover: None,
             local_composer: None,
             composer_caret_blink_start: std::time::Instant::now(),
             composer_layout: image_cache::ComposerLayout::default(),
@@ -1257,6 +1277,12 @@ impl Compositor {
         // so a momentary lock contention simply keeps the prior owner this frame.
         if let Ok(slot) = self.focus_ring_owner_state.lock() {
             self.focus_ring_owner = *slot;
+        }
+        // Latest-wins read of the resize-grip hover target (hud-wgiys): the same
+        // plain overwrite as the focus-ring owner, so momentary lock contention
+        // simply keeps the prior hover state for this frame.
+        if let Ok(slot) = self.resize_grip_hover_state.lock() {
+            self.resize_grip_hover = *slot;
         }
     }
 

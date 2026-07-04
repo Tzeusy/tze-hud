@@ -731,6 +731,22 @@ impl WinitApp {
         }
     }
 
+    /// Publish the portal tile whose bottom-right resize corner the pointer is
+    /// over to the compositor's grip pass (hud-wgiys).
+    ///
+    /// Per-frame + latest-wins, exactly like [`WinitApp::push_focus_ring_owner`]:
+    /// the compositor swaps that tile's resize-grip mark to `hover_color` and
+    /// recomputes the grip geometry from the live scene, so the highlight tracks
+    /// pointer moves and portal resize/drag without instrumenting every input
+    /// site. `None` (pointer off the corner, or no focused portal) leaves every
+    /// grip resting.
+    pub(super) fn push_resize_grip_hover(&self) {
+        let target = self.resize_grip_hover_target();
+        if let Ok(mut slot) = self.state.resize_grip_hover_state.lock() {
+            *slot = target;
+        }
+    }
+
     pub(super) fn drain_input_capture_commands(&mut self) {
         while let Ok(command) = self.state.input_capture_rx.try_recv() {
             self.state.pending_input_capture_commands.push_back(command);

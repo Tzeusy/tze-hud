@@ -91,7 +91,7 @@ use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel}
 use crate::component_startup::{register_profile_widgets, run_component_startup};
 use tze_hud_compositor::{
     Compositor, CompositorSurface, FocusRingOwnerHandle, LocalComposerStateHandle,
-    PortalViewerEchoQueue, WindowSurface,
+    PortalViewerEchoQueue, ResizeGripHoverHandle, WindowSurface,
 };
 use tze_hud_config::resolve_runtime_widget_asset_store;
 use tze_hud_input::{
@@ -456,6 +456,13 @@ struct WindowedRuntimeState {
     /// from the active tab's `FocusManager` owner; the compositor draws the ring
     /// for whatever owner it names (node or tile-level), above all content.
     focus_ring_owner_state: FocusRingOwnerHandle,
+    /// Shared handle carrying the portal tile whose resize-grip corner the pointer
+    /// is over to the compositor's grip pass (hud-wgiys). Written each frame in
+    /// `about_to_wait`: the focused portal's `SceneId` when the pointer sits over
+    /// its bottom-right resize corner, else `None`. The compositor swaps that
+    /// tile's grip mark to `hover_color`. Cloned from
+    /// `compositor.resize_grip_hover_state` at init.
+    resize_grip_hover_state: ResizeGripHoverHandle,
     /// Reverse channel (hud-21o6x): the compositor publishes the active composer's
     /// wrapped-line layout here each frame; this (main) thread reads it before
     /// dispatching ArrowUp/ArrowDown so the caret can step between soft-wrapped
@@ -583,6 +590,11 @@ impl ApplicationHandler for WinitApp {
         // transition site; the compositor recomputes bounds from the live scene,
         // so geometry changes (resize/drag) stay fresh without a focus event.
         self.push_focus_ring_owner();
+        // Publish the resize-grip hover target (hud-wgiys): when the pointer sits
+        // over the focused portal's bottom-right resize corner, the compositor
+        // lights that tile's grip in hover_color. Same per-frame + latest-wins
+        // cadence as the focus-ring push above.
+        self.push_resize_grip_hover();
         // Retry any keyboard events that were deferred because the scene lock
         // was busy during dispatch (hud-2fz34).  Runs after composer flush so
         // deferred keystrokes re-enter the same path as fresh ones.
@@ -911,6 +923,7 @@ impl ApplicationHandler for WinitApp {
         self.state.local_composer_state = Arc::clone(&compositor.local_composer_state);
         self.state.viewer_echo_queue = Arc::clone(&compositor.viewer_echo_queue);
         self.state.focus_ring_owner_state = Arc::clone(&compositor.focus_ring_owner_state);
+        self.state.resize_grip_hover_state = Arc::clone(&compositor.resize_grip_hover_state);
         // Reverse channel: read the compositor's per-frame wrapped-line layout for
         // soft-wrap vertical caret movement (hud-21o6x).
         self.state.composer_visual_layout = Arc::clone(&compositor.composer_visual_layout);
@@ -2289,6 +2302,8 @@ impl WindowedRuntime {
             local_composer_state: Arc::new(StdMutex::new(None)),
             viewer_echo_queue: Arc::new(StdMutex::new(Vec::new())),
             focus_ring_owner_state: Arc::new(StdMutex::new(None)),
+            // Placeholder; replaced in resumed() with the compositor's Arc (hud-wgiys).
+            resize_grip_hover_state: Arc::new(StdMutex::new(None)),
             // Placeholder; replaced in resumed() with the compositor's Arc (hud-21o6x).
             composer_visual_layout: Arc::new(StdMutex::new(None)),
             portal_projection_driver,
