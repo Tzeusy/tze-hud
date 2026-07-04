@@ -110,7 +110,8 @@ pub use portal_tokens::{
     PORTAL_TOKEN_WINDOW_MIN_HEIGHT_PX, PORTAL_TOKEN_WINDOW_MIN_WIDTH_PX,
     PORTAL_TOKEN_WINDOW_RESIZE_AFFORDANCE_PX, PORTAL_TOKEN_WINDOW_RESIZE_GRIP_COLOR,
     PORTAL_TOKEN_WINDOW_RESIZE_GRIP_HOVER_COLOR, PORTAL_TOKEN_WINDOW_RESIZE_GRIP_SIZE_PX,
-    PORTAL_TOKEN_WINDOW_RESIZE_STEP_PX, PortalPartTokens, resolve_portal_tokens,
+    PORTAL_TOKEN_WINDOW_RESIZE_STEP_PX, PortalPartTokens, resolve_portal_token_strings,
+    resolve_portal_tokens,
 };
 pub use privacy::{QuietHoursAction, quiet_hours_action, validate_privacy};
 pub use profile::{

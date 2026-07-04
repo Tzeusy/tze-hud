@@ -1836,6 +1836,16 @@ impl WindowedRuntime {
             degradation_level: tze_hud_protocol::session::RuntimeDegradationLevel::Normal,
             media_ingress_active: None,
             input_capture_tx: Some(input_capture_tx),
+            // Expose the runtime's ACTIVE-profile resolved portal tokens over the
+            // session handshake so clients (the text-stream portal exemplar)
+            // render the runtime's live look rather than a client-side mirror
+            // (hud-16um0, promoting hud-7jrj3). Resolved from the same startup
+            // token map the in-process/bridged portal drivers use.
+            resolved_portal_tokens: tze_hud_config::resolve_portal_token_strings(
+                &startup_compositor_tokens,
+            )
+            .into_iter()
+            .collect(),
         }));
 
         let (frame_ready_tx, frame_ready_rx) = frame_ready_channel();

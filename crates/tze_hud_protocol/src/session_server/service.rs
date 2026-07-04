@@ -140,6 +140,7 @@ impl HudSessionImpl {
                 degradation_level: crate::session::RuntimeDegradationLevel::Normal,
                 media_ingress_active: None,
                 input_capture_tx: None,
+                resolved_portal_tokens: std::collections::HashMap::new(),
             })),
             psk: psk.to_string(),
             agent_capabilities: Arc::new(HashMap::new()),

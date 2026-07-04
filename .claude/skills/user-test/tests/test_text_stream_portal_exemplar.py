@@ -1931,6 +1931,82 @@ class PortalTokenResolutionTests(unittest.TestCase):
         self.assertEqual(portal.BODY_FONT, 16.0)
 
 
+class RuntimeHandshakeTokenTests(unittest.TestCase):
+    """hud-16um0: the exemplar PREFERS the runtime's resolved portal tokens
+    delivered on the session handshake (`SessionEstablished.portal_part_tokens`)
+    over its local client-side mirror, and falls back to the mirror only when the
+    runtime does not expose them. The runtime map is parsed by the SAME
+    drift-guarded resolver as a local profile override map."""
+
+    def tearDown(self) -> None:
+        # Restore the local exemplar profile so other tests stay isolated.
+        portal.apply_visual_profile(None)
+
+    def test_adopt_runtime_tokens_drives_published_values(self) -> None:
+        # A runtime whose ACTIVE profile paints a magenta frame — distinct from
+        # both the exemplar profile and the canonical default.
+        runtime_frame = "#FF00FFEE"
+        runtime_map = dict(portal_tokens.CANONICAL_DEFAULTS)
+        runtime_map[portal_tokens.PORTAL_TOKEN_FRAME_BACKGROUND] = runtime_frame
+
+        # Baseline: local exemplar profile.
+        portal.apply_visual_profile(None)
+        local_frame = portal.TOKENS.frame_background
+
+        adopted = portal.adopt_runtime_tokens(runtime_map)
+        self.assertTrue(adopted, "non-empty runtime tokens must be adopted")
+
+        expected = portal_tokens.parse_color_hex(runtime_frame)
+        self.assertEqual(
+            portal.TOKENS.frame_background, expected,
+            "runtime-delivered frame token must drive the live TOKENS",
+        )
+        self.assertNotEqual(
+            portal.TOKENS.frame_background, local_frame,
+            "runtime tokens must override the local exemplar mirror",
+        )
+
+        # The PUBLISHED frame node equals the runtime-delivered value — the
+        # runtime's active profile drives the live portal, not a literal/mirror.
+        root, _ = portal.build_portal_nodes(
+            title="t", subtitle="s", body="b", footer_meta="f",
+        )
+        published = (
+            root.solid_color.color.r, root.solid_color.color.g,
+            root.solid_color.color.b, root.solid_color.color.a,
+        )
+        self.assertEqual(
+            tuple(round(c, 6) for c in published),
+            tuple(round(c, 6) for c in expected),
+        )
+
+    def test_empty_runtime_tokens_falls_back_to_local_mirror(self) -> None:
+        # An older runtime omits the field → empty map → keep the local mirror.
+        portal.apply_visual_profile(None)
+        local_frame = portal.TOKENS.frame_background
+        adopted = portal.adopt_runtime_tokens({})
+        self.assertFalse(
+            adopted, "empty runtime tokens (older runtime) must not be adopted",
+        )
+        self.assertEqual(
+            portal.TOKENS.frame_background, local_frame,
+            "local exemplar mirror stays authoritative on fallback",
+        )
+
+    def test_runtime_tokens_use_same_drift_guarded_resolver(self) -> None:
+        # Adopting the runtime map is identical to resolving it through the
+        # mirror directly, so the 7jrj3 drift-guard still governs the parse path.
+        runtime_map = dict(portal_tokens.CANONICAL_DEFAULTS)
+        runtime_map[portal_tokens.PORTAL_TOKEN_HEADER_FONT_SIZE] = "22"
+        portal.adopt_runtime_tokens(runtime_map)
+        self.assertEqual(portal.TOKENS.header_font_size_px, 22.0)
+        direct = portal_tokens.resolve_portal_tokens(runtime_map)
+        self.assertEqual(
+            portal.TOKENS, direct,
+            "runtime adoption must match resolving the map through the mirror",
+        )
+
+
 class CadencePresentAckTests(unittest.TestCase):
     """The cadence runtime-overhead axis is non-vacuous only when present_ms is a
     TRUE on-screen present time (FramePresented, hud-91uu6) rather than the

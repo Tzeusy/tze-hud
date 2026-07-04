@@ -78,11 +78,13 @@ import portal_part_tokens as ppt  # noqa: E402
 # value end-to-end. This is what the profile-swap phase exercises live, and what
 # the reskin assertion in the test suite proves.
 #
-# Deferred (follow-up): the runtime does not yet expose its *resolved*
-# PortalPartTokens over any wire surface, so resolution happens client-side
-# against the canonical mirror. Wiring the runtime's live resolved tokens over
-# the session handshake — so the runtime's active profile drives this exemplar —
-# is a protocol change tracked separately.
+# Runtime handshake (hud-16um0): the runtime now exposes its *resolved*
+# PortalPartTokens over the session handshake
+# (`SessionEstablished.portal_part_tokens`). When present, those runtime-active
+# tokens are adopted as the PRIMARY source right after connect (see
+# `adopt_runtime_tokens`), so the runtime's active profile drives this exemplar.
+# The EXEMPLAR_PROFILE_OVERRIDES map below is the typed FALLBACK used only when
+# the runtime predates the field (or `--ignore-runtime-tokens` is passed).
 PORTAL_TOKEN = ppt
 
 # Exemplar profile: the reviewed portal look, expressed as portal.* token
@@ -182,6 +184,28 @@ def apply_visual_profile(overrides: Optional[dict[str, str]]) -> ppt.PortalPartT
     TOKENS = ppt.resolve_portal_tokens(ACTIVE_PROFILE_OVERRIDES)
     _rebind_visual_tokens()
     return TOKENS
+
+
+def adopt_runtime_tokens(runtime_tokens: dict[str, str]) -> bool:
+    """Adopt the runtime's resolved portal tokens as the live source (hud-16um0).
+
+    ``runtime_tokens`` is the ``{token_key: value_string}`` map the runtime
+    delivers on the session handshake (``SessionEstablished.portal_part_tokens``),
+    fully resolved against the runtime's ACTIVE profile. When present, it is the
+    PRIMARY token source: the runtime's active profile — not the client-side
+    :data:`EXEMPLAR_PROFILE_OVERRIDES` mirror — drives every published visual
+    value. The map is a full override map (every canonical portal key present),
+    so it flows straight through :func:`apply_visual_profile`, which parses it
+    with the same drift-guarded resolver used for the local mirror.
+
+    Returns ``True`` when runtime tokens were adopted, ``False`` when the map is
+    empty (older runtime that predates the handshake field) — in which case the
+    caller keeps the local exemplar-profile mirror as the typed fallback.
+    """
+    if not runtime_tokens:
+        return False
+    apply_visual_profile(dict(runtime_tokens))
+    return True
 
 
 # ─── Portal chrome geometry (exemplar-local layout; see follow-up on tokens) ──
@@ -5321,6 +5345,25 @@ async def run_scenario(args: argparse.Namespace) -> int:
         }, target=args.target, doc=args.doc, phases=args.phases)
 
         await client.connect()
+        # hud-16um0: prefer the runtime's resolved portal tokens (delivered on the
+        # session handshake) so the runtime's ACTIVE profile drives the live look,
+        # instead of resolving against the client-side mirror. Falls back to the
+        # local exemplar profile when the runtime does not expose them (older
+        # runtime) or when explicitly ignored.
+        runtime_tokens = {} if args.ignore_runtime_tokens else client.resolved_portal_tokens
+        adopted_runtime_tokens = adopt_runtime_tokens(runtime_tokens)
+        token_source = "runtime-handshake" if adopted_runtime_tokens else (
+            "local-mirror-ignored" if args.ignore_runtime_tokens else "local-mirror-fallback"
+        )
+        emit_step_event(transcript, 0, "checkpoint", {
+            "code": "tokens:source",
+            "title": "Portal design-token source resolved",
+            "action": (
+                "adopt runtime-delivered resolved PortalPartTokens as the live "
+                "source when the handshake exposes them; else keep the local mirror"
+            ),
+            "expected_visual": "portal renders the runtime's active-profile look",
+        }, token_source=token_source, runtime_token_count=len(client.resolved_portal_tokens))
         scene_width, scene_height = client.scene_display_area or (scene_width, scene_height)
         emit_step_event(transcript, 0, "checkpoint", {
             "code": "scene:display-area",
@@ -5787,6 +5830,16 @@ def parse_args() -> argparse.Namespace:
             "Comma-separated list of phases to run: "
             "baseline, scroll, streaming, rapid, soak, composer-smoke, diagnostic-input, "
             "markdown, overflow, composer-edit, cadence, profile-swap, window-mgmt"
+        ),
+    )
+    p.add_argument(
+        "--ignore-runtime-tokens",
+        action="store_true",
+        help=(
+            "Do not adopt the runtime-resolved portal tokens delivered on the "
+            "session handshake (hud-16um0); resolve against the local exemplar "
+            "profile mirror instead. By default, when the runtime exposes its "
+            "active-profile tokens, they drive the live portal look."
         ),
     )
     p.add_argument("--baseline-hold-s", type=float, default=20.0)

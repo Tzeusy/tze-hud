@@ -176,6 +176,7 @@ impl SharedStateBuilder {
             degradation_level: tze_hud_protocol::session::RuntimeDegradationLevel::Normal,
             media_ingress_active: None,
             input_capture_tx: None,
+            resolved_portal_tokens: std::collections::HashMap::new(),
         }
     }
 }

@@ -194,6 +194,19 @@ pub struct SharedState {
     /// runtime installs this so gRPC InputCaptureRequest/InputCaptureRelease
     /// mutates the same InputProcessor used for OS pointer routing.
     pub input_capture_tx: Option<mpsc::UnboundedSender<InputCaptureCommand>>,
+    /// Runtime-resolved portal design tokens delivered on the session handshake
+    /// (RFC 0005 `SessionEstablished.portal_part_tokens`, hud-16um0).
+    ///
+    /// Maps each canonical portal token key to its runtime-resolved value string
+    /// (colors `#RRGGBB`/`#RRGGBBAA`, numerics decimal) for the runtime's ACTIVE
+    /// profile. Populated once at startup by the windowed runtime from its
+    /// resolved startup tokens (`tze_hud_config::resolve_portal_token_strings`).
+    /// Empty when the runtime does not expose tokens (headless/tests) — the
+    /// handshake then omits the field and clients fall back to their local
+    /// default mirror. This surfaces the runtime's active profile as the
+    /// authority for the portal exemplar's live look instead of a client-side
+    /// Python token mirror (promotes hud-7jrj3).
+    pub resolved_portal_tokens: std::collections::HashMap<String, String>,
 }
 
 impl SharedState {

@@ -28,13 +28,16 @@ published value.
 this mirror matches, so the two cannot silently drift. Colors are hex (``#RRGGBB``
 or ``#RRGGBBAA``); numerics are plain decimal strings — identical to Rust.
 
-## Deferred (see follow-up)
+## Runtime handshake exposure (hud-16um0)
 
-The runtime does not yet expose its *resolved* ``PortalPartTokens`` over any wire
-surface (no gRPC ``SessionEstablished`` field, no MCP read tool), so the exemplar
-resolves client-side against this canonical mirror. Wiring the runtime's live
-resolved tokens (so the runtime's *active profile* — not a Python-side exemplar
-profile — drives the live exemplar) is a protocol change tracked as a follow-up.
+The runtime now exposes its *resolved* ``PortalPartTokens`` over the session
+handshake: ``SessionEstablished.portal_part_tokens`` carries the runtime's
+ACTIVE profile's fully-resolved portal tokens as a ``{key: value_string}`` map
+(see ``crates/tze_hud_config::resolve_portal_token_strings``). The exemplar
+PREFERS that map — the runtime's active profile drives the live look — and uses
+this module only as a typed FALLBACK when the runtime predates the field (empty
+map). The runtime-delivered map is parsed by the same :func:`resolve_portal_tokens`
+here, so this drift-guarded mirror still governs the parse path either way.
 """
 
 from __future__ import annotations

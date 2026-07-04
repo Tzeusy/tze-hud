@@ -186,13 +186,27 @@ pub(super) async fn handle_session_init(
     let namespace = init.agent_id.clone();
     let resume_token = uuid::Uuid::now_v7().as_bytes().to_vec();
 
-    // Register session in the session registry and capture upload rate config.
-    let upload_rate_limit_bytes_per_sec = {
+    // Register session in the session registry and capture upload rate config +
+    // the runtime's resolved portal tokens for the handshake (hud-16um0).
+    let (upload_rate_limit_bytes_per_sec, resolved_portal_tokens) = {
         let mut st = state.lock().await;
         let _ = st
             .sessions
             .authenticate(&init.agent_id, psk, &granted_capabilities);
-        st.resource_store.upload_rate_limit_bytes_per_sec()
+        (
+            st.resource_store.upload_rate_limit_bytes_per_sec(),
+            st.resolved_portal_tokens.clone(),
+        )
+    };
+    // Only carry the field when the runtime actually exposes tokens; an empty
+    // map means "not exposed" (headless/tests) and clients fall back to their
+    // local default mirror, matching the pre-field wire behaviour.
+    let portal_part_tokens = if resolved_portal_tokens.is_empty() {
+        None
+    } else {
+        Some(ResolvedPortalTokens {
+            tokens: resolved_portal_tokens,
+        })
     };
 
     let session_open_at = now_wall_us();
@@ -253,6 +267,7 @@ pub(super) async fn handle_session_init(
                 active_subscriptions: sub_result.active,
                 denied_subscriptions: sub_result.denied,
                 negotiated_protocol_version: negotiated_version,
+                portal_part_tokens,
             })),
         }))
         .await;
