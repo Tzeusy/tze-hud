@@ -1792,6 +1792,7 @@ fn test_zone_publish_rejected_when_lease_orphaned() {
             ZoneContent::StreamText("first".to_string()),
             "agent.juliet",
             None,
+            None,
         )
         .expect("publish while active must succeed");
 
@@ -1807,6 +1808,7 @@ fn test_zone_publish_rejected_when_lease_orphaned() {
         "subtitle",
         ZoneContent::StreamText("second attempt from disconnected agent".to_string()),
         "agent.juliet",
+        None,
         None,
     );
 

@@ -1540,6 +1540,7 @@ async fn test_list_elements_request_supports_filters_and_override_metadata() {
                 ZoneContent::StreamText("hello".to_string()),
                 "agent-list",
                 None,
+                None,
             )
             .expect("publish zone");
 
