@@ -47,6 +47,12 @@ impl Compositor {
         self.viewer_echoes
             .retain_tiles(|tile_id| scene.tiles.contains_key(&tile_id));
 
+        // Measure the viewer-echo history wrap (total + per-entry) BEFORE the tile
+        // loop so the turn-divider pass can place a token-styled rule on each
+        // entry boundary (hud-hsc1t). Idempotent with the pre-text-pass prime;
+        // no-op when the store is empty.
+        self.prime_viewer_echo_layout(scene);
+
         let mut vertices: Vec<RectVertex> = Vec::new();
         let mut textured_cmds: Vec<TexturedDrawCmd> = Vec::new();
 
@@ -221,6 +227,33 @@ impl Compositor {
                 sh,
                 &composer_overlay_tokens,
             );
+
+            // ── Viewer-echo turn dividers (hud-hsc1t) ─────────────────────
+            // A token-styled rule between adjacent runtime-authored viewer
+            // history entries so the pilot-path echo reads as discrete turns
+            // (§Transcript Turn Separators). Shares the portal.divider.* tokens
+            // with the markdown transcript separators; content-free geometry,
+            // so nothing is revealed under redaction. No-op when the store is
+            // empty or the divider token is unset.
+            if !self.viewer_echoes.is_empty() {
+                if let Some(sep_color) = self.markdown_tokens.separator_color {
+                    let tile_opacity = self.tile_effective_opacity(tile, scene);
+                    let divider_color = self.gpu_color(Rgba {
+                        a: sep_color.a * tile_opacity,
+                        ..sep_color
+                    });
+                    for rect in self.collect_viewer_echo_divider_rects(tile, scene) {
+                        Self::append_clipped_rect_vertices(
+                            tile,
+                            rect,
+                            sw,
+                            sh,
+                            divider_color,
+                            &mut vertices,
+                        );
+                    }
+                }
+            }
         }
 
         // Update zone animation states (fade-in/fade-out) before rendering.

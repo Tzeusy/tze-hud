@@ -17,6 +17,54 @@ import text_stream_portal_exemplar as portal  # noqa: E402
 
 
 class TextStreamPortalExemplarTests(unittest.TestCase):
+    def test_join_transcript_entries_inserts_thematic_breaks(self) -> None:
+        joined = portal.join_transcript_entries(["first", "second", "third"])
+        # N entries → N-1 separators, each on its own line.
+        self.assertEqual(joined.count("\n---\n"), 2)
+        self.assertIn("first\n---\nsecond", joined)
+        self.assertIn("second\n---\nthird", joined)
+        # No leading/trailing divider.
+        self.assertFalse(joined.startswith("---"))
+        self.assertFalse(joined.endswith("---"))
+
+    def test_join_transcript_entries_drops_empty_entries(self) -> None:
+        joined = portal.join_transcript_entries(["only", "   ", ""])
+        # A single non-empty entry → no separator at all.
+        self.assertNotIn("---", joined)
+        self.assertEqual(joined, "only")
+
+    def test_split_transcript_entries_uses_blank_line_boundaries(self) -> None:
+        body = "alpha one\nalpha two\n\nbravo\n\n\ncharlie"
+        entries = portal.split_transcript_entries(body)
+        self.assertEqual(entries, ["alpha one\nalpha two", "bravo", "charlie"])
+
+    def test_load_transcript_slice_emits_entry_dividers(self) -> None:
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".md", delete=False, encoding="utf-8"
+        ) as handle:
+            handle.write("Entry one\nstill one\n\nEntry two\n\nEntry three\n")
+            doc_path = handle.name
+        try:
+            body = portal.load_transcript_slice(doc_path, max_lines=100)
+        finally:
+            Path(doc_path).unlink(missing_ok=True)
+        # Two dividers between three logical entries, each on its own line so the
+        # compositor recognises them as thematic breaks.
+        self.assertEqual(body.count("\n---\n"), 2)
+        self.assertIn("Entry one\nstill one\n---\nEntry two", body)
+
+    def test_load_transcript_slice_single_block_has_no_divider(self) -> None:
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".md", delete=False, encoding="utf-8"
+        ) as handle:
+            handle.write("Just one block\nwith two lines\n")
+            doc_path = handle.name
+        try:
+            body = portal.load_transcript_slice(doc_path, max_lines=100)
+        finally:
+            Path(doc_path).unlink(missing_ok=True)
+        self.assertNotIn("---", body)
+
     def test_large_display_size_clamp_uses_scene_bounds_not_demo_cap(self) -> None:
         w, h = portal.clamp_portal_size(2200.0, 1400.0, 3840.0, 2160.0)
 

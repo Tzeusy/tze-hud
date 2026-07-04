@@ -271,11 +271,57 @@ COMPOSER_LINE_PX = INPUT_FONT * 1.4
 # ─── Content helpers ──────────────────────────────────────────────────────────
 
 
+# Thematic-break marker the compositor renders as a token-styled turn divider
+# (portal.divider.color / .thickness_px, hud-nx7yq.4). Matches the runtime's own
+# `\n---\n` join in resident_grpc::visible_transcript_markdown so the raw-tile
+# pilot surface shows the same dividers the projection-authority path does.
+TRANSCRIPT_ENTRY_SEPARATOR = "---"
+
+
+def split_transcript_entries(body: str) -> list[str]:
+    """Split a transcript body into logical entries on blank-line boundaries.
+
+    A logical entry is a run of consecutive non-blank lines (a markdown block);
+    one or more blank lines end the current entry. This is the block model the
+    OUTPUT pane reads as discrete conversational turns.
+    """
+    entries: list[str] = []
+    current: list[str] = []
+    for line in body.splitlines():
+        if line.strip() == "":
+            if current:
+                entries.append("\n".join(current))
+                current = []
+        else:
+            current.append(line)
+    if current:
+        entries.append("\n".join(current))
+    return entries
+
+
+def join_transcript_entries(entries: list[str]) -> str:
+    """Join logical transcript entries with thematic-break separators.
+
+    Emits `entry\\n---\\nentry` so the compositor draws a token-styled divider on
+    the `---` line between adjacent entries (hud-hsc1t / §Transcript Turn
+    Separators). The exemplar owns its OUTPUT-pane transcript and previously
+    joined blocks with plain newlines, so no dividers rendered on the pilot
+    surface at all ("no dividers between history entries"). N entries yield N-1
+    separators; empty/whitespace-only entries are dropped so no leading/trailing
+    or doubled divider appears.
+    """
+    kept = [entry for entry in entries if entry.strip()]
+    return f"\n{TRANSCRIPT_ENTRY_SEPARATOR}\n".join(kept)
+
+
 def load_transcript_slice(doc_path: str, max_lines: int) -> str:
-    """Load the markdown file and trim to a bounded viewport."""
+    """Load the markdown file, trim to a bounded viewport, and insert a
+    thematic-break turn divider between each logical entry so the OUTPUT pane
+    renders discrete conversational turns (hud-hsc1t)."""
     raw = Path(doc_path).read_text(encoding="utf-8")
     lines = raw.splitlines()
-    return "\n".join(lines[:max_lines])
+    body = "\n".join(lines[:max_lines])
+    return join_transcript_entries(split_transcript_entries(body))
 
 
 def normalize_composer_input(text: str) -> str:
