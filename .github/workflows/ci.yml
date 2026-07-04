@@ -4,6 +4,8 @@
 #   check          — cargo check: fast compilation gate (no codegen)
 #   fmt            — cargo fmt --check: formatting gate
 #   clippy         — cargo clippy --all-targets -D warnings: lint gate (incl. tests/examples/benches)
+#   clippy-windows-gnu — cargo clippy --target x86_64-pc-windows-gnu -D warnings: lints the four
+#     crates carrying cfg(windows) code, which the Linux clippy job above never compiles
 #   test-unit      — cargo test --workspace --all-targets --exclude integration
 #   test-integration — cargo test -p integration (headless suites; excl. trace_regression, v1_thesis, soak)
 #   test-trace     — cargo test -p integration --test trace_regression
@@ -121,6 +123,54 @@ jobs:
           sudo apt-get install -y --no-install-recommends protobuf-compiler
       - name: cargo clippy (workspace, all targets, deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # ── Windows-target clippy (cfg(windows) coverage) ──────────────────────────
+  #
+  # The `clippy` job above runs on ubuntu-latest, so it never compiles code
+  # gated on #[cfg(target_os = "windows")] — that code is entirely invisible
+  # to the Linux lint gate. hud-53s6m found a real clippy::io_other_error
+  # regression in element_store.rs's Windows-only MoveFileExW path that this
+  # gap let slip onto main undetected (PR #1042 fixed it).
+  #
+  # This job cross-compiles+lints just the crates that carry cfg(windows)
+  # code, using the mingw-w64 cross toolchain (no linking/execution — clippy
+  # only needs to typecheck). A workspace-wide `--workspace --target
+  # x86_64-pc-windows-gnu` clippy run is NOT used here: several workspace
+  # members pull in Linux-only GStreamer/media and windowing deps that do not
+  # cross-compile, so this job is deliberately scoped to the four crates
+  # confirmed (hud-fsfkx) to cross-compile clippy-clean:
+  #   tze_hud_runtime, tze_hud_compositor, tze_hud_config, tze_hud_a11y
+  #
+  # If a fifth crate later grows cfg(windows) code, add it to the -p list
+  # below (or drop it here with a comment if it doesn't cross-compile clean).
+
+  clippy-windows-gnu:
+    name: cargo clippy (windows-gnu cross-target)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+          components: clippy
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2.9.1
+        timeout-minutes: 10
+      - name: Install protobuf compiler + MinGW cross toolchain
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            protobuf-compiler \
+            mingw-w64
+      - name: cargo clippy (windows-gnu, cfg(windows) crates, deny warnings)
+        run: |
+          cargo clippy \
+            -p tze_hud_runtime \
+            -p tze_hud_compositor \
+            -p tze_hud_config \
+            -p tze_hud_a11y \
+            --target x86_64-pc-windows-gnu \
+            -- -D warnings
 
   # ── Unit and crate-level tests ───────────────────────────────────────────────
   #
