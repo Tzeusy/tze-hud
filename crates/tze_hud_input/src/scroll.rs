@@ -508,6 +508,39 @@ impl ScrollTileState {
         }
     }
 
+    /// Current total content height in physical pixels (all rendered lines,
+    /// not clamped to the viewport).  See the field doc for the
+    /// total-content-height vs. max-scroll-offset coordinate-system note.
+    pub fn total_content_height_px(&self) -> f32 {
+        self.total_content_height_px
+    }
+
+    /// Force this tile's viewport to the tail, overriding any `ScrolledBack`
+    /// anchor.
+    ///
+    /// Unlike [`Self::notify_content_appended`], which deliberately preserves
+    /// a `ScrolledBack` viewport when ordinary (remote/streamed) content grows
+    /// (spec task 3.3), this is for a deliberate LOCAL action — e.g. the
+    /// viewer typing into or submitting their own composer — where staying
+    /// scrolled away from the tail would strand them from their own live
+    /// input (hud-qbcp8: input-history "reset to tail on typing/submit").
+    ///
+    /// Returns `true` if the offset or anchor changed.
+    pub fn reset_to_tail(&mut self) -> bool {
+        let Some(config) = &self.config else {
+            return false;
+        };
+        let tail = config.content_height.unwrap_or(0.0).max(0.0);
+        let changed = self.follow_tail != FollowTailAnchor::AtTail
+            || (self.offset_y - tail).abs() > f32::EPSILON;
+        self.offset_y = tail;
+        self.follow_tail = FollowTailAnchor::AtTail;
+        if changed {
+            self.dirty = true;
+        }
+        changed
+    }
+
     /// Queue an agent `SetScrollOffsetRequest`.
     ///
     /// Will be applied only if no user scroll event arrives this frame.
@@ -729,6 +762,31 @@ impl ScrollState {
             .get(&tile_id)
             .map(|s| s.follow_tail)
             .unwrap_or(FollowTailAnchor::AtTail)
+    }
+
+    /// Return a tile's current total content height in physical pixels, or
+    /// `0.0` if the tile is not registered.
+    ///
+    /// Callers that maintain their own running content-height total (rather
+    /// than re-measuring it) can read this back before adding a delta and
+    /// re-calling [`Self::notify_content_appended`], instead of tracking a
+    /// duplicate counter (hud-qbcp8).
+    pub fn total_content_height_px(&self, tile_id: SceneId) -> f32 {
+        self.tiles
+            .get(&tile_id)
+            .map(ScrollTileState::total_content_height_px)
+            .unwrap_or(0.0)
+    }
+
+    /// Force a tile's viewport to the tail, overriding any `ScrolledBack`
+    /// anchor.  Delegates to [`ScrollTileState::reset_to_tail`]; see that
+    /// method for the full contract.  No-op (`false`) if the tile is not
+    /// registered.
+    pub fn reset_to_tail(&mut self, tile_id: SceneId) -> bool {
+        self.tiles
+            .get_mut(&tile_id)
+            .map(ScrollTileState::reset_to_tail)
+            .unwrap_or(false)
     }
 }
 
@@ -1412,5 +1470,108 @@ mod tests {
     fn follow_tail_offset_zero_line_height_returns_unchanged() {
         let result = follow_tail_offset(50.0, 100.0, 200.0, 100.0, 0.0);
         assert!((result - 50.0).abs() < f32::EPSILON);
+    }
+
+    // ── reset_to_tail (hud-qbcp8) ──────────────────────────────────────────
+
+    /// `reset_to_tail` on a `ScrolledBack` tile must force the offset to the
+    /// tail (the tracked max-scroll-offset) and flip the anchor back to
+    /// `AtTail`, reporting `changed = true`.
+    #[test]
+    fn reset_to_tail_forces_scrolled_back_tile_to_tail() {
+        let tile_id = SceneId::new();
+        let line_h = 20.0_f32;
+        let viewport_h = 100.0_f32;
+        let mut scroll = ScrollState::new();
+
+        let config = ScrollConfig {
+            scrollable_y: true,
+            scrollable_x: false,
+            content_width: None,
+            content_height: None,
+        };
+        scroll.register_tile(tile_id, config);
+        // 20 lines of content (400px) — well past the 100px viewport.
+        scroll.notify_content_appended(tile_id, 20.0 * line_h, viewport_h, line_h);
+        assert_eq!(scroll.follow_tail_anchor(tile_id), FollowTailAnchor::AtTail);
+        let (_, tail_offset) = scroll.offset(tile_id);
+        assert!(tail_offset > 0.0, "tail offset should be nonzero here");
+
+        // Scroll away from the tail.
+        scroll.apply_user_scroll(tile_id, 0.0, -150.0);
+        assert_eq!(
+            scroll.follow_tail_anchor(tile_id),
+            FollowTailAnchor::ScrolledBack
+        );
+        let (_, scrolled_offset) = scroll.offset(tile_id);
+        assert!(scrolled_offset < tail_offset);
+
+        let changed = scroll.reset_to_tail(tile_id);
+        assert!(
+            changed,
+            "resetting a scrolled-back tile must report changed"
+        );
+
+        let (_, offset_after) = scroll.offset(tile_id);
+        assert!(
+            (offset_after - tail_offset).abs() < f32::EPSILON,
+            "reset_to_tail must snap back to the tracked tail ({tail_offset}); got {offset_after}"
+        );
+        assert_eq!(
+            scroll.follow_tail_anchor(tile_id),
+            FollowTailAnchor::AtTail,
+            "reset_to_tail must restore the AtTail anchor"
+        );
+    }
+
+    /// Calling `reset_to_tail` on a tile already at the tail is a no-op
+    /// (`changed = false`) — it must not spuriously mark the tile dirty.
+    #[test]
+    fn reset_to_tail_is_noop_when_already_at_tail() {
+        let tile_id = SceneId::new();
+        let line_h = 20.0_f32;
+        let viewport_h = 100.0_f32;
+        let mut scroll = ScrollState::new();
+
+        scroll.register_tile(tile_id, ScrollConfig::vertical());
+        scroll.notify_content_appended(tile_id, 20.0 * line_h, viewport_h, line_h);
+        assert_eq!(scroll.follow_tail_anchor(tile_id), FollowTailAnchor::AtTail);
+
+        let changed = scroll.reset_to_tail(tile_id);
+        assert!(
+            !changed,
+            "reset_to_tail on an already-at-tail tile must report no change"
+        );
+    }
+
+    /// `reset_to_tail` on an unregistered tile is a no-op.
+    #[test]
+    fn reset_to_tail_unregistered_tile_is_noop() {
+        let tile_id = SceneId::new();
+        let mut scroll = ScrollState::new();
+        assert!(!scroll.reset_to_tail(tile_id));
+    }
+
+    /// `total_content_height_px` reflects the running total tracked by
+    /// `notify_content_appended`, and is `0.0` before any content has been
+    /// recorded or for an unregistered tile.
+    #[test]
+    fn total_content_height_px_tracks_appended_content() {
+        let tile_id = SceneId::new();
+        let unregistered = SceneId::new();
+        let line_h = 20.0_f32;
+        let viewport_h = 100.0_f32;
+        let mut scroll = ScrollState::new();
+
+        assert_eq!(scroll.total_content_height_px(unregistered), 0.0);
+
+        scroll.register_tile(tile_id, ScrollConfig::vertical());
+        assert_eq!(scroll.total_content_height_px(tile_id), 0.0);
+
+        scroll.notify_content_appended(tile_id, 5.0 * line_h, viewport_h, line_h);
+        assert!((scroll.total_content_height_px(tile_id) - 5.0 * line_h).abs() < f32::EPSILON);
+
+        scroll.notify_content_appended(tile_id, 9.0 * line_h, viewport_h, line_h);
+        assert!((scroll.total_content_height_px(tile_id) - 9.0 * line_h).abs() < f32::EPSILON);
     }
 }

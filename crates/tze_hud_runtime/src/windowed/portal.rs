@@ -4,12 +4,23 @@ use tze_hud_input::{
     apply_hotkey_resize, hit_affordance,
 };
 use tze_hud_scene::HitResult;
-use tze_hud_scene::types::{DragHandleElementKind, ZoneInteractionKind};
+use tze_hud_scene::types::{DragHandleElementKind, TileScrollConfig, ZoneInteractionKind};
 
 use super::input_dispatch::{deliver_composer_batch, dispatch_portal_geometry_event};
 use super::keyboard::ComposerDeliveryContext;
 use super::lifecycle::{INTERACTION_LOCK_BUDGET, spin_acquire};
 use super::{WindowedConfig, WinitApp};
+
+/// Approximate line height (physical px) used ONLY for the input-pane
+/// history's scroll-content-height bookkeeping (hud-qbcp8).
+///
+/// Mirrors the compositor's default viewer-echo metrics
+/// (`VIEWER_ECHO_DEFAULT_FONT_SIZE_PX` 15.0px × `LINE_HEIGHT_MULTIPLIER` 1.4,
+/// see `crates/tze_hud_compositor/src/renderer/token_colors.rs` and
+/// `crates/tze_hud_compositor/src/text.rs`) — see
+/// [`WinitApp::append_raw_tile_viewer_echo`] for why an approximation is
+/// used here instead of the compositor's wrap-accurate measurement.
+const INPUT_HISTORY_APPROX_LINE_HEIGHT_PX: f32 = 21.0;
 
 pub(super) fn build_portal_projection_driver(
     config: &WindowedConfig,
@@ -1010,12 +1021,70 @@ impl WinitApp {
     /// state, and it is authored by the runtime — an adapter cannot forge a
     /// viewer entry through this path (the output-publication contract's viewer
     /// rejection is unchanged).
+    ///
+    /// Also makes wheel-scroll through the input-pane history LIVE (hud-qbcp8).
+    /// The rendering foundation (hud-acfvp/#1044) reads the tile's displayed
+    /// scroll offset once a `TileScrollConfig` is registered, but nothing
+    /// registered one or fed it content growth, so scrolling was inert.
+    /// Register the tile as scrollable and advance its follow-tail content
+    /// height the same way the authority-attached OUTPUT/transcript pane does
+    /// (`InputProcessor::notify_tile_content_appended`, wired from
+    /// `portal_projection_driver.rs`) — the runtime plays the "adapter" role
+    /// here because raw-tile viewer echoes are runtime-authored, not
+    /// adapter-published. A fresh `ScrollTileState` starts at content height 0
+    /// with `FollowTailAnchor::AtTail`, so the very first call below seeds the
+    /// offset directly to the tail — no separate seeding step needed. The
+    /// explicit `reset_tile_scroll_to_tail` afterward then forces back to the
+    /// tail even if the viewer had scrolled up, matching "submitting your own
+    /// reply reveals it" (don't strand the viewer scrolled-up).
     fn append_raw_tile_viewer_echo(&mut self, tile_id: tze_hud_scene::SceneId, text: String) {
         let submitted_at_wall_us = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_micros()
             .min(u128::from(u64::MAX)) as u64;
+
+        if let Ok(state) = self.state.shared_state.try_lock()
+            && let Ok(mut scene) = state.scene.try_lock()
+        {
+            let _ = scene.register_tile_scroll_config(tile_id, TileScrollConfig::vertical());
+            let viewport_height_px = scene
+                .tiles
+                .get(&tile_id)
+                .map(|t| t.bounds.height)
+                .unwrap_or(0.0);
+            if viewport_height_px > 0.0 {
+                // Approximate content height: the runtime has no token map or
+                // text rasterizer of its own, so it cannot measure the
+                // wrap-accurate height `Compositor::prime_viewer_echo_layout`
+                // computes per frame. This is a deliberate approximation
+                // (mirrors `text_stream_portal_exemplar.py`'s
+                // `scroll_max_y_for_text`, used for the OUTPUT pane's own
+                // scroll-config bookkeeping) — it only needs to keep the
+                // wheel-input clamp roughly right, because
+                // `input_history_block_top` re-clamps the DISPLAYED position
+                // to the compositor's exact band/content geometry every
+                // frame regardless of this value's precision.
+                let added_height_px =
+                    text.split('\n').count().max(1) as f32 * INPUT_HISTORY_APPROX_LINE_HEIGHT_PX;
+                let new_total_height_px = self
+                    .state
+                    .input_processor
+                    .tile_total_content_height_px(tile_id)
+                    + added_height_px;
+                self.state.input_processor.notify_tile_content_appended(
+                    tile_id,
+                    new_total_height_px,
+                    viewport_height_px,
+                    INPUT_HISTORY_APPROX_LINE_HEIGHT_PX,
+                    &mut scene,
+                );
+                self.state
+                    .input_processor
+                    .reset_tile_scroll_to_tail(tile_id, &mut scene);
+            }
+        }
+
         if let Ok(mut queue) = self.state.viewer_echo_queue.lock() {
             queue.push(tze_hud_compositor::ViewerEchoAppend {
                 tile_id,
@@ -2918,6 +2987,184 @@ mod tests {
         assert!(
             app.state.viewer_echo_queue.lock().unwrap().is_empty(),
             "whitespace-only submission must not enqueue a viewer echo"
+        );
+    }
+
+    /// A submission whose history overflows the band above the composer
+    /// (hud-qbcp8) must register the tile as scrollable and seed the scroll
+    /// offset directly to the tail — not to `0.0` (which would show the
+    /// OLDEST line, per `input_history_block_top`'s convention).
+    #[test]
+    fn overflowing_raw_tile_submission_registers_scroll_and_seeds_tail() {
+        let (scene, _tab_id, tile_id, _composer_id, _control_id) = portal_scene_with_control();
+        let (mut app, _rx) =
+            make_windowed_keyboard_test_app(scene, FocusManager::new(), InputProcessor::new());
+
+        // Tile viewport is 300px tall; 20 lines at ~21px/line is ~420px —
+        // comfortably past the viewport, so the tail offset must be nonzero.
+        let text = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut batch = tze_hud_input::DraftNotificationBatch::new();
+        batch.record_submission(tze_hud_input::DraftSubmission { text, sequence: 1 });
+        app.route_and_deliver_composer_batch(viewer_echo_context(tile_id), batch);
+
+        let shared = app.state.shared_state.try_lock().unwrap();
+        let scene = shared.scene.try_lock().unwrap();
+        assert!(
+            scene.tile_scroll_config(tile_id).is_some(),
+            "the input tile must be registered as scrollable after a submission"
+        );
+        let (_, offset_y) = scene.tile_scroll_offset_local(tile_id);
+        assert!(
+            offset_y > 0.0,
+            "the first overflowing submission must seed a nonzero tail offset, got {offset_y}"
+        );
+        assert!(
+            scene.tile_follow_tail_at_tail(tile_id),
+            "a freshly-seeded history must be at-tail"
+        );
+    }
+
+    /// After the viewer scrolls up through their own history and then submits
+    /// another reply, the scroll offset must snap back to the (new) tail
+    /// rather than staying scrolled away from the just-submitted reply
+    /// (hud-qbcp8: "don't strand the viewer scrolled-up").
+    #[test]
+    fn resubmitting_after_scroll_back_snaps_history_to_tail() {
+        let (scene, _tab_id, tile_id, _composer_id, _control_id) = portal_scene_with_control();
+        let (mut app, _rx) =
+            make_windowed_keyboard_test_app(scene, FocusManager::new(), InputProcessor::new());
+
+        let first_text = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut batch = tze_hud_input::DraftNotificationBatch::new();
+        batch.record_submission(tze_hud_input::DraftSubmission {
+            text: first_text,
+            sequence: 1,
+        });
+        app.route_and_deliver_composer_batch(viewer_echo_context(tile_id), batch);
+
+        let tail_after_first = {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let scene = shared.scene.try_lock().unwrap();
+            scene.tile_scroll_offset_local(tile_id).1
+        };
+        assert!(tail_after_first > 0.0);
+
+        // Scroll the viewer back up (away from the tail), inside the tile
+        // (tile bounds are 100,100 .. 500,400; this point misses both the
+        // composer and control hit regions, hitting the tile background).
+        {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let mut scene = shared.scene.try_lock().unwrap();
+            let _ = app.state.input_processor.process_scroll_event(
+                &tze_hud_input::ScrollEvent {
+                    x: 300.0,
+                    y: 250.0,
+                    delta_x: 0.0,
+                    delta_y: -50.0,
+                },
+                &mut scene,
+            );
+            assert!(
+                !scene.tile_follow_tail_at_tail(tile_id),
+                "test setup: scrolling up must leave the tile ScrolledBack"
+            );
+        }
+
+        // Submit a second reply — must force the viewport back to the tail.
+        let mut batch = tze_hud_input::DraftNotificationBatch::new();
+        batch.record_submission(tze_hud_input::DraftSubmission {
+            text: "one more reply".to_string(),
+            sequence: 2,
+        });
+        app.route_and_deliver_composer_batch(viewer_echo_context(tile_id), batch);
+
+        let shared = app.state.shared_state.try_lock().unwrap();
+        let scene = shared.scene.try_lock().unwrap();
+        assert!(
+            scene.tile_follow_tail_at_tail(tile_id),
+            "submitting a new reply must force the history back to the tail"
+        );
+        let (_, offset_after_resubmit) = scene.tile_scroll_offset_local(tile_id);
+        assert!(
+            offset_after_resubmit >= tail_after_first,
+            "the post-resubmit tail must be at or past the pre-scroll-back tail \
+             ({tail_after_first}); got {offset_after_resubmit}"
+        );
+    }
+
+    /// Typing into the composer while the input-pane history is scrolled back
+    /// must snap the history's scroll offset back to the tail (hud-qbcp8:
+    /// "don't strand the viewer scrolled-up" while they're actively drafting).
+    #[test]
+    fn typing_while_scrolled_back_resets_history_scroll_to_tail() {
+        use tze_hud_input::RawCharacterEvent;
+
+        let (mut scene, tab_id, tile_id, composer_id, _control_id) = portal_scene_with_control();
+        let mut processor = InputProcessor::new();
+        let mut focus_manager = FocusManager::new();
+        focus_manager.add_tab(tab_id);
+        processor.navigate_focus(&mut focus_manager, &mut scene, tab_id, false);
+        assert_eq!(
+            focus_manager.current_owner(tab_id).node_id(),
+            Some(composer_id),
+            "test setup: focus must rest on the composer"
+        );
+        assert!(
+            processor.is_composer_active(),
+            "test setup: landing focus on the composer must activate the draft"
+        );
+
+        let (mut app, _input_event_rx) =
+            make_windowed_keyboard_test_app(scene, focus_manager, processor);
+
+        // Seed an overflowing history and scroll away from the tail (same setup
+        // as `resubmitting_after_scroll_back_snaps_history_to_tail`).
+        let text = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut batch = tze_hud_input::DraftNotificationBatch::new();
+        batch.record_submission(tze_hud_input::DraftSubmission { text, sequence: 1 });
+        app.route_and_deliver_composer_batch(viewer_echo_context(tile_id), batch);
+        {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let mut scene = shared.scene.try_lock().unwrap();
+            let _ = app.state.input_processor.process_scroll_event(
+                &tze_hud_input::ScrollEvent {
+                    x: 300.0,
+                    y: 250.0,
+                    delta_x: 0.0,
+                    delta_y: -50.0,
+                },
+                &mut scene,
+            );
+            assert!(
+                !scene.tile_follow_tail_at_tail(tile_id),
+                "test setup: scrolling up must leave the tile ScrolledBack"
+            );
+        }
+
+        // Type a character while the history is scrolled back.
+        app.dispatch_character_event_inner(
+            &RawCharacterEvent {
+                character: "h".to_string(),
+                timestamp_mono_us: tze_hud_scene::MonoUs(1),
+            },
+            Some(tab_id),
+        );
+
+        let shared = app.state.shared_state.try_lock().unwrap();
+        let scene = shared.scene.try_lock().unwrap();
+        assert!(
+            scene.tile_follow_tail_at_tail(tile_id),
+            "typing into the focused composer must snap the input-pane history \
+             back to the tail"
         );
     }
 

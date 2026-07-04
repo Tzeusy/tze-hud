@@ -290,6 +290,24 @@ impl WinitApp {
         }
     }
 
+    /// Snap the input-pane history's scroll offset back to the tail
+    /// (hud-qbcp8).
+    ///
+    /// Called on every accepted composer keystroke: unlike ordinary content
+    /// growth (which deliberately leaves a `ScrolledBack` viewport alone, spec
+    /// §3.3), a viewer who is actively typing into their own composer should
+    /// not be stranded scrolled away from their own live draft. No-op (and no
+    /// scene write) once the tile is already at the tail.
+    pub(super) fn reset_input_history_scroll_to_tail(&mut self, tile_id: tze_hud_scene::SceneId) {
+        if let Ok(state) = self.state.shared_state.try_lock()
+            && let Ok(mut scene) = state.scene.try_lock()
+        {
+            self.state
+                .input_processor
+                .reset_tile_scroll_to_tail(tile_id, &mut scene);
+        }
+    }
+
     // ── Keyboard drain helpers ────────────────────────────────────────────
 
     /// Translate a raw key-down event through the `KeyboardProcessor`, log it,
@@ -554,6 +572,10 @@ impl WinitApp {
                 }
                 ComposerDeliveryContextLookup::Unavailable => None,
             };
+            // Captured before `delivery_context` is moved into
+            // `route_and_deliver_composer_batch` below (hud-qbcp8: input-
+            // history reset-to-tail needs the tile id after that move).
+            let history_tile_id = delivery_context.as_ref().map(|c| c.tile_id);
             // Soft-wrap vertical caret movement (hud-21o6x): for ArrowUp/ArrowDown,
             // hand the input layer the compositor's latest wrapped-line layout so
             // the caret can step between visual rows. Read the reverse channel only
@@ -602,6 +624,11 @@ impl WinitApp {
                 // Guard: do NOT push after a terminal batch — clear must win.
                 if !key_down_is_terminal {
                     self.push_local_composer_echo(composer_input_started);
+                    // hud-qbcp8: typing should not leave the input-pane history
+                    // scrolled away from the viewer's own live draft.
+                    if let Some(tile_id) = history_tile_id {
+                        self.reset_input_history_scroll_to_tail(tile_id);
+                    }
                 }
                 return;
             }
@@ -1177,6 +1204,10 @@ impl WinitApp {
                 }
                 ComposerDeliveryContextLookup::Unavailable => None,
             };
+            // Captured before `delivery_context` is moved into
+            // `route_and_deliver_composer_batch` below (hud-qbcp8: input-
+            // history reset-to-tail needs the tile id after that move).
+            let history_tile_id = delivery_context.as_ref().map(|c| c.tile_id);
             // Capture the input-started-at instant for local-ack latency
             // measurement (hud-r3ax6 / hud-o9ybl).
             let composer_input_started = Instant::now();
@@ -1214,6 +1245,11 @@ impl WinitApp {
                 // Guard: do NOT push after a terminal batch — clear must win.
                 if !char_is_terminal {
                     self.push_local_composer_echo(composer_input_started);
+                    // hud-qbcp8: typing should not leave the input-pane history
+                    // scrolled away from the viewer's own live draft.
+                    if let Some(tile_id) = history_tile_id {
+                        self.reset_input_history_scroll_to_tail(tile_id);
+                    }
                 }
             } else {
                 // EditOutcome::Unchanged: the draft was not mutated (e.g. the

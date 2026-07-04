@@ -550,6 +550,37 @@ impl InputProcessor {
         changed
     }
 
+    /// Return a tile's current total content height in physical pixels (see
+    /// [`ScrollState::total_content_height_px`]), or `0.0` if the tile has no
+    /// tracked scroll state yet.
+    ///
+    /// Lets a caller that appends content incrementally (e.g. one runtime
+    /// -authored history entry at a time) read back the running total and add
+    /// its own delta before re-calling [`Self::notify_tile_content_appended`],
+    /// rather than maintaining a duplicate counter (hud-qbcp8).
+    pub fn tile_total_content_height_px(&self, tile_id: SceneId) -> f32 {
+        self.scroll_state.total_content_height_px(tile_id)
+    }
+
+    /// Force a scrollable tile's viewport back to the tail, overriding any
+    /// `ScrolledBack` anchor, and sync the result to the scene.
+    ///
+    /// Unlike [`Self::notify_tile_content_appended`], which deliberately
+    /// leaves a `ScrolledBack` viewport undisturbed when ordinary content
+    /// grows (spec §3.3), this is for a deliberate LOCAL action — the viewer
+    /// typing into or submitting their own composer — where staying scrolled
+    /// away from the tail would strand them from their own live input
+    /// (hud-qbcp8). No-op if the tile has no tracked scroll state.
+    pub fn reset_tile_scroll_to_tail(&mut self, tile_id: SceneId, scene: &mut SceneGraph) -> bool {
+        let changed = self.scroll_state.reset_to_tail(tile_id);
+        if changed {
+            let (offset_x, offset_y) = self.scroll_state.offset(tile_id);
+            let _ = scene.set_tile_scroll_offset_local(tile_id, offset_x, offset_y);
+            scene.set_tile_follow_tail_at_tail(tile_id, true);
+        }
+        changed
+    }
+
     /// Notify a tile that leading (head) content has been removed.
     ///
     /// Called when the transcript head is trimmed — either by the 64 KiB
@@ -3643,6 +3674,143 @@ mod tests {
             !scene.tile_follow_tail_at_tail(tile_id),
             "spec 3.3: scene must still reflect ScrolledBack after append"
         );
+    }
+
+    // ── reset_tile_scroll_to_tail (hud-qbcp8) ─────────────────────────────────
+
+    /// A viewer typing/submitting their OWN input is a deliberate local action,
+    /// distinct from ordinary remote content growth: `reset_tile_scroll_to_tail`
+    /// must force a `ScrolledBack` tile back to the tail and publish both the
+    /// offset and the follow-tail flag to the scene, unlike
+    /// `notify_tile_content_appended` (spec 3.3), which leaves it alone.
+    #[test]
+    fn reset_tile_scroll_to_tail_forces_scrolled_back_tile_and_syncs_scene() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "test",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(100.0, 100.0, 400.0, 100.0), // viewport = 100px
+                1,
+            )
+            .unwrap();
+        scene
+            .register_tile_scroll_config(tile_id, tze_hud_scene::TileScrollConfig::vertical())
+            .unwrap();
+
+        let mut processor = InputProcessor::new();
+        let line_h = 20.0_f32;
+        let viewport_h = 100.0_f32;
+
+        // 20 lines of content (400px) — tail = 400 - 100 = 300px.
+        processor.notify_tile_content_appended(
+            tile_id,
+            20.0 * line_h,
+            viewport_h,
+            line_h,
+            &mut scene,
+        );
+        let (_, tail_offset) = scene.tile_scroll_offset_local(tile_id);
+        assert!(tail_offset > 0.0, "tail offset should be nonzero here");
+
+        // Scroll back up.
+        let _ = processor.process_scroll_event(
+            &ScrollEvent {
+                x: 200.0,
+                y: 150.0,
+                delta_x: 0.0,
+                delta_y: -120.0,
+            },
+            &mut scene,
+        );
+        assert!(!scene.tile_follow_tail_at_tail(tile_id));
+
+        let changed = processor.reset_tile_scroll_to_tail(tile_id, &mut scene);
+        assert!(changed, "reset must report the offset changed");
+
+        let (_, offset_after) = scene.tile_scroll_offset_local(tile_id);
+        assert!(
+            (offset_after - tail_offset).abs() < f32::EPSILON,
+            "reset must snap the scene offset back to the tail ({tail_offset}); got {offset_after}"
+        );
+        assert!(
+            scene.tile_follow_tail_at_tail(tile_id),
+            "reset must publish AtTail to the scene"
+        );
+    }
+
+    /// `reset_tile_scroll_to_tail` on a tile with no tracked scroll state is a
+    /// no-op and must not touch the scene.
+    #[test]
+    fn reset_tile_scroll_to_tail_unregistered_tile_is_noop() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "test",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(0.0, 0.0, 400.0, 100.0),
+                1,
+            )
+            .unwrap();
+
+        let mut processor = InputProcessor::new();
+        assert!(!processor.reset_tile_scroll_to_tail(tile_id, &mut scene));
+        assert_eq!(processor.tile_total_content_height_px(tile_id), 0.0);
+    }
+
+    /// `tile_total_content_height_px` lets a caller read back the running
+    /// total tracked by `notify_tile_content_appended` and add its own delta,
+    /// instead of maintaining a duplicate counter (hud-qbcp8's incremental
+    /// input-history height bookkeeping).
+    #[test]
+    fn tile_total_content_height_px_supports_incremental_append_callers() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "test",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(0.0, 0.0, 400.0, 300.0),
+                1,
+            )
+            .unwrap();
+        scene
+            .register_tile_scroll_config(tile_id, tze_hud_scene::TileScrollConfig::vertical())
+            .unwrap();
+
+        let mut processor = InputProcessor::new();
+        let line_h = 21.0_f32;
+        let viewport_h = 300.0_f32;
+
+        // First entry: 3 lines.
+        let total = processor.tile_total_content_height_px(tile_id) + 3.0 * line_h;
+        processor.notify_tile_content_appended(tile_id, total, viewport_h, line_h, &mut scene);
+        assert!((processor.tile_total_content_height_px(tile_id) - 3.0 * line_h).abs() < 0.01);
+
+        // Second entry: 2 more lines, read back and added incrementally.
+        let total = processor.tile_total_content_height_px(tile_id) + 2.0 * line_h;
+        processor.notify_tile_content_appended(tile_id, total, viewport_h, line_h, &mut scene);
+        assert!((processor.tile_total_content_height_px(tile_id) - 5.0 * line_h).abs() < 0.01);
     }
 
     /// Coordinate reconciliation: `total_content_height_px` is stored correctly
