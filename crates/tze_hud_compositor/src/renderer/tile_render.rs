@@ -44,7 +44,7 @@ use super::token_colors::{
     ComposerOverlayTokens, ComposerVerticalAnchor, TILE_BG_DEFAULT, TILE_BG_STATIC_IMAGE,
     TILE_BG_TEXT_MARKDOWN, linear_to_srgb, resolve_composer_overlay_tokens,
     resolve_focus_ring_tokens, resolve_resize_grip_tokens, resolve_tile_bg_token,
-    resolve_viewer_echo_tokens,
+    resolve_tile_spacing_tokens, resolve_viewer_echo_tokens,
 };
 
 // The composer's content inset (historically the `COMPOSER_TEXT_MARGIN = 6.0`
@@ -1640,8 +1640,12 @@ impl Compositor {
                                 // instead of drifting from the code it backs.
                                 let line_height =
                                     self.scaled_portal_font(tm.font_size_px, tile.id, scene) * 1.4;
-                                let panel_margin_x = 4.0_f32;
-                                let panel_pad_y = 2.0_f32;
+                                // Code-panel backdrop geometry is token-driven
+                                // (portal.spacing.code_panel_*); defaults equal the
+                                // historical 4.0/2.0 literals (no visual regression).
+                                let tile_spacing = resolve_tile_spacing_tokens(&self.token_map);
+                                let panel_margin_x = tile_spacing.code_panel_margin_x_px;
+                                let panel_pad_y = tile_spacing.code_panel_pad_y_px;
                                 let plain = parsed.plain_text.as_ref();
                                 for panel in &parsed.code_panels {
                                     use crate::markdown::CodePanelKind;
@@ -1759,7 +1763,11 @@ impl Compositor {
                         vertices,
                     );
 
-                    let text_margin = 8.0;
+                    // Fallback placeholder inset is token-driven
+                    // (portal.spacing.transcript_fallback_inset_px); default equals
+                    // the historical 8.0 literal (no visual regression).
+                    let text_margin =
+                        resolve_tile_spacing_tokens(&self.token_map).transcript_fallback_inset_px;
                     if tm.bounds.width > text_margin * 2.0 && tm.bounds.height > text_margin * 2.0 {
                         Self::append_clipped_rect_vertices(
                             tile,
@@ -1873,7 +1881,10 @@ impl Compositor {
                         vertices,
                     );
 
-                    let margin = 4.0_f32;
+                    // Placeholder accent margin is token-driven
+                    // (portal.spacing.image_margin_px); default equals the historical
+                    // 4.0 literal (no visual regression).
+                    let margin = resolve_tile_spacing_tokens(&self.token_map).image_margin_px;
                     if img.bounds.width > margin * 2.0 && img.bounds.height > margin * 2.0 {
                         let accent_color = [0.75_f32, 0.70, 0.65, tile_opacity];
                         Self::append_clipped_rect_vertices(
