@@ -64,6 +64,17 @@ pub struct LocalComposerState {
     /// The `SceneId` of the `HitRegionNode` that owns this composer region.
     /// Used to locate the tile bounds for overlay placement.
     pub node_id: tze_hud_scene::types::SceneId,
+    /// Optional dimmed hint rendered when the draft is EMPTY (hud-evk0j).
+    ///
+    /// When `text` is empty and this is `Some(non-empty)`, the composer echo
+    /// renders this string colored from `portal.composer.placeholder_color`
+    /// (see `ComposerOverlayTokens::placeholder_color`) instead of the empty
+    /// draft. It is purely a render-time hint: it is never part of the draft
+    /// buffer, is never submitted, carries no caret, and disappears the instant
+    /// the user types (the moment `text` is non-empty the normal draft path runs).
+    /// `None` (or empty) renders no placeholder, so composers that opt out are
+    /// unchanged.
+    pub placeholder: Option<String>,
 }
 
 /// Shared update slot for delivering [`LocalComposerState`] from the

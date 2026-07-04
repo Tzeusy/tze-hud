@@ -1013,10 +1013,25 @@ impl Compositor {
         // While a selection is active the caret marks the moving selection edge,
         // so it stays solid (no blink); the selection-offset math below relies on
         // the caret glyph being present.
+        // Empty-draft placeholder (hud-evk0j): when the draft buffer is empty and
+        // the composer carries a non-empty placeholder hint, render that hint in
+        // the dimmed placeholder color instead of the (empty) draft + caret. The
+        // placeholder is render-only — it is not in `cs.text`, so it is never
+        // submitted, carries no caret or selection, and vanishes the instant the
+        // user types (a non-empty `cs.text` falls through to the normal path).
+        let placeholder = if cs.text.is_empty() {
+            cs.placeholder.as_deref().filter(|p| !p.is_empty())
+        } else {
+            None
+        };
+
         let has_selection = cs.selection_anchor != cs.cursor_byte;
         let caret_visible =
             has_selection || caret_visible_at(self.composer_caret_blink_start.elapsed());
-        let display_text = composer_display_text_blink(&cs.text, cs.cursor_byte, caret_visible);
+        let display_text = match placeholder {
+            Some(hint) => hint.to_string(),
+            None => composer_display_text_blink(&cs.text, cs.cursor_byte, caret_visible),
+        };
 
         let text_margin = tokens.content_inset_px;
 
@@ -1034,12 +1049,18 @@ impl Compositor {
         // in text.rs: RGB channels go through the sRGB transfer curve; alpha is linear).
         let to_srgb_u8 = |v: f32| (linear_to_srgb(v.clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
         let to_alpha_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-        let text_color = [
-            to_srgb_u8(tokens.text_r),
-            to_srgb_u8(tokens.text_g),
-            to_srgb_u8(tokens.text_b),
-            to_alpha_u8(tokens.text_a),
-        ];
+        // Placeholder text uses the dimmed placeholder token color; live draft text
+        // uses the composer text color (hud-evk0j).
+        let text_color = if placeholder.is_some() {
+            tokens.placeholder_color
+        } else {
+            [
+                to_srgb_u8(tokens.text_r),
+                to_srgb_u8(tokens.text_g),
+                to_srgb_u8(tokens.text_b),
+                to_alpha_u8(tokens.text_a),
+            ]
+        };
 
         let bw = (region.width - text_margin * 2.0).max(1.0);
         let line_height = (tokens.font_size_px
@@ -1058,7 +1079,11 @@ impl Compositor {
         // ComposerDraft invariants; we still guard with `min(text.len())` here
         // so a stale snapshot with an out-of-range anchor cannot panic.
         let caret_utf8_len = '▌'.len_utf8(); // 3
-        let styled_runs: Box<[crate::text::StyledRunItem]> = {
+        let styled_runs: Box<[crate::text::StyledRunItem]> = if placeholder.is_some() {
+            // Placeholder is a static dimmed hint: no caret glyph, no selection
+            // highlight — the whole run is the placeholder color (hud-evk0j).
+            Box::new([])
+        } else {
             let anchor = cs.selection_anchor.min(cs.text.len());
             let cursor = cs.cursor_byte.min(cs.text.len());
             let display_len = display_text.len();
