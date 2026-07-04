@@ -663,7 +663,14 @@ async fn test_viewer_echo_stack_tracks_live_composer_box() {
     // Resting (single-line) box: echo sits strictly above the box top.
     compositor.composer_layout.visible_lines = 1.0;
     let y_rest = echo_y(&compositor, &scene);
-    let box_top_1 = Compositor::composer_input_box(region, composer_font, lhm, 1.0).y;
+    let box_top_1 = Compositor::composer_input_box(
+        region,
+        composer_font,
+        lhm,
+        1.0,
+        ComposerVerticalAnchor::Bottom,
+    )
+    .y;
     assert!(
         y_rest + echo_line_h <= box_top_1 + 0.5,
         "resting: echo bottom {} must be at/above the 1-line box top {box_top_1}",
@@ -673,7 +680,14 @@ async fn test_viewer_echo_stack_tracks_live_composer_box() {
     // Grow the draft to 4 lines: the echo must ride UP and stay above the taller box.
     compositor.composer_layout.visible_lines = 4.0;
     let y_grown = echo_y(&compositor, &scene);
-    let box_top_4 = Compositor::composer_input_box(region, composer_font, lhm, 4.0).y;
+    let box_top_4 = Compositor::composer_input_box(
+        region,
+        composer_font,
+        lhm,
+        4.0,
+        ComposerVerticalAnchor::Bottom,
+    )
+    .y;
     assert!(
         y_grown < y_rest,
         "echo must move up as the composer box grows (grown {y_grown} < resting {y_rest})"
@@ -749,7 +763,14 @@ fn echo_geometry(compositor: &Compositor) -> (f32, f32) {
         super::token_colors::resolve_composer_overlay_tokens(&compositor.token_map).font_size_px;
     let echo_font =
         super::token_colors::resolve_viewer_echo_tokens(&compositor.token_map).font_size_px;
-    let box_top = Compositor::composer_input_box(region, composer_font, lhm, 1.0).y;
+    let box_top = Compositor::composer_input_box(
+        region,
+        composer_font,
+        lhm,
+        1.0,
+        ComposerVerticalAnchor::Bottom,
+    )
+    .y;
     let echo_line_h = (echo_font * lhm).max(1.0);
     (box_top, echo_line_h)
 }
@@ -11961,7 +11982,13 @@ fn multiline_input_box_grows_upward_pinned_bottom() {
     let line_height = font * NX_LH_MULT;
     let margin = 6.0; // COMPOSER_TEXT_MARGIN
 
-    let one = Compositor::composer_input_box(region, font, NX_LH_MULT, 1.0);
+    let one = Compositor::composer_input_box(
+        region,
+        font,
+        NX_LH_MULT,
+        1.0,
+        ComposerVerticalAnchor::Bottom,
+    );
     let expected_one_h = line_height + margin * 2.0;
     assert!(
         (one.height - expected_one_h).abs() < 0.01,
@@ -11972,7 +11999,13 @@ fn multiline_input_box_grows_upward_pinned_bottom() {
         "one-line box is pinned to the region bottom"
     );
 
-    let three = Compositor::composer_input_box(region, font, NX_LH_MULT, 3.0);
+    let three = Compositor::composer_input_box(
+        region,
+        font,
+        NX_LH_MULT,
+        3.0,
+        ComposerVerticalAnchor::Bottom,
+    );
     let expected_three_h = line_height * 3.0 + margin * 2.0;
     assert!(
         (three.height - expected_three_h).abs() < 0.01,
@@ -11995,12 +12028,224 @@ fn multiline_input_box_grows_upward_pinned_bottom() {
 #[test]
 fn multiline_input_box_clamped_to_region() {
     let region = Rect::new(0.0, 0.0, 400.0, 50.0);
-    let box_rect = Compositor::composer_input_box(region, 16.0, NX_LH_MULT, 20.0);
+    let box_rect = Compositor::composer_input_box(
+        region,
+        16.0,
+        NX_LH_MULT,
+        20.0,
+        ComposerVerticalAnchor::Bottom,
+    );
     assert!(
         box_rect.height <= region.height + 0.01,
         "clamped to region height"
     );
     assert!(box_rect.y >= region.y - 0.01, "top not above the region");
+}
+
+/// hud-nottc: with the TOP anchor the composer input box pins to the region TOP
+/// (the pane content origin) and grows DOWNWARD as `visible_lines` rises, so the
+/// caret rests at the pane top-left when the draft is empty and the top edge
+/// never moves when the first glyph is typed. Contrast the Bottom anchor, which
+/// pins a single-line box near the region bottom — the "teleport" the owner saw.
+#[test]
+fn top_anchored_input_box_pins_to_region_top_and_grows_down() {
+    let region = Rect::new(10.0, 100.0, 600.0, 300.0); // bottom edge at y=400
+    let font = 16.0;
+    let line_height = font * NX_LH_MULT;
+    let margin = 6.0; // COMPOSER_TEXT_MARGIN
+
+    let one =
+        Compositor::composer_input_box(region, font, NX_LH_MULT, 1.0, ComposerVerticalAnchor::Top);
+    // Empty / single-line draft: box top IS the region top (pane content origin),
+    // not pinned to the region bottom.
+    assert_eq!(one.y, region.y, "top-anchored box pins to the region TOP");
+    assert!(
+        (one.height - (line_height + margin * 2.0)).abs() < 0.01,
+        "one-line height"
+    );
+
+    let three =
+        Compositor::composer_input_box(region, font, NX_LH_MULT, 3.0, ComposerVerticalAnchor::Top);
+    // Grows DOWNWARD: taller box, SAME top edge (the first line does not teleport).
+    assert_eq!(
+        three.y, region.y,
+        "top edge stays fixed as the box grows down"
+    );
+    assert!(three.height > one.height, "box grew with more lines");
+    assert_eq!(three.x, region.x);
+    assert_eq!(three.width, region.width);
+
+    // Contrast: the Bottom anchor would place the single-line box far below the
+    // top anchor — the teleport-to-bottom the owner reported for the empty draft.
+    let bottom_one = Compositor::composer_input_box(
+        region,
+        font,
+        NX_LH_MULT,
+        1.0,
+        ComposerVerticalAnchor::Bottom,
+    );
+    assert!(
+        bottom_one.y > one.y + 100.0,
+        "bottom anchor sits far below the top anchor (top y={}, bottom y={})",
+        one.y,
+        bottom_one.y
+    );
+}
+
+/// `portal.composer.anchor` selects the composer vertical anchor; the default is
+/// `Bottom` so every existing bottom-chat-strip profile is unchanged (hud-nottc).
+#[test]
+fn composer_anchor_token_resolves() {
+    use std::collections::HashMap;
+
+    let default = resolve_composer_overlay_tokens(&HashMap::new());
+    assert_eq!(
+        default.anchor,
+        ComposerVerticalAnchor::Bottom,
+        "default anchor is the bottom-chat strip"
+    );
+
+    let mut top = HashMap::new();
+    top.insert("portal.composer.anchor".to_string(), "top".to_string());
+    assert_eq!(
+        resolve_composer_overlay_tokens(&top).anchor,
+        ComposerVerticalAnchor::Top
+    );
+
+    // Case- and whitespace-insensitive.
+    let mut mixed = HashMap::new();
+    mixed.insert("portal.composer.anchor".to_string(), "  TOP ".to_string());
+    assert_eq!(
+        resolve_composer_overlay_tokens(&mixed).anchor,
+        ComposerVerticalAnchor::Top
+    );
+
+    // Unknown / malformed value falls back to Bottom.
+    let mut bogus = HashMap::new();
+    bogus.insert("portal.composer.anchor".to_string(), "sideways".to_string());
+    assert_eq!(
+        resolve_composer_overlay_tokens(&bogus).anchor,
+        ComposerVerticalAnchor::Bottom,
+        "unknown anchor value must fall back to Bottom"
+    );
+}
+
+/// hud-nottc live P1 (round 5): with the TOP anchor the composer caret must
+/// render at the input pane's top-left CONTENT ORIGIN when the draft is EMPTY
+/// (region top + margin — NOT the window's (0,0) top-left, NOT the region
+/// bottom), and it must NOT teleport when the first glyph is typed. Asserts the
+/// `TextItem` geometry directly (no pixel readback), so it is safe headless.
+#[tokio::test]
+async fn top_anchored_empty_caret_sits_at_pane_origin_no_teleport() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(600, 400).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+    // Select the top-anchored exemplar input-pane profile.
+    compositor
+        .token_map
+        .insert("portal.composer.anchor".to_string(), "top".to_string());
+
+    let mut scene = SceneGraph::new(600.0, 400.0);
+    let tab_id = scene.create_tab("test", 0).unwrap();
+    let lease_id = scene.grant_lease("test", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "test",
+            lease_id,
+            Rect::new(0.0, 0.0, 600.0, 400.0),
+            1,
+        )
+        .unwrap();
+    let root_id = SceneId::new();
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: root_id,
+                children: vec![],
+                data: NodeData::SolidColor(SolidColorNode {
+                    color: Rgba::new(0.02, 0.02, 0.02, 1.0),
+                    bounds: Rect::new(0.0, 0.0, 600.0, 400.0),
+                    radius: None,
+                }),
+            },
+        )
+        .unwrap();
+
+    // Short input pane at the tile TOP-LEFT (exemplar style). local bounds are
+    // tile-relative; the tile is at the scene origin so pane top == y 0.
+    const PANE_Y: f32 = 0.0;
+    const PANE_H: f32 = 80.0;
+    let hit_id = SceneId::new();
+    scene
+        .add_node_to_tile(
+            tile_id,
+            Some(root_id),
+            Node {
+                id: hit_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(0.0, PANE_Y, 400.0, PANE_H),
+                    interaction_id: "composer".to_owned(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    accepts_composer_input: true,
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap();
+
+    let tokens = resolve_composer_overlay_tokens(&compositor.token_map);
+    let margin = 6.0f32; // COMPOSER_TEXT_MARGIN
+
+    // ── Empty draft: caret at the pane content origin. ──
+    compositor.local_composer = Some(LocalComposerState {
+        text: String::new(),
+        cursor_byte: 0,
+        selection_anchor: 0,
+        at_capacity: false,
+        node_id: hit_id,
+    });
+    compositor.prime_composer_scroll_offset(&scene);
+    let empty_item = {
+        let tile = scene.tiles.get(&tile_id).unwrap();
+        compositor
+            .collect_composer_text_item(tile, &scene, 600.0, 400.0, &tokens)
+            .expect("empty focused composer must still produce a caret text item")
+    };
+    assert!(
+        (empty_item.pixel_y - (PANE_Y + margin)).abs() < 0.01,
+        "empty caret y must be the pane top + margin (content origin), got {}",
+        empty_item.pixel_y
+    );
+    assert!(
+        (empty_item.pixel_x - margin).abs() < 0.01,
+        "empty caret x must be the pane left + margin, got {}",
+        empty_item.pixel_x
+    );
+
+    // ── First glyph typed: NO teleport — the first line keeps the same origin. ──
+    compositor.local_composer = Some(LocalComposerState {
+        text: "h".to_owned(),
+        cursor_byte: 1,
+        selection_anchor: 1,
+        at_capacity: false,
+        node_id: hit_id,
+    });
+    compositor.prime_composer_scroll_offset(&scene);
+    let typed_item = {
+        let tile = scene.tiles.get(&tile_id).unwrap();
+        compositor
+            .collect_composer_text_item(tile, &scene, 600.0, 400.0, &tokens)
+            .expect("typed composer must produce a text item")
+    };
+    assert!(
+        (typed_item.pixel_y - empty_item.pixel_y).abs() < 0.01,
+        "caret teleported on the first keystroke: empty y={} typed y={}",
+        empty_item.pixel_y,
+        typed_item.pixel_y
+    );
 }
 
 // ─── Caret stays in the box for a short composer pane (hud-nottc) ─────────────

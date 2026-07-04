@@ -679,6 +679,34 @@ pub(super) struct ComposerOverlayTokens {
     /// `portal.composer.max_lines` token; defaults to
     /// [`COMPOSER_OVERLAY_DEFAULT_MAX_LINES`].
     pub(super) max_lines: u32,
+    /// Vertical anchoring of the composer input box within its region (hud-nottc).
+    ///
+    /// - [`ComposerVerticalAnchor::Bottom`] (default) — the input box pins to the
+    ///   BOTTOM edge of the region and grows UPWARD (the bottom-chat composer strip,
+    ///   `portal-bottom-chat-composer`). The projection-portal path uses this.
+    /// - [`ComposerVerticalAnchor::Top`] — the input box pins to the TOP edge of
+    ///   the region; the draft caret rests at the pane's top-left content origin
+    ///   when empty and the text flows DOWNWARD (document-style) as it grows, with
+    ///   no teleport between empty and non-empty states. The exemplar two-pane
+    ///   input pane uses this.
+    ///
+    /// Sourced from the `portal.composer.anchor` token (`"top"` / `"bottom"`);
+    /// defaults to `Bottom` so every existing bottom-strip profile is unchanged.
+    pub(super) anchor: ComposerVerticalAnchor,
+}
+
+/// Vertical anchoring of the composer input box within its region (hud-nottc).
+///
+/// The composer draft echo shares one layout core (`composer_input_box`) between
+/// two profiles; this parameter selects which edge the box pins to. See
+/// [`ComposerOverlayTokens::anchor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ComposerVerticalAnchor {
+    /// Pin the box to the region TOP; caret starts at the pane content origin and
+    /// text flows downward (exemplar two-pane input pane).
+    Top,
+    /// Pin the box to the region BOTTOM; the box grows upward (bottom-chat strip).
+    Bottom,
 }
 
 const COMPOSER_OVERLAY_DEFAULT_FONT_SIZE_PX: f32 = 16.0;
@@ -738,6 +766,19 @@ pub(super) fn resolve_composer_overlay_tokens(
         .filter(|&v| v >= 1)
         .unwrap_or(COMPOSER_OVERLAY_DEFAULT_MAX_LINES);
 
+    // Vertical anchor (default: Bottom — the bottom-chat strip). Only an explicit
+    // `top` (case-insensitive) selects the top-anchored exemplar input pane; any
+    // other / missing / malformed value falls back to Bottom so existing profiles
+    // are unchanged.
+    let anchor = match token_map
+        .get("portal.composer.anchor")
+        .map(|v| v.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("top") => ComposerVerticalAnchor::Top,
+        _ => ComposerVerticalAnchor::Bottom,
+    };
+
     ComposerOverlayTokens {
         bg_r,
         bg_g,
@@ -754,6 +795,7 @@ pub(super) fn resolve_composer_overlay_tokens(
         selection_bg,
         font_size_px,
         max_lines,
+        anchor,
     }
 }
 
