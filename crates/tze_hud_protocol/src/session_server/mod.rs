@@ -500,6 +500,10 @@ impl HudSession for HudSessionImpl {
         // Delivery is gated on SCENE_TOPOLOGY subscription in the session loop.
         let mut element_repositioned_rx = self.element_repositioned_tx.subscribe();
 
+        // Subscribe to the frame-presented broadcast channel (hud-91uu6).
+        // Delivery is gated on TELEMETRY_FRAMES subscription in the session loop.
+        let mut frame_presented_rx = self.frame_presented_tx.subscribe();
+
         // Create outbound channel
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<ServerMessage, Status>>(
             SESSION_EVENT_CHANNEL_CAPACITY,
@@ -764,6 +768,19 @@ impl HudSession for HudSessionImpl {
                     // Transactional — never coalesced or dropped. Agent cannot reject.
                     element_repositioned_result = element_repositioned_rx.recv() => {
                         if let LoopAction::Break = session.on_element_repositioned(element_repositioned_result, &tx).await {
+                            break;
+                        }
+                    }
+
+                    // ── FramePresented broadcast (hud-91uu6) ─────────────────────
+                    //
+                    // Batch-correlated present acknowledgment: pairs the accepted
+                    // MutationBatch.batch_ids composited into a presented frame with
+                    // that frame's present wall-clock. Delivered to agents subscribed
+                    // to TELEMETRY_FRAMES (requires read_telemetry). State-stream —
+                    // coalesced/droppable under backpressure. Agent cannot reject.
+                    frame_presented_result = frame_presented_rx.recv() => {
+                        if let LoopAction::Break = session.on_frame_presented(frame_presented_result, &tx).await {
                             break;
                         }
                     }
@@ -1374,6 +1391,53 @@ impl StreamSession {
                 // store state is persistent so a future snapshot or
                 // ListElementsRequest will reflect the current position.
                 let _ = n; // suppress unused warning; production: tracing::warn!
+                LoopAction::Continue
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                // Runtime shutting down — treat as ungraceful disconnect.
+                self.transition(SessionState::Closed);
+                LoopAction::Break
+            }
+        }
+    }
+
+    /// Handle a `FramePresented` broadcast result (hud-91uu6).
+    ///
+    /// Batch-correlated present acknowledgment. Delivered to agents subscribed to
+    /// TELEMETRY_FRAMES (requires the read_telemetry capability, enforced at
+    /// subscribe time — so checking the active subscription here is sufficient
+    /// and matches the RuntimeTelemetryFrame gate). State-stream class:
+    /// coalesced/droppable under backpressure. Agent cannot reject.
+    async fn on_frame_presented(
+        &mut self,
+        frame_presented_result: Result<
+            crate::proto::FramePresented,
+            tokio::sync::broadcast::error::RecvError,
+        >,
+        tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, tonic::Status>>,
+    ) -> LoopAction {
+        match frame_presented_result {
+            Ok(event) => {
+                // Gate on TELEMETRY_FRAMES subscription (read_telemetry capability
+                // was already enforced when the subscription was granted).
+                if self
+                    .subscriptions
+                    .contains(&crate::subscriptions::category::TELEMETRY_FRAMES.to_string())
+                {
+                    let seq = self.next_server_seq();
+                    let _ = tx
+                        .send(Ok(ServerMessage {
+                            sequence: seq,
+                            timestamp_wall_us: now_wall_us(),
+                            payload: Some(ServerPayload::FramePresented(event)),
+                        }))
+                        .await;
+                }
+                LoopAction::Continue
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                // Missed present acks under backpressure. State-stream class —
+                // droppable; the latency probe samples, so a gap is acceptable.
                 LoopAction::Continue
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => {

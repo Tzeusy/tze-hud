@@ -61,10 +61,13 @@ pub fn classify_server_payload(payload: &ServerPayload) -> TrafficClass {
         ServerPayload::DegradationNotice(_) => TrafficClass::Transactional,
 
         // Scene state / events / runtime telemetry — state-stream
+        // FramePresented rides the telemetry class: coalesced/droppable under
+        // backpressure (a present-latency probe samples it; hud-91uu6).
         ServerPayload::SceneSnapshot(_)
         | ServerPayload::SceneDelta(_)
         | ServerPayload::EventBatch(_)
-        | ServerPayload::RuntimeTelemetry(_) => TrafficClass::StateStream,
+        | ServerPayload::RuntimeTelemetry(_)
+        | ServerPayload::FramePresented(_) => TrafficClass::StateStream,
 
         // Heartbeat echo — ephemeral (droppable, latest-wins)
         ServerPayload::Heartbeat(_) => TrafficClass::Ephemeral,

@@ -560,6 +560,12 @@ impl SceneGraph {
             }
         }
 
+        // Record this batch for batch-correlated present acknowledgment (hud-91uu6).
+        // The commit above mutated the live graph, so the next composited frame
+        // carries this batch; the render loop drains and stamps it with the
+        // present wall-clock to emit a FramePresented event.
+        self.record_present_ack_batch(batch.batch_id);
+
         MutationResult {
             batch_id: batch.batch_id,
             applied: true,
@@ -1019,6 +1025,96 @@ mod tests {
         assert_eq!(result.created_ids.len(), 1);
         assert_eq!(scene.tile_count(), 1);
         assert!(result.sequence_number.is_some());
+    }
+
+    #[test]
+    fn accepted_batch_records_present_ack_and_drains_once() {
+        // hud-91uu6: an accepted batch enqueues its batch_id for present-ack
+        // correlation; the render loop drains it exactly once per present.
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let batch = make_batch(
+            "agent",
+            vec![SceneMutation::CreateTile {
+                tab_id,
+                namespace: "agent".to_string(),
+                lease_id,
+                bounds: Rect::new(10.0, 10.0, 200.0, 150.0),
+                z_order: 1,
+            }],
+        );
+        let expected = batch.batch_id;
+
+        assert!(scene.apply_batch(&batch).applied);
+
+        // The applied batch_id is queued for the next present.
+        let drained = scene.drain_present_ack_batch_ids();
+        assert_eq!(drained, vec![expected], "drain yields the applied batch_id");
+
+        // Drain is one-shot: a second drain (no new applies) is empty.
+        assert!(
+            scene.drain_present_ack_batch_ids().is_empty(),
+            "second drain yields nothing"
+        );
+    }
+
+    #[test]
+    fn rejected_batch_records_no_present_ack() {
+        // A rejected batch (missing lease) must not enqueue a present-ack: only
+        // batches whose commit changed the scene are reflected by a frame.
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        // Reference a lease that was never granted → Stage 1 rejection.
+        let bogus_lease = SceneId::new();
+        let batch = make_batch(
+            "agent",
+            vec![SceneMutation::CreateTile {
+                tab_id,
+                namespace: "agent".to_string(),
+                lease_id: bogus_lease,
+                bounds: Rect::new(10.0, 10.0, 200.0, 150.0),
+                z_order: 1,
+            }],
+        );
+
+        assert!(!scene.apply_batch(&batch).applied, "batch must be rejected");
+        assert!(
+            scene.drain_present_ack_batch_ids().is_empty(),
+            "rejected batch enqueues no present-ack"
+        );
+    }
+
+    #[test]
+    fn present_ack_preserves_application_order_across_batches() {
+        // Multiple batches applied before a present drain in application order.
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let mut expected = Vec::new();
+        for i in 0..3 {
+            let batch = make_batch(
+                "agent",
+                vec![SceneMutation::CreateTile {
+                    tab_id,
+                    namespace: "agent".to_string(),
+                    lease_id,
+                    bounds: Rect::new(10.0 * (i + 1) as f32, 10.0, 100.0, 80.0),
+                    z_order: i + 1,
+                }],
+            );
+            expected.push(batch.batch_id);
+            assert!(scene.apply_batch(&batch).applied);
+        }
+        assert_eq!(scene.drain_present_ack_batch_ids(), expected);
     }
 
     #[test]

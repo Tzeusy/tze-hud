@@ -1172,6 +1172,17 @@ impl ApplicationHandler for WinitApp {
                             // scene idles on the next iteration.
                             last_rendered_scene_version = scene.version;
                             last_rendered_geometry_epoch = scene.geometry_epoch;
+                            // ── Batch-correlated present ack drain (hud-91uu6) ──
+                            // gRPC `apply_batch` enqueues accepted batch_ids in
+                            // BOTH runtimes, so the windowed present path must drain
+                            // this queue every presented frame or it grows unbounded
+                            // over a live session. Emitting a `FramePresented` from
+                            // the compositor thread (threading the broadcast sender
+                            // into this move-closure past the network-start ordering)
+                            // is deferred to a follow-up; the headless runtime is the
+                            // testable producer today. Drain-and-discard here keeps
+                            // windowed memory bounded in the interim.
+                            let _presented_batch_ids = scene.drain_present_ack_batch_ids();
                             // ── DROP the scene lock BEFORE the vsync-blocking
                             // acquire/encode/submit/poll (hud-uyhpn) ────────────
                             // This is the fix: the lock hold now collapses to the

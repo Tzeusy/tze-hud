@@ -138,6 +138,20 @@ pub struct RuntimeOverlayState {
     /// Ephemeral: skipped during serialization.
     #[serde(skip, default)]
     pub recently_removed_tile_ids: Vec<SceneId>,
+    /// Accepted MutationBatch ids applied since the last present drain (hud-91uu6).
+    ///
+    /// Populated by [`SceneGraph::apply_batch`] on every accepted (applied) batch,
+    /// in application order. Drained by the render loop at frame present via
+    /// [`SceneGraph::drain_present_ack_batch_ids`], which stamps them with the
+    /// presented frame number + present wall-clock and emits a `FramePresented`
+    /// event to TELEMETRY_FRAMES subscribers. This is the batch → on-screen-present
+    /// correlation primitive: a batch whose commit changed the scene is reflected
+    /// by the next composited frame, so recording batch_ids here and draining at
+    /// present pairs each batch with the frame that carried it.
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub present_ack_pending_batch_ids: Vec<SceneId>,
     /// Tile IDs whose geometry the viewer has taken control of via a whole-portal
     /// move or resize gesture (hud-lyqun).
     ///
@@ -216,6 +230,29 @@ impl SceneGraph {
     /// outside the scene graph (e.g. `portal_resize_states`).
     pub fn drain_removed_tile_ids(&mut self) -> Vec<SceneId> {
         self.overlay.recently_removed_tile_ids.drain(..).collect()
+    }
+
+    /// Record an accepted MutationBatch id as pending on-screen present (hud-91uu6).
+    ///
+    /// Called by [`SceneGraph::apply_batch`] for every batch that applied. The id
+    /// is drained at the next frame present by [`Self::drain_present_ack_batch_ids`]
+    /// and paired with the presented frame number + present wall-clock to form a
+    /// `FramePresented` acknowledgment.
+    pub fn record_present_ack_batch(&mut self, batch_id: SceneId) {
+        self.overlay.present_ack_pending_batch_ids.push(batch_id);
+    }
+
+    /// Drain the batch_ids applied since the last present (hud-91uu6).
+    ///
+    /// Returns them in application order. The render loop calls this once per
+    /// presented frame; a non-empty result is stamped with the frame number and
+    /// present wall-clock and emitted as a `FramePresented` event to
+    /// TELEMETRY_FRAMES subscribers.
+    pub fn drain_present_ack_batch_ids(&mut self) -> Vec<SceneId> {
+        self.overlay
+            .present_ack_pending_batch_ids
+            .drain(..)
+            .collect()
     }
 
     /// Take viewer geometry authority over a tile (hud-lyqun).

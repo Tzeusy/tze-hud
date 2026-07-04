@@ -47,11 +47,12 @@ use crate::reload_triggers::{RuntimeServiceImpl, spawn_sighup_listener};
 use crate::runtime_context::{FallbackPolicy, RuntimeContext};
 use crate::widget_runtime_registration::process_pending_widget_svgs;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tze_hud_compositor::{Compositor, HeadlessSurface};
 use tze_hud_config::{TzeHudConfig, resolve_runtime_widget_asset_store};
 use tze_hud_input::{InputProcessor, PointerEvent, PointerEventKind, ScrollEvent};
+use tze_hud_protocol::proto::FramePresented;
 use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
 use tze_hud_protocol::proto::session::runtime_service_server::RuntimeServiceServer;
 use tze_hud_protocol::session::SharedState;
@@ -238,6 +239,15 @@ pub struct HeadlessRuntime {
     fallback_unrestricted: bool,
     /// Keeps the durable runtime widget asset store alive for runtime lifetime.
     _runtime_widget_store: Option<RuntimeWidgetStore>,
+    /// Broadcast sender for batch-correlated present acknowledgments (hud-91uu6).
+    ///
+    /// When set, `render_frame` drains the scene's present-ack queue after each
+    /// presented frame and emits a [`FramePresented`] pairing the applied
+    /// batch_ids with the frame number + present wall-clock. `None` (the default)
+    /// disables emission — the drain still runs so the queue never grows unbounded.
+    /// Wire this to `HudSessionImpl::frame_presented_tx` (via
+    /// [`HeadlessRuntime::set_frame_presented_tx`]) to deliver to gRPC subscribers.
+    frame_presented_tx: Option<tokio::sync::broadcast::Sender<FramePresented>>,
 }
 
 impl HeadlessRuntime {
@@ -382,7 +392,21 @@ impl HeadlessRuntime {
             runtime_context,
             fallback_unrestricted,
             _runtime_widget_store: runtime_widget_store,
+            frame_presented_tx: None,
         })
+    }
+
+    /// Wire a `FramePresented` broadcast sender so the render loop emits
+    /// batch-correlated present acknowledgments (hud-91uu6).
+    ///
+    /// Pass `HudSessionImpl::frame_presented_tx.clone()` to deliver present acks
+    /// to gRPC agents subscribed to TELEMETRY_FRAMES, or a standalone sender in
+    /// tests to observe the correlation directly.
+    pub fn set_frame_presented_tx(
+        &mut self,
+        tx: tokio::sync::broadcast::Sender<FramePresented>,
+    ) {
+        self.frame_presented_tx = Some(tx);
     }
 
     /// Get a reference to the shared state (scene + sessions).
@@ -501,6 +525,35 @@ impl HeadlessRuntime {
         // arrival) to Stage 7 completion (GPU present). Equals total frame time
         // since the frame pipeline starts at the input drain boundary.
         let input_to_next_present_us = frame_time_us;
+
+        // ── Batch-correlated present acknowledgment (hud-91uu6) ───────────────
+        // Stage 7 (GPU submit) is complete, so any batches applied to the scene
+        // since the last present are now on screen. Drain them and, if a sender
+        // is wired, emit a FramePresented pairing those batch_ids with this
+        // frame's number + present wall-clock. The drain runs unconditionally so
+        // the queue never grows unbounded even when no subscriber is attached.
+        let present_ack_batch_ids = scene_guard.drain_present_ack_batch_ids();
+        if let Some(tx) = &self.frame_presented_tx
+            && !present_ack_batch_ids.is_empty()
+        {
+            let present_wall_us = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_micros() as u64)
+                .unwrap_or(0);
+            let event = FramePresented {
+                frame_number: compositor_telemetry.frame_number,
+                present_wall_us,
+                // 16-byte big-endian UUID, matching the scene_id_to_bytes /
+                // bytes_to_scene_id wire contract used for MutationBatch.batch_id.
+                batch_ids: present_ack_batch_ids
+                    .iter()
+                    .map(|id| id.as_uuid().as_bytes().to_vec())
+                    .collect(),
+            };
+            // Broadcast send errors only when there are no subscribers — not an
+            // error condition for a droppable state-stream present ack.
+            let _ = tx.send(event);
+        }
 
         // Build the per-stage telemetry record (outside the Stage 8 timed region)
         let mut telemetry = FrameTelemetry::new(compositor_telemetry.frame_number);
