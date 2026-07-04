@@ -61,8 +61,130 @@ sys.path.insert(0, os.path.join(_SCRIPT_DIR, "proto_gen"))
 from hud_grpc_client import HudClient, _make_node  # noqa: E402
 from proto_gen import events_pb2, types_pb2  # noqa: E402
 
+import portal_part_tokens as ppt  # noqa: E402
 
-# ─── Portal chrome tokens (iterate here) ──────────────────────────────────────
+
+# ─── Portal design tokens (resolved, not literal) ─────────────────────────────
+#
+# hud-7jrj3 / finding vd-exemplar-hardcodes-all-visual-values: every published
+# color/font below is now RESOLVED from the canonical portal token surface
+# (`portal_part_tokens.py`, a sync-guarded mirror of Rust
+# `crates/tze_hud_config/src/portal_tokens.rs`) rather than being a bare literal.
+#
+# The exemplar's reviewed look is expressed as EXEMPLAR_PROFILE_OVERRIDES — a
+# profile-scoped override map, exactly the way a real component profile is a
+# swappable set of token overrides. Swapping the active profile (see
+# `apply_visual_profile`) re-resolves the tokens and reskins every published
+# value end-to-end. This is what the profile-swap phase exercises live, and what
+# the reskin assertion in the test suite proves.
+#
+# Deferred (follow-up): the runtime does not yet expose its *resolved*
+# PortalPartTokens over any wire surface, so resolution happens client-side
+# against the canonical mirror. Wiring the runtime's live resolved tokens over
+# the session handshake — so the runtime's active profile drives this exemplar —
+# is a protocol change tracked separately.
+PORTAL_TOKEN = ppt
+
+# Exemplar profile: the reviewed portal look, expressed as portal.* token
+# overrides (8-bit hex / decimal — the same value forms Rust parses). Absent
+# keys fall back to the canonical defaults in `portal_part_tokens.CANONICAL_DEFAULTS`.
+EXEMPLAR_PROFILE_OVERRIDES: dict[str, str] = {
+    ppt.PORTAL_TOKEN_FRAME_BACKGROUND: "#0000004D",        # black @ ~0.30 (light glass frame)
+    ppt.PORTAL_TOKEN_FRAME_BORDER_COLOR: "#FFFFFF1F",      # white @ ~0.12 composer border
+    ppt.PORTAL_TOKEN_HEADER_TEXT_COLOR: "#FAFCFF",         # near-white title
+    ppt.PORTAL_TOKEN_HEADER_FONT_SIZE: "18",               # exemplar title size
+    ppt.PORTAL_TOKEN_COMPOSER_BACKGROUND: "#000000F2",     # black @ ~0.95 input pane
+    ppt.PORTAL_TOKEN_COMPOSER_TEXT_COLOR: "#E0EBFA",       # input text
+    ppt.PORTAL_TOKEN_COMPOSER_CARET_COLOR: "#7ADB8FF2",    # green accent caret @ ~0.95
+    ppt.PORTAL_TOKEN_COMPOSER_PLACEHOLDER_COLOR: "#808CA3C7",  # muted placeholder @ ~0.78
+    ppt.PORTAL_TOKEN_TRANSCRIPT_BACKGROUND: "#000000F2",   # black @ ~0.95 output pane
+    ppt.PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR: "#EBF0F7",     # body text
+    ppt.PORTAL_TOKEN_TRANSCRIPT_DIM_TEXT_COLOR: "#C7D1E0E0",   # secondary labels @ ~0.88
+    ppt.PORTAL_TOKEN_TRANSCRIPT_DIM_BACKGROUND: "#00000080",   # black @ ~0.50 header/footer panels
+    ppt.PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR: "#7ADB8FEB",  # green activity dot @ ~0.92
+    ppt.PORTAL_TOKEN_DIVIDER_COLOR: "#FFFFFF1A",           # white @ ~0.10 hairline dividers
+    ppt.PORTAL_TOKEN_WINDOW_RESIZE_GRIP_COLOR: "#FFFFFFA8",    # white @ ~0.66 header grip
+    ppt.PORTAL_TOKEN_WINDOW_RESIZE_GRIP_HOVER_COLOR: "#FFFFFF66",  # white @ ~0.40 pane grip nub
+}
+
+# Active profile override map + resolved tokens. `TOKENS` is the single source
+# every published value reads from; `apply_visual_profile` rebinds both.
+ACTIVE_PROFILE_OVERRIDES: dict[str, str] = dict(EXEMPLAR_PROFILE_OVERRIDES)
+TOKENS: ppt.PortalPartTokens = ppt.resolve_portal_tokens(ACTIVE_PROFILE_OVERRIDES)
+
+
+def _rebind_visual_tokens() -> None:
+    """Recompute every token-derived visual global from the current `TOKENS`.
+
+    Colors are 4-tuples ``(r, g, b, a)`` in 0..1 (the form `make_solid_color_node`
+    / `make_text_node` consume). Secondary label sizes are derived from the
+    primary font tokens with fixed typographic steps, so they track a profile's
+    font-size overrides. Geometry (portal size, insets, header height) is NOT
+    tokenized here — the canonical `portal.spacing.*` tokens are calibrated for
+    the single-node Phase-1 pilot, not this two-pane chrome; two-pane geometry
+    tokens are a tracked follow-up.
+    """
+    global BG_RGBA, HEADER_BG_RGBA, DIVIDER_RGBA, FOOTER_BG_RGBA
+    global INPUT_PANE_BG_RGBA, OUTPUT_PANE_BG_RGBA, TEXT_WINDOW_BG_RGBA
+    global COMPOSER_BORDER_RGBA, SUBMIT_HINT_RGBA, EYEBROW_RGBA
+    global CARET_RGBA, STATIC_CARET_RGBA, PANE_DIVIDER_RGBA, PANE_DIVIDER_GRIP_RGBA
+    global TITLE_RGBA, SUBTITLE_RGBA, BODY_RGBA, META_RGBA
+    global ACTIVITY_DOT_RGBA, INPUT_TEXT_RGBA, INPUT_PLACEHOLDER_RGBA, HEADER_GRIP_RGBA
+    global TITLE_FONT, SUBTITLE_FONT, BODY_FONT, META_FONT
+    global EYEBROW_FONT, INPUT_FONT, SUBMIT_HINT_FONT
+
+    t = TOKENS
+    BG_RGBA = t.frame_background
+    HEADER_BG_RGBA = t.transcript_dim_background
+    DIVIDER_RGBA = t.divider_color
+    FOOTER_BG_RGBA = t.transcript_dim_background
+    INPUT_PANE_BG_RGBA = t.composer_background
+    OUTPUT_PANE_BG_RGBA = t.transcript_background
+    TEXT_WINDOW_BG_RGBA = t.transcript_background
+    COMPOSER_BORDER_RGBA = t.frame_border_color
+    SUBMIT_HINT_RGBA = t.transcript_dim_text_color
+    EYEBROW_RGBA = t.transcript_dim_text_color
+    CARET_RGBA = t.composer_caret_color
+    # Blink-off caret: same hue, zero alpha (a render state, not a color literal).
+    STATIC_CARET_RGBA = (*t.composer_caret_color[:3], 0.0)
+    PANE_DIVIDER_RGBA = t.divider_color
+    PANE_DIVIDER_GRIP_RGBA = t.resize_grip_hover_color
+    TITLE_RGBA = t.header_text_color
+    SUBTITLE_RGBA = t.transcript_dim_text_color
+    BODY_RGBA = t.transcript_text_color
+    META_RGBA = t.transcript_dim_text_color
+    ACTIVITY_DOT_RGBA = t.lifecycle_active_color
+    INPUT_TEXT_RGBA = t.composer_text_color
+    INPUT_PLACEHOLDER_RGBA = t.composer_placeholder_color
+    HEADER_GRIP_RGBA = t.resize_grip_color
+    TITLE_FONT = t.header_font_size_px
+    # Secondary label sizes derive from the primary font tokens with fixed
+    # typographic steps, so they track a profile's font-size overrides.
+    SUBTITLE_FONT = max(1.0, t.transcript_font_size_px - 4.0)
+    BODY_FONT = t.transcript_font_size_px
+    META_FONT = max(1.0, t.transcript_font_size_px - 4.0)
+    EYEBROW_FONT = max(1.0, t.transcript_font_size_px - 5.0)
+    INPUT_FONT = t.composer_font_size_px
+    SUBMIT_HINT_FONT = max(1.0, t.composer_font_size_px - 5.0)
+
+
+def apply_visual_profile(overrides: Optional[dict[str, str]]) -> ppt.PortalPartTokens:
+    """Swap the active portal profile and reskin every token-derived visual.
+
+    ``overrides`` is a ``{token_key: value}`` map (a component profile). Passing
+    ``None`` restores the exemplar profile. Re-resolves `TOKENS` and rebinds the
+    module-level visual globals, so any subsequently rebuilt portal frame is
+    published with the new palette/typography — proving the exemplar is
+    token-driven end-to-end, not literal.
+    """
+    global ACTIVE_PROFILE_OVERRIDES, TOKENS
+    ACTIVE_PROFILE_OVERRIDES = dict(overrides) if overrides is not None else dict(EXEMPLAR_PROFILE_OVERRIDES)
+    TOKENS = ppt.resolve_portal_tokens(ACTIVE_PROFILE_OVERRIDES)
+    _rebind_visual_tokens()
+    return TOKENS
+
+
+# ─── Portal chrome geometry (exemplar-local layout; see follow-up on tokens) ──
 
 PORTAL_W = 860.0
 PORTAL_H = 680.0
@@ -75,36 +197,43 @@ PORTAL_X_FROM_RIGHT = 28.0
 PORTAL_Y = 120.0
 PORTAL_Z = 220
 
-BG_RGBA = (0.0, 0.0, 0.0, 0.30)              # light portal frame only
-HEADER_BG_RGBA = (0.0, 0.0, 0.0, 0.50)       # header slightly denser than frame
-DIVIDER_RGBA = (1.0, 1.0, 1.0, 0.10)
-FOOTER_BG_RGBA = (0.0, 0.0, 0.0, 0.50)
-# Input + output panes: black at 95% opacity.
-INPUT_PANE_BG_RGBA = (0.0, 0.0, 0.0, 0.95)
-OUTPUT_PANE_BG_RGBA = (0.0, 0.0, 0.0, 0.95)
-TEXT_WINDOW_BG_RGBA = (0.0, 0.0, 0.0, 0.95)
-COMPOSER_BORDER_RGBA = (1.0, 1.0, 1.0, 0.12)
-SUBMIT_HINT_RGBA = (0.54, 0.60, 0.68, 0.90)
-EYEBROW_RGBA = (0.70, 0.76, 0.84, 0.90)
-CARET_RGBA = (0.48, 0.86, 0.56, 0.95)
-STATIC_CARET_RGBA = (0.48, 0.86, 0.56, 0.0)
+# ── Token-derived visual identity (resolved, never literal) ───────────────────
+#
+# Every color/font below is sourced from the resolved `TOKENS` (the active
+# portal profile). These module globals are (re)bound by `_rebind_visual_tokens`
+# — the initial binds here run at import; `apply_visual_profile` re-binds them on
+# a profile swap so the whole surface reskins. Colors are 4-tuples (r,g,b,a) in
+# 0..1; fonts are px floats.
+BG_RGBA = TOKENS.frame_background              # light portal frame only
+HEADER_BG_RGBA = TOKENS.transcript_dim_background   # header panel (denser than frame)
+DIVIDER_RGBA = TOKENS.divider_color
+FOOTER_BG_RGBA = TOKENS.transcript_dim_background
+# Input + output panes source the composer / transcript backgrounds.
+INPUT_PANE_BG_RGBA = TOKENS.composer_background
+OUTPUT_PANE_BG_RGBA = TOKENS.transcript_background
+TEXT_WINDOW_BG_RGBA = TOKENS.transcript_background
+COMPOSER_BORDER_RGBA = TOKENS.frame_border_color
+SUBMIT_HINT_RGBA = TOKENS.transcript_dim_text_color
+EYEBROW_RGBA = TOKENS.transcript_dim_text_color
+CARET_RGBA = TOKENS.composer_caret_color
+STATIC_CARET_RGBA = (*TOKENS.composer_caret_color[:3], 0.0)
 
-TITLE_RGBA = (0.98, 0.99, 1.0, 1.0)
-SUBTITLE_RGBA = (0.78, 0.82, 0.88, 0.88)
-BODY_RGBA = (0.92, 0.94, 0.97, 0.98)
-META_RGBA = (0.66, 0.70, 0.76, 0.82)
-ACTIVITY_DOT_RGBA = (0.48, 0.86, 0.56, 0.92)
-INPUT_TEXT_RGBA = (0.88, 0.92, 0.98, 0.96)
-INPUT_PLACEHOLDER_RGBA = (0.50, 0.55, 0.64, 0.78)
-HEADER_GRIP_RGBA = (1.0, 1.0, 1.0, 0.66)
+TITLE_RGBA = TOKENS.header_text_color
+SUBTITLE_RGBA = TOKENS.transcript_dim_text_color
+BODY_RGBA = TOKENS.transcript_text_color
+META_RGBA = TOKENS.transcript_dim_text_color
+ACTIVITY_DOT_RGBA = TOKENS.lifecycle_active_color
+INPUT_TEXT_RGBA = TOKENS.composer_text_color
+INPUT_PLACEHOLDER_RGBA = TOKENS.composer_placeholder_color
+HEADER_GRIP_RGBA = TOKENS.resize_grip_color
 
-TITLE_FONT = 18.0
-SUBTITLE_FONT = 12.0
-BODY_FONT = 16.0
-META_FONT = 12.0
-EYEBROW_FONT = 11.0
-INPUT_FONT = 16.0
-SUBMIT_HINT_FONT = 11.0
+TITLE_FONT = TOKENS.header_font_size_px
+SUBTITLE_FONT = max(1.0, TOKENS.transcript_font_size_px - 4.0)
+BODY_FONT = TOKENS.transcript_font_size_px
+META_FONT = max(1.0, TOKENS.transcript_font_size_px - 4.0)
+EYEBROW_FONT = max(1.0, TOKENS.transcript_font_size_px - 5.0)
+INPUT_FONT = TOKENS.composer_font_size_px
+SUBMIT_HINT_FONT = max(1.0, TOKENS.composer_font_size_px - 5.0)
 
 PADDING_X = 18.0
 HEADER_H = 52.0
@@ -117,8 +246,10 @@ ACTIVITY_DOT_SIZE = 8.0
 PANE_DIVIDER_W = 6.0
 MIN_PANE_W = 240.0
 INPUT_PANE_W = (PORTAL_W - PANE_DIVIDER_W) / 2.0
-PANE_DIVIDER_RGBA = (1.0, 1.0, 1.0, 0.14)
-PANE_DIVIDER_GRIP_RGBA = (1.0, 1.0, 1.0, 0.40)
+# Pane divider hairline is token-sourced (rebound on profile swap); the grip
+# nub derives from the resize-grip token so it tracks the same profile.
+PANE_DIVIDER_RGBA = TOKENS.divider_color
+PANE_DIVIDER_GRIP_RGBA = TOKENS.resize_grip_hover_color
 PANE_DIVIDER_GRIP_H = 44.0
 PANE_DIVIDER_GRIP_W = 2.0
 PORTAL_RESIZE_HANDLE = 22.0
@@ -721,6 +852,48 @@ def profile_swap_dimensions(
         ("expanded", expanded_w, expanded_h, 20.0, 18.0),
         ("standard", standard_w, standard_h, TITLE_FONT, BODY_FONT),
     ]
+
+
+# Per-profile color accents for the profile-swap phase. Each named profile is a
+# real set of portal.* token overrides (a component profile). Applying it via
+# `apply_visual_profile` re-resolves TOKENS and reskins every published value —
+# so the swap changes the live palette, not just the frame dimensions. The
+# "standard" profile is the exemplar's own look (no accent). This is the live,
+# end-to-end proof that the exemplar is token-driven, not literal.
+PROFILE_SWAP_COLOR_ACCENTS: dict[str, dict[str, str]] = {
+    "compact": {
+        ppt.PORTAL_TOKEN_FRAME_BACKGROUND: "#101826D9",     # cool slate glass
+        ppt.PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR: "#DCE6F5",
+        ppt.PORTAL_TOKEN_HEADER_TEXT_COLOR: "#EAF1FF",
+    },
+    "standard": {},
+    "expanded": {
+        ppt.PORTAL_TOKEN_FRAME_BACKGROUND: "#1A1206D9",     # warm amber glass
+        ppt.PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR: "#F5ECD9",
+        ppt.PORTAL_TOKEN_HEADER_TEXT_COLOR: "#FFF3DE",
+    },
+}
+
+
+def profile_swap_overrides(name: str, title_font: float, body_font: float) -> dict[str, str]:
+    """Build the full portal-token override map for one profile-swap step.
+
+    Starts from the exemplar profile, applies the profile's font sizes (so
+    header/composer/transcript typography track the swap), then layers the
+    named color accent. Pure so the reskin assertion can exercise it directly.
+    """
+    overrides = dict(EXEMPLAR_PROFILE_OVERRIDES)
+    overrides[ppt.PORTAL_TOKEN_HEADER_FONT_SIZE] = _fmt_token_num(title_font)
+    overrides[ppt.PORTAL_TOKEN_TRANSCRIPT_FONT_SIZE] = _fmt_token_num(body_font)
+    overrides[ppt.PORTAL_TOKEN_COMPOSER_FONT_SIZE] = _fmt_token_num(body_font)
+    overrides.update(PROFILE_SWAP_COLOR_ACCENTS.get(name, {}))
+    return overrides
+
+
+def _fmt_token_num(value: float) -> str:
+    """Format a numeric token value the way Rust's parser accepts (no trailing
+    ``.0`` noise on integers)."""
+    return str(int(value)) if float(value).is_integer() else repr(float(value))
 
 
 def clamp_input_pane_width(width: float) -> float:
@@ -4768,12 +4941,20 @@ async def run_profile_swap(
     hold_s: float,
     mutation_lock: asyncio.Lock,
 ) -> None:
-    """Cycle through named visual profiles (compact / standard / expanded) by mutating portal chrome tokens."""
+    """Cycle through named visual profiles (compact / standard / expanded).
+
+    Each profile is applied as a real portal-token override map via
+    `apply_visual_profile`, so the swap reskins BOTH geometry (portal size) and
+    the token-driven visual identity (frame background, transcript/header color,
+    typography). The published node values therefore change end-to-end per
+    profile — the live proof that the exemplar sources its visuals from resolved
+    tokens rather than literals (hud-7jrj3).
+    """
     emit_step_event(transcript, 11, "started", {
         "code": "profile-swap",
         "title": "Visual profile swap",
-        "action": "cycle compact → standard → expanded portal chrome profiles",
-        "expected_visual": "portal chrome dimensions shift each cycle; body text remains readable; no layout collapse",
+        "action": "cycle compact → standard → expanded portal token profiles (palette + typography + dimensions)",
+        "expected_visual": "portal palette AND chrome dimensions shift each cycle; body text remains readable; no layout collapse",
     })
 
     profiles = profile_swap_dimensions(PORTAL_W, PORTAL_H)
@@ -4782,45 +4963,61 @@ async def run_profile_swap(
     tab_width = tiles.tab_width
     tab_height = tiles.tab_height
 
-    for idx, (name, pw, ph, title_font, body_font) in enumerate(profiles):
-        pw_clamped, ph_clamped = clamp_portal_size(pw, ph, tab_width, tab_height)
-        set_portal_size(pw_clamped, ph_clamped, tab_width, tab_height)
+    try:
+        for idx, (name, pw, ph, title_font, body_font) in enumerate(profiles):
+            pw_clamped, ph_clamped = clamp_portal_size(pw, ph, tab_width, tab_height)
+            set_portal_size(pw_clamped, ph_clamped, tab_width, tab_height)
 
-        body_slice = "\n".join(lines[:min(len(lines), 40)])
-        is_last = idx == len(profiles) - 1
-        await publish_portal(
-            client, lease_id, tiles,
-            title="Exemplar Review Portal",
-            subtitle=f"Profile: {name}  ({pw_clamped:.0f}×{ph_clamped:.0f}px)",
-            body=body_slice,
-            footer_meta=f"profile-swap  •  {name}  •  title={title_font}pt body={body_font}pt",
-            include_tile_setup=True,
-            mutation_lock=mutation_lock,
-        )
-        status = "completed" if is_last else "checkpoint"
-        emit_step_event(transcript, 11, status, {
-            "code": f"profile-swap:{name}",
-            "title": f"Profile '{name}'",
-            "action": f"set portal to {pw_clamped:.0f}×{ph_clamped:.0f}px, title_font={title_font}pt, body_font={body_font}pt",
-            "expected_visual": f"portal resizes to {name} chrome dimensions; content remains readable",
-        }, portal_w=pw_clamped, portal_h=ph_clamped,
-           title_font_pt=title_font, body_font_pt=body_font,
-           operator_evidence=operator_evidence_entry(
-               f"profile-swap:{name}",
-               f"portal reskinned to '{name}' profile; chrome dimensions shifted and "
-               f"body text remained readable with no layout collapse",
-               {
-                   "profile": name,
-                   "portal_w": pw_clamped,
-                   "portal_h": ph_clamped,
-                   "title_font_pt": title_font,
-                   "body_font_pt": body_font,
-               },
-           ))
-        await asyncio.sleep(hold_s)
+            # Reskin: re-resolve the portal tokens from this profile's override
+            # map before rebuilding the frame. Every subsequently published
+            # color/font is read from the freshly resolved TOKENS.
+            resolved = apply_visual_profile(
+                profile_swap_overrides(name, title_font, body_font)
+            )
+            frame_bg = resolved.frame_background
+            body_rgba = resolved.transcript_text_color
 
-    # Restore canonical portal dimensions
-    set_portal_size(PORTAL_W, PORTAL_H, tab_width, tab_height)
+            body_slice = "\n".join(lines[:min(len(lines), 40)])
+            is_last = idx == len(profiles) - 1
+            await publish_portal(
+                client, lease_id, tiles,
+                title="Exemplar Review Portal",
+                subtitle=f"Profile: {name}  ({pw_clamped:.0f}×{ph_clamped:.0f}px)",
+                body=body_slice,
+                footer_meta=f"profile-swap  •  {name}  •  title={title_font}pt body={body_font}pt",
+                include_tile_setup=True,
+                mutation_lock=mutation_lock,
+            )
+            status = "completed" if is_last else "checkpoint"
+            emit_step_event(transcript, 11, status, {
+                "code": f"profile-swap:{name}",
+                "title": f"Profile '{name}'",
+                "action": f"apply '{name}' portal tokens: {pw_clamped:.0f}×{ph_clamped:.0f}px, "
+                          f"title_font={title_font}pt, body_font={body_font}pt, "
+                          f"frame_bg=rgba{tuple(round(c, 3) for c in frame_bg)}",
+                "expected_visual": f"portal reskins to '{name}' palette + dimensions; content remains readable",
+            }, portal_w=pw_clamped, portal_h=ph_clamped,
+               title_font_pt=title_font, body_font_pt=body_font,
+               operator_evidence=operator_evidence_entry(
+                   f"profile-swap:{name}",
+                   f"portal reskinned to '{name}' profile; palette AND chrome dimensions "
+                   f"shifted (frame + text sourced from resolved tokens) and body text "
+                   f"remained readable with no layout collapse",
+                   {
+                       "profile": name,
+                       "portal_w": pw_clamped,
+                       "portal_h": ph_clamped,
+                       "title_font_pt": title_font,
+                       "body_font_pt": body_font,
+                       "resolved_frame_background": [round(c, 4) for c in frame_bg],
+                       "resolved_transcript_text_color": [round(c, 4) for c in body_rgba],
+                   },
+               ))
+            await asyncio.sleep(hold_s)
+    finally:
+        # Restore the exemplar profile + canonical portal dimensions.
+        apply_visual_profile(None)
+        set_portal_size(PORTAL_W, PORTAL_H, tab_width, tab_height)
 
 
 async def run_window_mgmt(
