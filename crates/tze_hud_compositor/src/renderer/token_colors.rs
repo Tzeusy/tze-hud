@@ -718,6 +718,85 @@ pub(super) fn resolve_viewer_echo_tokens(token_map: &HashMap<String, String>) ->
     }
 }
 
+/// Resolved compositor-side portal spacing for the tile-render surfaces the
+/// exemplar client never draws itself: the markdown code-panel backdrop geometry,
+/// the glyphon-unavailable text-tile fallback inset, and the unregistered-image
+/// placeholder margin.
+///
+/// These are RUNTIME/COMPOSITOR-LOCAL render internals. Unlike the SHARED portal
+/// chrome spacing (`portal.spacing.content_inset_px`, `..header_height_px`,
+/// `..section_gap_px`) which lives in `tze_hud_config::PortalPartTokens` and is
+/// delivered to the exemplar over the session handshake, the exemplar has no
+/// concept of code panels, the glyphon fallback, or image placeholders — so these
+/// keys stay OUT of the handshake surface and resolve here from the token map
+/// directly. This is the runtime-side mirror of the exemplar-local two-pane
+/// geometry keys (`portal.two_pane.*`) being kept out of the runtime's canonical
+/// product vocabulary: the same runtime/exemplar boundary, seen from the other
+/// side. The `portal.viewer_echo.*` / `portal.window.resize_grip.*` resolvers in
+/// this module follow the same compositor-local pattern.
+///
+/// Every value is still token-overridable via its `portal.spacing.*` key, and the
+/// defaults equal the historical inline literals so the default profile is
+/// visually unchanged (CLAUDE.md "never hardcode … styling in the compositor").
+/// `0.0` (flush) is permitted; non-finite / negative overrides fall back to the
+/// default so a malformed token cannot invert the geometry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct TileSpacingTokens {
+    /// Inset (px) of the glyphon-unavailable text-tile fallback placeholder quad.
+    pub(super) transcript_fallback_inset_px: f32,
+    /// Horizontal margin (px) of the markdown code-panel backdrop from the node edge.
+    pub(super) code_panel_margin_x_px: f32,
+    /// Vertical padding (px) above and below the markdown code-panel backdrop.
+    pub(super) code_panel_pad_y_px: f32,
+    /// Margin (px) of the unregistered-image placeholder accent inside its tile.
+    pub(super) image_margin_px: f32,
+}
+
+// Tile-spacing fallback literals — the historical inline values, preserved so an
+// absent token reproduces the prior geometry exactly (no visual regression).
+const TILE_SPACING_DEFAULT_TRANSCRIPT_FALLBACK_INSET_PX: f32 = 8.0;
+const TILE_SPACING_DEFAULT_CODE_PANEL_MARGIN_X_PX: f32 = 4.0;
+const TILE_SPACING_DEFAULT_CODE_PANEL_PAD_Y_PX: f32 = 2.0;
+const TILE_SPACING_DEFAULT_IMAGE_MARGIN_PX: f32 = 4.0;
+
+/// Resolve [`TileSpacingTokens`] from the compositor token map.
+///
+/// Keys are `portal.spacing.transcript_fallback_inset_px`,
+/// `portal.spacing.code_panel_margin_x_px`, `portal.spacing.code_panel_pad_y_px`,
+/// and `portal.spacing.image_margin_px`. Missing, unparseable, non-finite, or
+/// negative values fall back to the historical literal for that surface.
+#[inline]
+pub(super) fn resolve_tile_spacing_tokens(
+    token_map: &HashMap<String, String>,
+) -> TileSpacingTokens {
+    let px = |key: &str, default: f32| -> f32 {
+        token_map
+            .get(key)
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(default)
+    };
+
+    TileSpacingTokens {
+        transcript_fallback_inset_px: px(
+            "portal.spacing.transcript_fallback_inset_px",
+            TILE_SPACING_DEFAULT_TRANSCRIPT_FALLBACK_INSET_PX,
+        ),
+        code_panel_margin_x_px: px(
+            "portal.spacing.code_panel_margin_x_px",
+            TILE_SPACING_DEFAULT_CODE_PANEL_MARGIN_X_PX,
+        ),
+        code_panel_pad_y_px: px(
+            "portal.spacing.code_panel_pad_y_px",
+            TILE_SPACING_DEFAULT_CODE_PANEL_PAD_Y_PX,
+        ),
+        image_margin_px: px(
+            "portal.spacing.image_margin_px",
+            TILE_SPACING_DEFAULT_IMAGE_MARGIN_PX,
+        ),
+    }
+}
+
 #[inline]
 pub(super) fn notification_dismiss_bounds(
     x: f32,

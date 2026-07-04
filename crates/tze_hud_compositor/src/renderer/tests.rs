@@ -12374,6 +12374,76 @@ fn composer_anchor_token_resolves() {
     );
 }
 
+/// hud-6ti2z: the non-composer tile-render spacing literals (code-panel backdrop
+/// margins, glyphon-unavailable text fallback inset, unregistered-image
+/// placeholder margin) resolve from their own `portal.spacing.*` tokens. Defaults
+/// MUST equal the historical inline literals (8.0 / 4.0 / 2.0 / 4.0) so the
+/// default profile is visually unchanged; overrides propagate; malformed values
+/// fall back. These are compositor-local (the exemplar never renders these
+/// surfaces), so — unlike `portal.spacing.content_inset_px` — they are resolved
+/// here rather than through the config-crate handshake `PortalPartTokens`.
+#[test]
+fn tile_spacing_tokens_resolve_default_override_and_reject() {
+    use crate::renderer::token_colors::resolve_tile_spacing_tokens;
+    use std::collections::HashMap;
+
+    // Defaults equal the historical literals (no visual regression).
+    let default = resolve_tile_spacing_tokens(&HashMap::new());
+    assert_eq!(default.transcript_fallback_inset_px, 8.0);
+    assert_eq!(default.code_panel_margin_x_px, 4.0);
+    assert_eq!(default.code_panel_pad_y_px, 2.0);
+    assert_eq!(default.image_margin_px, 4.0);
+
+    // Each key overrides its own field, independently of the others.
+    let mut over = HashMap::new();
+    over.insert(
+        "portal.spacing.transcript_fallback_inset_px".to_string(),
+        "12".to_string(),
+    );
+    over.insert(
+        "portal.spacing.code_panel_margin_x_px".to_string(),
+        "7".to_string(),
+    );
+    over.insert(
+        "portal.spacing.code_panel_pad_y_px".to_string(),
+        "3.5".to_string(),
+    );
+    over.insert(
+        "portal.spacing.image_margin_px".to_string(),
+        "9".to_string(),
+    );
+    let resolved = resolve_tile_spacing_tokens(&over);
+    assert_eq!(resolved.transcript_fallback_inset_px, 12.0);
+    assert_eq!(resolved.code_panel_margin_x_px, 7.0);
+    assert_eq!(resolved.code_panel_pad_y_px, 3.5);
+    assert_eq!(resolved.image_margin_px, 9.0);
+
+    // Flush (0.0) is a valid inset/margin and must be honored.
+    let mut flush = HashMap::new();
+    flush.insert(
+        "portal.spacing.code_panel_margin_x_px".to_string(),
+        "0".to_string(),
+    );
+    assert_eq!(
+        resolve_tile_spacing_tokens(&flush).code_panel_margin_x_px,
+        0.0
+    );
+
+    // Malformed / negative / non-finite overrides fall back to the default.
+    for bad in ["not-a-number", "-4", "NaN", "inf", ""] {
+        let mut m = HashMap::new();
+        m.insert(
+            "portal.spacing.image_margin_px".to_string(),
+            bad.to_string(),
+        );
+        assert_eq!(
+            resolve_tile_spacing_tokens(&m).image_margin_px,
+            4.0,
+            "malformed image_margin override {bad:?} must fall back to the 4.0 default"
+        );
+    }
+}
+
 /// hud-nottc live P1 (round 5): with the TOP anchor the composer caret must
 /// render at the input pane's top-left CONTENT ORIGIN when the draft is EMPTY
 /// (region top + margin — NOT the window's (0,0) top-left, NOT the region
