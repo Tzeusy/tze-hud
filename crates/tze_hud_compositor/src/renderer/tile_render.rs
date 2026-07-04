@@ -41,9 +41,9 @@ use super::image_cache::{
     composer_scroll_offset, composer_vertical_line_offset, composer_visible_line_count,
 };
 use super::token_colors::{
-    ComposerOverlayTokens, TILE_BG_DEFAULT, TILE_BG_STATIC_IMAGE, TILE_BG_TEXT_MARKDOWN,
-    linear_to_srgb, resolve_composer_overlay_tokens, resolve_focus_ring_tokens,
-    resolve_tile_bg_token, resolve_viewer_echo_tokens,
+    ComposerOverlayTokens, ComposerVerticalAnchor, TILE_BG_DEFAULT, TILE_BG_STATIC_IMAGE,
+    TILE_BG_TEXT_MARKDOWN, linear_to_srgb, resolve_composer_overlay_tokens,
+    resolve_focus_ring_tokens, resolve_tile_bg_token, resolve_viewer_echo_tokens,
 };
 
 /// Horizontal inset (physical px) between the composer region edge and the draft
@@ -515,6 +515,7 @@ impl Compositor {
             tokens.font_size_px,
             line_height_multiplier,
             self.composer_layout.visible_lines,
+            tokens.anchor,
         );
 
         // Background fill.
@@ -595,28 +596,41 @@ impl Compositor {
     /// For a composer region that is already ~one line tall (the intended
     /// promotion-era structured composer node) the strip equals the region, so
     /// behaviour there is unchanged.
-    /// Composer input box for `visible_lines` wrapped text lines, pinned to the
-    /// BOTTOM of the region and grown UPWARD (hud-nx7yq.1).
+    /// Composer input box for `visible_lines` wrapped text lines within `region`.
     ///
     /// Height is `visible_lines` text lines plus symmetric vertical padding (equal
     /// to the horizontal text margin), clamped to the region height.
     /// `visible_lines == 1.0` reproduces the single input-line strip (hud-2zsbf)
     /// exactly, so single-line behaviour is unchanged.
     ///
-    /// Growth is viewer-local: the box extends upward over the transcript, which
-    /// yields the space by occlusion; the portal's outer geometry is untouched.
+    /// Vertical placement is selected by `anchor` (hud-nottc):
+    /// - [`ComposerVerticalAnchor::Bottom`] (default profile) — the box pins to the
+    ///   BOTTOM edge of the region and grows UPWARD (hud-nx7yq.1). Growth is
+    ///   viewer-local: the box extends upward over the transcript, which yields the
+    ///   space by occlusion; the portal's outer geometry is untouched.
+    /// - [`ComposerVerticalAnchor::Top`] — the box pins to the TOP edge of the
+    ///   region so the draft caret rests at the pane's top-left content origin when
+    ///   empty and the text flows DOWNWARD as it grows, with NO teleport between the
+    ///   empty and non-empty states (exemplar two-pane input pane).
     pub(super) fn composer_input_box(
         region: Rect,
         font_size_px: f32,
         line_height_multiplier: f32,
         visible_lines: f32,
+        anchor: ComposerVerticalAnchor,
     ) -> Rect {
         let line_height = (font_size_px * line_height_multiplier).max(1.0);
         let lines = visible_lines.max(1.0);
         let box_height = (line_height * lines + COMPOSER_TEXT_MARGIN * 2.0)
             .min(region.height)
             .max(1.0);
-        let box_y = region.y + (region.height - box_height).max(0.0);
+        let box_y = match anchor {
+            // Pin to the bottom edge; the box grows upward as `visible_lines` rises.
+            ComposerVerticalAnchor::Bottom => region.y + (region.height - box_height).max(0.0),
+            // Pin to the top edge; the box grows downward — caret starts at the
+            // pane content origin and never teleports when the first glyph arrives.
+            ComposerVerticalAnchor::Top => region.y,
+        };
         Rect::new(region.x, box_y, region.width, box_height)
     }
 
@@ -843,6 +857,7 @@ impl Compositor {
             tokens.font_size_px,
             crate::markdown::MarkdownTokens::default().line_height_multiplier,
             layout.visible_lines,
+            tokens.anchor,
         );
 
         // Insert the caret glyph at the cursor byte offset, gated by the blink
@@ -1153,12 +1168,14 @@ impl Compositor {
         // draft instead of the fixed single-line position it would otherwise grow
         // into. The box is measured with the COMPOSER font (matching the draft box
         // exactly), while the echo lines use their own font below.
-        let composer_font_size_px = resolve_composer_overlay_tokens(&self.token_map).font_size_px;
+        let composer_tokens = resolve_composer_overlay_tokens(&self.token_map);
+        let composer_font_size_px = composer_tokens.font_size_px;
         let draft_box = Self::composer_input_box(
             region,
             composer_font_size_px,
             line_height_multiplier,
             self.composer_layout.visible_lines,
+            composer_tokens.anchor,
         );
         let line_h = (tokens.font_size_px * line_height_multiplier).max(1.0);
         let margin = COMPOSER_TEXT_MARGIN;
