@@ -33,22 +33,41 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
         self.assertNotIn("---", joined)
         self.assertEqual(joined, "only")
 
-    def test_append_transcript_entry_adds_divider_before_new_turn(self) -> None:
-        body = portal.join_transcript_entries(["doc line one", "doc line two"])
-        appended = portal.append_transcript_entry(body, "hello from the viewer")
-        self.assertTrue(appended.endswith("\n---\nhello from the viewer"))
-        # Existing body is preserved verbatim ahead of the new divider.
-        self.assertTrue(appended.startswith(body))
+    def test_append_input_history_records_viewer_submission(self) -> None:
+        # A viewer submission lands in the INPUT-pane history (hud-egf39).
+        history: list[str] = []
+        recorded = portal.append_input_history(history, "hello from the viewer")
+        self.assertEqual(recorded, "hello from the viewer")
+        self.assertEqual(history, ["hello from the viewer"])
 
-    def test_append_transcript_entry_to_empty_body_has_no_divider(self) -> None:
-        appended = portal.append_transcript_entry("", "first message")
-        self.assertEqual(appended, "first message")
+    def test_append_input_history_does_not_touch_output_transcript(self) -> None:
+        # The OUTPUT transcript stays agent-authored only: recording an INPUT
+        # submission must never fold the viewer text into `body_full`
+        # (supersedes the #1027/#1031 combined-transcript echo — hud-egf39).
+        body_full = portal.join_transcript_entries(["agent line one", "agent line two"])
+        history: list[str] = []
+        portal.append_input_history(history, "viewer reply that must not echo right")
+        # body_full is an ordinary string the caller owns; the helper never
+        # receives it and cannot mutate it. Assert the viewer text is absent
+        # from the OUTPUT transcript and present in the INPUT history.
+        self.assertNotIn("viewer reply that must not echo right", body_full)
+        self.assertIn("viewer reply that must not echo right", history)
 
-    def test_append_transcript_entry_preserves_multiline_entry(self) -> None:
-        appended = portal.append_transcript_entry("history", "line one\nline two")
-        self.assertEqual(appended, "history\n---\nline one\nline two")
-        # The multi-line entry stays one turn: exactly one divider.
-        self.assertEqual(appended.count("\n---\n"), 1)
+    def test_append_input_history_drops_whitespace_only_submission(self) -> None:
+        # A bare Enter (empty/whitespace draft) creates no INPUT history turn.
+        history: list[str] = []
+        self.assertIsNone(portal.append_input_history(history, "   \n  "))
+        self.assertEqual(history, [])
+
+    def test_append_input_history_normalizes_and_stacks_entries(self) -> None:
+        # Entries accumulate in submission order; CRLF/CR are normalized so a
+        # multi-line submission stays a single history turn (the runtime draws
+        # the `---` divider between adjacent turns — #1020).
+        history: list[str] = []
+        portal.append_input_history(history, "first")
+        recorded = portal.append_input_history(history, "line one\r\nline two")
+        self.assertEqual(recorded, "line one\nline two")
+        self.assertEqual(history, ["first", "line one\nline two"])
 
     def test_split_transcript_entries_uses_blank_line_boundaries(self) -> None:
         body = "alpha one\nalpha two\n\nbravo\n\n\ncharlie"
