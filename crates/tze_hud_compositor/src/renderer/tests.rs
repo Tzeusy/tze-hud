@@ -323,6 +323,74 @@ async fn test_focused_hit_region_emits_focus_ring_in_overlay_mode() {
     }
 }
 
+/// vd-crude-resize-handle-grip: a portal (scrollable) tile gets a token-colored
+/// dot-grid resize grip painted at its bottom-right corner; a non-portal tile
+/// (no scroll config) gets nothing. Draw-list-level assertion (no pixel
+/// readback), safe to run synchronously.
+#[tokio::test]
+async fn test_portal_tile_emits_resize_grip_in_overlay_mode() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(400, 300).await);
+    // The live windowed path is always in overlay mode; the grip must show there.
+    compositor.overlay_mode = true;
+
+    let mut scene = SceneGraph::new(400.0, 300.0);
+    let tab_id = scene.create_tab("agent", 0).unwrap();
+    let lease_id = scene.grant_lease("agent", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "agent",
+            lease_id,
+            Rect::new(50.0, 40.0, 300.0, 200.0),
+            1,
+        )
+        .unwrap();
+
+    // Baseline: a non-portal tile (no scroll config) paints no grip.
+    {
+        let mut before: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.append_resize_grip_vertices(&scene, &mut before, 400.0, 300.0);
+        assert!(
+            before.is_empty(),
+            "non-portal tile must paint no resize grip, got {} verts",
+            before.len()
+        );
+    }
+
+    // Mark the tile a portal (scrollable) → the grip appears.
+    scene
+        .register_tile_scroll_config(tile_id, tze_hud_scene::types::TileScrollConfig::vertical())
+        .unwrap();
+    let mut verts: Vec<crate::pipeline::RectVertex> = Vec::new();
+    compositor.append_resize_grip_vertices(&scene, &mut verts, 400.0, 300.0);
+
+    // 6 dots (lower-right triangle of a 3×3 grid) × 6 vertices each.
+    assert_eq!(
+        verts.len(),
+        36,
+        "resize grip must emit 6 dot quads (36 verts), got {}",
+        verts.len()
+    );
+
+    // Every grip vertex must carry the token-driven resting grip color with a
+    // visible (non-zero) alpha — otherwise the grip would be invisible on the
+    // transparent overlay.
+    let grip = crate::renderer::token_colors::resolve_resize_grip_tokens(&compositor.token_map);
+    let expected = compositor.gpu_color_raw(grip.mark_color(false));
+    assert!(
+        expected[3] > 0.0,
+        "resize grip default alpha must be visible"
+    );
+    for v in &verts {
+        for (c, (actual, want)) in v.color.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (actual - want).abs() < 1e-3,
+                "grip color channel {c} mismatch: {actual} vs {want}"
+            );
+        }
+    }
+}
+
 /// hud-k6yvb: a TILE-LEVEL focus owner (a non-passthrough tile with no focusable
 /// nodes) must get a visible ring around the whole tile from the chrome pass —
 /// the case #988 could not draw because tile-level focus has no scene state.
