@@ -496,6 +496,12 @@ struct WindowedRuntimeState {
     /// server + PSK are configured. Aborted on teardown so its task/stream is not
     /// leaked. `None` in the default configuration.
     resident_grpc_bridge: Option<crate::resident_grpc_bridge::ResidentGrpcBridgeHandle>,
+    /// Inbound composer input routed back from the resident gRPC bridge (hud-omfqi).
+    /// Drained on each `about_to_wait` tick into the projection authority's
+    /// pending-input inbox — the same sink a non-bridged portal reaches. `None`
+    /// unless the bridge is enabled with input routing.
+    resident_grpc_input_rx:
+        Option<tokio::sync::mpsc::Receiver<crate::resident_grpc_bridge::ResidentBridgeInput>>,
     /// Cumulative count of interactive-feedback scene updates dropped because the
     /// main-thread `spin_acquire` timed out on the scene / shared-state lock
     /// during a guaranteed-feedback gesture (drag-move / live resize) — the exact
@@ -579,6 +585,11 @@ impl ApplicationHandler for WinitApp {
         // ops enqueued in the same event-loop tick are fed into the cadence
         // coalescer and materialised by the immediately-following drain call.
         self.drain_portal_ops();
+        // Drain composer input routed back from the resident gRPC bridge
+        // (hud-omfqi). Runs alongside portal-op ingestion so bridged viewer
+        // submissions reach the authority's pending-input inbox before the
+        // immediately-following projection drain refreshes portal content.
+        self.drain_resident_grpc_input();
         // Drain the in-process portal projection authority (hud-2iup7).
         // Must run AFTER composer flush so draft state is settled before portal
         // content is refreshed.  Uses try_lock on the scene to avoid blocking
@@ -2057,6 +2068,13 @@ impl WindowedRuntime {
         // separate runtime (the aspirational external authority deployment model);
         // simultaneous same-scene dual materialisation needs an authority-level
         // transport-routing decision and is deferred.
+        // Return path for bridged composer input (hud-omfqi): when the bridge
+        // routes input, it forwards inbound composer submissions here; the winit
+        // thread drains this into the authority's pending-input inbox (the same
+        // sink a non-bridged portal reaches). `None` unless the bridge is enabled.
+        let mut resident_grpc_input_rx: Option<
+            tokio::sync::mpsc::Receiver<crate::resident_grpc_bridge::ResidentBridgeInput>,
+        > = None;
         let resident_grpc_bridge = {
             let env_enabled = std::env::var("TZE_HUD_RESIDENT_GRPC_PORTAL")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -2114,10 +2132,16 @@ impl WindowedRuntime {
                         let tokens = crate::portal_tokens::resolve_bridge_visual_tokens(
                             &startup_compositor_tokens,
                         );
+                        // Wire the bridged-composer-input return path (hud-omfqi):
+                        // the bridge requests the input capability + INPUT_EVENTS
+                        // subscription and forwards inbound composer input here.
+                        let (input_tx, input_rx) = tokio::sync::mpsc::channel(64);
+                        resident_grpc_input_rx = Some(input_rx);
                         let handle = crate::resident_grpc_bridge::spawn_resident_grpc_bridge(
                             rt.rt.handle(),
                             bridge_cfg,
                             tokens,
+                            Some(input_tx),
                         );
                         portal_projection_driver
                             .set_resident_grpc_bridge_tx(Some(handle.state_sender()));
@@ -2194,6 +2218,7 @@ impl WindowedRuntime {
             portal_op_rx: portal_op_rx_opt.take(),
             pending_keyboard_events: VecDeque::new(),
             resident_grpc_bridge,
+            resident_grpc_input_rx,
             interaction_feedback_lock_misses: std::sync::atomic::AtomicU64::new(0),
         };
 

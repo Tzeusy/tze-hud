@@ -142,6 +142,7 @@ impl WindowedRuntimeState {
             pending_keyboard_events: VecDeque::new(),
             interaction_feedback_lock_misses: std::sync::atomic::AtomicU64::new(0),
             resident_grpc_bridge: None,
+            resident_grpc_input_rx: None,
         }
     }
 }

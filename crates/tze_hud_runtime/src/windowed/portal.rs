@@ -1259,6 +1259,58 @@ impl WinitApp {
         }
     }
 
+    /// Drain composer input routed back from the resident gRPC bridge (hud-omfqi).
+    ///
+    /// A bridged portal's viewer keystrokes are delivered to the bridge as gRPC
+    /// `INPUT_EVENTS`; the bridge forwards the composer submissions here. Each is
+    /// routed into the projection authority's pending-input inbox via
+    /// `ingest_bridged_composer_submit` — the same sink a non-bridged portal
+    /// reaches — so the driving session sees the typed/submitted text instead of
+    /// it being silently dropped.
+    ///
+    /// Uses `try_recv` in a non-blocking loop; never blocks the event-loop thread.
+    /// Only `Submit` events become pending input (matching the non-bridged path,
+    /// where per-keystroke draft state is display-only); `DraftState` / `Cancel`
+    /// carry no submission and are ignored here.
+    pub(super) fn drain_resident_grpc_input(&mut self) {
+        use crate::resident_grpc_bridge::ResidentBridgeInputKind;
+        let Some(ref mut rx) = self.state.resident_grpc_input_rx else {
+            return;
+        };
+        let mut submissions: Vec<(String, String)> = Vec::new();
+        loop {
+            match rx.try_recv() {
+                Ok(input) => {
+                    if let ResidentBridgeInputKind::Submit { text, .. } = input.kind {
+                        submissions.push((input.projection_id, text));
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    // The bridge task exited (reconnect budget exhausted / teardown);
+                    // stop polling this channel.
+                    self.state.resident_grpc_input_rx = None;
+                    break;
+                }
+            }
+        }
+        for (projection_id, text) in submissions {
+            let submitted_at_wall_us = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64;
+            self.state
+                .portal_projection_driver
+                .ingest_bridged_composer_submit(
+                    &projection_id,
+                    text,
+                    submitted_at_wall_us.max(1),
+                    tze_hud_projection::ContentClassification::Private,
+                );
+        }
+    }
+
     /// Called from `about_to_wait` after composer-draft flush.  Drives
     /// `InProcessPortalDriver::drain` which calls
     /// `InputProcessor::notify_tile_content_appended` for every `RenderPortal`
@@ -1648,6 +1700,7 @@ mod tests {
             portal_op_rx: None,
             pending_keyboard_events: VecDeque::new(),
             resident_grpc_bridge: None,
+            resident_grpc_input_rx: None,
             interaction_feedback_lock_misses: std::sync::atomic::AtomicU64::new(0),
         };
 
