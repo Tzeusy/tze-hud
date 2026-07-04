@@ -102,6 +102,7 @@ impl WindowedRuntimeState {
             pending_input_latency: Arc::new(StdMutex::new(VecDeque::new())),
             frame_ready_rx,
             frame_ready_tx: Some(frame_ready_tx),
+            frame_presented_tx: None,
             compositor: None,
             window_surface: None,
             input_processor: InputProcessor::new(),
