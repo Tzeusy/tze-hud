@@ -90,9 +90,7 @@ impl WindowedRuntimeState {
             compositor_handle: None,
             network_rt: None,
             network_handles: Vec::new(),
-            runtime_context: Arc::new(
-                crate::runtime_context::RuntimeContext::headless_default(),
-            ),
+            runtime_context: Arc::new(crate::runtime_context::RuntimeContext::headless_default()),
             _runtime_widget_store: None,
             fallback_unrestricted: true,
             shared_state,
@@ -139,8 +137,7 @@ impl WindowedRuntimeState {
             viewer_echo_queue: Arc::new(StdMutex::new(Vec::new())),
             focus_ring_owner_state: Arc::new(StdMutex::new(None)),
             composer_visual_layout: Arc::new(StdMutex::new(None)),
-            portal_projection_driver:
-                crate::portal_projection_driver::InProcessPortalDriver::new(),
+            portal_projection_driver: crate::portal_projection_driver::InProcessPortalDriver::new(),
             portal_op_rx: None,
             pending_keyboard_events: VecDeque::new(),
             resident_grpc_bridge: None,
@@ -221,7 +218,13 @@ impl HeadlessEventLoopHarness {
             vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 800.0, 600.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 800.0, 600.0),
+                1,
+            )
             .unwrap();
         let composer_id = SceneId::new();
         scene
