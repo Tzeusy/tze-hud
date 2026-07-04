@@ -431,6 +431,34 @@ pub(crate) struct LayerPartitionedRoundedRectCmds {
     pub(crate) chrome: Vec<RoundedRectDrawCmd>,
 }
 
+/// Owned, scene-free inputs for the GPU encode stage (hud-uyhpn).
+///
+/// Produced by [`Compositor::collect_encode_inputs`] — which performs ALL of the
+/// scene reads the encode stage previously did inline (rounded-rect command
+/// collection, composer/echo layout priming, text-item collection + glyphon
+/// prepare) — and consumed by [`Compositor::encode_from_inputs`], which touches
+/// only the GPU surface view and these precomputed values.
+///
+/// Splitting the scene-read half out of the encode half is what lets the
+/// windowed frame loop DROP the scene lock before the vsync-blocking
+/// `acquire_frame()` + submit + `device.poll(Wait)`: the whole encode tail now
+/// runs lock-free against this owned struct rather than borrowing `&SceneGraph`.
+pub(crate) struct EncodeInputs {
+    /// Background-layer SDF rounded-rect commands (drawn between the Clear pass
+    /// and the tile/content/chrome flat-rect pass).
+    rr_background: Vec<RoundedRectDrawCmd>,
+    /// Content + Chrome + per-tile SDF rounded-rect commands (drawn above tiles).
+    rr_post: Vec<RoundedRectDrawCmd>,
+    /// Inline code-span backdrop vertices, already color-transformed through
+    /// `gpu_color_raw` (so the encode stage needs no `&self` method borrow).
+    inline_verts: Vec<RectVertex>,
+    /// Whether glyphon text was prepared this frame and the text pass should be
+    /// replayed. `false` when there is no rasterizer, no text items, or prepare
+    /// failed — in which case the text pass is skipped (but the atlas is still
+    /// trimmed) exactly as before the split.
+    render_text: bool,
+}
+
 /// Per-zone Stack slot layout, computed once per zone per frame by
 /// [`Compositor::zone_slot_layout`] and consumed by all zone-rendering call
 /// sites that need slot geometry: `collect_text_items`, `render_zone_content`,
@@ -1692,11 +1720,121 @@ impl Compositor {
     // the Background vertex split index.  No natural grouping exists that would
     // reduce the count without creating an ad-hoc context struct.
     #[allow(clippy::too_many_arguments)]
-    fn encode_frame(
+    /// Perform every scene read the GPU encode stage needs, returning an owned
+    /// [`EncodeInputs`] (hud-uyhpn).
+    ///
+    /// This is the scene-read half of the former monolithic `encode_frame`:
+    /// rounded-rect command collection, composer/viewer-echo layout priming,
+    /// text-item collection, and the glyphon prepare (Phase A/B). It borrows
+    /// `&SceneGraph` and mutates `self` (rasterizer / caches) but never touches
+    /// the swapchain surface, so it can run entirely under the scene lock and
+    /// BEFORE the vsync-blocking `acquire_frame()`.
+    ///
+    /// The matching encode half is [`Compositor::encode_from_inputs`], which is
+    /// scene-free and runs after the lock is dropped.
+    fn collect_encode_inputs(
+        &mut self,
+        scene: &SceneGraph,
+        surf_w: u32,
+        surf_h: u32,
+    ) -> EncodeInputs {
+        let sw = surf_w as f32;
+        let sh = surf_h as f32;
+
+        // ── Single-pass partition of all rounded-rect commands ────────────────
+        let rr_all = self.collect_all_rounded_rect_cmds(scene, sw, sh);
+        let rr_background = rr_all.background;
+        let mut rr_post: Vec<crate::pipeline::RoundedRectDrawCmd> = Vec::new();
+        rr_post.extend(rr_all.content);
+        rr_post.extend(rr_all.chrome);
+        rr_post.extend(self.collect_tile_rounded_rect_cmds(scene));
+
+        // ── Text pass inputs (Stage 6) ────────────────────────────────────────
+        // Prime the composer horizontal caret-follow offset (hud-zlfi4) and the
+        // viewer-echo history wrap (hud-pncm3) BEFORE collecting text items —
+        // identical ordering to the pre-split encode_frame.
+        self.prime_composer_scroll_offset(scene);
+        self.prime_viewer_echo_layout(scene);
+
+        let has_text_rasterizer = self.text_rasterizer.is_some();
+        let text_items: Vec<TextItem> = if has_text_rasterizer {
+            self.collect_text_items(scene, sw, sh)
+        } else {
+            vec![]
+        };
+        // Phase A: prepare glyphon buffers (requires mutable tr borrow). Drop the
+        // borrow immediately after so Phase B can call self.gpu_color_raw.
+        //
+        // When text_items is empty we return None — not Some(Ok([])) — so the
+        // encode stage skips render_text_pass entirely. Replaying glyphon's
+        // previously-prepared TextAreas from the last non-empty frame would leave
+        // stale text on screen.
+        let prepare_result: Option<Result<Vec<crate::text::InlineBackdropQuad>, String>> =
+            if let Some(ref mut tr) = self.text_rasterizer {
+                tr.update_viewport(&self.queue, surf_w, surf_h);
+                if text_items.is_empty() {
+                    None
+                } else {
+                    Some(tr.prepare_text_items(&self.device, &self.queue, &text_items))
+                }
+            } else {
+                None
+            };
+        // Phase B: convert inline backdrop quads to GPU vertices. `self` is no
+        // longer mutably borrowed here, so gpu_color_raw is available.
+        let inline_verts: Vec<crate::pipeline::RectVertex> =
+            if let Some(Ok(ref inline_quads)) = prepare_result {
+                inline_quads
+                    .iter()
+                    .flat_map(|q| {
+                        let color = self.gpu_color_raw([
+                            q.color[0] as f32 / 255.0,
+                            q.color[1] as f32 / 255.0,
+                            q.color[2] as f32 / 255.0,
+                            q.color[3] as f32 / 255.0,
+                        ]);
+                        rect_vertices(q.x, q.y, q.w, q.h, sw, sh, color)
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
+        // Determine whether the encode stage should replay the text pass. On a
+        // prepare error we warn HERE (once) and skip — matching the pre-split
+        // warn site's effect exactly.
+        let render_text = match &prepare_result {
+            Some(Ok(_)) => true,
+            Some(Err(e)) => {
+                tracing::warn!(error = %e, "text prepare failed — frame continues without text");
+                false
+            }
+            None => false,
+        };
+
+        EncodeInputs {
+            rr_background,
+            rr_post,
+            inline_verts,
+            render_text,
+        }
+    }
+
+    /// Encode the GPU command buffer from precomputed, scene-free
+    /// [`EncodeInputs`] (hud-uyhpn).
+    ///
+    /// This is the surface-touching half of the former monolithic `encode_frame`.
+    /// It reads only the acquired surface `frame_view` and the owned `inputs`
+    /// (plus GPU-owned state like the text-rasterizer atlas) — never `&SceneGraph`
+    /// — so the windowed frame loop runs it AFTER dropping the scene lock.
+    ///
+    /// `render_text` gating and the always-run `trim_atlas()` preserve the exact
+    /// glyph-eviction semantics of the pre-split code.
+    #[allow(clippy::too_many_arguments)]
+    fn encode_from_inputs(
         &mut self,
         vertices: &[RectVertex],
         frame_view: &wgpu::TextureView,
-        scene: &SceneGraph,
+        inputs: &EncodeInputs,
         surf_w: u32,
         surf_h: u32,
         use_overlay_pipeline: bool,
@@ -1770,15 +1908,12 @@ impl Compositor {
             }
         }
 
-        // ── Single-pass partition of all rounded-rect commands ────────────────
-        // Collect once; reuse the partitioned results in both SDF passes below.
-        let rr_all = self.collect_all_rounded_rect_cmds(scene, sw, sh);
-
         // ── Background SDF rounded-rect pass ──────────────────────────────────
         // Runs after the Clear pass (so it composites over the cleared surface)
         // but BEFORE tile/content/chrome geometry — this is what ensures
-        // Background backdrops are correctly occluded by agent tiles.
-        self.encode_rounded_rect_pass(&mut encoder, frame_view, &rr_all.background, sw, sh);
+        // Background backdrops are correctly occluded by agent tiles. Commands
+        // were collected scene-side in `collect_encode_inputs`.
+        self.encode_rounded_rect_pass(&mut encoder, frame_view, &inputs.rr_background, sw, sh);
 
         // ── Geometry pass 2: Tiles + Content + Chrome flat-rect zones ─────────
         // Uses LoadOp::Load to preserve the Background geometry drawn above.
@@ -1816,133 +1951,69 @@ impl Compositor {
 
         // ── Content + Chrome SDF rounded-rect pass ────────────────────────────
         // Runs after tiles so Content/Chrome backdrops composite above tiles.
-        {
-            let mut rr_post: Vec<crate::pipeline::RoundedRectDrawCmd> = Vec::new();
-            rr_post.extend(rr_all.content);
-            rr_post.extend(rr_all.chrome);
-            rr_post.extend(self.collect_tile_rounded_rect_cmds(scene));
-            self.encode_rounded_rect_pass(&mut encoder, frame_view, &rr_post, sw, sh);
-        }
+        // `rr_post` (content + chrome + per-tile) was collected scene-side.
+        self.encode_rounded_rect_pass(&mut encoder, frame_view, &inputs.rr_post, sw, sh);
 
         // ── Text pass (Stage 6) ───────────────────────────────────────────────
-        // Prime the composer horizontal caret-follow offset (hud-zlfi4) BEFORE
-        // collecting text items: it measures the caret x against the composer font
-        // (mutable rasterizer borrow), which the immutable collect path below
-        // cannot do.  No-op when no composer is active.
-        self.prime_composer_scroll_offset(scene);
-        // Measure the viewer-echo history wrap once per frame, before the
-        // text pass reads the line count for bottom-alignment (hud-pncm3).
-        self.prime_viewer_echo_layout(scene);
-        // Collect text items before borrowing the rasterizer mutably, to avoid
-        // simultaneous mutable + immutable borrow of `self`.
-        let has_text_rasterizer = self.text_rasterizer.is_some();
-        let text_items: Vec<TextItem> = if has_text_rasterizer {
-            self.collect_text_items(scene, sw, sh)
-        } else {
-            vec![]
-        };
-        // Phase A: prepare glyphon buffers (requires mutable tr borrow).
-        // Drop the borrow immediately after so Phase B can call self.gpu_color_raw.
-        //
-        // When text_items is empty we return None — not Some(Ok([])) — so that
-        // Phase C skips render_text_pass entirely.  Calling render_text_pass
-        // without a preceding prepare would replay glyphon's previously prepared
-        // TextAreas from the last non-empty frame, causing stale text to linger.
-        let prepare_result: Option<Result<Vec<crate::text::InlineBackdropQuad>, String>> =
-            if let Some(ref mut tr) = self.text_rasterizer {
-                tr.update_viewport(&self.queue, surf_w, surf_h);
-                if text_items.is_empty() {
-                    None
-                } else {
-                    Some(tr.prepare_text_items(&self.device, &self.queue, &text_items))
-                }
-            } else {
-                None
-            };
-        // Phase B: convert inline backdrop quads to GPU vertices.
-        // `self` is no longer mutably borrowed here, so gpu_color_raw is available.
-        let inline_verts: Vec<crate::pipeline::RectVertex> =
-            if let Some(Ok(ref inline_quads)) = prepare_result {
-                inline_quads
-                    .iter()
-                    .flat_map(|q| {
-                        let color = self.gpu_color_raw([
-                            q.color[0] as f32 / 255.0,
-                            q.color[1] as f32 / 255.0,
-                            q.color[2] as f32 / 255.0,
-                            q.color[3] as f32 / 255.0,
-                        ]);
-                        rect_vertices(q.x, q.y, q.w, q.h, sw, sh, color)
-                    })
-                    .collect()
-            } else {
-                vec![]
-            };
-        // Phase C: render passes (re-takes tr mutable borrow).
+        // The text items were collected and glyphon-prepared scene-side in
+        // `collect_encode_inputs` (Phase A/B). Here we only replay the prepared
+        // TextAreas (Phase C) and always trim the atlas — no scene access.
+        let inline_verts = &inputs.inline_verts;
         if let Some(ref mut tr) = self.text_rasterizer {
-            if let Some(ref result) = prepare_result {
-                match result {
-                    Err(e) => {
-                        tracing::warn!(error = %e, "text prepare failed — frame continues without text");
-                    }
-                    Ok(_) => {
-                        // ── Inline backdrop pass (Phase 2, hud-9ieev) ────────────
-                        // Render pixel-exact backdrop quads for inline code spans
-                        // BEFORE the glyphon glyph pass so backdrops appear behind
-                        // the glyphs.  Uses LoadOp::Load to preserve geometry pixels.
-                        if !inline_verts.is_empty() {
-                            let inline_buf =
-                                self.device
-                                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                        label: Some("inline_backdrop_verts"),
-                                        contents: bytemuck::cast_slice(&inline_verts),
-                                        usage: wgpu::BufferUsages::VERTEX,
-                                    });
-                            let mut inline_pass =
-                                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                    label: Some("inline_backdrop_pass"),
-                                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                        view: frame_view,
-                                        resolve_target: None,
-                                        ops: wgpu::Operations {
-                                            load: wgpu::LoadOp::Load,
-                                            store: wgpu::StoreOp::Store,
-                                        },
-                                    })],
-                                    depth_stencil_attachment: None,
-                                    timestamp_writes: None,
-                                    occlusion_query_set: None,
-                                });
-                            if use_overlay_pipeline {
-                                inline_pass.set_pipeline(&self.clear_pipeline);
-                            } else {
-                                inline_pass.set_pipeline(&self.pipeline);
-                            }
-                            inline_pass.set_vertex_buffer(0, inline_buf.slice(..));
-                            inline_pass.draw(0..inline_verts.len() as u32, 0..1);
-                        }
-
-                        // ── Glyphon text pass ─────────────────────────────────────
-                        let mut text_pass =
-                            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                label: Some("text_pass"),
-                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                    view: frame_view,
-                                    resolve_target: None,
-                                    ops: wgpu::Operations {
-                                        // LoadOp::Load: preserve geometry pixels under the text.
-                                        load: wgpu::LoadOp::Load,
-                                        store: wgpu::StoreOp::Store,
-                                    },
-                                })],
-                                depth_stencil_attachment: None,
-                                timestamp_writes: None,
-                                occlusion_query_set: None,
+            if inputs.render_text {
+                // ── Inline backdrop pass (Phase 2, hud-9ieev) ────────────────
+                // Render pixel-exact backdrop quads for inline code spans BEFORE
+                // the glyphon glyph pass so backdrops appear behind the glyphs.
+                // Uses LoadOp::Load to preserve geometry pixels.
+                if !inline_verts.is_empty() {
+                    let inline_buf =
+                        self.device
+                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("inline_backdrop_verts"),
+                                contents: bytemuck::cast_slice(inline_verts),
+                                usage: wgpu::BufferUsages::VERTEX,
                             });
-                        if let Err(e) = tr.render_text_pass(&mut text_pass) {
-                            tracing::warn!(error = %e, "text render failed — frame continues without text");
-                        }
+                    let mut inline_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("inline_backdrop_pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: frame_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    if use_overlay_pipeline {
+                        inline_pass.set_pipeline(&self.clear_pipeline);
+                    } else {
+                        inline_pass.set_pipeline(&self.pipeline);
                     }
+                    inline_pass.set_vertex_buffer(0, inline_buf.slice(..));
+                    inline_pass.draw(0..inline_verts.len() as u32, 0..1);
+                }
+
+                // ── Glyphon text pass ────────────────────────────────────────
+                let mut text_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("text_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: frame_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            // LoadOp::Load: preserve geometry pixels under the text.
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                if let Err(e) = tr.render_text_pass(&mut text_pass) {
+                    tracing::warn!(error = %e, "text render failed — frame continues without text");
                 }
             }
             // Trim every frame regardless of item count — glyphs from prior frames
@@ -1952,6 +2023,37 @@ impl Compositor {
 
         let encode_us = encode_start.elapsed().as_micros() as u64;
         (encoder, encode_us)
+    }
+
+    /// Encode one frame's GPU command buffer directly from the scene (the
+    /// headless / chrome-render convenience wrapper).
+    ///
+    /// Behaviourally identical to the pre-split monolith: it simply threads the
+    /// scene through [`Compositor::collect_encode_inputs`] (scene reads) and then
+    /// [`Compositor::encode_from_inputs`] (GPU encode). The windowed present path
+    /// does NOT use this wrapper — it calls the two halves separately so it can
+    /// drop the scene lock between them (hud-uyhpn).
+    #[allow(clippy::too_many_arguments)]
+    fn encode_frame(
+        &mut self,
+        vertices: &[RectVertex],
+        frame_view: &wgpu::TextureView,
+        scene: &SceneGraph,
+        surf_w: u32,
+        surf_h: u32,
+        use_overlay_pipeline: bool,
+        bg_vertex_count: usize,
+    ) -> (wgpu::CommandEncoder, u64) {
+        let inputs = self.collect_encode_inputs(scene, surf_w, surf_h);
+        self.encode_from_inputs(
+            vertices,
+            frame_view,
+            &inputs,
+            surf_w,
+            surf_h,
+            use_overlay_pipeline,
+            bg_vertex_count,
+        )
     }
 }
 

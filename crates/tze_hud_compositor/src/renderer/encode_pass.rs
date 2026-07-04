@@ -161,6 +161,66 @@ impl super::Compositor {
         wr.composite_widgets(&mut widget_pass, registry, surf_w, surf_h, &self.device);
     }
 
+    /// Collect the scene-side widget draw geometry (hud-uyhpn).
+    ///
+    /// Thin Compositor-level wrapper over
+    /// [`crate::widget::WidgetRenderer::collect_widget_draw_quads`] that also
+    /// handles the "no widget renderer" case. Called in the windowed build phase
+    /// (under the scene lock) so the widget pass can be encoded lock-free from the
+    /// returned owned quads.
+    pub(super) fn collect_widget_draw_geometry(
+        &self,
+        scene: &SceneGraph,
+        surf_w: f32,
+        surf_h: f32,
+    ) -> Vec<crate::widget::WidgetDrawQuad> {
+        match &self.widget_renderer {
+            Some(wr) => wr.collect_widget_draw_quads(&scene.widget_registry, surf_w, surf_h),
+            None => Vec::new(),
+        }
+    }
+
+    /// Encode the widget pass from precomputed, scene-free quads (hud-uyhpn).
+    ///
+    /// The scene-free counterpart to [`Self::encode_widget_pass`]. Consumes the
+    /// owned [`crate::widget::WidgetDrawQuad`]s produced by
+    /// [`Self::collect_widget_draw_geometry`] so the windowed present path never
+    /// touches `&scene.widget_registry` after the lock is dropped.
+    pub(super) fn encode_widget_pass_prepared(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame_view: &wgpu::TextureView,
+        quads: &[crate::widget::WidgetDrawQuad],
+        surf_w: f32,
+        surf_h: f32,
+    ) {
+        let wr = match &self.widget_renderer {
+            Some(r) => r,
+            None => return,
+        };
+        if quads.is_empty() {
+            return;
+        }
+
+        // Begin a LoadOp::Load render pass — widgets composite on top of scene content.
+        let mut widget_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("widget_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: frame_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        wr.composite_prepared(&mut widget_pass, quads, surf_w, surf_h, &self.device);
+    }
+
     /// Encode a top-most chrome pass for drag-handle quads.
     pub(super) fn encode_drag_handle_pass(
         &self,

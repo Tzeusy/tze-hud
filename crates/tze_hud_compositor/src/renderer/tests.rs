@@ -1067,6 +1067,100 @@ async fn test_render_frame_via_compositor_surface_trait() {
     assert_eq!(telemetry.tile_count, 0, "empty scene has no tiles");
 }
 
+/// hud-uyhpn lock-scope split: `build_windowed_frame` must produce the frame's
+/// scene geometry WITHOUT touching the surface, and `present_windowed_frame`
+/// must then consume that build to yield equivalent telemetry.
+///
+/// This pins the structural property the drag-input fix depends on: the scene
+/// reads (vertex/geometry build) happen in a phase that takes NO surface, so the
+/// windowed frame loop can drop the scene lock before the vsync-blocking
+/// `acquire_frame()` + submit + poll runs inside `present_windowed_frame`. The
+/// build method's signature — `(&mut scene, surf_w, surf_h)` with no surface —
+/// is itself the compile-time guarantee; this test additionally confirms real
+/// geometry flows out of the lock-held build phase and that a subsequent present
+/// reports the same tile count.
+#[tokio::test]
+async fn build_windowed_frame_decoupled_from_surface_then_presents() {
+    let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+    // A zone publish with an opaque backdrop guarantees non-empty flat-rect
+    // geometry so the assertion is meaningful (not a vacuously-empty scene).
+    let mut scene = SceneGraph::new(1280.0, 720.0);
+    scene.register_zone(ZoneDefinition {
+        id: SceneId::new(),
+        name: "notification-area".to_owned(),
+        description: "notification area zone".to_owned(),
+        geometry_policy: GeometryPolicy::EdgeAnchored {
+            edge: DisplayEdge::Top,
+            height_pct: 0.08,
+            width_pct: 0.70,
+            margin_px: 12.0,
+        },
+        accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+        rendering_policy: RenderingPolicy {
+            font_size_px: Some(18.0),
+            backdrop: Some(Rgba::new(0.0, 0.0, 0.0, 1.0)),
+            backdrop_opacity: Some(0.9),
+            text_color: Some(Rgba::new(1.0, 1.0, 1.0, 1.0)),
+            ..Default::default()
+        },
+        contention_policy: ContentionPolicy::Stack { max_depth: 8 },
+        max_publishers: 4,
+        transport_constraint: None,
+        auto_clear_ms: Some(5_000),
+        ephemeral: false,
+        layer_attachment: LayerAttachment::Background,
+    });
+    scene
+        .publish_to_zone(
+            "notification-area",
+            ZoneContent::Notification(NotificationPayload {
+                text: "Backdrop for build/present split test".to_owned(),
+                icon: String::new(),
+                urgency: 1,
+                ttl_ms: None,
+                title: String::new(),
+                actions: Vec::new(),
+            }),
+            "test",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+    // Prime per the Stage-4 commit-time prime contract (hud-380dl / hud-v2z6u).
+    compositor.prime_markdown_cache(&scene);
+    compositor.prime_truncation_cache(&scene);
+
+    // ── Build phase: scene reads only, NO surface argument ─────────────────
+    let build = compositor.build_windowed_frame(&mut scene, 1280, 720);
+    assert!(
+        build.vertex_count() > 0,
+        "build_windowed_frame must produce flat-rect geometry from the scene \
+         alone, with no surface acquired (this is what lets the frame loop drop \
+         the scene lock before acquire_frame)"
+    );
+    let built_tiles = build.tile_count();
+    // Drag-handle geometry is precomputed in the build phase too (scene-free at
+    // present time); with no portal tiles here it is simply empty, but the field
+    // must be populated by the build, not the present.
+    let _ = build.drag_handle_vertex_count();
+
+    // ── Present phase: consumes the build against the surface ──────────────
+    let telemetry = compositor
+        .present_windowed_frame(build, &surface as &dyn crate::surface::CompositorSurface);
+    assert!(
+        telemetry.frame_time_us > 0,
+        "present must record a frame time"
+    );
+    assert_eq!(
+        telemetry.tile_count, built_tiles,
+        "present must carry through the tile count recorded during build"
+    );
+}
+
 /// Verify that HEADLESS_FORCE_SOFTWARE env-var path is exercised in the
 /// adapter-selection code.  We cannot assert the adapter backend in a unit
 /// test (it's opaque), so we just verify that creating a compositor with
