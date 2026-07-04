@@ -403,10 +403,25 @@ impl super::Compositor {
                 // segment's glyph alpha (StreamFadeRamp) instead of snapping it
                 // in. Steady tiles (`is_revealing() == false`) are untouched, so
                 // their draw output is byte-identical to the no-reveal path.
-                if let Some(reveal) = self.portal_tile_reveal_states.get(&tile.id) {
-                    if reveal.is_revealing() {
-                        let ramp = super::easing::StreamFadeRamp::default();
-                        for item in &mut items[items_before..] {
+                //
+                // Reveal state is now keyed per `(tile, node)` (hud-tbdfx), so a
+                // tile may have several in-flight reveals. Gather this tile's
+                // revealing entries once, then let `apply_portal_reveal_fade`
+                // route each item to the matching node's reveal by plain-text
+                // equality (its own internal guard), so each glyph fades under at
+                // most one reveal. The `Vec` is allocated only when some node is
+                // actually revealing.
+                let tile_id = tile.id;
+                let revealing: Vec<&super::draw_cmds::PortalTileStreamReveal> = self
+                    .portal_tile_reveal_states
+                    .iter()
+                    .filter(|((tid, _), reveal)| *tid == tile_id && reveal.is_revealing())
+                    .map(|(_, reveal)| reveal)
+                    .collect();
+                if !revealing.is_empty() {
+                    let ramp = super::easing::StreamFadeRamp::default();
+                    for item in &mut items[items_before..] {
+                        for reveal in &revealing {
                             apply_portal_reveal_fade(item, reveal, ramp);
                         }
                     }
