@@ -10947,13 +10947,20 @@ async fn local_composer_text_item_uses_hit_region_bounds() {
     );
 }
 
-/// Regression (hud-2zsbf): mirror the resident portal — a FULL-TILE composer
-/// HitRegion (as `resident_grpc::render_batch` publishes via
-/// `local_bounds_for_state`) with a long draft. The local echo MUST be confined
-/// to a single input-line strip pinned to the BOTTOM of the portal, not laid as
-/// a full-width line across the portal TOP (the live P1 "extends forever").
+/// Regression (hud-2zsbf + hud-n0x4u): mirror the resident portal — a FULL-TILE
+/// composer HitRegion (as `resident_grpc::render_batch` publishes via
+/// `local_bounds_for_state`) with a long unbreakable draft. The draft MUST NOT
+/// "extend forever" horizontally past the region's right edge, and MUST be
+/// bottom-anchored (caret line in the bottom input strip), not laid as a
+/// full-width line across the portal TOP (the live hud-2zsbf P1).
 ///
-/// Transcript body is rendered dim so only the (bright) composer echo registers.
+/// Under break-anywhere wrap (hud-n0x4u) the 200-char token no longer stays one
+/// clipped line — it wraps at the glyph level into a bottom-anchored multi-line
+/// box so every character stays visible. This test therefore guards the
+/// horizontal no-overflow + bottom-anchoring invariants, not a single-line
+/// layout.
+///
+/// Transcript body is rendered dim so only the (bright) composer draft registers.
 #[tokio::test]
 async fn composer_echo_confined_to_bottom_strip_full_tile_hitregion() {
     let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(600, 300).await);
@@ -11038,47 +11045,45 @@ async fn composer_echo_confined_to_bottom_strip_full_tile_hitregion() {
         }
     }
     assert!(count > 0, "composer echo must render some glyphs");
-    let _ = (minx, miny); // bbox min unused; discrimination is by band distribution
+    let _ = minx; // bbox min-x unused; the horizontal guard is on maxx
 
     // Input strip: line_height + 2*margin = 16*1.4 + 12 = 34.4, pinned to the
-    // bottom of the 300px-tall region → strip_top ≈ 265.6. The echo glyphs form a
-    // single input line inside that strip. Pre-fix, the draft was laid out as a
-    // full-width line at the PORTAL TOP (the "extends forever" P1); post-fix its
-    // bulk sits in the bottom strip and the portal body carries no echo line.
+    // bottom of the 300px-tall region → strip_top ≈ 265.6.
     let strip_height = 16.0 * crate::text::LINE_HEIGHT_MULTIPLIER + 12.0;
     let strip_top = (300.0 - strip_height) as usize; // ≈ 265
 
-    // The portal body between the top chrome row and the input strip must be
-    // free of echo glyphs (the draft is not laid across the portal).
-    let body_bright = (20..strip_top.saturating_sub(2))
-        .flat_map(|r| (0..600usize).map(move |c| (r, c)))
-        .filter(|(r, c)| is_bright((r * 600 + c) * 4))
-        .count();
-    assert_eq!(
-        body_bright, 0,
-        "composer echo leaked into the portal body: {body_bright} bright glyph pixels \
-         between y=20 and the input strip top (≈{strip_top}); the draft must not span the portal"
+    // The core hud-2zsbf P1 was HORIZONTAL: the draft "extended forever" as a
+    // full-width unwrapped line spilling past the region's right edge. Under
+    // break-anywhere wrap (hud-n0x4u) an unbreakable 200-char token is no longer
+    // one over-long clipped line — it wraps at the glyph level into a bottom-
+    // anchored multi-line box so every character stays visible — but the
+    // horizontal clip must STILL hold: nothing past the region interior right
+    // edge (600 - COMPOSER_TEXT_MARGIN(6) = 594).
+    assert!(
+        maxx <= 594,
+        "composer draft overflowed horizontally to x={maxx} (region interior right = 594); \
+         break-anywhere wrap must keep every line inside the box, never 'extend forever'"
     );
 
-    // The echo bulk must live in the bottom input strip.
+    // Bottom-anchored: the composer box is pinned to the BOTTOM of the portal and
+    // grows UPWARD as the draft wraps, so the newest/caret line rides in the
+    // bottom input strip. The live P1 laid the draft at the PORTAL TOP instead;
+    // here the draft must reach down into the bottom strip.
+    assert!(
+        maxy >= strip_top,
+        "composer draft is not bottom-anchored: maxy={maxy} never reaches the input \
+         strip (strip_top≈{strip_top}); the caret line must ride at the bottom, \
+         not float at the portal top"
+    );
+
+    // The bottom input strip carries the newest wrapped line's glyphs.
     let strip_bright = (strip_top.saturating_sub(2)..300usize)
         .flat_map(|r| (0..600usize).map(move |c| (r, c)))
         .filter(|(r, c)| is_bright((r * 600 + c) * 4))
         .count();
     assert!(
         strip_bright > 1000,
-        "composer echo not rendered in the bottom input strip (strip_bright={strip_bright})"
-    );
-    assert!(
-        strip_bright * 100 >= count * 90,
-        "most echo glyphs must sit in the bottom input strip: {strip_bright}/{count} \
-         (pre-fix the draft rendered at the portal top instead)"
-    );
-
-    // Horizontal clip still holds: nothing past the region interior right edge.
-    assert!(
-        maxx <= 594,
-        "composer echo overflowed horizontally to x={maxx} (region interior right = 594)"
+        "composer draft not rendered in the bottom input strip (strip_bright={strip_bright})"
     );
 }
 

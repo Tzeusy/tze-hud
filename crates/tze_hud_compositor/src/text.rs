@@ -427,6 +427,54 @@ pub struct TextRasterizer {
     shape_cache: HashMap<[u8; 32], Buffer>,
 }
 
+/// Wrap policy for wrapped text (composer draft, viewer-echo history, and every
+/// bounded `TextItem` in the render path).
+///
+/// [`Wrap::WordOrGlyph`] wraps at word boundaries **and** falls back to breaking
+/// a single token at the glyph level when that token is wider than the line box
+/// (hud-n0x4u). Plain [`Wrap::Word`] would leave such an unbreakable token on one
+/// over-long line whose tail is then clipped away by the box scissor — the owner
+/// could type a 200-char run of `asdasd…` and never see the end. `WordOrGlyph` is
+/// a strict superset of `Word` (identical for text that already fits), so this is
+/// safe to apply to the shared render path.
+///
+/// This constant is the single source of truth for that policy: the measurement
+/// helpers ([`TextRasterizer::measure_composer_wrapped`],
+/// [`TextRasterizer::measure_composer_visual_layout`],
+/// [`composer_wrap_line_widths`]) and the render path
+/// ([`TextRasterizer::build_and_shape_buffer`]) all use it, so predicted line
+/// counts and painted line counts always agree (no caret drift).
+pub(crate) const WRAPPED_TEXT_WRAP: Wrap = Wrap::WordOrGlyph;
+
+/// Shape `text` wrapped to `wrap_width` under [`WRAPPED_TEXT_WRAP`] and return the
+/// advance width (`line_w`) of each resulting visual line, top-to-bottom.
+///
+/// Pure CPU: operates on a borrowed [`FontSystem`] (no GPU device needed), so it
+/// is unit-testable without a headless surface. Used by
+/// [`TextRasterizer::measure_wrapped_line_count`] (the viewer-echo history line
+/// count) and exercised directly by the break-anywhere wrap tests. Uses the same
+/// sans-serif base attributes and metrics as the composer/echo measurement paths
+/// so the counted layout matches what the render path paints.
+///
+/// Returns an empty vec only for text that produces no layout runs (e.g. the
+/// empty string); callers that need a floor of one line should `.max(1)`.
+pub(crate) fn composer_wrap_line_widths(
+    font_system: &mut FontSystem,
+    text: &str,
+    wrap_width: f32,
+    font_size_px: f32,
+    line_height_multiplier: f32,
+) -> Vec<f32> {
+    let line_height = font_size_px * line_height_multiplier;
+    let mut buf = Buffer::new(font_system, Metrics::new(font_size_px, line_height));
+    buf.set_size(font_system, Some(wrap_width.max(1.0)), None);
+    buf.set_wrap(font_system, WRAPPED_TEXT_WRAP);
+    let base_attrs = Attrs::new().family(Family::SansSerif).weight(Weight(400));
+    buf.set_text(font_system, text, base_attrs, Shaping::Advanced);
+    buf.shape_until_scroll(font_system, false);
+    buf.layout_runs().map(|run| run.line_w).collect()
+}
+
 impl TextRasterizer {
     /// Create a text rasterizer targeting the given surface format.
     ///
@@ -628,8 +676,11 @@ impl TextRasterizer {
     /// the box from clipping the caret at a wrap boundary.
     ///
     /// Same wrap parameters as the render path (`bounds_width = wrap_width`,
-    /// `Wrap::Word`), so the line counts agree. Runs once per frame only while a
-    /// multi-line composer is active — off the transcript hot path.
+    /// [`WRAPPED_TEXT_WRAP`]), so the line counts agree — including the
+    /// break-anywhere fallback that keeps an over-long unbreakable token on
+    /// multiple in-box lines instead of one clipped line (hud-n0x4u). Runs once
+    /// per frame only while a multi-line composer is active — off the transcript
+    /// hot path.
     pub(crate) fn measure_composer_wrapped(
         &mut self,
         text: &str,
@@ -649,10 +700,13 @@ impl TextRasterizer {
             &mut self.font_system,
             Metrics::new(font_size_px, line_height),
         );
-        // Bounded width + word wrap → the same multi-line layout the render path
-        // produces (collect_composer_text_item sets bounds_width = wrap_width).
+        // Bounded width + break-anywhere word wrap → the same multi-line layout
+        // the render path produces (collect_composer_text_item sets
+        // bounds_width = wrap_width; build_and_shape_buffer uses the same
+        // WRAPPED_TEXT_WRAP), so an over-long unbreakable token wraps here exactly
+        // as it paints and the box height / caret line stay in sync (hud-n0x4u).
         buf.set_size(&mut self.font_system, Some(wrap_width.max(1.0)), None);
-        buf.set_wrap(&mut self.font_system, Wrap::Word);
+        buf.set_wrap(&mut self.font_system, WRAPPED_TEXT_WRAP);
         let base_attrs = Attrs::new().family(Family::SansSerif).weight(Weight(400));
         buf.set_text(&mut self.font_system, text, base_attrs, Shaping::Advanced);
         buf.shape_until_scroll(&mut self.font_system, false);
@@ -673,6 +727,31 @@ impl TextRasterizer {
             }
         }
         (total_lines.max(1), caret_line)
+    }
+
+    /// Count the wrapped visual lines of `text` at `wrap_width` under
+    /// [`WRAPPED_TEXT_WRAP`] (≥ 1). Thin wrapper over [`composer_wrap_line_widths`]
+    /// for callers that need only the line count and no caret — the viewer-echo
+    /// history block (`prime_viewer_echo_layout`). Sharing the same helper keeps
+    /// the echo's break-anywhere wrap identical to what the render path paints
+    /// (hud-n0x4u), so an over-long single-word reply is counted as the multiple
+    /// in-box lines it actually occupies rather than one clipped line.
+    pub(crate) fn measure_wrapped_line_count(
+        &mut self,
+        text: &str,
+        wrap_width: f32,
+        font_size_px: f32,
+        line_height_multiplier: f32,
+    ) -> usize {
+        composer_wrap_line_widths(
+            &mut self.font_system,
+            text,
+            wrap_width,
+            font_size_px,
+            line_height_multiplier,
+        )
+        .len()
+        .max(1)
     }
 
     /// Measure the composer draft's wrapped VISUAL-LINE layout for soft-wrap
@@ -701,7 +780,11 @@ impl TextRasterizer {
             Metrics::new(font_size_px, line_height),
         );
         buf.set_size(&mut self.font_system, Some(wrap_width.max(1.0)), None);
-        buf.set_wrap(&mut self.font_system, Wrap::Word);
+        // Same break-anywhere policy as the render + caret-line paths
+        // (WRAPPED_TEXT_WRAP) so visual-row byte ranges for Up/Down navigation
+        // match the painted wrap, including glyph-level breaks inside an over-long
+        // token (hud-n0x4u).
+        buf.set_wrap(&mut self.font_system, WRAPPED_TEXT_WRAP);
         let base_attrs = Attrs::new().family(Family::SansSerif).weight(Weight(400));
         buf.set_text(&mut self.font_system, text, base_attrs, Shaping::Advanced);
         buf.shape_until_scroll(&mut self.font_system, false);
@@ -1054,7 +1137,11 @@ impl TextRasterizer {
             Some(item.bounds_width),
             Some(item.bounds_height),
         );
-        buf.set_wrap(&mut self.font_system, Wrap::Word);
+        // Break-anywhere wrap: word boundaries first, glyph-level fallback for a
+        // single token wider than the box so its tail stays visible instead of
+        // overflowing into the clip scissor (hud-n0x4u). Shared with the composer
+        // / echo measurement helpers via WRAPPED_TEXT_WRAP so counts agree.
+        buf.set_wrap(&mut self.font_system, WRAPPED_TEXT_WRAP);
         let family = match item.font_family {
             FontFamily::SystemSansSerif => Family::SansSerif,
             FontFamily::SystemMonospace => Family::Monospace,
@@ -2860,6 +2947,75 @@ fn linear_to_srgb_u8(linear: f32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// hud-n0x4u repro (pure CPU): a single unbroken token far wider than the box
+    /// must fall back to glyph-level (break-anywhere) wrapping so every visual line
+    /// fits inside `wrap_width` and no content is left on one over-long line whose
+    /// tail the box scissor would clip.
+    ///
+    /// This exercises the shared [`composer_wrap_line_widths`] helper, which uses
+    /// [`WRAPPED_TEXT_WRAP`] — the exact policy the composer draft, the viewer-echo
+    /// history line count, and the render paint path all use. Before the fix
+    /// (`Wrap::Word`) the 200-char run shaped to ONE line wider than the box: this
+    /// asserts `> 1` line, so it fails on the old policy and passes on the new one.
+    #[test]
+    fn overlong_unbroken_token_wraps_at_glyph_level_within_box() {
+        let mut fs = bundled_font_system();
+        let font_size_px = 16.0;
+        let lhm = 1.4;
+        let wrap_width = 80.0;
+
+        // A 200-char run with NO spaces — one unbreakable "word" (the owner's
+        // `asdasd…` case). Word-only wrap cannot break it; glyph fallback must.
+        let token = "a".repeat(200);
+        let widths = composer_wrap_line_widths(&mut fs, &token, wrap_width, font_size_px, lhm);
+
+        assert!(
+            widths.len() > 1,
+            "an over-long unbroken token must wrap to multiple lines \
+             (break-anywhere fallback); got {} line(s) — the tail would be clipped",
+            widths.len()
+        );
+        // Every wrapped line must fit inside the box (small epsilon for the final
+        // glyph advance / AA). A line wider than the box is exactly the clipped-tail
+        // defect this fix removes.
+        for (i, w) in widths.iter().enumerate() {
+            assert!(
+                *w <= wrap_width + 1.0,
+                "wrapped line {i} width {w} exceeds wrap_width {wrap_width}; \
+                 its tail would be clipped by the box scissor"
+            );
+        }
+    }
+
+    /// A token that already fits stays on a single line — the break-anywhere
+    /// policy is a strict superset of word wrap and must not gratuitously split
+    /// content that fits.
+    #[test]
+    fn short_token_stays_single_line() {
+        let mut fs = bundled_font_system();
+        let widths = composer_wrap_line_widths(&mut fs, "hi", 400.0, 16.0, 1.4);
+        assert_eq!(widths.len(), 1, "a short token must not wrap");
+    }
+
+    /// Normal spaced text still wraps at word boundaries under the break-anywhere
+    /// policy (regression guard: WordOrGlyph must not change ordinary word wrap).
+    #[test]
+    fn spaced_text_still_word_wraps() {
+        let mut fs = bundled_font_system();
+        let text = "word ".repeat(40); // ~200 chars, many spaces
+        let widths = composer_wrap_line_widths(&mut fs, &text, 80.0, 16.0, 1.4);
+        assert!(
+            widths.len() > 1,
+            "spaced text must still wrap to multiple lines"
+        );
+        for (i, w) in widths.iter().enumerate() {
+            assert!(
+                *w <= 80.0 + 1.0,
+                "word-wrapped line {i} width {w} exceeds box width 80.0"
+            );
+        }
+    }
 
     #[test]
     fn strip_markdown_removes_heading_markers() {
