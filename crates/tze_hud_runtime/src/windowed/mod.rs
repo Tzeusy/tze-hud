@@ -2102,13 +2102,17 @@ impl WindowedRuntime {
                                 settings.agent_id.clone(),
                             );
                         bridge_cfg.lease_ttl_ms = settings.lease_ttl_ms;
-                        let tokens = crate::portal_tokens::portal_visual_tokens_from_part_tokens(
-                            &tze_hud_config::resolve_portal_tokens(
-                                &tze_hud_config::tokens::resolve_tokens(
-                                    &tze_hud_config::tokens::DesignTokenMap::new(),
-                                    &tze_hud_config::tokens::DesignTokenMap::new(),
-                                ),
-                            ),
+                        // Resolve the bridge's visual tokens from the runtime's
+                        // LOADED startup design tokens (`startup_compositor_tokens`
+                        // — canonical defaults pre-merged with the active profile's
+                        // overrides), NOT empty maps. This mirrors the in-process
+                        // driver's `resolve_visual_tokens`, which resolves against
+                        // the same startup token map (applied via
+                        // `apply_token_map(global_tokens)`), so a bridged portal is
+                        // visually identical to an in-process one instead of falling
+                        // back to unstyled canonical defaults (hud-ygtiy).
+                        let tokens = crate::portal_tokens::resolve_bridge_visual_tokens(
+                            &startup_compositor_tokens,
                         );
                         let handle = crate::resident_grpc_bridge::spawn_resident_grpc_bridge(
                             rt.rt.handle(),
