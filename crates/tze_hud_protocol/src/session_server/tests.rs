@@ -10015,7 +10015,8 @@ fn sample_frame_presented(batch_id: SceneId) -> crate::proto::FramePresented {
 #[tokio::test]
 async fn test_frame_presented_delivered_to_telemetry_subscriber() {
     let (mut client, _server, frame_presented_tx) = setup_test_with_frame_presented_tx().await;
-    let (_tx, mut stream) = handshake_telemetry(&mut client, "telemetry-agent", "test-key", true).await;
+    let (_tx, mut stream) =
+        handshake_telemetry(&mut client, "telemetry-agent", "test-key", true).await;
 
     // Let the session handler finish subscribing to the broadcast channel.
     tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
@@ -10056,8 +10057,7 @@ async fn test_frame_presented_not_delivered_without_telemetry_subscription() {
 
     let _ = frame_presented_tx.send(sample_frame_presented(SceneId::new()));
 
-    let result =
-        tokio::time::timeout(tokio::time::Duration::from_millis(200), stream.next()).await;
+    let result = tokio::time::timeout(tokio::time::Duration::from_millis(200), stream.next()).await;
     // Timeout = no delivery = correct. If any message arrives it must not be a
     // FramePresented (Heartbeat etc. are allowed).
     if let Ok(Some(Ok(msg))) = result {

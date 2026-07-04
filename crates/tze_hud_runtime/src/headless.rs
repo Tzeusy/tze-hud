@@ -402,10 +402,7 @@ impl HeadlessRuntime {
     /// Pass `HudSessionImpl::frame_presented_tx.clone()` to deliver present acks
     /// to gRPC agents subscribed to TELEMETRY_FRAMES, or a standalone sender in
     /// tests to observe the correlation directly.
-    pub fn set_frame_presented_tx(
-        &mut self,
-        tx: tokio::sync::broadcast::Sender<FramePresented>,
-    ) {
+    pub fn set_frame_presented_tx(&mut self, tx: tokio::sync::broadcast::Sender<FramePresented>) {
         self.frame_presented_tx = Some(tx);
     }
 
