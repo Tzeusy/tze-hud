@@ -33,6 +33,23 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
         self.assertNotIn("---", joined)
         self.assertEqual(joined, "only")
 
+    def test_append_transcript_entry_adds_divider_before_new_turn(self) -> None:
+        body = portal.join_transcript_entries(["doc line one", "doc line two"])
+        appended = portal.append_transcript_entry(body, "hello from the viewer")
+        self.assertTrue(appended.endswith("\n---\nhello from the viewer"))
+        # Existing body is preserved verbatim ahead of the new divider.
+        self.assertTrue(appended.startswith(body))
+
+    def test_append_transcript_entry_to_empty_body_has_no_divider(self) -> None:
+        appended = portal.append_transcript_entry("", "first message")
+        self.assertEqual(appended, "first message")
+
+    def test_append_transcript_entry_preserves_multiline_entry(self) -> None:
+        appended = portal.append_transcript_entry("history", "line one\nline two")
+        self.assertEqual(appended, "history\n---\nline one\nline two")
+        # The multi-line entry stays one turn: exactly one divider.
+        self.assertEqual(appended.count("\n---\n"), 1)
+
     def test_split_transcript_entries_uses_blank_line_boundaries(self) -> None:
         body = "alpha one\nalpha two\n\nbravo\n\n\ncharlie"
         entries = portal.split_transcript_entries(body)

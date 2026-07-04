@@ -314,6 +314,16 @@ def join_transcript_entries(entries: list[str]) -> str:
     return f"\n{TRANSCRIPT_ENTRY_SEPARATOR}\n".join(kept)
 
 
+def append_transcript_entry(body: str, entry: str) -> str:
+    """Append a submitted viewer entry to the OUTPUT-pane transcript body.
+
+    The new entry lands after a `---` turn divider (hud-hsc1t); empty bodies
+    and whitespace-only entries collapse correctly because
+    join_transcript_entries drops blank segments (hud-xg9ok).
+    """
+    return join_transcript_entries([body, entry])
+
+
 def load_transcript_slice(doc_path: str, max_lines: int) -> str:
     """Load the markdown file, trim to a bounded viewport, and insert a
     thematic-break turn divider between each logical entry so the OUTPUT pane
@@ -3436,16 +3446,47 @@ async def portal_interaction_loop(
         request_composer_render()
 
     async def on_composer_draft_submit(text: str, sequence: int) -> None:
-        """Handle runtime-owned ComposerDraftSubmitEvent — clear local display."""
-        nonlocal composer_text, composer_cursor, composer_cursor_goal_x, last_draft_sequence
+        """Handle runtime-owned ComposerDraftSubmitEvent — echo into history.
+
+        The exemplar owns the OUTPUT-pane transcript, so a submitted draft must
+        be appended as a new turn entry and the pane republished at the tail;
+        clearing the composer alone makes viewer messages visually vanish
+        (hud-xg9ok).
+        """
+        nonlocal composer_text, composer_cursor, composer_cursor_goal_x, last_draft_sequence, body_full
         last_draft_sequence = sequence
-        if text.strip():
+        submitted = normalize_composer_input(text)
+        if submitted.strip():
             emit_step_event(transcript, 10, "checkpoint", {
                 "code": "input:submit",
                 "title": "Composer submitted",
                 "action": "runtime-owned draft submitted; composer clears",
                 "expected_visual": "composer clears after submit",
             }, submitted=text)
+            body_full = append_transcript_entry(body_full, submitted)
+            tail_offset = scroll_max_y_for_text(body_full, output_rect.h, SCROLL_LINE_PX)
+            async with mutation_lock:
+                await client.submit_mutation_batch(
+                    lease_id,
+                    [
+                        register_tile_scroll_mutation(
+                            tiles.output_scroll,
+                            scrollable_y=True,
+                            content_height=scroll_max_y_for_text(
+                                body_full, output_rect.h, SCROLL_LINE_PX,
+                            ),
+                        ),
+                        set_scroll_offset_mutation(tiles.output_scroll, 0.0, tail_offset),
+                    ],
+                    timeout=2.0,
+                )
+            await render_output_scroll(tail_offset)
+            emit_step_event(transcript, 10, "checkpoint", {
+                "code": "echo:appended",
+                "title": "Viewer entry appended to history",
+                "action": "submitted draft appended as a transcript turn; output pane republished at tail",
+                "expected_visual": "submitted text visible at the bottom of history below a divider",
+            }, entry_len=len(submitted))
         composer_text = ""
         composer_cursor = 0
         composer_cursor_goal_x = None
