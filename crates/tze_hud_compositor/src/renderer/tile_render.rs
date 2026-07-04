@@ -149,6 +149,56 @@ pub(super) fn viewer_echo_divider_rects(
     rects
 }
 
+/// Display-space y of the input-history block's first (oldest wrapped) line,
+/// given the band geometry and the input tile's clamped vertical scroll offset
+/// (hud-acfvp).
+///
+/// The runtime-authored viewer-echo history is a bounded window in the band
+/// `[band_top, band_bottom]` directly above the composer input box
+/// (`band_bottom == draft_box.y`). At the **tail** — the resting state — the
+/// block is bottom-aligned: its last (newest) line sits on `band_bottom` and the
+/// oldest lines clip off `band_top` (the pre-scroll newest-fit window). Scrolling
+/// the input tile UP eases its displayed vertical scroll offset DOWN from the
+/// tail toward `0`, which slides the whole block DOWN inside the fixed band and
+/// reveals older lines; at the fully-scrolled bound the oldest line rests on
+/// `band_top`.
+///
+/// `scroll_offset_y` is the tile's *displayed* vertical scroll offset (the eased
+/// value the rest of the tile — caret, clear_bg, hit region, draft glyphs —
+/// already translates by via `render_node`, hud-6n9iv), or `None` when the tile
+/// carries no scroll config yet: with no scroll config the block pins to the
+/// tail, reproducing the prior newest-fit window byte-for-byte. The offset is
+/// clamped to `[0, max_scrollback]` where
+/// `max_scrollback = (block_height - band_height).max(0)`, so the window can
+/// never overscroll past the oldest line or below the tail.
+///
+/// Free-standing (no `self`, no GPU) so the scroll math is unit-testable without
+/// a headless compositor, mirroring [`viewer_echo_divider_rects`].
+pub(super) fn input_history_block_top(
+    band_top: f32,
+    band_bottom: f32,
+    block_height: f32,
+    scroll_offset_y: Option<f32>,
+) -> f32 {
+    // The tail is always bottom-aligned: the block's bottom sits on the band
+    // bottom regardless of whether the history overflows the band, so a history
+    // that fits keeps its prior bottom-aligned position exactly.
+    let tail_top = band_bottom - block_height;
+    let band_height = (band_bottom - band_top).max(0.0);
+    let max_scrollback = (block_height - band_height).max(0.0);
+    // Resting scroll-back is the tail (max): a scrollable input tile seeds its
+    // offset to the tail and eases it toward 0 as the viewer scrolls up. A tile
+    // with no scroll config has no offset to read, so it pins to the tail.
+    let scrollback = scroll_offset_y
+        .map(|o| o.clamp(0.0, max_scrollback))
+        .unwrap_or(max_scrollback);
+    // Reveal older lines by sliding the block DOWN from the tail as the offset
+    // eases below the tail (max_scrollback). At the fully-scrolled bound
+    // (offset 0) the oldest line rests on the band top; when the history fits the
+    // band `max_scrollback` is 0 and the block never moves.
+    tail_top + (max_scrollback - scrollback)
+}
+
 impl Compositor {
     // ─── Drag-boost helpers ───────────────────────────────────────────────────
 
@@ -1200,11 +1250,19 @@ impl Compositor {
             .max(1);
         let block_height = (total_lines as f32 * line_h).max(line_h);
 
-        // Bottom-align the block so the NEWEST reply sits just above the composer
-        // box; the block grows upward. When the history is taller than the band,
-        // the top (oldest) lines fall above `band_top` and are clipped by the
-        // scissor below — the newest replies stay visible and the bound holds.
-        let block_top = draft_box.y - block_height;
+        // Slide the block within the fixed band by the input tile's displayed
+        // vertical scroll offset so the viewer can scroll UP through older history
+        // (hud-acfvp). At the tail the block is bottom-aligned (NEWEST reply just
+        // above the composer box, oldest clipping off `band_top`); as the tile
+        // scrolls up the whole window slides down and reveals older replies. A
+        // tile with no scroll config pins to the tail, so the newest-fit window is
+        // byte-identical to the pre-scroll behavior. The scissor below still clips
+        // the band, so lines pushed past its edges drop out (bounded window).
+        let scroll_offset_y = scene
+            .tile_scroll_config(tile.id)
+            .map(|_| self.display_tile_scroll_offset(scene, tile.id).1);
+        let block_top =
+            input_history_block_top(band_top, draft_box.y, block_height, scroll_offset_y);
 
         items.push(crate::text::TextItem {
             text: Arc::from(joined.as_str()),
@@ -1310,9 +1368,15 @@ impl Compositor {
             });
         let total_lines: usize = per_entry.iter().sum::<usize>().max(1);
         let block_height = (total_lines as f32 * line_h).max(line_h);
-        // Bottom-align: newest entry sits just above the composer box, oldest at
-        // the top and clipping first — identical to the text block.
-        let block_top = draft_box.y - block_height;
+        // Slide by the input tile's displayed scroll offset — identical geometry
+        // to the text block (hud-acfvp) — so the turn dividers stay locked onto
+        // the boundaries between the scrolled entries. Pins to the tail when the
+        // tile has no scroll config.
+        let scroll_offset_y = scene
+            .tile_scroll_config(tile.id)
+            .map(|_| self.display_tile_scroll_offset(scene, tile.id).1);
+        let block_top =
+            input_history_block_top(band_top, draft_box.y, block_height, scroll_offset_y);
 
         viewer_echo_divider_rects(
             &per_entry,

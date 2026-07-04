@@ -12438,6 +12438,187 @@ fn viewer_echo_divider_rects_clips_and_degenerate() {
     );
 }
 
+/// hud-acfvp: the input-history block's top slides within the fixed band by the
+/// input tile's clamped displayed scroll offset, so the viewer can wheel-scroll
+/// UP through older entries. Pure scroll math — no rasterizer, no GPU.
+#[test]
+fn input_history_block_top_slides_with_scroll_offset() {
+    // Band [100, 300] → band_height 200; a 500px history overflows by 300px.
+    let band_top = 100.0_f32;
+    let band_bottom = 300.0_f32;
+    let block_height = 500.0_f32;
+    let max_scrollback = block_height - (band_bottom - band_top); // 300
+
+    // No scroll config → pin to the tail: block bottom (top + height) rests on the
+    // band bottom, newest visible, oldest clipped above — the pre-scroll window.
+    let tail = tile_render::input_history_block_top(band_top, band_bottom, block_height, None);
+    assert!(
+        (tail - (band_bottom - block_height)).abs() < 0.01,
+        "no scroll config pins the block to the tail (band_bottom - block_height), got {tail}"
+    );
+    assert!(
+        (tail - (band_top - max_scrollback)).abs() < 0.01,
+        "tail equals band_top - max_scrollback"
+    );
+
+    // Offset seeded at the tail (max_scrollback) reproduces the tail exactly.
+    let at_tail = tile_render::input_history_block_top(
+        band_top,
+        band_bottom,
+        block_height,
+        Some(max_scrollback),
+    );
+    assert!(
+        (at_tail - tail).abs() < 0.01,
+        "offset at the tail matches the no-config tail, got {at_tail}"
+    );
+
+    // Scrolling up (offset eases toward 0) slides the block DOWN, revealing older
+    // lines; fully scrolled up rests the oldest line on the band top.
+    let scrolled_up =
+        tile_render::input_history_block_top(band_top, band_bottom, block_height, Some(0.0));
+    assert!(
+        (scrolled_up - band_top).abs() < 0.01,
+        "fully scrolled up rests the oldest line on band_top, got {scrolled_up}"
+    );
+    assert!(
+        scrolled_up > at_tail,
+        "scrolling up moves the block DOWN (older revealed): {scrolled_up} > {at_tail}"
+    );
+
+    // A partial offset lands proportionally between the two, and the offset is
+    // clamped so it can never overscroll past the oldest line or below the tail.
+    let mid =
+        tile_render::input_history_block_top(band_top, band_bottom, block_height, Some(100.0));
+    assert!(
+        (mid - (band_top - 100.0)).abs() < 0.01,
+        "partial scroll-back is band_top - clamp(offset), got {mid}"
+    );
+    let over_up =
+        tile_render::input_history_block_top(band_top, band_bottom, block_height, Some(-50.0));
+    assert!(
+        (over_up - band_top).abs() < 0.01,
+        "negative offset clamps to the fully-scrolled-up bound, got {over_up}"
+    );
+    let over_down =
+        tile_render::input_history_block_top(band_top, band_bottom, block_height, Some(9999.0));
+    assert!(
+        (over_down - tail).abs() < 0.01,
+        "offset past the tail clamps to the tail, got {over_down}"
+    );
+
+    // History that fits the band has zero scroll range: every offset yields the
+    // same bottom-aligned position (no spurious motion for short histories).
+    let short = 120.0_f32; // < band_height (200)
+    let fit_tail = tile_render::input_history_block_top(band_top, band_bottom, short, None);
+    let fit_scrolled =
+        tile_render::input_history_block_top(band_top, band_bottom, short, Some(50.0));
+    assert!(
+        (fit_tail - fit_scrolled).abs() < 0.01,
+        "a history that fits the band never scrolls (max_scrollback == 0)"
+    );
+    assert!(
+        (fit_tail - (band_bottom - short)).abs() < 0.01,
+        "a fitting history stays bottom-aligned at band_bottom - block_height, got {fit_tail}"
+    );
+}
+
+/// hud-acfvp end-to-end: the rendered input-history block honors the input tile's
+/// scroll offset. With no scroll config the block pins to the tail; registering a
+/// vertical scroll config and setting the offset to 0 slides the (overflowing)
+/// block DOWN to reveal older entries, and an offset past the tail clamps back to
+/// the tail. GPU-gated (needs `new_headless`); skips when no text rasterizer.
+#[tokio::test]
+async fn input_history_block_honors_tile_scroll_offset() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(400, 100).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+    if compositor.text_rasterizer.is_none() {
+        eprintln!("skipping: no text rasterizer (viewer-echo text path unavailable headless)");
+        return;
+    }
+
+    // Short tile so a handful of multi-line echoes overflow the band above the
+    // composer box (max_scrollback > 0), making the scroll shift observable.
+    let mut scene = SceneGraph::new(400.0, 100.0);
+    let tab_id = scene.create_tab("agent", 0).unwrap();
+    let lease_id = scene.grant_lease("agent", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "agent",
+            lease_id,
+            Rect::new(0.0, 0.0, 400.0, 100.0),
+            1,
+        )
+        .unwrap();
+    let composer_id = SceneId::new();
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: composer_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(0.0, 0.0, 400.0, 100.0),
+                    interaction_id: "portal-composer".to_owned(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    accepts_composer_input: true,
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap();
+
+    // Several multi-line replies → a history block far taller than the band.
+    for i in 0..4 {
+        compositor
+            .viewer_echoes
+            .append(tile_id, format!("reply {i}\nline b\nline c"), i as u64);
+    }
+    compositor.prime_viewer_echo_layout(&scene);
+
+    let echo_y = |c: &Compositor, s: &SceneGraph| -> f32 {
+        let tile = s.visible_tiles()[0].clone();
+        let tokens = super::token_colors::resolve_viewer_echo_tokens(&c.token_map);
+        let items = c.collect_viewer_echo_text_items(&tile, s, 400.0, 100.0, &tokens);
+        items
+            .iter()
+            .find(|t| t.color == VIEWER_ECHO_COLOR)
+            .expect("a viewer-echo block must render")
+            .pixel_y
+    };
+
+    // No scroll config → tail (bottom-aligned newest-fit window).
+    let tail_y = echo_y(&compositor, &scene);
+
+    // Register a vertical scroll config; the offset now drives the block.
+    scene
+        .register_tile_scroll_config(tile_id, TileScrollConfig::vertical())
+        .unwrap();
+
+    // Offset 0 = fully scrolled up: the block slides DOWN, revealing older lines.
+    scene
+        .set_tile_scroll_offset_local(tile_id, 0.0, 0.0)
+        .unwrap();
+    let scrolled_up_y = echo_y(&compositor, &scene);
+    assert!(
+        scrolled_up_y > tail_y + 1.0,
+        "scrolling the input tile up must move the history block DOWN to reveal older \
+         entries: scrolled_up_y {scrolled_up_y} should exceed tail_y {tail_y}"
+    );
+
+    // An offset far past the tail clamps back to the tail position.
+    scene
+        .set_tile_scroll_offset_local(tile_id, 0.0, 100_000.0)
+        .unwrap();
+    let clamped_tail_y = echo_y(&compositor, &scene);
+    assert!(
+        (clamped_tail_y - tail_y).abs() < 0.5,
+        "an offset past the tail clamps to the tail: {clamped_tail_y} vs {tail_y}"
+    );
+}
+
 /// No breaks, zero width, or zero thickness produce no divider rects.
 #[test]
 fn separator_rects_degenerate_inputs_are_empty() {
