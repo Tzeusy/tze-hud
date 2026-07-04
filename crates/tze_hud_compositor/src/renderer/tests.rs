@@ -14108,3 +14108,137 @@ async fn hud_b0x0m_static_image_tint_scaled_by_tile_opacity() {
         "StaticImage tint alpha must be tile-opacity-scaled: got {tint_a}, expected 0.5"
     );
 }
+
+// ─── hud-dat3x: tile text honours whole-tile opacity ─────────────────────────
+// A tile whose opacity is driven to 0 (the exemplar minimize path calls
+// `update_tile_opacity(0.0)`) hides its solid-color backdrop via the quad path,
+// but text was collected at full opacity — leaving floating glyphs on screen.
+// `collect_text_items` must now fold the same `tile_effective_opacity` the quad
+// path uses into every text item: opacity 0 → ZERO items from that tile (nothing
+// shaped/rasterized), a fractional opacity → items carrying the blended alpha.
+
+/// Build a single scrollable (portal) markdown tile carrying `content` at the
+/// given whole-tile `opacity`, and return `(scene, tile_id)`.
+fn dat3x_markdown_tile_scene(content: &str, opacity: f32) -> (SceneGraph, SceneId) {
+    let mut scene = SceneGraph::new(256.0, 256.0);
+    let tab_id = scene.create_tab("t", 0).unwrap();
+    let lease_id = scene.grant_lease("t", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(tab_id, "t", lease_id, Rect::new(0.0, 0.0, 120.0, 120.0), 1)
+        .unwrap();
+    scene
+        .register_tile_scroll_config(tile_id, TileScrollConfig::vertical())
+        .unwrap();
+    let root_id = SceneId::new();
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: root_id,
+                children: vec![],
+                data: NodeData::TextMarkdown(TextMarkdownNode {
+                    content: content.to_owned(),
+                    bounds: Rect::new(0.0, 0.0, 120.0, 120.0),
+                    font_size_px: 14.0,
+                    font_family: FontFamily::SystemSansSerif,
+                    color: Rgba::new(0.9, 0.9, 0.9, 1.0),
+                    background: Some(Rgba::new(0.04, 0.05, 0.07, 1.0)),
+                    alignment: TextAlign::Start,
+                    overflow: TextOverflow::Ellipsis,
+                    color_runs: Box::default(),
+                }),
+            },
+        )
+        .unwrap();
+    scene.tiles.get_mut(&tile_id).unwrap().opacity = opacity;
+    (scene, tile_id)
+}
+
+/// A tile at opacity 0 must contribute NO text items — the minimize path hides
+/// the backdrop AND the glyphs, together.
+#[tokio::test]
+async fn hud_dat3x_zero_tile_opacity_collects_no_text() {
+    let (compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+    let (scene, _tile_id) = dat3x_markdown_tile_scene("hello transcript", 0.0);
+
+    let items = compositor.collect_text_items(&scene, 256.0, 256.0);
+    assert!(
+        items.iter().all(|t| !t.text.contains("hello")),
+        "a tile at opacity 0 must yield no transcript text items, got {} item(s)",
+        items.len()
+    );
+}
+
+/// A tile at fractional opacity must blend its glyphs proportionally: the text
+/// item carries the tile alpha (0.5), matching the backdrop fade.
+#[tokio::test]
+async fn hud_dat3x_fractional_tile_opacity_blends_text() {
+    let (compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+    let (scene, _tile_id) = dat3x_markdown_tile_scene("hello transcript", 0.5);
+
+    let items = compositor.collect_text_items(&scene, 256.0, 256.0);
+    let item = items
+        .iter()
+        .find(|t| t.text.contains("hello"))
+        .expect("a tile at opacity 0.5 must still render its text");
+    assert!(
+        (item.opacity - 0.5).abs() < 1e-4,
+        "tile opacity 0.5 must fold into the text item opacity: got {}",
+        item.opacity
+    );
+}
+
+/// Control: a fully-opaque tile renders its text at full opacity (no regression
+/// to the steady-state path).
+#[tokio::test]
+async fn hud_dat3x_full_tile_opacity_renders_text_opaque() {
+    let (compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+    let (scene, _tile_id) = dat3x_markdown_tile_scene("hello transcript", 1.0);
+
+    let items = compositor.collect_text_items(&scene, 256.0, 256.0);
+    let item = items
+        .iter()
+        .find(|t| t.text.contains("hello"))
+        .expect("a fully-opaque tile must render its text");
+    assert!(
+        (item.opacity - 1.0).abs() < 1e-4,
+        "full tile opacity must leave text opacity at 1.0: got {}",
+        item.opacity
+    );
+}
+
+/// A portal fading IN (durable `tile.opacity == 1`, TRANSIENT §6.3 animation
+/// opacity pinned at ~0) must STILL collect and shape its text — only the item
+/// alpha rides the transient fade to ~0. The skip-shaping optimization gates on
+/// the DURABLE scene-level `tile.opacity` only; gating it on the combined value
+/// would defer the warm-up shape into the middle of the animation, forcing a
+/// re-shape hitch when the tile crosses the visibility threshold (hud-991cj
+/// steady-state reuse). This is the inverse of the durable-minimize skip.
+#[tokio::test]
+async fn hud_dat3x_transient_portal_fade_still_shapes_text() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+    let (scene, tile_id) = dat3x_markdown_tile_scene("hello transcript", 1.0);
+
+    // Pin the §6.3 portal fade at ~0 while leaving tile.opacity = 1.0.
+    // `duration_ms: 0` makes `current_opacity_eased` return `target_opacity`.
+    compositor.portal_tile_anim_states.insert(
+        tile_id,
+        super::draw_cmds::ZoneAnimationState {
+            transition_start: std::time::Instant::now(),
+            duration_ms: 0,
+            from_opacity: 0.0,
+            target_opacity: 0.0,
+        },
+    );
+
+    let items = compositor.collect_text_items(&scene, 256.0, 256.0);
+    let item = items
+        .iter()
+        .find(|t| t.text.contains("hello"))
+        .expect("a fading-in portal (durable opacity 1) must STILL shape its text (warm-up)");
+    assert!(
+        item.opacity <= 1e-4,
+        "transient fade must blend the item alpha to ~0: got {}",
+        item.opacity
+    );
+}

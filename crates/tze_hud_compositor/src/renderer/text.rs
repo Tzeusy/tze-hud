@@ -30,6 +30,15 @@ use super::token_colors::{
 /// we avoid constructing a default `MarkdownTokens` struct six times per frame.
 const DEFAULT_LINE_HEIGHT_MULTIPLIER: f32 = 1.4;
 
+/// Below this whole-tile opacity a tile contributes no visible text, so the
+/// text collector skips shaping/rasterizing its glyphs entirely rather than
+/// emitting fully-transparent `TextItem`s.  This mirrors the quad/backdrop path
+/// (which paints nothing at a zero-alpha tile) so a minimized tile — opacity
+/// driven to 0 by `update_tile_opacity(0.0)` — leaves NO floating glyphs on
+/// screen (hud-dat3x).  Chosen well below one 8-bit alpha step (1/255 ≈ 0.0039)
+/// so any perceptible fraction still blends.
+const TILE_TEXT_OPACITY_EPSILON: f32 = 1e-4;
+
 // ─── Text-collection impl block ───────────────────────────────────────────────
 
 impl super::Compositor {
@@ -328,6 +337,37 @@ impl super::Compositor {
         // ── TextMarkdownNode tiles ────────────────────────────────────────────
         for tile in &Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene) {
             if let Some(root_id) = tile.root_node {
+                // Whole-tile opacity, split into its two components:
+                //
+                //   • `base_opacity` — the DURABLE scene-level `tile.opacity`
+                //     (× drag boost). The exemplar minimize path drives this to 0
+                //     via `update_tile_opacity(0.0)`; it is a persistent state, not
+                //     a per-frame animation.
+                //   • the §6.3 portal-transition animation opacity — a TRANSIENT
+                //     per-frame fade that a portal passes through while collapsing
+                //     or expanding.
+                //
+                // Skip shaping ONLY on durable invisibility. A tile fading IN still
+                // has `base_opacity == 1` while its animation opacity ramps up from
+                // 0; shaping it now (and blending the item alpha down) warms the
+                // shaped-buffer cache so the fade reuses one shape instead of
+                // re-shaping when it crosses the visibility threshold (hud-991cj).
+                // Gating the skip on the *combined* value would defer that shape
+                // into the middle of the animation — a per-frame re-shape hitch.
+                let base_opacity = Self::effective_tile_opacity(tile, scene);
+                if base_opacity <= TILE_TEXT_OPACITY_EPSILON {
+                    // Durably invisible (minimized / dragged to zero): collect,
+                    // shape, truncate, and draw nothing — no floating glyphs
+                    // (hud-dat3x). Matches the quad/backdrop path, which paints
+                    // nothing at a zero-alpha tile.
+                    continue;
+                }
+                // The value the quad/backdrop path applies via
+                // `tile_effective_opacity` (== base × portal anim). Text fades in
+                // lockstep with the tile's solid-color backdrop.
+                let tile_opacity =
+                    (base_opacity * self.portal_tile_anim_opacity(tile.id)).clamp(0.0, 1.0);
+
                 // Compute scroll offset once per tile and pass it down so text
                 // glyph positions track the scrolled content (Bounded Transcript
                 // Viewport requirement — hud-w5ih).
@@ -340,20 +380,21 @@ impl super::Compositor {
                 // hud-plz8q).
                 let at_tail = super::tile_at_tail_for_ellipsis(tile.id, scene);
 
-                // §6.3 portal transition: track item count before to apply
-                // portal animation opacity to newly added items.
+                // Track item count before so the tile's whole-tile opacity can be
+                // folded into exactly the glyphs this tile just contributed.
                 let items_before = items.len();
                 self.collect_text_items_from_node(
                     root_id, tile, scene, scroll_x, scroll_y, at_tail, &mut items,
                 );
 
-                // Apply portal tile animation opacity (§6.3 transition tokens).
-                // Only scrollable tiles (portal tiles) have animation state;
-                // all others return 1.0 from portal_tile_anim_opacity.
-                let portal_anim = self.portal_tile_anim_opacity(tile.id);
-                if portal_anim < 1.0 {
+                // Fractional opacity: blend every glyph (transcript, cached
+                // markdown, plain, and ellipsis/truncation items alike) the tile
+                // just contributed, proportionally — matching the backdrop fade.
+                // This includes the §6.3 portal animation opacity, since
+                // `tile_effective_opacity` already folds it in.
+                if tile_opacity < 1.0 {
                     for item in &mut items[items_before..] {
-                        item.opacity *= portal_anim;
+                        item.opacity *= tile_opacity;
                     }
                 }
 
@@ -994,11 +1035,20 @@ impl super::Compositor {
         if self.local_composer.is_some() {
             let composer_tokens = resolve_composer_overlay_tokens(&self.token_map);
             for tile in &Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene) {
-                if let Some(text_item) =
+                if let Some(mut text_item) =
                     self.collect_composer_text_item(tile, scene, sw, sh, &composer_tokens)
                 {
-                    items.push(text_item);
-                    // Only the first matching tile renders the composer (focus is exclusive).
+                    // Fold the whole-tile opacity into the composer draft so it
+                    // fades with (and vanishes alongside) the tile backdrop
+                    // rather than floating over a minimized tile (hud-dat3x).
+                    // Skip only on DURABLE invisibility (scene tile.opacity); a
+                    // transient portal fade still shapes and blends.
+                    if Self::effective_tile_opacity(tile, scene) > TILE_TEXT_OPACITY_EPSILON {
+                        text_item.opacity *= self.tile_effective_opacity(tile, scene);
+                        items.push(text_item);
+                    }
+                    // Only the first matching tile owns the composer (focus is
+                    // exclusive), so stop regardless of whether it was visible.
                     break;
                 }
             }
@@ -1012,6 +1062,16 @@ impl super::Compositor {
         if !self.viewer_echoes.is_empty() {
             let viewer_tokens = resolve_viewer_echo_tokens(&self.token_map);
             for tile in &Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene) {
+                // Skip minimized tiles entirely and blend the rest, so viewer
+                // echo history fades with the tile backdrop instead of floating
+                // over a hidden tile (hud-dat3x). Gate the skip on DURABLE
+                // invisibility (scene tile.opacity) — a transient portal fade
+                // still shapes and blends.
+                if Self::effective_tile_opacity(tile, scene) <= TILE_TEXT_OPACITY_EPSILON {
+                    continue;
+                }
+                let tile_opacity = self.tile_effective_opacity(tile, scene);
+                let items_before = items.len();
                 items.extend(self.collect_viewer_echo_text_items(
                     tile,
                     scene,
@@ -1019,6 +1079,11 @@ impl super::Compositor {
                     sh,
                     &viewer_tokens,
                 ));
+                if tile_opacity < 1.0 {
+                    for item in &mut items[items_before..] {
+                        item.opacity *= tile_opacity;
+                    }
+                }
             }
         }
 
