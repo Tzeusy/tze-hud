@@ -282,6 +282,13 @@ struct WindowedRuntimeState {
     /// Frame-ready sender (compositor thread will own this; stored here until
     /// the compositor thread is spawned and takes it).
     frame_ready_tx: Option<FrameReadyTx>,
+    /// Present-ack broadcast sender (hud-4va6q). Cloned from the gRPC session
+    /// service during network start; the compositor thread takes it when spawned
+    /// and emits `FramePresented` after each presented frame. `None` in
+    /// compositor-only mode (grpc_port == 0), where there is no session to
+    /// subscribe — the compositor still drains the present-ack queue.
+    frame_presented_tx:
+        Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::FramePresented>>,
     /// Compositor and surface (Some until compositor thread is spawned and takes the compositor).
     compositor: Option<Compositor>,
     /// The window surface (main thread owns this for the lifetime of the window).
@@ -928,6 +935,10 @@ impl ApplicationHandler for WinitApp {
             .frame_ready_tx
             .take()
             .expect("frame_ready_tx already taken");
+        // Present-ack sender (hud-4va6q): moved into the compositor closure so the
+        // production render loop can broadcast `FramePresented`, mirroring the
+        // headless producer. `None` in compositor-only mode (no gRPC session).
+        let frame_presented_tx = self.state.frame_presented_tx.take();
         let shutdown = self.state.shutdown.clone();
         let benchmark_failed = self.state.benchmark_failed.clone();
         let telemetry_collector = TelemetryCollector::new();
@@ -1176,13 +1187,12 @@ impl ApplicationHandler for WinitApp {
                             // gRPC `apply_batch` enqueues accepted batch_ids in
                             // BOTH runtimes, so the windowed present path must drain
                             // this queue every presented frame or it grows unbounded
-                            // over a live session. Emitting a `FramePresented` from
-                            // the compositor thread (threading the broadcast sender
-                            // into this move-closure past the network-start ordering)
-                            // is deferred to a follow-up; the headless runtime is the
-                            // testable producer today. Drain-and-discard here keeps
-                            // windowed memory bounded in the interim.
-                            let _presented_batch_ids = scene.drain_present_ack_batch_ids();
+                            // over a live session. Drain UNDER the lock (cheap: a
+                            // VecDeque swap, no I/O) and broadcast `FramePresented`
+                            // AFTER the lock is released and the frame is presented
+                            // (hud-4va6q) — keeping the send off the hottest
+                            // lock-collapse path (hud-uyhpn).
+                            let presented_batch_ids = scene.drain_present_ack_batch_ids();
                             // ── DROP the scene lock BEFORE the vsync-blocking
                             // acquire/encode/submit/poll (hud-uyhpn) ────────────
                             // This is the fix: the lock hold now collapses to the
@@ -1203,6 +1213,39 @@ impl ApplicationHandler for WinitApp {
                             // surface.present()."
                             let _ = frame_ready_tx.send(true);
                             last_present_at = std::time::Instant::now();
+
+                            // ── Broadcast FramePresented (hud-4va6q) ──────────
+                            // Stage 6–7 are complete, so the batches drained above
+                            // are now on screen. Mirror the headless producer
+                            // (headless.rs): pair those batch_ids with this frame's
+                            // number + present wall-clock and broadcast to gRPC
+                            // subscribers, gated on read_telemetry at the session
+                            // layer. The send is off the scene lock (already
+                            // dropped) and skipped when no subscriber is attached
+                            // (compositor-only mode) or no batch was applied.
+                            if let Some(tx) = &frame_presented_tx
+                                && !presented_batch_ids.is_empty()
+                            {
+                                let present_wall_us = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_micros() as u64)
+                                    .unwrap_or(0);
+                                let event = tze_hud_protocol::proto::FramePresented {
+                                    frame_number: compositor_telemetry.frame_number,
+                                    present_wall_us,
+                                    // 16-byte big-endian UUID, matching the
+                                    // scene_id_to_bytes / bytes_to_scene_id wire
+                                    // contract used for MutationBatch.batch_id.
+                                    batch_ids: presented_batch_ids
+                                        .iter()
+                                        .map(|id| id.as_uuid().as_bytes().to_vec())
+                                        .collect(),
+                                };
+                                // Broadcast send errors only when there are no
+                                // subscribers — not an error for a droppable
+                                // state-stream present ack.
+                                let _ = tx.send(event);
+                            }
 
                             // Telemetry emit (Stage 8)
                             let mut telem = tze_hud_telemetry::FrameTelemetry::new(
@@ -1874,15 +1917,20 @@ impl WindowedRuntime {
             || std::env::var("TZE_HUD_BIND_ALL_INTERFACES")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
-        let (mut network_rt, mut network_handles, element_repositioned_tx, input_event_tx) =
-            start_network_services(
-                cfg.grpc_port,
-                &cfg.psk,
-                shared_state.clone(),
-                Arc::clone(&runtime_context),
-                fallback_unrestricted,
-                bind_all,
-            )?;
+        let (
+            mut network_rt,
+            mut network_handles,
+            element_repositioned_tx,
+            input_event_tx,
+            frame_presented_tx,
+        ) = start_network_services(
+            cfg.grpc_port,
+            &cfg.psk,
+            shared_state.clone(),
+            Arc::clone(&runtime_context),
+            fallback_unrestricted,
+            bind_all,
+        )?;
 
         // ── MCP HTTP server ────────────────────────────────────────────────────
         //
@@ -2194,6 +2242,7 @@ impl WindowedRuntime {
             pending_input_latency,
             frame_ready_rx,
             frame_ready_tx: Some(frame_ready_tx),
+            frame_presented_tx,
             compositor: None,
             window_surface: None,
             input_processor: InputProcessor::new(),
