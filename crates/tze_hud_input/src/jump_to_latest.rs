@@ -47,10 +47,31 @@
 
 use serde::{Deserialize, Serialize};
 
+/// sRGB transfer: straight-sRGB component → linear, for one channel in [0.0, 1.0].
+///
+/// Kept byte-for-byte identical to `tze_hud_compositor`'s `srgb_to_linear` so the
+/// `color_*` DEFAULT below lands in the same LINEAR space the token-set path
+/// produces (that path parses `#RRGGBB` via the compositor's `parse_hex_color`,
+/// which applies this same transfer). No compile-time link between the two copies;
+/// update both if the transfer function ever changes.
+#[inline]
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
 /// Token-resolved visual properties for the "jump to latest" pill.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct JumpToLatestTokens {
-    /// Pill fill color (RGBA components, each in [0.0, 1.0]).
+    /// Pill fill color. LINEAR RGB components in [0.0, 1.0] (unlike `text_*`,
+    /// which are STRAIGHT sRGB). The compositor feeds these straight into
+    /// `gpu_color_raw`, which assumes linear input; the token-set path resolves
+    /// `portal.jump_to_latest.color` through `parse_hex_color` (sRGB→linear), so
+    /// the DEFAULT below must also be linear for default and token-set to render
+    /// the same intended color (hud-25pee). Alpha carries no color-space transform.
     pub color_r: f32,
     pub color_g: f32,
     pub color_b: f32,
@@ -81,10 +102,13 @@ impl Default for JumpToLatestTokens {
         // sides when changing defaults.
         Self {
             // #4A5568 — the same neutral chrome tone as the scroll indicator
-            // thumb, ambient rather than alarming.
-            color_r: 0x4A as f32 / 255.0,
-            color_g: 0x55 as f32 / 255.0,
-            color_b: 0x68 as f32 / 255.0,
+            // thumb, ambient rather than alarming. Stored LINEAR (via
+            // srgb_to_linear) to match the token-set path, which parses the same
+            // hex through the compositor's parse_hex_color (sRGB→linear); the
+            // compositor's gpu_color_raw consumes color_* as linear (hud-25pee).
+            color_r: srgb_to_linear(0x4A as f32 / 255.0),
+            color_g: srgb_to_linear(0x55 as f32 / 255.0),
+            color_b: srgb_to_linear(0x68 as f32 / 255.0),
             color_a: 0.9,
             // #CBD5E0 — a light neutral that reads on the #4A5568 pill without
             // the loudness of pure white; ambient, subordinate to content.
@@ -202,6 +226,32 @@ mod tests {
 
     fn default_tokens() -> JumpToLatestTokens {
         JumpToLatestTokens::default()
+    }
+
+    // ─── Color-space convention (hud-25pee) ───────────────────────────────
+
+    /// The pill FILL default is stored LINEAR — the space `gpu_color_raw`
+    /// consumes and the space the token-set path (`parse_hex_color`) produces —
+    /// so default and token-set render the same intended color. It must equal
+    /// the straight-sRGB #4A5568 channels passed through `srgb_to_linear`, and be
+    /// strictly below those straight values (a plain literal would be the bug).
+    #[test]
+    fn pill_fill_default_is_linear() {
+        let d = default_tokens();
+        let (sr, sg, sb) = (
+            0x4A as f32 / 255.0,
+            0x55 as f32 / 255.0,
+            0x68 as f32 / 255.0,
+        );
+        let eps = 1e-6;
+        assert!((d.color_r - srgb_to_linear(sr)).abs() < eps);
+        assert!((d.color_g - srgb_to_linear(sg)).abs() < eps);
+        assert!((d.color_b - srgb_to_linear(sb)).abs() < eps);
+        // Linear is strictly darker than the straight-sRGB literal for these mid
+        // tones — the regression lock against reintroducing the raw literal.
+        assert!(d.color_r < sr - eps && d.color_g < sg - eps && d.color_b < sb - eps);
+        // `text_*`, by contrast, remain STRAIGHT sRGB (different consumer path).
+        assert_eq!(d.text_r, 0xCB as f32 / 255.0);
     }
 
     // ─── Visibility gates on scrolled-back state ──────────────────────────

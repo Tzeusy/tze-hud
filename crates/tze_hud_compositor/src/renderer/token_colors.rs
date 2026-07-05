@@ -1314,3 +1314,68 @@ pub(super) fn emit_drag_highlight_border(
         ));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The jump-to-latest pill FILL must render the same intended color whether it
+    /// comes from the built-in default or from an explicitly-set token carrying the
+    /// same hex — the color-space parity hud-25pee restores.
+    ///
+    /// Both feed `color_*` into `gpu_color_raw`, which assumes LINEAR input. The
+    /// token-set path parses `#4A5568` through `parse_hex_color` (sRGB→linear); the
+    /// default must therefore also be linear. Before the fix the default stored the
+    /// straight-sRGB literal `0x4A/255`, so default-vs-token rendered noticeably
+    /// different fills for the same intended color.
+    #[test]
+    fn jump_to_latest_pill_fill_default_matches_token_set_color_space() {
+        let default = tze_hud_input::JumpToLatestTokens::default();
+
+        // Explicitly set the token to the SAME hex the default is built from.
+        let mut token_map = HashMap::new();
+        token_map.insert(
+            "portal.jump_to_latest.color".to_string(),
+            "#4A5568".to_string(),
+        );
+        let resolved = resolve_jump_to_latest_tokens(&token_map);
+
+        // RGB parity: default and token-set land in the same (linear) space.
+        // Alpha differs by design (default 0.9 vs the hex's implicit 1.0) and
+        // carries no color-space transform, so it is asserted separately below.
+        let eps = 1e-6;
+        assert!(
+            (resolved.color_r - default.color_r).abs() < eps,
+            "pill-fill R must match between default and token-set: default={}, token-set={}",
+            default.color_r,
+            resolved.color_r,
+        );
+        assert!(
+            (resolved.color_g - default.color_g).abs() < eps,
+            "pill-fill G must match between default and token-set: default={}, token-set={}",
+            default.color_g,
+            resolved.color_g,
+        );
+        assert!(
+            (resolved.color_b - default.color_b).abs() < eps,
+            "pill-fill B must match between default and token-set: default={}, token-set={}",
+            default.color_b,
+            resolved.color_b,
+        );
+
+        // The default is LINEAR, not the straight-sRGB literal (regression lock).
+        assert!(
+            default.color_r < 0x4A as f32 / 255.0 - eps,
+            "pill-fill default R must be linear (< the straight-sRGB literal), got {}",
+            default.color_r,
+        );
+
+        // The token-set path is the source of truth for the linear value: it must
+        // equal parsing the hex directly (sRGB→linear), confirming the default was
+        // reconciled to that space rather than the two drifting independently.
+        let expected = parse_hex_color("#4A5568").expect("valid hex");
+        assert!((default.color_r - expected.r).abs() < eps);
+        assert!((default.color_g - expected.g).abs() < eps);
+        assert!((default.color_b - expected.b).abs() < eps);
+    }
+}
