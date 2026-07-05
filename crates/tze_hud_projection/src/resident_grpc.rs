@@ -2672,7 +2672,10 @@ mod tests {
             transcript_unit_text(2, OutputKind::Assistant, "bravo"),
         ];
         let md = visible_transcript_markdown(&units, Some(1));
-        assert_eq!(md, format!("alpha\n---\n{PORTAL_UNREAD_DIVIDER_LINE}\nbravo"));
+        assert_eq!(
+            md,
+            format!("alpha\n---\n{PORTAL_UNREAD_DIVIDER_LINE}\nbravo")
+        );
         let plain = visible_transcript_markdown(&units, None);
         assert!(!plain.contains(PORTAL_UNREAD_DIVIDER_LINE));
     }
@@ -2693,7 +2696,11 @@ mod tests {
         state.unread_output_count = Some(1);
 
         let runs = unread_divider_color_runs(&state, divider_color);
-        assert_eq!(runs.len(), 1, "an unread agent turn must emit one divider run");
+        assert_eq!(
+            runs.len(),
+            1,
+            "an unread agent turn must emit one divider run"
+        );
         assert_eq!(
             runs[0].start_byte, 0,
             "divider run must be a zero-length sentinel"
