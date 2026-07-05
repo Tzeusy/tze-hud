@@ -80,6 +80,9 @@ PORTAL_TOKEN_CONNECTING_MARKER_COLOR = "portal.connecting_marker.color"
 PORTAL_TOKEN_ACTIVITY_CUE_COLOR = "portal.activity_cue.color"
 PORTAL_TOKEN_STREAMING_CURSOR_COLOR = "portal.streaming_cursor.color"
 
+PORTAL_TOKEN_TIMESTAMP_COLOR = "portal.timestamp.color"
+PORTAL_TOKEN_TIMESTAMP_GRANULARITY = "portal.timestamp.granularity"
+
 PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR = "portal.lifecycle.active_color"
 PORTAL_TOKEN_LIFECYCLE_ATTACHED_COLOR = "portal.lifecycle.attached_color"
 PORTAL_TOKEN_LIFECYCLE_ATTENTION_COLOR = "portal.lifecycle.attention_color"
@@ -146,6 +149,8 @@ _RUST_DEFAULTS: dict[str, str] = {
     "CONNECTING_MARKER_COLOR": "#4C93A6",
     "ACTIVITY_CUE_COLOR": "#8A8FB0",
     "STREAMING_CURSOR_COLOR": "#A6ABC8",
+    "TIMESTAMP_COLOR": "#6B7689",
+    "TIMESTAMP_GRANULARITY": "off",
     "LIFECYCLE_ACTIVE_COLOR": "#4FA88A",
     "LIFECYCLE_ATTACHED_COLOR": "#5A8FC0",
     "LIFECYCLE_ATTENTION_COLOR": "#C28A3D",
@@ -206,6 +211,8 @@ CANONICAL_DEFAULTS: dict[str, str] = {
     PORTAL_TOKEN_CONNECTING_MARKER_COLOR: _RUST_DEFAULTS["CONNECTING_MARKER_COLOR"],
     PORTAL_TOKEN_ACTIVITY_CUE_COLOR: _RUST_DEFAULTS["ACTIVITY_CUE_COLOR"],
     PORTAL_TOKEN_STREAMING_CURSOR_COLOR: _RUST_DEFAULTS["STREAMING_CURSOR_COLOR"],
+    PORTAL_TOKEN_TIMESTAMP_COLOR: _RUST_DEFAULTS["TIMESTAMP_COLOR"],
+    PORTAL_TOKEN_TIMESTAMP_GRANULARITY: _RUST_DEFAULTS["TIMESTAMP_GRANULARITY"],
     PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR: _RUST_DEFAULTS["LIFECYCLE_ACTIVE_COLOR"],
     PORTAL_TOKEN_LIFECYCLE_ATTACHED_COLOR: _RUST_DEFAULTS["LIFECYCLE_ATTACHED_COLOR"],
     PORTAL_TOKEN_LIFECYCLE_ATTENTION_COLOR: _RUST_DEFAULTS["LIFECYCLE_ATTENTION_COLOR"],
@@ -323,6 +330,10 @@ class PortalPartTokens:
     connecting_marker_color: Rgba
     activity_cue_color: Rgba
     streaming_cursor_color: Rgba
+    # Ambient per-turn arrival timestamp (secondary/dim color + profile-governed
+    # visibility granularity: "off" | "per_turn" | "grouped").
+    timestamp_color: Rgba
+    timestamp_granularity: str
     lifecycle_active_color: Rgba
     lifecycle_attached_color: Rgba
     lifecycle_attention_color: Rgba
@@ -366,6 +377,22 @@ def _px(token_map: dict[str, str], key: str) -> float:
     return parsed
 
 
+_TIMESTAMP_GRANULARITIES = ("off", "per_turn", "grouped")
+
+
+def _granularity(token_map: dict[str, str], key: str) -> str:
+    """Resolve the ambient per-turn timestamp granularity.
+
+    Mirrors ``TimestampGranularity::parse`` in Rust: ``off`` / ``per_turn`` /
+    ``grouped`` (case-insensitive, ``per-turn`` accepted as ``per_turn``); any
+    other value falls back to the canonical default.
+    """
+    raw = token_map.get(key, CANONICAL_DEFAULTS[key]).strip().lower().replace("-", "_")
+    if raw in _TIMESTAMP_GRANULARITIES:
+        return raw
+    return CANONICAL_DEFAULTS[key]
+
+
 def resolve_portal_tokens(overrides: Optional[dict[str, str]] = None) -> PortalPartTokens:
     """Resolve :class:`PortalPartTokens` from an optional profile override map.
 
@@ -401,6 +428,8 @@ def resolve_portal_tokens(overrides: Optional[dict[str, str]] = None) -> PortalP
         connecting_marker_color=_color(tm, PORTAL_TOKEN_CONNECTING_MARKER_COLOR),
         activity_cue_color=_color(tm, PORTAL_TOKEN_ACTIVITY_CUE_COLOR),
         streaming_cursor_color=_color(tm, PORTAL_TOKEN_STREAMING_CURSOR_COLOR),
+        timestamp_color=_color(tm, PORTAL_TOKEN_TIMESTAMP_COLOR),
+        timestamp_granularity=_granularity(tm, PORTAL_TOKEN_TIMESTAMP_GRANULARITY),
         lifecycle_active_color=_color(tm, PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR),
         lifecycle_attached_color=_color(tm, PORTAL_TOKEN_LIFECYCLE_ATTACHED_COLOR),
         lifecycle_attention_color=_color(tm, PORTAL_TOKEN_LIFECYCLE_ATTENTION_COLOR),

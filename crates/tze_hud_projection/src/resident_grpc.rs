@@ -7,6 +7,7 @@
 
 use std::time::Instant;
 
+use tze_hud_config::TimestampGranularity;
 use tze_hud_protocol::proto;
 use tze_hud_protocol::proto::session as session_proto;
 
@@ -84,6 +85,35 @@ const PORTAL_ACTIVITY_MARKER_LINE: &str = "⋯ writing";
 /// caret at the tail; the token-resolved `streaming_cursor_color` accent rides
 /// alongside via `streaming_cursor_color_runs`. Ambient, not alarming.
 const PORTAL_STREAMING_CURSOR_GLYPH: &str = " ▍";
+
+/// Separator between an ambient per-turn arrival timestamp and its turn text
+/// (portal-chat-grade-affordances §Ambient Per-Turn Timestamps, hud-g1ena.4). A
+/// middot with hair spacing keeps the stamp compact and visually subordinate to
+/// the turn content it prefixes.
+const PORTAL_TIMESTAMP_SEPARATOR: &str = " · ";
+
+/// One minute in microseconds — the arrival-minute bucket used by
+/// [`TimestampGranularity::Grouped`](tze_hud_config::TimestampGranularity::Grouped)
+/// and the `HH:MM` presentation precision.
+const WALL_CLOCK_MINUTE_US: u64 = 60_000_000;
+
+/// Format a runtime-assigned wall-clock arrival time as an ambient `HH:MM`
+/// time-of-day (UTC).
+///
+/// `appended_at_wall_us` is microseconds since the Unix epoch in the WALL-CLOCK
+/// domain — the same unforgeable, runtime-assigned arrival metadata the activity
+/// cue reads (`TranscriptUnit::appended_at_wall_us`). CLOCK-DOMAIN typing is
+/// preserved: this is presentation of *arrival* time and is deliberately NOT the
+/// media/display clock (`present_at`/sync-group timing); the two are never
+/// conflated. Rendered at minute precision (seconds dropped) to stay quiet and
+/// ambient. UTC is used because the runtime carries no viewer timezone at this
+/// layer; a local-offset presentation is a promotion-era profile concern.
+fn format_wall_clock_arrival_hhmm(appended_at_wall_us: u64) -> String {
+    let seconds_of_day = (appended_at_wall_us / 1_000_000) % 86_400;
+    let hours = seconds_of_day / 3_600;
+    let minutes = (seconds_of_day % 3_600) / 60;
+    format!("{hours:02}:{minutes:02}")
+}
 
 /// Quiescence window (µs) for the agent-activity / streaming-cursor cue.
 ///
@@ -318,6 +348,18 @@ pub struct PortalVisualTokens {
     /// `activity_cue_color`; a distinct token so a profile can style the tail
     /// cursor independently. Source token: `portal.streaming_cursor.color`.
     pub streaming_cursor_color: proto::Rgba,
+
+    // Ambient per-turn timestamps (portal-chat-grade-affordances
+    // §Ambient Per-Turn Timestamps, hud-g1ena.4).
+    /// Color of the ambient per-turn arrival timestamp — SECONDARY presentation
+    /// (dim/muted), subordinate to turn content and never an attention source.
+    /// Source token: `portal.timestamp.color`.
+    pub timestamp_color: proto::Rgba,
+    /// Component-profile-governed visibility/granularity of the ambient per-turn
+    /// arrival timestamp (`off` / `per_turn` / `grouped`). Governs presentation
+    /// only; every presented time still derives from the runtime-assigned
+    /// wall-clock `appended_at_wall_us`. Source token: `portal.timestamp.granularity`.
+    pub timestamp_granularity: TimestampGranularity,
 
     // Lifecycle affordance accents (cooperative-hud-projection §lifecycle).
     //
@@ -654,8 +696,17 @@ impl ResidentGrpcPortalAdapter {
     /// ambient agent-activity / streaming-cursor cue from observed appends
     /// (hud-g1ena.5); callers pass the same timestamp they hand to
     /// `render_portal_message` so the drain-record markdown matches the tile.
+    ///
+    /// Ambient per-turn timestamps (hud-g1ena.4) are presented per the adapter's
+    /// profile-resolved granularity, so the drain-record markdown matches the tile
+    /// content byte-for-byte.
     pub fn render_portal_markdown(&self, state: &ProjectedPortalState, now_wall_us: u64) -> String {
-        portal_markdown(state, self.composer_display.as_ref(), now_wall_us)
+        portal_markdown_with(
+            state,
+            self.composer_display.as_ref(),
+            now_wall_us,
+            self.visual_tokens.timestamp_granularity,
+        )
     }
 
     /// Move the compact affordance. The next collapsed render publishes this
@@ -1087,7 +1138,12 @@ impl ResidentGrpcPortalAdapter {
             id: root_id_le,
             data: Some(proto::node_proto::Data::TextMarkdown(
                 proto::TextMarkdownNodeProto {
-                    content: portal_markdown(state, self.composer_display.as_ref(), now_wall_us),
+                    content: portal_markdown_with(
+                        state,
+                        self.composer_display.as_ref(),
+                        now_wall_us,
+                        self.visual_tokens.timestamp_granularity,
+                    ),
                     bounds: Some(bounds),
                     font_size_px,
                     color: Some(text_color),
@@ -1168,6 +1224,18 @@ impl ResidentGrpcPortalAdapter {
                             self.visual_tokens.streaming_cursor_color,
                             now_wall_us,
                         ));
+                        // Ambient per-turn arrival timestamps (hud-g1ena.4,
+                        // §Ambient Per-Turn Timestamps). Secondary/subordinate
+                        // token color for the `HH:MM` stamps that
+                        // `visible_transcript_markdown_with` prefixes onto turns;
+                        // absent unless the profile enables a non-Off granularity
+                        // on an Expanded portal with a non-empty transcript, so it
+                        // suppresses under redaction with the transcript itself.
+                        runs.extend(timestamp_color_runs(
+                            state,
+                            self.visual_tokens.timestamp_color,
+                            self.visual_tokens.timestamp_granularity,
+                        ));
                         runs
                     },
                     // Transcript panes use Ellipsis to engage the TruncationCache
@@ -1245,10 +1313,30 @@ impl ResidentGrpcPortalAdapter {
     }
 }
 
+/// Render the portal body markdown with ambient per-turn timestamps OFF.
+///
+/// Thin default-carrying shim over [`portal_markdown_with`], used only by the unit
+/// tests that predate timestamps and assert the no-stamp rendering. The production
+/// render path ([`ResidentGrpcPortalAdapter::text_node`] /
+/// [`ResidentGrpcPortalAdapter::render_portal_markdown`]) always passes the
+/// adapter's profile-resolved [`TimestampGranularity`]; hence `#[cfg(test)]`.
+#[cfg(test)]
 fn portal_markdown(
     state: &ProjectedPortalState,
     composer_display: Option<&ComposerDisplayState>,
     now_wall_us: u64,
+) -> String {
+    portal_markdown_with(state, composer_display, now_wall_us, TimestampGranularity::Off)
+}
+
+/// Render the portal body markdown, presenting ambient per-turn arrival
+/// timestamps per the profile-resolved `timestamps` granularity
+/// (portal-chat-grade-affordances §Ambient Per-Turn Timestamps, hud-g1ena.4).
+fn portal_markdown_with(
+    state: &ProjectedPortalState,
+    composer_display: Option<&ComposerDisplayState>,
+    now_wall_us: u64,
+    timestamps: TimestampGranularity,
 ) -> String {
     let mut result = String::new();
     let title = state.display_name.as_deref().unwrap_or("Projected session");
@@ -1334,9 +1422,10 @@ fn portal_markdown(
                 // `streaming_cursor_color` rides alongside via
                 // `streaming_cursor_color_runs`; `agent_activity_active` is the
                 // single gate for both the glyph and the sentinel run.
-                let mut body = visible_transcript_markdown(
+                let mut body = visible_transcript_markdown_with(
                     &state.visible_transcript,
                     unread_divider_boundary(state),
+                    timestamps,
                 );
                 if agent_activity_active(state, now_wall_us) {
                     body.push_str(PORTAL_STREAMING_CURSOR_GLYPH);
@@ -1921,6 +2010,45 @@ fn streaming_cursor_color_runs(
     }
 }
 
+/// Build the token-styled sentinel color run for the ambient per-turn arrival
+/// timestamps (portal-chat-grade-affordances §Ambient Per-Turn Timestamps,
+/// hud-g1ena.4).
+///
+/// Mirrors the other Phase-1 sentinels (`unread_divider_color_runs`,
+/// `streaming_cursor_color_runs`): a single zero-length run (`[0..0]`) carrying
+/// the token-resolved `timestamp_color` so the SECONDARY presentation hue is
+/// token-driven, never a literal in the render path (§6.1). Emitted exactly when
+/// at least one stamp is rendered by [`visible_transcript_markdown_with`] — an
+/// Expanded portal with a non-empty retained transcript and a non-`Off`
+/// granularity. Under redaction `visible_transcript` is emptied upstream, so the
+/// gate is false and no sentinel is emitted, exactly like the transcript preview.
+///
+/// ## Phase-1 scope note
+///
+/// Per-glyph coloring of each stamp requires its byte offset in the single-node
+/// content, which is fragile in the raw-tile model (see `composer_color_runs`).
+/// For Phase-1 the timestamp color is a zero-length sentinel at byte 0 carrying
+/// the token color; the text-visible `HH:MM` prefix marks each stamp. Promotion-
+/// era structured multi-node layout will color the stamp spans precisely.
+fn timestamp_color_runs(
+    state: &ProjectedPortalState,
+    timestamp_color: proto::Rgba,
+    granularity: TimestampGranularity,
+) -> Vec<proto::TextColorRunProto> {
+    if granularity != TimestampGranularity::Off
+        && state.presentation == ProjectedPortalPresentation::Expanded
+        && !state.visible_transcript.is_empty()
+    {
+        vec![proto::TextColorRunProto {
+            start_byte: 0,
+            end_byte: 0,
+            color: Some(timestamp_color),
+        }]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Render the retained transcript window to markdown, inserting the in-transcript
 /// unread divider (hud-g1ena.2) before the oldest retained unseen agent-authored
 /// turn when `unread_boundary` names its index.
@@ -1931,8 +2059,40 @@ fn streaming_cursor_color_runs(
 /// single global `portal.divider.color`, so a bare break could not be told apart
 /// in this single-node markdown path). Its token-resolved color rides a separate
 /// zero-length sentinel (`unread_divider_color_runs`).
+/// Two-arg shim rendering the transcript with per-turn timestamps OFF, used only
+/// by unit tests that predate timestamps. Production goes through
+/// [`visible_transcript_markdown_with`] with the profile-resolved granularity.
+#[cfg(test)]
 fn visible_transcript_markdown(units: &[TranscriptUnit], unread_boundary: Option<usize>) -> String {
+    visible_transcript_markdown_with(units, unread_boundary, TimestampGranularity::Off)
+}
+
+/// Render the retained transcript window to markdown, additionally presenting
+/// ambient per-turn arrival timestamps per `timestamps`
+/// (portal-chat-grade-affordances §Ambient Per-Turn Timestamps, hud-g1ena.4).
+///
+/// Each presented time derives from the unit's runtime-assigned wall-clock
+/// arrival metadata (`appended_at_wall_us`) — never adapter-supplied content, so
+/// an adapter cannot forge it — formatted at minute precision by
+/// [`format_wall_clock_arrival_hhmm`]. The stamp is a compact, subordinate prefix
+/// on the turn (its token-resolved `timestamp_color` rides a separate zero-length
+/// sentinel, [`timestamp_color_runs`]); CLOCK-DOMAIN typing is preserved — this is
+/// arrival time, not media/display-clock presentation timing.
+///
+/// Granularity governs only how often a stamp appears:
+/// - [`TimestampGranularity::Off`] — none (the default; unchanged from the bare
+///   two-arg [`visible_transcript_markdown`]).
+/// - [`TimestampGranularity::PerTurn`] — every turn.
+/// - [`TimestampGranularity::Grouped`] — only when a turn's arrival minute differs
+///   from the previous *stamped* turn's, so consecutive same-minute turns share one.
+fn visible_transcript_markdown_with(
+    units: &[TranscriptUnit],
+    unread_boundary: Option<usize>,
+    timestamps: TimestampGranularity,
+) -> String {
     let mut result = String::new();
+    // Last arrival-minute bucket a stamp was emitted for, for Grouped coalescing.
+    let mut last_stamped_minute: Option<u64> = None;
     for (index, unit) in units.iter().enumerate() {
         if index > 0 {
             // Turn separator between adjacent transcript entries (hud-nx7yq.4): a
@@ -1949,6 +2109,20 @@ fn visible_transcript_markdown(units: &[TranscriptUnit], unread_boundary: Option
             // from the ordinary turn separator above. Own line, then the turn text.
             result.push_str(PORTAL_UNREAD_DIVIDER_LINE);
             result.push('\n');
+        }
+        // Ambient per-turn arrival timestamp (secondary/subordinate prefix). Sourced
+        // from the runtime-assigned wall-clock arrival metadata, never adapter
+        // content. Grouped coalesces consecutive same-minute turns onto one stamp.
+        let minute_bucket = unit.appended_at_wall_us / WALL_CLOCK_MINUTE_US;
+        let show_stamp = match timestamps {
+            TimestampGranularity::Off => false,
+            TimestampGranularity::PerTurn => true,
+            TimestampGranularity::Grouped => last_stamped_minute != Some(minute_bucket),
+        };
+        if show_stamp {
+            result.push_str(&format_wall_clock_arrival_hhmm(unit.appended_at_wall_us));
+            result.push_str(PORTAL_TIMESTAMP_SEPARATOR);
+            last_stamped_minute = Some(minute_bucket);
         }
         result.push_str(clamp_utf8(&unit.output_text, 4_096));
     }
@@ -2105,6 +2279,13 @@ pub fn portal_visual_tokens_from_part_tokens(
             b: part.streaming_cursor_color.b,
             a: part.streaming_cursor_color.a,
         },
+        timestamp_color: proto::Rgba {
+            r: part.timestamp_color.r,
+            g: part.timestamp_color.g,
+            b: part.timestamp_color.b,
+            a: part.timestamp_color.a,
+        },
+        timestamp_granularity: part.timestamp_granularity,
         lifecycle_active_color: proto::Rgba {
             r: part.lifecycle_active_color.r,
             g: part.lifecycle_active_color.g,
@@ -3936,5 +4117,122 @@ mod tests {
         // marker — the §Connecting State Distinction invariant, enforced at the
         // mapping boundary too.
         assert_ne!(visual.connecting_marker_color, visual.stale_marker_color);
+    }
+
+    // ── Ambient per-turn timestamps (hud-g1ena.4) ────────────────────────────
+
+    /// A retained agent turn with a chosen runtime-assigned wall-clock arrival.
+    fn stamped_unit(sequence: u64, wall_us: u64, text: &str) -> TranscriptUnit {
+        TranscriptUnit {
+            sequence,
+            output_text: text.to_string(),
+            output_kind: OutputKind::Assistant,
+            content_classification: ContentClassification::Private,
+            logical_unit_id: None,
+            coalesce_key: None,
+            expects_reply: false,
+            appended_at_wall_us: wall_us,
+        }
+    }
+
+    #[test]
+    fn wall_clock_arrival_formats_at_minute_precision_utc() {
+        assert_eq!(format_wall_clock_arrival_hhmm(0), "00:00");
+        // 90s past the epoch → 00:01 (seconds dropped, minute rolls).
+        assert_eq!(format_wall_clock_arrival_hhmm(90_000_000), "00:01");
+        // 13:45:59 UTC → still 13:45 (minute precision, ambient).
+        let thirteen_forty_five =
+            (13 * 3_600 + 45 * 60 + 59) * 1_000_000 + 999_999;
+        assert_eq!(format_wall_clock_arrival_hhmm(thirteen_forty_five), "13:45");
+    }
+
+    #[test]
+    fn per_turn_granularity_stamps_every_turn_from_arrival_metadata() {
+        let units = vec![
+            stamped_unit(1, 0, "first"),
+            stamped_unit(2, 90_000_000, "second"),
+        ];
+        let md = visible_transcript_markdown_with(&units, None, TimestampGranularity::PerTurn);
+        // Each turn carries its own runtime-assigned arrival stamp + separator.
+        assert!(md.contains(&format!("00:00{PORTAL_TIMESTAMP_SEPARATOR}first")), "{md}");
+        assert!(md.contains(&format!("00:01{PORTAL_TIMESTAMP_SEPARATOR}second")), "{md}");
+    }
+
+    #[test]
+    fn grouped_granularity_coalesces_consecutive_same_minute_turns() {
+        let units = vec![
+            stamped_unit(1, 0, "a"),              // 00:00, minute 0 — stamped
+            stamped_unit(2, 30_000_000, "b"),     // 00:00, minute 0 — same, no stamp
+            stamped_unit(3, 90_000_000, "c"),     // 00:01, minute 1 — new, stamped
+        ];
+        let md = visible_transcript_markdown_with(&units, None, TimestampGranularity::Grouped);
+        // Exactly two stamps: one for the first minute, one when the minute rolls.
+        assert_eq!(md.matches(PORTAL_TIMESTAMP_SEPARATOR).count(), 2, "{md}");
+        assert!(md.contains(&format!("00:00{PORTAL_TIMESTAMP_SEPARATOR}a")), "{md}");
+        // "b" shares the minute with "a" and carries no stamp of its own.
+        assert!(md.contains("\n---\nb"), "{md}");
+        assert!(md.contains(&format!("00:01{PORTAL_TIMESTAMP_SEPARATOR}c")), "{md}");
+    }
+
+    #[test]
+    fn off_granularity_renders_no_timestamps() {
+        let units = vec![stamped_unit(1, 90_000_000, "hello")];
+        let md = visible_transcript_markdown_with(&units, None, TimestampGranularity::Off);
+        assert_eq!(md, "hello");
+        assert!(!md.contains(PORTAL_TIMESTAMP_SEPARATOR));
+    }
+
+    #[test]
+    fn adapter_supplied_text_cannot_forge_the_arrival_stamp() {
+        // A turn whose CONTENT lies about the time; the presented stamp derives
+        // from the runtime-assigned appended_at_wall_us, not the content.
+        let units = vec![stamped_unit(1, 0, "it is really 23:59")];
+        let md = visible_transcript_markdown_with(&units, None, TimestampGranularity::PerTurn);
+        assert!(md.starts_with(&format!("00:00{PORTAL_TIMESTAMP_SEPARATOR}")), "{md}");
+    }
+
+    #[test]
+    fn timestamp_color_runs_are_zero_length_token_sentinels_when_enabled() {
+        let mut state = make_expanded_interaction_state("ts-runs");
+        state.visible_transcript = vec![stamped_unit(1, 0, "hi")];
+        let color = proto::Rgba { r: 0.42, g: 0.43, b: 0.44, a: 1.0 };
+        let runs = timestamp_color_runs(&state, color, TimestampGranularity::PerTurn);
+        assert_eq!(runs.len(), 1, "one timestamp sentinel when stamps render");
+        assert_eq!(runs[0].start_byte, 0, "Phase-1 sentinel run is zero-length");
+        assert_eq!(runs[0].end_byte, 0, "Phase-1 sentinel run is zero-length");
+        assert_eq!(runs[0].color, Some(color), "sentinel carries the token color");
+    }
+
+    #[test]
+    fn timestamp_color_runs_absent_when_off_collapsed_or_empty() {
+        let mut expanded = make_expanded_interaction_state("ts-off");
+        expanded.visible_transcript = vec![stamped_unit(1, 0, "hi")];
+        let color = proto::Rgba { r: 0.4, g: 0.4, b: 0.4, a: 1.0 };
+        // Off granularity → no sentinel even with content.
+        assert!(timestamp_color_runs(&expanded, color, TimestampGranularity::Off).is_empty());
+        // Empty transcript (e.g. redacted upstream) → no sentinel even when enabled.
+        let mut empty = make_expanded_interaction_state("ts-empty");
+        empty.visible_transcript = vec![];
+        assert!(
+            timestamp_color_runs(&empty, color, TimestampGranularity::PerTurn).is_empty()
+        );
+        // Collapsed presentation → the stamp is an expanded-transcript affordance.
+        let mut collapsed = make_expanded_interaction_state("ts-collapsed");
+        collapsed.presentation = ProjectedPortalPresentation::Collapsed;
+        collapsed.visible_transcript = vec![stamped_unit(1, 0, "hi")];
+        assert!(
+            timestamp_color_runs(&collapsed, color, TimestampGranularity::PerTurn).is_empty()
+        );
+    }
+
+    #[test]
+    fn portal_visual_tokens_from_part_tokens_maps_timestamp_fields() {
+        let part = tze_hud_config::PortalPartTokens::default();
+        let visual = portal_visual_tokens_from_part_tokens(&part);
+        assert_eq!(visual.timestamp_color.r, part.timestamp_color.r);
+        assert_eq!(visual.timestamp_color.a, part.timestamp_color.a);
+        assert_eq!(visual.timestamp_granularity, part.timestamp_granularity);
+        // Ambient default is Off — the base surface stays calm (profile opt-in).
+        assert_eq!(visual.timestamp_granularity, TimestampGranularity::Off);
     }
 }

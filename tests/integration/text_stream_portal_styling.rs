@@ -24,7 +24,8 @@ use tze_hud_config::{
     PORTAL_TOKEN_COLLAPSED_BACKGROUND, PORTAL_TOKEN_COLLAPSED_FONT_SIZE,
     PORTAL_TOKEN_COLLAPSED_TEXT_COLOR, PORTAL_TOKEN_COMPOSER_AT_CAPACITY_COLOR,
     PORTAL_TOKEN_COMPOSER_BACKGROUND, PORTAL_TOKEN_COMPOSER_FONT_SIZE,
-    PORTAL_TOKEN_COMPOSER_TEXT_COLOR, PORTAL_TOKEN_TRANSCRIPT_BACKGROUND,
+    PORTAL_TOKEN_COMPOSER_TEXT_COLOR, PORTAL_TOKEN_TIMESTAMP_COLOR,
+    PORTAL_TOKEN_TIMESTAMP_GRANULARITY, PORTAL_TOKEN_TRANSCRIPT_BACKGROUND,
     PORTAL_TOKEN_TRANSCRIPT_FONT_SIZE, PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR,
     PORTAL_TOKEN_TRANSITION_IN_MS, PORTAL_TOKEN_TRANSITION_OUT_MS, resolve_portal_tokens,
 };
@@ -1166,6 +1167,107 @@ fn portal_node_proto_clears_composer_on_cancel() {
     assert!(
         content.contains("composer: ready"),
         "post-cancel render must show 'composer: ready'; got:\n{content}"
+    );
+}
+
+// ── Ambient per-turn timestamps (hud-g1ena.4) ────────────────────────────────
+
+/// A profile that enables per-turn timestamps and a sentinel timestamp color must
+/// (1) present the runtime-assigned wall-clock arrival stamp in the transcript
+/// body and (2) carry the token-resolved color as a zero-length sentinel run —
+/// all runs staying zero-length (the §6.1 Phase-1 sentinel invariant) — proving
+/// the token propagates end-to-end and the granularity is profile-governed.
+#[test]
+fn per_turn_timestamps_render_stamp_and_token_sentinel() {
+    use std::collections::HashMap;
+
+    let empty: HashMap<String, String> = HashMap::new();
+
+    // Profile: per-turn timestamps, sentinel pure-green timestamp color.
+    let mut overrides = HashMap::new();
+    overrides.insert(
+        PORTAL_TOKEN_TIMESTAMP_GRANULARITY.to_string(),
+        "per_turn".to_string(),
+    );
+    overrides.insert(
+        PORTAL_TOKEN_TIMESTAMP_COLOR.to_string(),
+        "#00FF00".to_string(), // pure green — r=0, g=1, b=0
+    );
+    let resolved = tze_hud_config::tokens::resolve_tokens(&empty, &overrides);
+    let visual_tokens = portal_visual_tokens_from_part_tokens(&resolve_portal_tokens(&resolved));
+
+    let mut authority = ProjectionAuthority::default();
+    let permit_all = ProjectedPortalPolicy::permit_all();
+    let expanded_state = build_expanded_state(&mut authority, "proj-timestamps", &permit_all);
+
+    let mut adapter = ResidentGrpcPortalAdapter::with_tokens(
+        ResidentGrpcPortalConfig::new(vec![0u8; 16]),
+        visual_tokens,
+    );
+    adapter.record_created_tile(vec![0xDE; 16]);
+
+    let cmd = adapter
+        .render_portal_message(&expanded_state, 1, 0)
+        .expect("render must succeed after tile is recorded");
+    let (content, color_runs) = extract_text_markdown_with_runs(cmd);
+
+    // build_expanded_state appends its one turn at a small wall-clock time
+    // (µs since epoch), which formats to the 00:00 UTC minute; the stamp and its
+    // separator must be present in the transcript body.
+    assert!(
+        content.contains("00:00 · "),
+        "per-turn timestamp stamp must be present in the transcript body; got:\n{content}"
+    );
+
+    // Exactly one run carries the injected pure-green timestamp sentinel. Other
+    // ambient sentinels (e.g. the lifecycle accent for this Active state) share
+    // the zero-length span but a different color.
+    let is_timestamp_green = |run: &tze_hud_protocol::proto::TextColorRunProto| {
+        run.color
+            .as_ref()
+            .is_some_and(|c| c.g > 0.9 && c.r < 0.1 && c.b < 0.1)
+    };
+    let green_runs = color_runs.iter().filter(|r| is_timestamp_green(r)).count();
+    assert_eq!(
+        green_runs, 1,
+        "exactly one timestamp sentinel with the injected green token; got {green_runs} \
+         among {total} run(s): {color_runs:?}",
+        total = color_runs.len()
+    );
+
+    // §6.1 Phase-1 invariant: every published run is a zero-length sentinel.
+    assert!(
+        color_runs.iter().all(|r| r.start_byte >= r.end_byte),
+        "all color runs must be zero-length sentinels (no pixel runs): {color_runs:?}"
+    );
+}
+
+/// With the default profile (timestamps OFF), no stamp and no timestamp sentinel
+/// are emitted — the ambient default keeps the base surface calm.
+#[test]
+fn default_profile_renders_no_timestamps() {
+    use std::collections::HashMap;
+
+    let empty: HashMap<String, String> = HashMap::new();
+    let visual_tokens = portal_visual_tokens_from_part_tokens(&resolve_portal_tokens(&empty));
+
+    let mut authority = ProjectionAuthority::default();
+    let permit_all = ProjectedPortalPolicy::permit_all();
+    let expanded_state = build_expanded_state(&mut authority, "proj-no-timestamps", &permit_all);
+
+    let mut adapter = ResidentGrpcPortalAdapter::with_tokens(
+        ResidentGrpcPortalConfig::new(vec![0u8; 16]),
+        visual_tokens,
+    );
+    adapter.record_created_tile(vec![0xAD; 16]);
+
+    let cmd = adapter
+        .render_portal_message(&expanded_state, 1, 0)
+        .expect("render must succeed after tile is recorded");
+    let content = extract_text_markdown_content(cmd);
+    assert!(
+        !content.contains("00:00 · "),
+        "default (Off) profile must not render a per-turn timestamp; got:\n{content}"
     );
 }
 
