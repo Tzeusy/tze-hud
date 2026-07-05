@@ -74,6 +74,7 @@ PORTAL_TOKEN_STALE_MARKER_COLOR = "portal.stale_marker.color"
 
 PORTAL_TOKEN_UNREAD_INDICATOR_COLOR = "portal.unread_indicator.color"
 PORTAL_TOKEN_AWAITING_REPLY_COLOR = "portal.awaiting_reply.color"
+PORTAL_TOKEN_EMPTY_STATE_COLOR = "portal.empty_state.color"
 
 PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR = "portal.lifecycle.active_color"
 PORTAL_TOKEN_LIFECYCLE_ATTACHED_COLOR = "portal.lifecycle.attached_color"
@@ -136,6 +137,7 @@ _RUST_DEFAULTS: dict[str, str] = {
     "STALE_MARKER_COLOR": "#B87333",
     "UNREAD_INDICATOR_COLOR": "#6B7689",
     "AWAITING_REPLY_COLOR": "#7B85C4",
+    "EMPTY_STATE_COLOR": "#5F8A78",
     "LIFECYCLE_ACTIVE_COLOR": "#4FA88A",
     "LIFECYCLE_ATTACHED_COLOR": "#5A8FC0",
     "LIFECYCLE_ATTENTION_COLOR": "#C28A3D",
@@ -191,6 +193,7 @@ CANONICAL_DEFAULTS: dict[str, str] = {
     PORTAL_TOKEN_STALE_MARKER_COLOR: _RUST_DEFAULTS["STALE_MARKER_COLOR"],
     PORTAL_TOKEN_UNREAD_INDICATOR_COLOR: _RUST_DEFAULTS["UNREAD_INDICATOR_COLOR"],
     PORTAL_TOKEN_AWAITING_REPLY_COLOR: _RUST_DEFAULTS["AWAITING_REPLY_COLOR"],
+    PORTAL_TOKEN_EMPTY_STATE_COLOR: _RUST_DEFAULTS["EMPTY_STATE_COLOR"],
     PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR: _RUST_DEFAULTS["LIFECYCLE_ACTIVE_COLOR"],
     PORTAL_TOKEN_LIFECYCLE_ATTACHED_COLOR: _RUST_DEFAULTS["LIFECYCLE_ATTACHED_COLOR"],
     PORTAL_TOKEN_LIFECYCLE_ATTENTION_COLOR: _RUST_DEFAULTS["LIFECYCLE_ATTENTION_COLOR"],
@@ -303,6 +306,7 @@ class PortalPartTokens:
     stale_marker_color: Rgba
     unread_indicator_color: Rgba
     awaiting_reply_color: Rgba
+    empty_state_color: Rgba
     lifecycle_active_color: Rgba
     lifecycle_attached_color: Rgba
     lifecycle_attention_color: Rgba
@@ -376,6 +380,7 @@ def resolve_portal_tokens(overrides: Optional[dict[str, str]] = None) -> PortalP
         stale_marker_color=_color(tm, PORTAL_TOKEN_STALE_MARKER_COLOR),
         unread_indicator_color=_color(tm, PORTAL_TOKEN_UNREAD_INDICATOR_COLOR),
         awaiting_reply_color=_color(tm, PORTAL_TOKEN_AWAITING_REPLY_COLOR),
+        empty_state_color=_color(tm, PORTAL_TOKEN_EMPTY_STATE_COLOR),
         lifecycle_active_color=_color(tm, PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR),
         lifecycle_attached_color=_color(tm, PORTAL_TOKEN_LIFECYCLE_ATTACHED_COLOR),
         lifecycle_attention_color=_color(tm, PORTAL_TOKEN_LIFECYCLE_ATTENTION_COLOR),

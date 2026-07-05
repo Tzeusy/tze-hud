@@ -181,6 +181,14 @@ pub const PORTAL_TOKEN_UNREAD_INDICATOR_COLOR: &str = "portal.unread_indicator.c
 /// escalates this into an alert.
 pub const PORTAL_TOKEN_AWAITING_REPLY_COLOR: &str = "portal.awaiting_reply.color";
 
+/// Color of the friendly first-run empty-portal treatment (hud-g1ena.6,
+/// portal-chat-grade-affordances §First-Run Empty Portal Treatment) shown when a
+/// connected portal's retained transcript is empty, replacing the literal
+/// `<empty projection stream>`. Quiet and inviting — a presence engine's empty
+/// surface reads as calm and ready, never as an error — so it defaults to the
+/// same muted quiet-signal family as the other ambient tokens.
+pub const PORTAL_TOKEN_EMPTY_STATE_COLOR: &str = "portal.empty_state.color";
+
 // ── Lifecycle affordance tokens (cooperative-hud-projection §lifecycle) ───────
 //
 // Token-resolved accent colors driving the viewer-facing affordance for a
@@ -377,6 +385,11 @@ mod defaults {
     /// slate (unread/dim) ambient tones so a question reads as its own quiet
     /// signal rather than colliding with an existing meaning.
     pub const AWAITING_REPLY_COLOR: &str = "#7B85C4";
+    /// Muted sage — a calm, welcoming green-slate for the first-run empty state,
+    /// distinct from the amber (stale/at-capacity), slate (unread/dim), and
+    /// periwinkle (awaiting-reply) tones so an empty surface reads as its own
+    /// quiet "ready" signal rather than an error or an existing meaning.
+    pub const EMPTY_STATE_COLOR: &str = "#5F8A78";
 
     // Lifecycle affordance accents — ambient, mutually distinct (see token-key
     // docs above). Active: calm teal-green; attached/ready: soft blue;
@@ -508,6 +521,10 @@ pub struct PortalPartTokens {
     /// `expects_reply == true`. Ambient by design, matching the muted tone
     /// convention of the other quiet-signal tokens.
     pub awaiting_reply_color: Rgba,
+    /// Color of the friendly first-run empty-portal treatment (hud-g1ena.6)
+    /// shown when a connected portal's retained transcript is empty. Quiet and
+    /// inviting — reads as calm and ready, never as an error.
+    pub empty_state_color: Rgba,
 
     // Lifecycle affordance accents (cooperative-hud-projection §lifecycle).
     // Each maps a `ProjectionLifecycleState` group onto an ambient accent; the
@@ -630,6 +647,8 @@ impl Default for PortalPartTokens {
                 .expect("unread indicator color default is valid hex"),
             awaiting_reply_color: parse_color_hex(defaults::AWAITING_REPLY_COLOR)
                 .expect("awaiting reply color default is valid hex"),
+            empty_state_color: parse_color_hex(defaults::EMPTY_STATE_COLOR)
+                .expect("empty state color default is valid hex"),
 
             lifecycle_active_color: parse_color_hex(defaults::LIFECYCLE_ACTIVE_COLOR)
                 .expect("lifecycle active color default is valid hex"),
@@ -860,6 +879,10 @@ pub fn resolve_portal_tokens(token_map: &DesignTokenMap) -> PortalPartTokens {
             PORTAL_TOKEN_AWAITING_REPLY_COLOR,
             defaults.awaiting_reply_color
         ),
+        empty_state_color: resolve_color!(
+            PORTAL_TOKEN_EMPTY_STATE_COLOR,
+            defaults.empty_state_color
+        ),
 
         lifecycle_active_color: resolve_color!(
             PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR,
@@ -1048,6 +1071,7 @@ const PORTAL_TOKEN_DEFAULT_STRINGS: &[(&str, &str)] = &[
         PORTAL_TOKEN_AWAITING_REPLY_COLOR,
         defaults::AWAITING_REPLY_COLOR,
     ),
+    (PORTAL_TOKEN_EMPTY_STATE_COLOR, defaults::EMPTY_STATE_COLOR),
     (
         PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR,
         defaults::LIFECYCLE_ACTIVE_COLOR,
@@ -2030,7 +2054,7 @@ mod tests {
     #[test]
     fn resolve_portal_token_strings_covers_every_key() {
         // Number of distinct portal token keys resolved by resolve_portal_tokens.
-        const EXPECTED_KEYS: usize = 47;
+        const EXPECTED_KEYS: usize = 48;
         assert_eq!(
             PORTAL_TOKEN_DEFAULT_STRINGS.len(),
             EXPECTED_KEYS,
