@@ -3248,6 +3248,73 @@ mod tests {
         );
     }
 
+    /// MCP-injected paste text (`drain_paste_inject`) while the input-pane
+    /// history is scrolled back must ALSO snap the scroll offset back to the
+    /// tail — the same reset-to-tail treatment the KeyDown/Character typing
+    /// paths get from hud-qbcp8 (hud-sq2ss: `drain_paste_inject` had no
+    /// `tile_id` in scope, so paste-injected composer text left a scrolled-back
+    /// viewer stranded).
+    #[test]
+    fn paste_inject_while_scrolled_back_resets_history_scroll_to_tail() {
+        let (mut scene, tab_id, tile_id, composer_id, _control_id) = portal_scene_with_control();
+        let mut processor = InputProcessor::new();
+        let mut focus_manager = FocusManager::new();
+        focus_manager.add_tab(tab_id);
+        processor.navigate_focus(&mut focus_manager, &mut scene, tab_id, false);
+        assert_eq!(
+            focus_manager.current_owner(tab_id).node_id(),
+            Some(composer_id),
+            "test setup: focus must rest on the composer"
+        );
+
+        let (mut app, _input_event_rx) =
+            make_windowed_keyboard_test_app(scene, focus_manager, processor);
+
+        // Seed an overflowing history and scroll away from the tail (same setup
+        // as `typing_while_scrolled_back_resets_history_scroll_to_tail`).
+        let text = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut batch = tze_hud_input::DraftNotificationBatch::new();
+        batch.record_submission(tze_hud_input::DraftSubmission { text, sequence: 1 });
+        app.route_and_deliver_composer_batch(viewer_echo_context(tile_id), batch);
+        {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let mut scene = shared.scene.try_lock().unwrap();
+            let _ = app.state.input_processor.process_scroll_event(
+                &tze_hud_input::ScrollEvent {
+                    x: 300.0,
+                    y: 250.0,
+                    delta_x: 0.0,
+                    delta_y: -50.0,
+                },
+                &mut scene,
+            );
+            assert!(
+                !scene.tile_follow_tail_at_tail(tile_id),
+                "test setup: scrolling up must leave the tile ScrolledBack"
+            );
+        }
+
+        // Replace the harness's disconnected paste_inject channel with a fresh
+        // one pre-loaded with pasted text, then drain it exactly as the
+        // production `about_to_wait` loop does.
+        let (paste_inject_tx, paste_inject_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        app.state.paste_inject_rx = paste_inject_rx;
+        paste_inject_tx.send("pasted text".to_string()).unwrap();
+
+        app.drain_paste_inject();
+
+        let shared = app.state.shared_state.try_lock().unwrap();
+        let scene = shared.scene.try_lock().unwrap();
+        assert!(
+            scene.tile_follow_tail_at_tail(tile_id),
+            "paste-injecting composer text must snap the input-pane history \
+             back to the tail, matching the typing reset-to-tail path"
+        );
+    }
+
     // ── Input-history scroll seed: exact tail-pin (hud-3y7va) ──────────────────
 
     /// A long reply with NO hard newlines soft-wraps into several visual rows the

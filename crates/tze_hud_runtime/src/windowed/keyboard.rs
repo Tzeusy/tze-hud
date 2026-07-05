@@ -1516,6 +1516,24 @@ impl WinitApp {
     /// Used by `dispatch_key_down_event`, `dispatch_character_event`, and
     /// `flush_composer_draft_at_settle` to supply the delivery context to
     /// `deliver_composer_batch` and the projection-authority input bridge.
+    /// Resolve the scene `tile_id` owning the currently focused composer,
+    /// without resolving the agent namespace (hud-sq2ss).
+    ///
+    /// Mirrors the `composer_focused_node()` + `focus_manager` lookup half of
+    /// [`Self::composer_delivery_context_for_tab`], but skips the
+    /// `namespace_for_keyboard_tile` scene lock that lookup also does — callers
+    /// that only need the tile id for a reset-to-tail (not for routing a batch
+    /// to an agent) should use this instead of paying for a namespace resolve
+    /// they will not use.
+    ///
+    /// Returns `None` if no composer is focused, there is no active tab, or the
+    /// focus owner is not a tile (all "nothing to reset" cases, not errors).
+    pub(super) fn composer_focused_tile_id(&self) -> Option<tze_hud_scene::SceneId> {
+        self.state.input_processor.composer_focused_node()?;
+        let tab_id = self.active_tab_for_keyboard_dispatch().flatten()?;
+        self.state.focus_manager.current_owner(tab_id).tile_id()
+    }
+
     pub(super) fn composer_delivery_context(&self) -> ComposerDeliveryContextLookup {
         match self.active_tab_for_keyboard_dispatch() {
             Some(Some(tab_id)) => self.composer_delivery_context_for_tab(tab_id),
