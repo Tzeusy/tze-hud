@@ -1004,6 +1004,12 @@ impl WinitApp {
         // locked block below; consumed after the lock is released to call
         // clear_local_composer_echo() without a borrow conflict (hud-r3ax6).
         let mut composer_focus_lost = false;
+        // Flag set when a pointer caret placement / drag-select mutates the
+        // composer draft selection inside the locked block below; consumed
+        // after the lock is released to push the updated echo to the
+        // compositor (which renders caret/selection from the local echo slot,
+        // not the input processor) without a borrow conflict (hud-etrs0).
+        let mut composer_selection_changed = false;
         // Interactive gestures require guaranteed same-frame local feedback
         // (local-feedback-first).  For those events, acquire the locks with a
         // bounded spin instead of a single `try_lock`, so a contended scene lock
@@ -1238,6 +1244,7 @@ impl WinitApp {
                                         );
                                     self.state.composer_pointer_drag_anchor =
                                         Some((*tile_id, byte_offset));
+                                    composer_selection_changed = true;
                                     tracing::debug!(
                                         byte_offset,
                                         "composer: pointer-down positioned cursor via byte-geometry hit-test"
@@ -1264,6 +1271,7 @@ impl WinitApp {
                                 self.state
                                     .input_processor
                                     .route_pointer_selection_to_composer(anchor_byte, byte_offset);
+                                composer_selection_changed = true;
                             }
                         }
                     }
@@ -1479,6 +1487,13 @@ impl WinitApp {
         if composer_focus_lost {
             self.clear_local_composer_echo();
             self.state.composer_pointer_drag_anchor = None;
+        } else if composer_selection_changed {
+            // A pointer caret placement or drag-select changed the draft
+            // selection; publish the refreshed snapshot so the compositor
+            // renders the new caret/highlight on the next frame rather than
+            // leaving it stale until the next keystroke (hud-etrs0, §4.1
+            // local-feedback-first).
+            self.push_local_composer_echo(input_started_at);
         }
 
         // Update the OS resize/move cursor to reflect the affordance under the

@@ -6051,6 +6051,23 @@ mod tests {
             Some(2),
             "pointer-down must record a drag anchor at the placed byte"
         );
+        // The compositor renders the caret/selection from the local echo slot,
+        // not the input processor, so the pointer caret must be published there
+        // too (hud-etrs0 local-feedback-first) or the visible caret stays stale
+        // until the next keystroke.
+        let echo = app
+            .state
+            .local_composer_state
+            .lock()
+            .unwrap()
+            .clone()
+            .flatten()
+            .expect("pointer-down must publish the composer echo");
+        assert_eq!(
+            (echo.cursor_byte, echo.selection_anchor),
+            (2, 2),
+            "pointer-down must push the placed caret into the local echo slot"
+        );
 
         // ── PointerMove to node-local (x=26, y=90): row 1 (bottom half), same
         // text_x=20 → row 1's table nearest byte is 5 (distances 20, 12, 0, 10
@@ -6069,6 +6086,22 @@ mod tests {
             (5, 2),
             "drag must extend the selection from anchor byte 2 to byte 5 under \
              the new pointer position"
+        );
+        // The drag-extended selection must also reach the local echo slot so
+        // the highlight repaints live during the drag (hud-etrs0), not only
+        // after a later keystroke.
+        let echo = app
+            .state
+            .local_composer_state
+            .lock()
+            .unwrap()
+            .clone()
+            .flatten()
+            .expect("drag-move must publish the composer echo");
+        assert_eq!(
+            (echo.cursor_byte, echo.selection_anchor),
+            (5, 2),
+            "drag-move must push the extended selection into the local echo slot"
         );
 
         // ── PointerUp ends the drag gesture but must not disturb the
