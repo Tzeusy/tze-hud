@@ -1683,6 +1683,15 @@ fn projected_portal_state(
     // not "disconnected").
     let connection_degraded =
         session.hud_connection.is_none() && session.reconnect.last_disconnect_wall_us.is_some();
+    // Content-free "ever connected" signal (portal-chat-grade-affordances
+    // §Connecting State Distinction). True once the session has a live HUD
+    // connection OR has recorded a disconnect (connected-then-dropped still
+    // counts as ever-connected). It is false only for a freshly-attached,
+    // never-connected portal — exactly the "connecting" case the disconnect
+    // comment above gates out of `connection_degraded`. Redaction-independent,
+    // like `connection_degraded`: connection state only, no content leak.
+    let has_ever_connected =
+        session.hud_connection.is_some() || session.reconnect.last_disconnect_wall_us.is_some();
     let interaction_enabled = session.portal_presentation == ProjectedPortalPresentation::Expanded
         && projection_visible
         && policy.allow_input
@@ -1719,6 +1728,7 @@ fn projected_portal_state(
         preserve_geometry: true,
         redacted,
         connection_degraded,
+        has_ever_connected,
         interaction_enabled,
         attention: ProjectedPortalAttention::Ambient,
         provider_kind: identity_visible.then(|| session.provider_kind.clone()),

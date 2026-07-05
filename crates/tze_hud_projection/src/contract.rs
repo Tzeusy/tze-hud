@@ -956,6 +956,21 @@ pub struct ProjectedPortalState {
     /// to permitted viewers.
     #[serde(default)]
     pub connection_degraded: bool,
+    /// Content-free "has the owning session ever connected" signal
+    /// (portal-chat-grade-affordances §Connecting State Distinction). `true` once
+    /// the driving session has established its first HUD connection (or has since
+    /// disconnected — a portal that connected then dropped has still *ever*
+    /// connected). `false` only for a freshly-attached, never-connected portal
+    /// ("connecting").
+    ///
+    /// Like `connection_degraded`, this is computed from the session lifecycle
+    /// **independently of viewer redaction**: it conveys connection state only,
+    /// never identity or transcript content, so a restricted viewer still gets
+    /// the correct first-run vs connecting distinction. The first-run empty
+    /// treatment (hud-g1ena.6) yields to the connecting treatment when this is
+    /// `false`, so a starting-up portal never renders as a "ready" empty state.
+    #[serde(default)]
+    pub has_ever_connected: bool,
     pub interaction_enabled: bool,
     pub attention: ProjectedPortalAttention,
     #[serde(default, skip_serializing_if = "Option::is_none")]

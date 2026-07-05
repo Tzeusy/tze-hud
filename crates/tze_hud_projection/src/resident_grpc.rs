@@ -25,6 +25,29 @@ use crate::{
 /// like the scroll-position indicator.
 const PORTAL_DISCONNECT_MARKER_LINE: &str = "⊘ disconnected — stream stale";
 
+/// First-run empty-portal body (hud-g1ena.6, portal-chat-grade-affordances
+/// §First-Run Empty Portal Treatment): quiet, inviting copy shown when a
+/// *connected* portal's retained transcript window is empty, replacing the
+/// literal `<empty projection stream>`. Ambient by design — a presence engine's
+/// empty surface reads as calm and ready, never as an error. The portal header
+/// carries the identity; this line is the "inviting copy" that redaction
+/// suppresses.
+const PORTAL_EMPTY_READY_LINE: &str = "Ready — waiting for the first message.";
+
+/// Content-free empty-portal placeholder for a viewer without identity clearance
+/// (§First-Run Empty Portal Treatment redaction scenario): no identity, no
+/// inviting copy — only a neutral, quiet mark, mirroring how the other
+/// affordances go silent under redaction.
+const PORTAL_EMPTY_REDACTED_LINE: &str = "· · ·";
+
+/// Quiet placeholder shown while a portal is attached but has never connected
+/// (portal-chat-grade-affordances §Connecting State Distinction). A starting-up
+/// portal must not read as a "ready" empty state, so the first-run treatment
+/// yields to this. hud-g1ena.6 establishes the precedence + a minimal
+/// placeholder; the distinct connecting *treatment* (token + visual language)
+/// lands under hud-g1ena.7.
+const PORTAL_CONNECTING_PLACEHOLDER_LINE: &str = "Connecting…";
+
 /// Whether the portal is in a connection-degraded presentation state.
 ///
 /// Keyed off the redaction-independent `connection_degraded` flag (set by the
@@ -138,6 +161,12 @@ pub struct PortalVisualTokens {
     /// of the other quiet-signal indicators. Source token:
     /// `portal.awaiting_reply.color`.
     pub awaiting_reply_color: proto::Rgba,
+    /// Color of the friendly first-run empty-portal treatment (hud-g1ena.6,
+    /// portal-chat-grade-affordances §First-Run Empty Portal Treatment) that
+    /// replaces the literal `<empty projection stream>` placeholder. Quiet and
+    /// inviting by design — a presence engine's empty surface reads as calm and
+    /// ready, never as an error. Source token: `portal.empty_state.color`.
+    pub empty_state_color: proto::Rgba,
 
     // Lifecycle affordance accents (cooperative-hud-projection §lifecycle).
     //
@@ -922,6 +951,13 @@ impl ResidentGrpcPortalAdapter {
                             state,
                             self.visual_tokens.awaiting_reply_color,
                         ));
+                        // First-run empty-state treatment (hud-g1ena.6). Absent
+                        // unless the retained transcript is empty on a connected
+                        // portal; the connecting case is deferred to hud-g1ena.7.
+                        runs.extend(empty_state_color_runs(
+                            state,
+                            self.visual_tokens.empty_state_color,
+                        ));
                         runs
                     },
                     // Transcript panes use Ellipsis to engage the TruncationCache
@@ -1057,10 +1093,18 @@ fn portal_markdown(
     match state.presentation {
         ProjectedPortalPresentation::Expanded => {
             push_line(&mut result, "");
-            push_line(
-                &mut result,
-                &visible_transcript_markdown(&state.visible_transcript),
-            );
+            // §First-Run Empty Portal Treatment (hud-g1ena.6): an empty retained
+            // transcript renders the friendly, token-styled empty/connecting body
+            // instead of the literal `<empty projection stream>`. The first
+            // appended unit replaces it (this branch is empty-only).
+            if state.visible_transcript.is_empty() {
+                push_line(&mut result, &empty_portal_markdown(state));
+            } else {
+                push_line(
+                    &mut result,
+                    &visible_transcript_markdown(&state.visible_transcript),
+                );
+            }
             push_line(&mut result, "");
             if is_connection_degraded(state) {
                 // §2: clear live activity/typing/composer-ready signals on
@@ -1409,10 +1453,63 @@ fn lifecycle_marker_color_runs(
     }]
 }
 
-fn visible_transcript_markdown(units: &[TranscriptUnit]) -> String {
-    if units.is_empty() {
-        return "<empty projection stream>".to_string();
+/// Render the friendly, token-styled empty/first-run portal body (hud-g1ena.6,
+/// §First-Run Empty Portal Treatment) shown when the retained transcript window
+/// is empty. Replaces the literal `<empty projection stream>` placeholder.
+///
+/// Three cases, in precedence order:
+/// 1. **Connecting takes precedence** (§Connecting State Distinction): an
+///    attached-but-never-connected portal (`!has_ever_connected`) shows a quiet
+///    connecting placeholder — never the "ready" invite — so a starting-up
+///    portal never reads as a ready-and-idle empty state. The distinct
+///    connecting treatment/token is hud-g1ena.7; this only guarantees precedence.
+/// 2. **Redacted**: a restricted viewer's `visible_transcript` is emptied
+///    upstream, so this path is reached for them too. Under redaction identity
+///    and inviting copy are suppressed — only a content-free placeholder shows.
+/// 3. **Connected + empty**: the inviting ready line. Identity is carried by the
+///    portal header (`**title**`), so this stays a single, uncluttered line.
+///
+/// Yields immediately to real content: the caller only renders this when
+/// `visible_transcript.is_empty()`, so the first appended unit replaces it.
+fn empty_portal_markdown(state: &ProjectedPortalState) -> String {
+    if !state.has_ever_connected {
+        return PORTAL_CONNECTING_PLACEHOLDER_LINE.to_string();
     }
+    if state.redacted {
+        return PORTAL_EMPTY_REDACTED_LINE.to_string();
+    }
+    PORTAL_EMPTY_READY_LINE.to_string()
+}
+
+/// Build the token-styled sentinel color run for the first-run empty-state body.
+///
+/// Mirrors the other Phase-1 sentinels (`stale_marker_color_runs`,
+/// `unread_indicator_color_runs`): a zero-length run (`[0..0]`) carrying the
+/// token-resolved `empty_state_color` so the visual token drives the treatment
+/// without any literal color in the render path (§6.1). Emitted only when the
+/// empty-state body is actually rendered — an Expanded portal with an empty
+/// retained transcript that has connected. The connecting case
+/// (`!has_ever_connected`) is intentionally excluded: its distinct token is
+/// deferred to hud-g1ena.7.
+fn empty_state_color_runs(
+    state: &ProjectedPortalState,
+    empty_state_color: proto::Rgba,
+) -> Vec<proto::TextColorRunProto> {
+    if state.presentation == ProjectedPortalPresentation::Expanded
+        && state.visible_transcript.is_empty()
+        && state.has_ever_connected
+    {
+        vec![proto::TextColorRunProto {
+            start_byte: 0,
+            end_byte: 0,
+            color: Some(empty_state_color),
+        }]
+    } else {
+        Vec::new()
+    }
+}
+
+fn visible_transcript_markdown(units: &[TranscriptUnit]) -> String {
     let mut result = String::new();
     for (index, unit) in units.iter().enumerate() {
         if index > 0 {
@@ -1549,6 +1646,12 @@ pub fn portal_visual_tokens_from_part_tokens(
             b: part.awaiting_reply_color.b,
             a: part.awaiting_reply_color.a,
         },
+        empty_state_color: proto::Rgba {
+            r: part.empty_state_color.r,
+            g: part.empty_state_color.g,
+            b: part.empty_state_color.b,
+            a: part.empty_state_color.a,
+        },
         lifecycle_active_color: proto::Rgba {
             r: part.lifecycle_active_color.r,
             g: part.lifecycle_active_color.g,
@@ -1630,6 +1733,9 @@ mod tests {
             preserve_geometry: false,
             redacted: false,
             connection_degraded: false,
+            // Live, interactive fixture: the session has connected (so the
+            // first-run empty state, not the connecting placeholder, applies).
+            has_ever_connected: true,
             interaction_enabled: true,
             attention: ProjectedPortalAttention::Ambient,
             provider_kind: None,
@@ -2663,5 +2769,141 @@ mod tests {
             "projected portal collapsed default font should remain readable; got {}px",
             visual.collapsed_font_size_px
         );
+    }
+
+    // ── §First-Run Empty Portal Treatment (hud-g1ena.6) ──────────────────────
+
+    /// A connected portal with an empty retained transcript renders the friendly,
+    /// token-styled empty state — NOT the literal `<empty projection stream>` —
+    /// and emits exactly one token-driven sentinel color run.
+    #[test]
+    fn empty_state_replaces_literal_placeholder_with_token_styled_ready_line() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let empty_color = adapter.visual_tokens().empty_state_color;
+
+        // Fixture: connected (has_ever_connected == true), empty transcript.
+        let state = make_expanded_interaction_state("portal-empty");
+        assert!(state.visible_transcript.is_empty(), "precondition: empty");
+
+        let markdown = portal_markdown(&state, None);
+        assert!(
+            !markdown.contains("<empty projection stream>"),
+            "the literal placeholder must be gone: {markdown}"
+        );
+        assert!(
+            markdown.contains(PORTAL_EMPTY_READY_LINE),
+            "connected + empty must render the inviting ready line: {markdown}"
+        );
+
+        let runs = empty_state_color_runs(&state, empty_color);
+        assert_eq!(runs.len(), 1, "empty state must emit one token-driven run");
+        assert_eq!(
+            runs[0].color.unwrap(),
+            empty_color,
+            "run must carry the empty_state_color token, never a literal color"
+        );
+        assert_eq!(runs[0].start_byte, 0);
+        assert_eq!(runs[0].end_byte, 0);
+    }
+
+    /// §Connecting State Distinction precedence: an attached-but-never-connected
+    /// portal (`has_ever_connected == false`) shows the quiet connecting
+    /// placeholder — never the "ready" invite — and emits NO empty-state color
+    /// run (the distinct connecting token is deferred to hud-g1ena.7).
+    #[test]
+    fn empty_state_yields_to_connecting_when_never_connected() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let empty_color = adapter.visual_tokens().empty_state_color;
+
+        let mut state = make_expanded_interaction_state("portal-connecting");
+        state.has_ever_connected = false;
+
+        let markdown = portal_markdown(&state, None);
+        assert!(
+            markdown.contains(PORTAL_CONNECTING_PLACEHOLDER_LINE),
+            "never-connected must render the connecting placeholder: {markdown}"
+        );
+        assert!(
+            !markdown.contains(PORTAL_EMPTY_READY_LINE),
+            "a starting-up portal must NOT read as a ready empty state: {markdown}"
+        );
+        assert!(
+            !markdown.contains("<empty projection stream>"),
+            "the literal placeholder must be gone even while connecting: {markdown}"
+        );
+        assert!(
+            empty_state_color_runs(&state, empty_color).is_empty(),
+            "the connecting case must emit no empty-state run (deferred to hud-g1ena.7)"
+        );
+    }
+
+    /// §First-Run Empty Portal Treatment redaction scenario: a restricted viewer
+    /// (whose `visible_transcript` is emptied upstream, so this path is reached)
+    /// sees a content-free placeholder with NO inviting copy. The empty-state
+    /// treatment itself is still active, so the token-driven run is still emitted.
+    #[test]
+    fn empty_state_suppresses_inviting_copy_under_redaction() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let empty_color = adapter.visual_tokens().empty_state_color;
+
+        let mut state = make_expanded_interaction_state("portal-redacted-empty");
+        state.redacted = true;
+
+        let markdown = portal_markdown(&state, None);
+        assert!(
+            markdown.contains(PORTAL_EMPTY_REDACTED_LINE),
+            "redacted empty portal must render the content-free placeholder: {markdown}"
+        );
+        assert!(
+            !markdown.contains(PORTAL_EMPTY_READY_LINE),
+            "redaction must suppress the inviting copy: {markdown}"
+        );
+        assert_eq!(
+            empty_state_color_runs(&state, empty_color).len(),
+            1,
+            "the redacted empty-state treatment is still active → one token run"
+        );
+    }
+
+    /// The empty state yields immediately to real content: the first appended
+    /// transcript unit replaces it, and no empty-state marker or run remains.
+    #[test]
+    fn empty_state_yields_to_first_content() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let empty_color = adapter.visual_tokens().empty_state_color;
+
+        let mut state = make_expanded_interaction_state("portal-first-content");
+        state.visible_transcript = vec![transcript_unit(1, OutputKind::Assistant, false)];
+
+        let markdown = portal_markdown(&state, None);
+        assert!(
+            markdown.contains("example output"),
+            "real content must render: {markdown}"
+        );
+        assert!(
+            !markdown.contains(PORTAL_EMPTY_READY_LINE)
+                && !markdown.contains(PORTAL_CONNECTING_PLACEHOLDER_LINE)
+                && !markdown.contains(PORTAL_EMPTY_REDACTED_LINE),
+            "no empty/connecting placeholder once content exists: {markdown}"
+        );
+        assert!(
+            empty_state_color_runs(&state, empty_color).is_empty(),
+            "a non-empty transcript must emit no empty-state run"
+        );
+    }
+
+    /// The `empty_state_color` `PortalVisualTokens` field maps 1:1 from the
+    /// source `PortalPartTokens` channel (hud-g1ena.6), same single-source-of-
+    /// truth invariant as the other token-mapping tests in this module.
+    #[test]
+    fn portal_visual_tokens_from_part_tokens_maps_empty_state_color() {
+        let part = tze_hud_config::PortalPartTokens::default();
+        let visual = portal_visual_tokens_from_part_tokens(&part);
+        assert_eq!(visual.empty_state_color.r, part.empty_state_color.r);
+        assert_eq!(visual.empty_state_color.a, part.empty_state_color.a);
     }
 }
