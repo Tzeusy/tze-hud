@@ -1744,6 +1744,18 @@ fn projected_portal_state(
         .iter()
         .filter(|item| !item.delivery_state.is_terminal())
         .count();
+    // Viewer-turn delivery-acknowledgement cue (hud-g1ena.1, §Viewer Turn Delivery
+    // Acknowledgement). Surface the delivery state of the viewer's MOST RECENT
+    // submitted reply — the tail of `pending_input`, which is always the newest
+    // submission (a fresh submit pushes to the back after older terminal items are
+    // pruned to tombstones; acknowledgements mutate the item in place without
+    // reordering). This is a pure read of runtime-owned state: no adapter round
+    // trip and no viewer read/seen disclosure. Gated on `transcript_visible` so the
+    // cue redacts together with the echoed viewer turn it annotates (a viewer who
+    // cannot see the transcript gets no delivery cue).
+    let latest_viewer_delivery_state = transcript_visible
+        .then(|| session.pending_input.back().map(|item| item.delivery_state))
+        .flatten();
 
     ProjectedPortalState {
         projection_id: session.projection_id.clone(),
@@ -1779,6 +1791,7 @@ fn projected_portal_state(
         visible_unread_output_count: unread_visible.then_some(visible_unread_output_count),
         pending_input_count: pending_visible.then_some(pending_input_count),
         pending_input_bytes: pending_visible.then_some(session.pending_input_bytes),
+        latest_viewer_delivery_state,
         last_input_feedback: session.last_input_feedback.as_ref().and_then(|feedback| {
             pending_visible.then(|| {
                 if redacted {

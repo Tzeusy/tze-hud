@@ -1009,6 +1009,24 @@ pub struct ProjectedPortalState {
     pub pending_input_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_input_bytes: Option<usize>,
+    /// Delivery state of the viewer's most recent submitted reply, surfaced so the
+    /// portal can render an ambient per-turn delivery-acknowledgement cue on the
+    /// echoed viewer turn (hud-g1ena.1, §Viewer Turn Delivery Acknowledgement).
+    ///
+    /// This is a **local presentation of state the runtime already owns**: it is
+    /// derived from the authority's existing `pending_input` bookkeeping (the tail
+    /// item — the newest viewer submission — and its evolving delivery state), so
+    /// rendering the cue introduces **no new adapter round trip** and discloses no
+    /// viewer read/seen state back to the adapter. `None` when there is no tracked
+    /// viewer submission, or when the transcript is redacted for this viewer — the
+    /// cue redacts together with the transcript it annotates.
+    ///
+    /// Phase-1 scope: the single-node raw-tile pilot surfaces the latest viewer
+    /// turn's delivery state as one portal-level cue rather than a precise per-turn
+    /// mark; precise per-turn placement is deferred to the promotion-era structured
+    /// multi-node layout, exactly like the other Phase-1 ambient markers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_viewer_delivery_state: Option<InputDeliveryState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_input_feedback: Option<PortalInputFeedback>,
     /// Latest batched adapter draft notification. Present only when the

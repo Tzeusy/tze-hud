@@ -49,6 +49,9 @@
 //! | `portal.connecting_marker.color` | connecting marker | never-connected connecting cue color, distinct from the degraded/stale marker (RGBA hex) |
 //! | `portal.activity_cue.color` | activity cue | ambient header "agent is writing" cue derived from observed appends (RGBA hex) |
 //! | `portal.streaming_cursor.color` | streaming cursor | ambient tail live-writing cursor derived from observed appends (RGBA hex) |
+//! | `portal.delivery.inflight_color` | delivery cue | ambient in-flight (Pending/Deferred) viewer-turn delivery cue (RGBA hex) |
+//! | `portal.delivery.delivered_color` | delivery cue | ambient delivered (Delivered/Handled) viewer-turn delivery cue (RGBA hex) |
+//! | `portal.delivery.failed_color` | delivery cue | ambient failed (Rejected/Expired) viewer-turn delivery cue (RGBA hex) |
 //! | `portal.lifecycle.active_color` | lifecycle affordance | accent for `Active` (RGBA hex) |
 //! | `portal.lifecycle.attached_color` | lifecycle affordance | accent for `Attached`/ready (RGBA hex) |
 //! | `portal.lifecycle.attention_color` | lifecycle affordance | accent for `Degraded`/`HudUnavailable` (RGBA hex) |
@@ -223,6 +226,38 @@ pub const PORTAL_TOKEN_ACTIVITY_CUE_COLOR: &str = "portal.activity_cue.color";
 /// `portal.activity_cue.color`; kept as a separate key so a profile can style
 /// the tail live-writing treatment independently of the header cue.
 pub const PORTAL_TOKEN_STREAMING_CURSOR_COLOR: &str = "portal.streaming_cursor.color";
+
+// ── Viewer-turn delivery-acknowledgement tokens ──────────────────────────────
+//
+// Ambient per-turn cue reflecting the runtime's already-tracked input delivery
+// state on the viewer's ECHOED turn (portal-chat-grade-affordances §Viewer Turn
+// Delivery Acknowledgement, hud-g1ena.1). DERIVED entirely from runtime-owned
+// delivery state — never a new adapter round trip, and rendering it discloses no
+// viewer read/seen state back to the adapter. Three presentation classes fold the
+// six `InputDeliveryState` variants: in-flight (Pending/Deferred), delivered
+// (Delivered/Handled), failed (Rejected/Expired). Strictly subordinate to the
+// ambient attention model: a delivery transition is not an attention event, and a
+// failed cue stays on the turn rather than escalating interruption class — hence
+// muted tones, never an alarm red.
+
+/// Color of the ambient in-flight (Pending/Deferred) viewer-turn delivery cue —
+/// the reply has been submitted but the owning adapter has not yet taken
+/// delivery. A calm "in transit" steel-blue, distinct from the amber
+/// (stale/at-capacity), slate (unread/dim/timestamp), periwinkle
+/// (awaiting-reply), sage (empty), cyan (connecting), and lavender (activity)
+/// tones so "sending" carries its own quiet meaning.
+pub const PORTAL_TOKEN_DELIVERY_INFLIGHT_COLOR: &str = "portal.delivery.inflight_color";
+/// Color of the ambient delivered (Delivered/Handled) viewer-turn delivery cue —
+/// the owning adapter has taken (or fully handled) the reply. A calm confirming
+/// mint-teal; ambient by design (a quiet "reached" tick), never a loud success
+/// flash.
+pub const PORTAL_TOKEN_DELIVERY_DELIVERED_COLOR: &str = "portal.delivery.delivered_color";
+/// Color of the ambient failed (Rejected/Expired) viewer-turn delivery cue — the
+/// reply was rejected by the adapter or expired before delivery. A muted, warm
+/// clay tone that reads as "did not arrive" WITHOUT the alarm of the amber stale
+/// marker or a red error: per doctrine the failed cue stays ambient on the turn
+/// and never escalates the portal's interruption class.
+pub const PORTAL_TOKEN_DELIVERY_FAILED_COLOR: &str = "portal.delivery.failed_color";
 
 // ── Ambient per-turn timestamp tokens ────────────────────────────────────────
 //
@@ -535,6 +570,23 @@ mod defaults {
     /// perceptible as "live writing here" while staying ambient.
     pub const STREAMING_CURSOR_COLOR: &str = "#A6ABC8";
 
+    /// Muted steel-blue — the ambient in-flight (Pending/Deferred) viewer-turn
+    /// delivery cue. A calm "in transit" tone distinct from the amber
+    /// (stale/at-capacity), slate (unread/dim/timestamp), periwinkle
+    /// (awaiting-reply), sage (empty), cyan (connecting), and lavender (activity)
+    /// families so "sending" reads as its own quiet signal.
+    pub const DELIVERY_INFLIGHT_COLOR: &str = "#6E8CA8";
+    /// Muted mint-teal — the ambient delivered (Delivered/Handled) viewer-turn
+    /// delivery cue. A calm confirming "reached" tone; kept ambient (a hair cooler
+    /// and clearer than the sage empty-state green) so a delivery tick never reads
+    /// as a loud success flash.
+    pub const DELIVERY_DELIVERED_COLOR: &str = "#57A88E";
+    /// Muted warm clay — the ambient failed (Rejected/Expired) viewer-turn delivery
+    /// cue. Deliberately NOT the amber `STALE_MARKER_COLOR` nor an alarm red: per
+    /// doctrine a failed delivery stays ambient on the turn and never escalates the
+    /// portal's interruption class, so the tone reads as "did not arrive" quietly.
+    pub const DELIVERY_FAILED_COLOR: &str = "#B5827A";
+
     /// Muted slate — the ambient per-turn arrival timestamp. Shares the quiet
     /// secondary tone of `TRANSCRIPT_DIM_TEXT_COLOR` / `UNREAD_INDICATOR_COLOR` /
     /// `COMPOSER_PLACEHOLDER_COLOR` so a stamp reads as subordinate metadata, not
@@ -700,6 +752,19 @@ pub struct PortalPartTokens {
     /// agent is actively appending.
     pub streaming_cursor_color: Rgba,
 
+    // Viewer-turn delivery acknowledgement (portal-chat-grade-affordances
+    // §Viewer Turn Delivery Acknowledgement, hud-g1ena.1). Three ambient cue
+    // classes derived from the runtime's already-tracked `InputDeliveryState`; the
+    // adapter never hardcodes these hues and never issues a round trip to render
+    // them.
+    /// Color of the ambient in-flight (Pending/Deferred) viewer-turn delivery cue.
+    pub delivery_inflight_color: Rgba,
+    /// Color of the ambient delivered (Delivered/Handled) viewer-turn delivery cue.
+    pub delivery_delivered_color: Rgba,
+    /// Color of the ambient failed (Rejected/Expired) viewer-turn delivery cue.
+    /// Muted, not an alarm: a failed cue stays ambient on the turn.
+    pub delivery_failed_color: Rgba,
+
     // Ambient per-turn timestamps (portal-chat-grade-affordances
     // §Ambient Per-Turn Timestamps, hud-g1ena.4). Secondary presentation of each
     // unit's runtime-assigned wall-clock arrival time; the adapter never hardcodes
@@ -844,6 +909,13 @@ impl Default for PortalPartTokens {
                 .expect("activity cue color default is valid hex"),
             streaming_cursor_color: parse_color_hex(defaults::STREAMING_CURSOR_COLOR)
                 .expect("streaming cursor color default is valid hex"),
+
+            delivery_inflight_color: parse_color_hex(defaults::DELIVERY_INFLIGHT_COLOR)
+                .expect("delivery in-flight color default is valid hex"),
+            delivery_delivered_color: parse_color_hex(defaults::DELIVERY_DELIVERED_COLOR)
+                .expect("delivery delivered color default is valid hex"),
+            delivery_failed_color: parse_color_hex(defaults::DELIVERY_FAILED_COLOR)
+                .expect("delivery failed color default is valid hex"),
 
             timestamp_color: parse_color_hex(defaults::TIMESTAMP_COLOR)
                 .expect("timestamp color default is valid hex"),
@@ -1118,6 +1190,19 @@ pub fn resolve_portal_tokens(token_map: &DesignTokenMap) -> PortalPartTokens {
             defaults.streaming_cursor_color
         ),
 
+        delivery_inflight_color: resolve_color!(
+            PORTAL_TOKEN_DELIVERY_INFLIGHT_COLOR,
+            defaults.delivery_inflight_color
+        ),
+        delivery_delivered_color: resolve_color!(
+            PORTAL_TOKEN_DELIVERY_DELIVERED_COLOR,
+            defaults.delivery_delivered_color
+        ),
+        delivery_failed_color: resolve_color!(
+            PORTAL_TOKEN_DELIVERY_FAILED_COLOR,
+            defaults.delivery_failed_color
+        ),
+
         timestamp_color: resolve_color!(PORTAL_TOKEN_TIMESTAMP_COLOR, defaults.timestamp_color),
         timestamp_granularity: resolve_granularity!(
             PORTAL_TOKEN_TIMESTAMP_GRANULARITY,
@@ -1327,6 +1412,18 @@ const PORTAL_TOKEN_DEFAULT_STRINGS: &[(&str, &str)] = &[
     (
         PORTAL_TOKEN_STREAMING_CURSOR_COLOR,
         defaults::STREAMING_CURSOR_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_DELIVERY_INFLIGHT_COLOR,
+        defaults::DELIVERY_INFLIGHT_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_DELIVERY_DELIVERED_COLOR,
+        defaults::DELIVERY_DELIVERED_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_DELIVERY_FAILED_COLOR,
+        defaults::DELIVERY_FAILED_COLOR,
     ),
     (PORTAL_TOKEN_TIMESTAMP_COLOR, defaults::TIMESTAMP_COLOR),
     (
@@ -2358,7 +2455,7 @@ mod tests {
     #[test]
     fn resolve_portal_token_strings_covers_every_key() {
         // Number of distinct portal token keys resolved by resolve_portal_tokens.
-        const EXPECTED_KEYS: usize = 54;
+        const EXPECTED_KEYS: usize = 57;
         assert_eq!(
             PORTAL_TOKEN_DEFAULT_STRINGS.len(),
             EXPECTED_KEYS,

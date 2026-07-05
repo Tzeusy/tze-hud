@@ -1450,6 +1450,98 @@ fn submit_portal_input_echoes_viewer_text_into_transcript() {
     );
 }
 
+/// hud-g1ena.1: the projected portal state surfaces the viewer's most recent
+/// submitted reply's delivery state so the render layer can present the ambient
+/// per-turn delivery cue. The value is derived from the authority's existing
+/// runtime-owned `pending_input` bookkeeping (no new adapter round trip): it starts
+/// `Pending` on submit, advances to `Delivered` once the owner takes delivery via
+/// `get_pending_input`, tracks the NEWEST submission when several are outstanding,
+/// and is withheld (`None`) from a viewer whose clearance redacts the transcript.
+#[test]
+fn latest_viewer_delivery_state_flows_into_projected_portal_state() {
+    let mut authority = ProjectionAuthority::default();
+    let owner_token = attach(&mut authority, "projection-a");
+
+    // No submission yet → nothing to acknowledge.
+    let initial = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("portal state materializes");
+    assert_eq!(
+        initial.latest_viewer_delivery_state, None,
+        "no viewer submission yet → no delivery cue state"
+    );
+
+    // Submit a viewer reply → the runtime tracks it as Pending.
+    assert_eq!(
+        authority
+            .submit_portal_input("projection-a", portal_submission("input-1", "first reply"))
+            .feedback_state,
+        PortalInputFeedbackState::Accepted,
+    );
+    let pending = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("portal state materializes");
+    assert_eq!(
+        pending.latest_viewer_delivery_state,
+        Some(InputDeliveryState::Pending),
+        "a freshly submitted reply is in-flight (Pending)"
+    );
+
+    // The owner takes delivery → the same reply advances to Delivered.
+    let poll = authority.handle_get_pending_input(
+        GetPendingInputRequest {
+            envelope: envelope(
+                ProjectionOperation::GetPendingInput,
+                "projection-a",
+                "req-poll",
+            ),
+            owner_token,
+            max_items: None,
+            max_bytes: None,
+        },
+        "caller-a",
+        200,
+    );
+    assert!(poll.accepted, "owner poll must succeed: {poll:?}");
+    let delivered = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("portal state materializes");
+    assert_eq!(
+        delivered.latest_viewer_delivery_state,
+        Some(InputDeliveryState::Delivered),
+        "once the owner takes delivery the cue state advances to Delivered"
+    );
+
+    // A newer submission is what the cue reflects (the tail of pending_input),
+    // even while the older one stays Delivered.
+    assert_eq!(
+        authority
+            .submit_portal_input("projection-a", portal_submission("input-2", "second reply"))
+            .feedback_state,
+        PortalInputFeedbackState::Accepted,
+    );
+    let newest = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("portal state materializes");
+    assert_eq!(
+        newest.latest_viewer_delivery_state,
+        Some(InputDeliveryState::Pending),
+        "the cue reflects the NEWEST viewer submission"
+    );
+
+    // Redaction: a viewer whose clearance withholds the transcript gets no cue
+    // state — the delivery cue redacts together with the echoed turn.
+    let mut no_transcript = ProjectedPortalPolicy::permit_all();
+    no_transcript.reveal_transcript = false;
+    let redacted = authority
+        .projected_portal_state("projection-a", &no_transcript)
+        .expect("portal state materializes");
+    assert_eq!(
+        redacted.latest_viewer_delivery_state, None,
+        "a viewer who cannot see the transcript gets no delivery cue state"
+    );
+}
+
 /// A rejected `submit_portal_input` (e.g. timestamp overflow) must NOT append
 /// a viewer unit to the transcript.
 #[test]
