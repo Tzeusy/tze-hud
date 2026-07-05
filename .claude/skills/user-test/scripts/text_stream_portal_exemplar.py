@@ -104,6 +104,7 @@ EXEMPLAR_PROFILE_OVERRIDES: dict[str, str] = {
     ppt.PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR: "#EBF0F7",     # body text
     ppt.PORTAL_TOKEN_TRANSCRIPT_DIM_TEXT_COLOR: "#C7D1E0E0",   # secondary labels @ ~0.88
     ppt.PORTAL_TOKEN_TRANSCRIPT_DIM_BACKGROUND: "#00000080",   # black @ ~0.50 header/footer panels
+    ppt.PORTAL_TOKEN_COLLAPSED_BACKGROUND: "#12161C",      # off-black compact/minimized surface (hud-4e6c0; mirrors hud-0hj7f runtime value)
     ppt.PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR: "#7ADB8FEB",  # green activity dot @ ~0.92
     ppt.PORTAL_TOKEN_DIVIDER_COLOR: "#FFFFFF1A",           # white @ ~0.10 hairline dividers
     ppt.PORTAL_TOKEN_WINDOW_RESIZE_GRIP_COLOR: "#FFFFFFA8",    # white @ ~0.66 header grip
@@ -148,6 +149,7 @@ def _rebind_visual_tokens() -> None:
     global CARET_RGBA, STATIC_CARET_RGBA, PANE_DIVIDER_RGBA, PANE_DIVIDER_GRIP_RGBA
     global TITLE_RGBA, SUBTITLE_RGBA, BODY_RGBA, META_RGBA
     global ACTIVITY_DOT_RGBA, INPUT_TEXT_RGBA, INPUT_PLACEHOLDER_RGBA, HEADER_GRIP_RGBA
+    global MINIMIZE_BG_RGBA, MINIMIZED_ICON_BG_RGBA, MINIMIZED_ICON_CORE_RGBA
     global TITLE_FONT, SUBTITLE_FONT, BODY_FONT, META_FONT
     global EYEBROW_FONT, INPUT_FONT, SUBMIT_HINT_FONT
 
@@ -175,6 +177,16 @@ def _rebind_visual_tokens() -> None:
     INPUT_TEXT_RGBA = t.composer_text_color
     INPUT_PLACEHOLDER_RGBA = t.composer_placeholder_color
     HEADER_GRIP_RGBA = t.resize_grip_color
+    # Compact/minimized-state control backgrounds resolve their hue from the
+    # collapsed_card.background token — the collapsed-state surface token that
+    # hud-0hj7f darkened to off-black — so the minimize button and minimized icon
+    # inherit the off-black palette instead of a hardcoded blue-grey (hud-4e6c0).
+    # Alpha stays a per-node functional parameter (button emphasis; floating-icon
+    # outer/inner opacity for visibility + layer depth over arbitrary wallpaper),
+    # mirroring the STATIC_CARET_RGBA precedent of token hue + explicit render alpha.
+    MINIMIZE_BG_RGBA = (*t.collapsed_background[:3], 0.88)
+    MINIMIZED_ICON_BG_RGBA = (*t.collapsed_background[:3], 0.72)
+    MINIMIZED_ICON_CORE_RGBA = (*t.collapsed_background[:3], 0.94)
     TITLE_FONT = t.header_font_size_px
     # Secondary label sizes derive from the primary font tokens with fixed
     # typographic steps, so they track a profile's font-size overrides.
@@ -313,6 +325,11 @@ ACTIVITY_DOT_RGBA = TOKENS.lifecycle_active_color
 INPUT_TEXT_RGBA = TOKENS.composer_text_color
 INPUT_PLACEHOLDER_RGBA = TOKENS.composer_placeholder_color
 HEADER_GRIP_RGBA = TOKENS.resize_grip_color
+# Compact/minimized-state control backgrounds (see _rebind_visual_tokens for the
+# hud-4e6c0 rationale): token hue from collapsed_card.background, functional alpha.
+MINIMIZE_BG_RGBA = (*TOKENS.collapsed_background[:3], 0.88)
+MINIMIZED_ICON_BG_RGBA = (*TOKENS.collapsed_background[:3], 0.72)
+MINIMIZED_ICON_CORE_RGBA = (*TOKENS.collapsed_background[:3], 0.94)
 
 TITLE_FONT = TOKENS.header_font_size_px
 SUBTITLE_FONT = max(1.0, TOKENS.transcript_font_size_px - 4.0)
@@ -1715,7 +1732,7 @@ def build_portal_nodes(
         *DIVIDER_RGBA, 0.0, HEADER_H, PORTAL_W, DIVIDER_H,
     )
     minimize_bg = make_solid_color_node(
-        0.10, 0.14, 0.20, 0.88,
+        *MINIMIZE_BG_RGBA,
         MINIMIZE_BUTTON_X,
         MINIMIZE_BUTTON_Y,
         MINIMIZE_BUTTON_SIZE,
@@ -2848,10 +2865,15 @@ def build_minimized_icon_nodes(
     attention: bool,
     pulse: bool,
 ) -> tuple[types_pb2.NodeProto, list[types_pb2.NodeProto]]:
+    # hud-4e6c0: the card BACKGROUND surfaces (root, core) resolve their hue from
+    # the collapsed_card.background token so the minimized state inherits the
+    # off-black palette. The foreground marks below (activity accent gold/green,
+    # light signal lines, grip nubs) are intentional semantic accents/content, not
+    # the grey-background defect this bead targets, so they stay literal here.
     accent = (1.0, 0.82, 0.22, 0.98) if attention else (0.48, 0.86, 0.56, 0.94)
     halo_alpha = 0.28 if pulse else 0.12
     root = make_solid_color_node(
-        0.02, 0.03, 0.05, 0.72,
+        *MINIMIZED_ICON_BG_RGBA,
         0.0, 0.0,
         MINIMIZED_ICON_SIZE,
         MINIMIZED_ICON_SIZE,
@@ -2865,7 +2887,7 @@ def build_minimized_icon_nodes(
         radius=MINIMIZED_ICON_RADIUS - 3.0,
     )
     core = make_solid_color_node(
-        0.06, 0.08, 0.12, 0.94,
+        *MINIMIZED_ICON_CORE_RGBA,
         10.0, 10.0,
         MINIMIZED_ICON_SIZE - 20.0,
         MINIMIZED_ICON_SIZE - 20.0,
