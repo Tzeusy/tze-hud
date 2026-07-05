@@ -72,6 +72,9 @@ PORTAL_TOKEN_TRANSCRIPT_MAX_MEASURE_PX = "portal.transcript.max_measure_px"
 
 PORTAL_TOKEN_STALE_MARKER_COLOR = "portal.stale_marker.color"
 
+PORTAL_TOKEN_UNREAD_INDICATOR_COLOR = "portal.unread_indicator.color"
+PORTAL_TOKEN_AWAITING_REPLY_COLOR = "portal.awaiting_reply.color"
+
 PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR = "portal.lifecycle.active_color"
 PORTAL_TOKEN_LIFECYCLE_ATTACHED_COLOR = "portal.lifecycle.attached_color"
 PORTAL_TOKEN_LIFECYCLE_ATTENTION_COLOR = "portal.lifecycle.attention_color"
@@ -131,6 +134,8 @@ _RUST_DEFAULTS: dict[str, str] = {
     "TRANSCRIPT_DIM_TEXT_COLOR": "#6B7689",
     "TRANSCRIPT_DIM_BACKGROUND": "#07090C",
     "STALE_MARKER_COLOR": "#B87333",
+    "UNREAD_INDICATOR_COLOR": "#6B7689",
+    "AWAITING_REPLY_COLOR": "#7B85C4",
     "LIFECYCLE_ACTIVE_COLOR": "#4FA88A",
     "LIFECYCLE_ATTACHED_COLOR": "#5A8FC0",
     "LIFECYCLE_ATTENTION_COLOR": "#C28A3D",
@@ -184,6 +189,8 @@ CANONICAL_DEFAULTS: dict[str, str] = {
     PORTAL_TOKEN_TRANSCRIPT_DIM_BACKGROUND: _RUST_DEFAULTS["TRANSCRIPT_DIM_BACKGROUND"],
     PORTAL_TOKEN_TRANSCRIPT_MAX_MEASURE_PX: _RUST_DEFAULTS["TRANSCRIPT_MAX_MEASURE_PX"],
     PORTAL_TOKEN_STALE_MARKER_COLOR: _RUST_DEFAULTS["STALE_MARKER_COLOR"],
+    PORTAL_TOKEN_UNREAD_INDICATOR_COLOR: _RUST_DEFAULTS["UNREAD_INDICATOR_COLOR"],
+    PORTAL_TOKEN_AWAITING_REPLY_COLOR: _RUST_DEFAULTS["AWAITING_REPLY_COLOR"],
     PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR: _RUST_DEFAULTS["LIFECYCLE_ACTIVE_COLOR"],
     PORTAL_TOKEN_LIFECYCLE_ATTACHED_COLOR: _RUST_DEFAULTS["LIFECYCLE_ATTACHED_COLOR"],
     PORTAL_TOKEN_LIFECYCLE_ATTENTION_COLOR: _RUST_DEFAULTS["LIFECYCLE_ATTENTION_COLOR"],
@@ -294,6 +301,8 @@ class PortalPartTokens:
     transcript_max_measure_px: float
     # Ancillary
     stale_marker_color: Rgba
+    unread_indicator_color: Rgba
+    awaiting_reply_color: Rgba
     lifecycle_active_color: Rgba
     lifecycle_attached_color: Rgba
     lifecycle_attention_color: Rgba
@@ -365,6 +374,8 @@ def resolve_portal_tokens(overrides: Optional[dict[str, str]] = None) -> PortalP
         transcript_dim_background=_color(tm, PORTAL_TOKEN_TRANSCRIPT_DIM_BACKGROUND),
         transcript_max_measure_px=_px(tm, PORTAL_TOKEN_TRANSCRIPT_MAX_MEASURE_PX),
         stale_marker_color=_color(tm, PORTAL_TOKEN_STALE_MARKER_COLOR),
+        unread_indicator_color=_color(tm, PORTAL_TOKEN_UNREAD_INDICATOR_COLOR),
+        awaiting_reply_color=_color(tm, PORTAL_TOKEN_AWAITING_REPLY_COLOR),
         lifecycle_active_color=_color(tm, PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR),
         lifecycle_attached_color=_color(tm, PORTAL_TOKEN_LIFECYCLE_ATTACHED_COLOR),
         lifecycle_attention_color=_color(tm, PORTAL_TOKEN_LIFECYCLE_ATTENTION_COLOR),
