@@ -416,6 +416,18 @@ struct DriveEntry {
     /// continued streaming simply extends it; a state that carries no active cue
     /// clears it.
     activity_cue_clear_due_us: Option<u64>,
+    /// The raw unread-output count carried from the most recent materialisation's
+    /// drained batch (hud-kbm80 follow-up).
+    ///
+    /// `take_due_portal_update` zeroes `session.unread_output_count` as it consumes
+    /// a drain, so the normal drain restores the live count from the drained
+    /// `PortalTranscriptUpdate` via [`carry_drained_unread_count`]. The forced
+    /// cue-quiesce repaint has no such drained update in hand — it re-derives state
+    /// straight from the (already-zeroed) session — so without this it would repaint
+    /// the ambient "N unread" indicator away even though no viewer action cleared it.
+    /// We stash the last-materialised raw count here and re-apply it (through
+    /// `carry_drained_unread_count`, preserving redaction) on the quiesce repaint.
+    activity_cue_carried_unread: usize,
 }
 
 /// In-process state for the portal projection drive loop.
@@ -483,6 +495,7 @@ impl InProcessPortalDriveState {
                 hud_disconnected: false,
                 needs_degraded_repaint: false,
                 activity_cue_clear_due_us: None,
+                activity_cue_carried_unread: 0,
             },
         );
     }
@@ -1650,6 +1663,11 @@ impl InProcessPortalDriver {
             // path and the bridged tee.
             if let Some(entry) = self.drive.entries.get_mut(&proj_id) {
                 entry.activity_cue_clear_due_us = activity_cue_clear_due_us(&state, now_us);
+                // Stash the just-drained raw unread count so the forced quiesce
+                // repaint below can restore the ambient "N unread" indicator: it
+                // re-derives state from the now-zeroed session and would otherwise
+                // drop the count even though no viewer action cleared it (hud-kbm80).
+                entry.activity_cue_carried_unread = update.unread_output_count;
             }
 
             // Per-projection transport routing (hud-g7ool). A projection routed to
@@ -2196,24 +2214,67 @@ impl InProcessPortalDriver {
             // re-runs the cue derivation, which is now false past the deadline). If
             // the session vanished since the deadline was scheduled, drop the
             // now-orphaned drive entry instead of repainting.
-            let Some(state) = self.authority.projected_portal_state(&proj_id, &policy) else {
+            let Some(mut state) = self.authority.projected_portal_state(&proj_id, &policy) else {
                 self.detach_projection(&proj_id);
                 continue;
             };
+            // Restore the ambient unread-output count the same way the normal drain
+            // does (hud-kbm80): `take_due_portal_update` zeroed the session, so the
+            // re-derived state reads a stale 0 and would drop the "N unread"
+            // indicator on this cue-only repaint. Carry the last-materialised raw
+            // count forward through `carry_drained_unread_count` (which preserves the
+            // upstream redaction). On an idle portal (the quiesce premise) no viewer
+            // action has changed the count since that materialisation, so it is still
+            // accurate.
+            if let Some(carried) = self
+                .drive
+                .entries
+                .get(&proj_id)
+                .map(|e| e.activity_cue_carried_unread)
+            {
+                state.unread_output_count =
+                    carry_drained_unread_count(state.unread_output_count, carried);
+            }
             // Per-projection transport routing (hud-g7ool / hud-vne15): a bridged
             // projection's quiesced state is forwarded over the bridge and its
-            // in-process repaint suppressed, mirroring the degraded pass. Clear the
-            // one-shot deadline here so a tile-less bridged entry does not re-tee a
-            // `Publish` every drain.
+            // in-process repaint suppressed, mirroring the degraded pass.
             if self.effective_transport(&proj_id) == PortalTransport::ResidentGrpcBridge {
-                if let Some(entry) = self.drive.entries.get_mut(&proj_id) {
-                    entry.activity_cue_clear_due_us = None;
-                }
-                if let Some(tx) = &self.resident_grpc_bridge_tx {
-                    let _ = tx.try_send(BridgeMessage::Publish {
+                // Clear the one-shot deadline ONLY on a successful enqueue. Unlike a
+                // normal publish, this quiesce `Publish` has no later update to
+                // supersede it (idle portal by premise), so if the bounded bridge
+                // channel is `Full` (bridge reconnecting / slow to drain) dropping it
+                // would strand the remote portal's "⋯ writing" cue forever. On `Full`
+                // we retain the deadline and let the next drain retry with freshly
+                // re-derived (still-quiesced) state; on success — or a closed/absent
+                // channel that will never accept it — we clear it (hud-kbm80).
+                match &self.resident_grpc_bridge_tx {
+                    Some(tx) => match tx.try_send(BridgeMessage::Publish {
                         projection_id: proj_id.clone(),
                         state: Box::new(state.clone()),
-                    });
+                    }) {
+                        Ok(()) => {
+                            if let Some(entry) = self.drive.entries.get_mut(&proj_id) {
+                                entry.activity_cue_clear_due_us = None;
+                            }
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            // Backpressure: retain the deadline; retry next drain.
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            // Bridge gone; nothing will ever accept this quiesce
+                            // repaint, so clear to avoid an unbounded retry.
+                            if let Some(entry) = self.drive.entries.get_mut(&proj_id) {
+                                entry.activity_cue_clear_due_us = None;
+                            }
+                        }
+                    },
+                    None => {
+                        // No bridge channel installed; clear to avoid an unbounded
+                        // retry against a transport that cannot receive it.
+                        if let Some(entry) = self.drive.entries.get_mut(&proj_id) {
+                            entry.activity_cue_clear_due_us = None;
+                        }
+                    }
                 }
                 continue;
             }
@@ -6149,6 +6210,141 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "an idle quiesced bridged entry must not be re-teed on the next drain"
+        );
+    }
+
+    /// hud-kbm80 (review follow-up): the cue-quiesce repaint must not drop the
+    /// ambient "N unread" indicator. `take_due_portal_update` zeroes the session's
+    /// unread count, and the quiesce pass re-derives state from that zeroed session
+    /// — so without carrying the last-materialised count forward it would repaint
+    /// the unread indicator away even though no viewer action cleared it. A fresh
+    /// agent turn is itself unread output, so this overlap (cue active AND unread
+    /// > 0) is the common case, not an edge one.
+    #[test]
+    fn activity_cue_quiesce_preserves_unread_indicator() {
+        let mut driver = InProcessPortalDriver::new();
+        let proj = "proj-cue-unread";
+        let token = attach_and_get_token(&mut driver, proj);
+        driver.attach_projection(proj, Vec::new());
+        record_live_connection(&mut driver, proj);
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        // A single fresh agent turn: the cue is active AND the output is unread.
+        publish(&mut driver, proj, &token, "streaming line", 100);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+
+        let tile_id = driver
+            .drive
+            .entries
+            .get(proj)
+            .unwrap()
+            .tile_scene_id
+            .expect("first drain must create the portal tile");
+        let painted = tile_markdown(&scene, tile_id);
+        assert!(
+            painted.contains(PORTAL_ACTIVITY_MARKER_TEXT),
+            "the activity cue must be painted while the agent tail is fresh"
+        );
+        assert!(
+            painted.contains("1 unread"),
+            "the ambient unread indicator must paint the live count on the drain render"
+        );
+
+        let due = driver
+            .drive
+            .entries
+            .get(proj)
+            .unwrap()
+            .activity_cue_clear_due_us
+            .expect("a live fresh agent tail must schedule a cue-quiesce repaint");
+
+        // Quiesce with NO new update and NO viewer action: the cue clears, but the
+        // unread indicator must survive (the count was not cleared by a viewer).
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), due);
+        let quiesced = tile_markdown(&scene, tile_id);
+        assert!(
+            !quiesced.contains(PORTAL_ACTIVITY_MARKER_TEXT),
+            "the cue SHALL quiesce once appends stop"
+        );
+        assert!(
+            quiesced.contains("1 unread"),
+            "the cue-quiesce repaint must NOT drop the ambient unread indicator \
+             (hud-kbm80 review follow-up): no viewer action cleared it"
+        );
+    }
+
+    /// hud-kbm80 (review follow-up): a bridged cue-quiesce `Publish` has no later
+    /// update to supersede it, so it must survive bounded-channel backpressure.
+    /// When `try_send` returns `Full`, the one-shot deadline must be RETAINED and
+    /// the next drain must retry, rather than clearing the deadline and stranding
+    /// the remote portal's writing cue forever.
+    #[test]
+    fn bridged_cue_quiesce_retries_when_bridge_channel_full() {
+        let mut driver = InProcessPortalDriver::new();
+        // Capacity-1 channel so a single un-drained message wedges `try_send`.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<BridgeMessage>(1);
+        driver.set_resident_grpc_bridge_tx(Some(tx));
+
+        let proj = "proj-bridged-cue-full";
+        let token = attach_and_get_token(&mut driver, proj);
+        driver.attach_projection(proj, Vec::new());
+        driver.set_projection_transport(proj, PortalTransport::ResidentGrpcBridge);
+        record_live_connection(&mut driver, proj);
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        // Live materialisation fills the capacity-1 channel (1/1) and schedules the
+        // deadline. Leave that Publish UN-drained so the channel stays full.
+        publish(&mut driver, proj, &token, "bridged streaming", 100);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+        let due = driver
+            .drive
+            .entries
+            .get(proj)
+            .unwrap()
+            .activity_cue_clear_due_us
+            .expect("a bridged live fresh tail must schedule a cue-quiesce repaint");
+
+        // Drain at the deadline while the channel is still full: the quiesce Publish
+        // cannot be enqueued, so the deadline must be retained for a retry.
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), due);
+        assert_eq!(
+            driver
+                .drive
+                .entries
+                .get(proj)
+                .unwrap()
+                .activity_cue_clear_due_us,
+            Some(due),
+            "a Full bridge channel must NOT consume the one-shot cue-quiesce deadline"
+        );
+
+        // Free the channel (drain the stale live Publish), then drain again: the
+        // retry now succeeds, forwarding exactly one quiesce Publish and clearing
+        // the deadline.
+        assert!(
+            matches!(rx.try_recv(), Ok(BridgeMessage::Publish { .. })),
+            "the live materialisation Publish must be the message wedging the channel"
+        );
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), due);
+        assert!(
+            matches!(rx.try_recv(), Ok(BridgeMessage::Publish { .. })),
+            "the retry must forward the quiesce Publish once the channel drains"
+        );
+        assert!(
+            driver
+                .drive
+                .entries
+                .get(proj)
+                .unwrap()
+                .activity_cue_clear_due_us
+                .is_none(),
+            "a successful retry must clear the one-shot deadline"
         );
     }
 
