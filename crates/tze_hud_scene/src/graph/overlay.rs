@@ -109,6 +109,21 @@ pub struct RuntimeOverlayState {
     /// Ephemeral: skipped during serialization.
     #[serde(skip, default)]
     pub tile_follow_tail_at_tail: HashMap<SceneId, bool>,
+    /// Runtime-owned ambient unread-output count per tile (hud-g1ena.3).
+    ///
+    /// The aggregate `ProjectedPortalState::unread_output_count` a text-stream
+    /// portal already tracks, plumbed onto the transcript tile by the portal
+    /// projection driver each drain. Read by the compositor to render the
+    /// ambient unread badge the jump-to-latest pill MAY carry
+    /// (portal-chat-grade-affordances §Jump-to-Latest Affordance) — the pill is
+    /// only shown while `tile_follow_tail_at_tail == false`, so the badge clears
+    /// with it when the viewer returns to the tail.
+    ///
+    /// `0` (or an absent entry) means nothing unread; the driver stores `0` when
+    /// the count is redacted or empty so no badge renders. Ephemeral: skipped
+    /// during serialization.
+    #[serde(skip, default)]
+    pub tile_unread_counts: HashMap<SceneId, usize>,
     /// Runtime-owned lifecycle-affordance accents per tile.
     ///
     /// Set by the [`SceneMutation::SetTileLifecycleAccent`] apply path (driven by
@@ -507,5 +522,30 @@ impl SceneGraph {
             .get(&tile_id)
             .copied()
             .unwrap_or(false)
+    }
+
+    // ─── Ambient unread count (hud-g1ena.3) ───────────────────────────────
+
+    /// Record a tile's ambient unread-output count (the aggregate
+    /// `ProjectedPortalState::unread_output_count`).
+    ///
+    /// Called by the portal projection driver each drain. `count = 0` clears the
+    /// badge; the driver passes `0` for both a genuine empty count and a redacted
+    /// (`None`) count so no unread badge renders in either case.
+    ///
+    /// No-op if the tile does not exist.
+    pub fn set_tile_unread_count(&mut self, tile_id: SceneId, count: usize) {
+        if self.tiles.contains_key(&tile_id) {
+            self.overlay.tile_unread_counts.insert(tile_id, count);
+        }
+    }
+
+    /// Return a tile's ambient unread-output count (`0` when unset/cleared).
+    pub fn tile_unread_count(&self, tile_id: SceneId) -> usize {
+        self.overlay
+            .tile_unread_counts
+            .get(&tile_id)
+            .copied()
+            .unwrap_or(0)
     }
 }

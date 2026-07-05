@@ -2055,6 +2055,21 @@ impl InProcessPortalDriver {
                         "portal drain: RenderPortal — notify_tile_content_appended"
                     );
 
+                    // hud-g1ena.3: carry the ambient unread-output count onto the
+                    // tile so the compositor can render it as the badge the
+                    // jump-to-latest pill MAY carry (portal-chat-grade-affordances
+                    // §Jump-to-Latest Affordance). Uses the aggregate
+                    // `unread_output_count` (carried past the drain-zero above,
+                    // hud-meqet), matching the ambient in-transcript indicator. A
+                    // redacted (`None`) or empty count stores 0 → no badge; the pill
+                    // is itself gated on `scrolled_back`, so the badge clears with it
+                    // the instant the viewer returns to the tail (local-first, no
+                    // adapter round trip).
+                    scene.set_tile_unread_count(
+                        tile_scene_id,
+                        state.unread_output_count.unwrap_or(0),
+                    );
+
                     // §6b.4: consume the geometry batch after delivery so that
                     // `projected_portal_state` does not re-deliver the same snapshot
                     // on the next drain cycle. The caller (push_geometry_snapshot_for_tile)
@@ -2739,6 +2754,26 @@ mod tests {
                 .tile_scene_id
                 .is_some(),
             "tile must persist after RenderPortal drain"
+        );
+
+        // hud-g1ena.3: the RenderPortal drain must also plumb the ambient
+        // unread-output count onto the tile so the compositor can render the
+        // jump-to-latest badge. The driver writes the entry at the drain site, so
+        // its presence proves the `set_tile_unread_count` wiring runs; the value
+        // must reflect the just-drained batch's unread count (carried past the
+        // drain-zero, matching the ambient indicator, hud-meqet), which this
+        // fixture drives above zero by coalescing 9 appended lines. The badge's
+        // scrolled-away visibility gate is covered by the compositor test.
+        assert!(
+            scene.overlay.tile_unread_counts.contains_key(&tile_id),
+            "hud-g1ena.3 regression: RenderPortal drain must call set_tile_unread_count \
+             so the jump-to-latest pill can carry the ambient unread count"
+        );
+        assert!(
+            scene.tile_unread_count(tile_id) > 0,
+            "the plumbed count must reflect the drained batch's unread output \
+             (got {}), not a hardcoded zero",
+            scene.tile_unread_count(tile_id)
         );
     }
 

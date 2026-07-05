@@ -40,6 +40,7 @@ impl SceneGraph {
         self.overlay.tile_scroll_configs.remove(&tile_id);
         self.overlay.tile_scroll_offsets.remove(&tile_id);
         self.overlay.tile_follow_tail_at_tail.remove(&tile_id);
+        self.overlay.tile_unread_counts.remove(&tile_id);
         self.overlay.tile_lifecycle_accents.remove(&tile_id);
         self.overlay.drag_active_elements.remove(&tile_id);
         self.overlay.viewer_geometry_locked.remove(&tile_id);

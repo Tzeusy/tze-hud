@@ -1332,6 +1332,107 @@ impl Compositor {
         })
     }
 
+    /// Build a `TextItem` for the ambient unread-count badge the jump-to-latest
+    /// pill MAY carry (hud-g1ena.3, portal-chat-grade-affordances §Jump-to-Latest
+    /// Affordance).
+    ///
+    /// Returns `None` unless every gate the pill render in `render_frame` uses
+    /// also holds — the tile has a registered scroll config with a known content
+    /// height, the content overflows (a scroll indicator would render), the
+    /// viewport is scrolled away from the tail, and the pill geometry is
+    /// renderable — AND the tile carries a nonzero, non-redacted unread count.
+    /// Mirroring the pill's gates exactly keeps the badge and pill appearing and
+    /// disappearing together; because the pill is gated on `scrolled_back`, the
+    /// badge clears the instant the viewer returns to the tail, with no adapter
+    /// round trip (local-first).
+    ///
+    /// The count is centered in the pill and clipped to it, token-styled from the
+    /// same [`tze_hud_input::JumpToLatestTokens`] as the pill fill — no literal
+    /// color in the render path.
+    pub(super) fn collect_jump_to_latest_badge_item(
+        &self,
+        tile: &Tile,
+        scene: &SceneGraph,
+        jump_to_latest_tokens: &tze_hud_input::JumpToLatestTokens,
+        scroll_indicator_tokens: &tze_hud_input::ScrollIndicatorTokens,
+    ) -> Option<crate::text::TextItem> {
+        // No rasterizer → no glyphs (headless snapshot tests still exercise the
+        // gating via the pure functions this delegates to).
+        self.text_rasterizer.as_ref()?;
+
+        let scroll_cfg = scene.tile_scroll_config(tile.id)?;
+        let content_height = scroll_cfg.content_height?;
+        let viewport_px = tile.bounds.height;
+        let (_, scroll_offset_y) = self.display_tile_scroll_offset(scene, tile.id);
+        // Only offer the badge where the pill itself renders: content overflows.
+        tze_hud_input::compute_scroll_indicator(
+            viewport_px,
+            content_height,
+            scroll_offset_y,
+            scroll_indicator_tokens,
+        )?;
+
+        let scrolled_back = !scene.tile_follow_tail_at_tail(tile.id);
+        let pill = tze_hud_input::compute_jump_to_latest_pill(
+            tile.bounds.width,
+            viewport_px,
+            scrolled_back,
+            jump_to_latest_tokens,
+        )?;
+
+        // The count the pill MAY carry — `None`/`0` leaves the plain pill (no badge).
+        let count = scene.tile_unread_count(tile.id);
+        let label = tze_hud_input::jump_to_latest_badge_label(Some(count))?;
+
+        // `text_*` are STRAIGHT sRGB floats → sRGB u8 by a plain scale (no curve;
+        // the resolver already normalized any token-parsed linear value back to
+        // sRGB). Matches the badge-text convention documented on JumpToLatestTokens.
+        let to_srgb_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        let color = [
+            to_srgb_u8(jump_to_latest_tokens.text_r),
+            to_srgb_u8(jump_to_latest_tokens.text_g),
+            to_srgb_u8(jump_to_latest_tokens.text_b),
+            to_srgb_u8(jump_to_latest_tokens.text_a),
+        ];
+
+        let font_size_px = jump_to_latest_tokens.text_size_px.max(1.0);
+        let line_height_multiplier = crate::markdown::MarkdownTokens::default().line_height_multiplier;
+        let line_height = (font_size_px * line_height_multiplier).max(1.0);
+
+        // Pill origin in absolute pixels; vertically center one text line inside it.
+        let pill_x = tile.bounds.x + pill.x_px;
+        let pill_y = tile.bounds.y + pill.y_px;
+        let text_y = pill_y + ((pill.height_px - line_height) / 2.0).max(0.0);
+        let bounds_width = pill.width_px.max(1.0);
+        let bounds_height = pill.height_px.max(1.0);
+
+        Some(crate::text::TextItem {
+            text: Arc::from(label.as_str()),
+            pixel_x: pill_x,
+            pixel_y: text_y,
+            bounds_width,
+            bounds_height,
+            clip_pixel_x: pill_x,
+            clip_pixel_y: pill_y,
+            clip_bounds_width: bounds_width,
+            clip_bounds_height: bounds_height,
+            font_size_px,
+            font_family: tze_hud_scene::types::FontFamily::SystemSansSerif,
+            font_weight: 400,
+            color,
+            // Horizontally center the count within the pill.
+            alignment: tze_hud_scene::types::TextAlign::Center,
+            overflow: tze_hud_scene::types::TextOverflow::Clip,
+            outline_color: None,
+            outline_width: None,
+            opacity: 1.0,
+            color_runs: Box::new([]),
+            styled_runs: Box::new([]),
+            line_height_multiplier,
+            viewport: crate::overflow::TruncationViewport::HeadAnchored,
+        })
+    }
+
     /// Depth-first search for the first composer-input `HitRegionNode` reachable
     /// from the tile root (a `HitRegionNode` with `accepts_composer_input`).
     ///
