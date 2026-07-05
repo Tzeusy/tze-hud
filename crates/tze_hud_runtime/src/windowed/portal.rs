@@ -6026,6 +6026,7 @@ mod tests {
                 },
             ],
             text_len: 6,
+            input_box: None,
         };
         *app.state.composer_visual_layout.lock().unwrap() = Some(layout);
 

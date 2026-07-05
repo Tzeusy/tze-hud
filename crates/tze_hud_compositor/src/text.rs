@@ -840,6 +840,10 @@ impl TextRasterizer {
         tze_hud_input::ComposerVisualLayout {
             lines,
             text_len: text.len(),
+            // The caller (`prime_composer_scroll_offset`) fills this from its own
+            // `composer_input_box` geometry after measuring, so the input box
+            // stays single-sourced by the compositor (hud-lw60x).
+            input_box: None,
         }
     }
 

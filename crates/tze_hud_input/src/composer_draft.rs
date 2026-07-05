@@ -187,6 +187,53 @@ pub struct ComposerVisualLine {
     pub glyph_x: Vec<(usize, f32)>,
 }
 
+/// Vertical geometry of the RENDERED composer input box, in composer-node-local
+/// pixel space (y measured from the composer HitRegion's top edge — the same
+/// origin `ComposerVisualLayout::byte_at_point` receives its `y` in).
+///
+/// Published by the compositor (`Compositor::prime_composer_scroll_offset`) from
+/// its own `composer_input_box` geometry so the input layer never re-derives the
+/// box — the compositor is the single source of the box placement, and the two
+/// cannot drift (craft-and-care engineering-bar §9, single geometry authority).
+///
+/// # Why the input layer needs this (hud-lw60x)
+///
+/// For a full-tile-HitRegion PROJECTION composer the HitRegion spans the WHOLE
+/// portal (click-anywhere-to-focus, hud-v4k1h) but the draft renders in a
+/// short, BOTTOM-anchored input box (`box_y = region.y + region.height −
+/// box_height`, hud-2zsbf / hud-nx7yq.1). Splitting the FULL node height evenly
+/// across rows (the pre-hud-lw60x fallback below) therefore maps a click on the
+/// visible text strip to `frac_y ≈ 1.0` → always the last row, leaving the upper
+/// visible rows unreachable. Mapping the click through THIS box instead makes
+/// every visible row hittable.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ComposerInputBoxGeometry {
+    /// Node-local y (px) of the rendered input box's top edge.
+    pub box_top: f32,
+    /// Rendered input box height (px). The visible text strip is
+    /// `[box_top, box_top + box_height]`.
+    pub box_height: f32,
+    /// Node-local y (px) of VISUAL ROW 0's top edge, already shifted UP by the
+    /// vertical scroll offset (`box_top + content_inset − vscroll_px`). Because
+    /// rows are a uniform `line_height` tall, row `i`'s top is
+    /// `row0_top + i * line_height`; folding `vscroll_px` in here keeps the row
+    /// mapping exact even while the draft is scrolled (the vscroll drift the
+    /// even-split path below could not account for).
+    pub row0_top: f32,
+    /// Per-visual-row height (px). Uniform across rows.
+    pub line_height: f32,
+    /// Absolute index of the FIRST visual row inside the visible box (the
+    /// vertical scroll offset in rows, `vscroll_px / line_height`). Zero when the
+    /// draft has not scrolled.
+    pub first_visible_row: usize,
+    /// Count of visual rows the box actually shows. Together with
+    /// `first_visible_row` this bounds the pointer hit-test to the VISIBLE window
+    /// `[first_visible_row, first_visible_row + visible_rows − 1]`, so a click in
+    /// the box's own top/bottom padding while scrolled resolves to the nearest
+    /// visible row instead of a clipped row above/below the window (hud-lw60x).
+    pub visible_rows: usize,
+}
+
 /// The composer draft's wrapped layout: the ordered visual rows plus the draft
 /// length it was measured for (a staleness guard, hud-21o6x).
 ///
@@ -201,6 +248,12 @@ pub struct ComposerVisualLayout {
     pub lines: Vec<ComposerVisualLine>,
     /// Raw-draft byte length this layout was measured for.
     pub text_len: usize,
+    /// Rendered input-box vertical geometry, when the compositor published it
+    /// (the multi-line profile always does; `None` on the single-line profile
+    /// and until the first post-focus frame). Drives `byte_at_point`'s pointer-Y
+    /// → visual-row mapping (hud-lw60x); when `None`, `byte_at_point` falls back
+    /// to splitting the passed content height evenly across the rows.
+    pub input_box: Option<ComposerInputBoxGeometry>,
 }
 
 impl ComposerVisualLine {
@@ -281,31 +334,63 @@ impl ComposerVisualLayout {
         }
     }
 
-    /// Raw byte nearest the point `(x, y)` in composer-content pixel space —
-    /// `x`/`y` measured from the content box's top-left, after the caller has
-    /// already subtracted any margin/inset (hud-etrs0 pointer hit-test).
+    /// Raw byte nearest the point `(x, y)` in composer-NODE-local pixel space —
+    /// `y` measured from the composer HitRegion's top edge, `x` from the content
+    /// box's left after the caller has de-inset the horizontal margin (hud-etrs0
+    /// pointer hit-test).
     ///
-    /// Selects a visual row by splitting `content_height` evenly across
-    /// `self.lines`, then maps `x` to a byte via that row's real glyph
-    /// geometry ([`ComposerVisualLine::byte_at_x`]). The even split is exact
-    /// only while every row fits within `content_height` — the common
-    /// un-scrolled case, since the box grows to fit up to the configured
-    /// `max_lines` before it scrolls. Once the draft has scrolled past its
-    /// visible window the row estimate drifts from the true row (this layout
-    /// carries no per-row baseline / vscroll offset yet — a follow-up would
-    /// publish those alongside `glyph_x` if pointer hit-testing needs to stay
-    /// exact while scrolled).
+    /// Row selection: when the compositor published the rendered input-box
+    /// geometry ([`Self::input_box`], the multi-line PROJECTION path, hud-lw60x),
+    /// `y` is clamped into the visible box and mapped to a visual row through
+    /// `row0_top`/`line_height`, then clamped into the visible row window — so a
+    /// click on the short, bottom-anchored text strip of a TALL projection portal
+    /// lands on the row actually under the pointer, `row0_top`'s baked-in
+    /// `vscroll_px` keeps that exact while the draft is scrolled, and a click in
+    /// the box's own padding resolves to the nearest visible row rather than a
+    /// clipped one outside the window.
     ///
-    /// Returns byte `0` when there are no rows.
+    /// Fallback (no published geometry — the single-line profile never publishes
+    /// one, and a multi-line composer may not yet on the first post-focus frame):
+    /// split `content_height` evenly across `self.lines`. That even split is
+    /// exact only while the box height equals the node height and nothing has
+    /// scrolled; it is the pre-hud-lw60x behavior, retained for the
+    /// no-geometry case.
+    ///
+    /// Either way, `x` maps to a byte via the selected row's real glyph geometry
+    /// ([`ComposerVisualLine::byte_at_x`]). Returns byte `0` when there are no
+    /// rows.
     pub fn byte_at_point(&self, x: f32, y: f32, content_height: f32) -> usize {
         let Some(last) = self.lines.len().checked_sub(1) else {
             return 0;
         };
-        let row = if content_height > 0.0 {
-            let frac = (y / content_height).clamp(0.0, 1.0);
-            ((frac * self.lines.len() as f32) as usize).min(last)
-        } else {
-            0
+        let row = match self.input_box {
+            // Map the pointer Y through the RENDERED input box (hud-lw60x). Clamp
+            // into the visible strip first, then locate the row band. `row0_top`
+            // already folds in the vertical scroll, so a click while scrolled
+            // lands on the correct absolute row. Finally clamp the row into the
+            // VISIBLE window `[first_visible_row, last_visible]`: the box's own
+            // top/bottom padding (content inset) sits outside the text rows, so
+            // without this a padding click while scrolled would resolve to a
+            // clipped row just above/below the window and yank the caret there.
+            Some(g) if g.line_height > 0.0 => {
+                let y_in_box = y.clamp(g.box_top, g.box_top + g.box_height);
+                let rel = y_in_box - g.row0_top;
+                let idx = (rel / g.line_height).floor().max(0.0) as usize;
+                let last_visible = g
+                    .first_visible_row
+                    .saturating_add(g.visible_rows.saturating_sub(1))
+                    .min(last);
+                idx.clamp(g.first_visible_row.min(last_visible), last_visible)
+            }
+            // No published geometry: even split across the passed content height.
+            _ => {
+                if content_height > 0.0 {
+                    let frac = (y / content_height).clamp(0.0, 1.0);
+                    ((frac * self.lines.len() as f32) as usize).min(last)
+                } else {
+                    0
+                }
+            }
         };
         self.lines[row].byte_at_x(x)
     }
@@ -3150,6 +3235,7 @@ mod tests {
                 },
             ],
             text_len: 6,
+            input_box: None,
         }
     }
 
@@ -3209,8 +3295,205 @@ mod tests {
         let empty = ComposerVisualLayout {
             lines: vec![],
             text_len: 0,
+            input_box: None,
         };
         assert_eq!(empty.byte_at_point(20.0, 10.0, 100.0), 0);
+    }
+
+    // ─── Tall-projection input-box pointer hit-test (hud-lw60x) ───────────────
+
+    /// A TALL full-portal PROJECTION composer: three wrapped rows rendered in a
+    /// short, BOTTOM-anchored input box inside a much taller HitRegion (the
+    /// click-anywhere-to-focus target). Geometry mirrors the compositor's
+    /// `composer_input_box` for node height 300, `line_height` 20, `content_inset`
+    /// 6 → `box_height = 20*3 + 6*2 = 72`, `box_top = 300 − 72 = 228`,
+    /// `row0_top = 228 + 6 − vscroll`. Per-row glyph tables give a DISTINCT byte
+    /// per row at the same x, so the assertion isolates the row selection.
+    fn tall_projection_layout(input_box: Option<ComposerInputBoxGeometry>) -> ComposerVisualLayout {
+        ComposerVisualLayout {
+            lines: vec![
+                ComposerVisualLine {
+                    start_byte: 0,
+                    end_byte: 3,
+                    glyph_x: vec![(0, 0.0), (1, 10.0), (2, 20.0), (3, 30.0)],
+                },
+                ComposerVisualLine {
+                    start_byte: 3,
+                    end_byte: 6,
+                    glyph_x: vec![(3, 0.0), (4, 10.0), (5, 20.0), (6, 30.0)],
+                },
+                ComposerVisualLine {
+                    start_byte: 6,
+                    end_byte: 9,
+                    glyph_x: vec![(6, 0.0), (7, 10.0), (8, 20.0), (9, 30.0)],
+                },
+            ],
+            text_len: 9,
+            input_box,
+        }
+    }
+
+    #[test]
+    fn byte_at_point_maps_pointer_y_through_bottom_anchored_input_box() {
+        // Three rows all visible, no scroll: row0_top = 228 + 6 = 234; rows at
+        // 234 / 254 / 274; visible box spans y ∈ [228, 300].
+        let geom = ComposerInputBoxGeometry {
+            box_top: 228.0,
+            box_height: 72.0,
+            row0_top: 234.0,
+            line_height: 20.0,
+            first_visible_row: 0,
+            visible_rows: 3,
+        };
+        let l = tall_projection_layout(Some(geom));
+
+        // x=12 → nearest glyph boundary is the 10px stop on every row, so the byte
+        // returned is purely a function of the SELECTED row: row0→1, row1→4, row2→7.
+        // A click on the TOP of the visible strip must select the top visible row
+        // (byte 1) — the pre-fix bug mapped it to the LAST row (byte 7).
+        assert_eq!(
+            l.byte_at_point(12.0, 240.0, 300.0),
+            1,
+            "top of the visible strip selects the TOP visible row, not the last"
+        );
+        // Middle visible row.
+        assert_eq!(
+            l.byte_at_point(12.0, 258.0, 300.0),
+            4,
+            "middle of the visible strip selects the middle row"
+        );
+        // Bottom of the visible strip → bottom row.
+        assert_eq!(
+            l.byte_at_point(12.0, 290.0, 300.0),
+            7,
+            "bottom of the visible strip selects the bottom row"
+        );
+        // A click ABOVE the box (transcript area of the full portal) clamps into
+        // the box and resolves to the TOP visible row, never the last.
+        assert_eq!(
+            l.byte_at_point(12.0, 50.0, 300.0),
+            1,
+            "click above the box clamps to the top visible row"
+        );
+        // A click BELOW the box clamps to the bottom row.
+        assert_eq!(
+            l.byte_at_point(12.0, 500.0, 300.0),
+            7,
+            "click below the box clamps to the bottom row"
+        );
+    }
+
+    #[test]
+    fn byte_at_point_without_geometry_reproduces_even_split_regression() {
+        // SAME rows, but no published box geometry (the pre-hud-lw60x path / the
+        // single-line + first-frame fallback): the node height is split evenly, so
+        // a click on the visible strip of a tall portal (y=240 of 300) lands on the
+        // LAST row — the exact defect the geometry mapping above fixes. Kept as a
+        // contrast so a future change that drops the geometry can't pass silently.
+        let l = tall_projection_layout(None);
+        assert_eq!(
+            l.byte_at_point(12.0, 240.0, 300.0),
+            7,
+            "even-split fallback mislocates the visible strip to the last row"
+        );
+    }
+
+    #[test]
+    fn byte_at_point_input_box_folds_vertical_scroll() {
+        // Five rows, three visible, scrolled so rows 2..5 show (first_visible = 2):
+        // vscroll_px = 2*20 = 40; row0_top = 228 + 6 − 40 = 194. The first VISIBLE
+        // row (row 2) then sits at 194 + 2*20 = 234, i.e. the box top interior.
+        let geom = ComposerInputBoxGeometry {
+            box_top: 228.0,
+            box_height: 72.0,
+            row0_top: 194.0,
+            line_height: 20.0,
+            first_visible_row: 2,
+            visible_rows: 3,
+        };
+        let mut l = tall_projection_layout(Some(geom));
+        // Extend to five rows so the scrolled indices exist.
+        l.lines.push(ComposerVisualLine {
+            start_byte: 9,
+            end_byte: 12,
+            glyph_x: vec![(9, 0.0), (10, 10.0), (11, 20.0), (12, 30.0)],
+        });
+        l.lines.push(ComposerVisualLine {
+            start_byte: 12,
+            end_byte: 15,
+            glyph_x: vec![(12, 0.0), (13, 10.0), (14, 20.0), (15, 30.0)],
+        });
+        l.text_len = 15;
+
+        // A click at the top of the visible strip selects the first VISIBLE row
+        // (absolute row 2, byte 7) — folding vscroll in, not row 0.
+        assert_eq!(
+            l.byte_at_point(12.0, 240.0, 300.0),
+            7,
+            "scrolled: top of the strip is the first visible row (row 2), not row 0"
+        );
+        // Bottom of the strip → last visible row (absolute row 4, byte 13).
+        assert_eq!(
+            l.byte_at_point(12.0, 292.0, 300.0),
+            13,
+            "scrolled: bottom of the strip is the last visible row (row 4)"
+        );
+    }
+
+    #[test]
+    fn byte_at_point_input_box_padding_clamps_to_visible_window() {
+        // Six rows, three visible, scrolled to the MIDDLE so rows 1..4 show
+        // (first_visible = 1): rows 0 and 4,5 are clipped ABOVE / BELOW the box.
+        // vscroll_px = 1*20 = 20; row0_top = 228 + 6 − 20 = 214, so the absolute
+        // row tops are 214/234/254/274/294/314. The box is [228, 300] with a 6px
+        // content inset, so its top padding [228, 234) sits over the clipped row 0
+        // and its bottom padding (294, 300] over the clipped row 4. A click in
+        // that padding must resolve to the nearest VISIBLE row (1 or 3), never the
+        // clipped row that happens to fall under the padding band (hud-lw60x P2).
+        let geom = ComposerInputBoxGeometry {
+            box_top: 228.0,
+            box_height: 72.0,
+            row0_top: 214.0,
+            line_height: 20.0,
+            first_visible_row: 1,
+            visible_rows: 3,
+        };
+        let mut l = tall_projection_layout(Some(geom));
+        // Extend to six rows; row i's 10px glyph stop is byte 3*i + 1.
+        for start in [9usize, 12, 15] {
+            l.lines.push(ComposerVisualLine {
+                start_byte: start,
+                end_byte: start + 3,
+                glyph_x: vec![
+                    (start, 0.0),
+                    (start + 1, 10.0),
+                    (start + 2, 20.0),
+                    (start + 3, 30.0),
+                ],
+            });
+        }
+        l.text_len = 18;
+
+        // Top padding (y=228, over clipped row 0) → first VISIBLE row (row 1, byte
+        // 4), not the clipped row 0 (byte 1).
+        assert_eq!(
+            l.byte_at_point(12.0, 228.0, 300.0),
+            4,
+            "top padding clamps to the first visible row, not the clipped row above"
+        );
+        // Bottom padding (y=299, over clipped row 4) → last VISIBLE row (row 3,
+        // byte 10), not the clipped row 4 (byte 13) — the pre-clamp overshoot.
+        assert_eq!(
+            l.byte_at_point(12.0, 299.0, 300.0),
+            10,
+            "bottom padding clamps to the last visible row, not the clipped row below"
+        );
+        // Interior middle still lands on the true row under the pointer (row 2).
+        assert_eq!(
+            l.byte_at_point(12.0, 258.0, 300.0),
+            7,
+            "interior click still selects the row actually under the pointer"
+        );
     }
 
     #[test]
@@ -3341,6 +3624,7 @@ mod tests {
                 glyph_x: vec![(0, 0.0), (1, 10.0), (2, 20.0), (3, 30.0), (4, 40.0)],
             }],
             text_len: 4,
+            input_box: None,
         }));
         // Single-row layout (lines.len()==1) is not multi-row → hard-newline: Up → start.
         mgr.route_key_down("ArrowUp", "ArrowUp", false, false, false);
