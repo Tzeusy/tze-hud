@@ -140,17 +140,44 @@ fn is_connection_degraded(state: &ProjectedPortalState) -> bool {
 /// without any attention re-escalation, and it quiesces promptly once appends
 /// stop (§activity cue is not a notification).
 fn agent_activity_active(state: &ProjectedPortalState, now_wall_us: u64) -> bool {
+    // The cue is active exactly while `now` has not passed the newest agent
+    // tail's clear-due deadline. Factored through
+    // `agent_activity_clear_deadline_us` so the drive loop can schedule a
+    // one-shot quiesce repaint off the same predicate (hud-kbm80).
+    agent_activity_clear_deadline_us(state).is_some_and(|deadline| now_wall_us <= deadline)
+}
+
+/// The wall-clock instant (µs since epoch) past which `state`'s agent-activity /
+/// streaming-cursor cue quiesces, or `None` when the state carries no cue at all
+/// (wrong presentation, degraded / never-connected, or a tail that is not a
+/// fresh non-question agent turn).
+///
+/// This is the time-independent factor of [`agent_activity_active`]: it applies
+/// every structural gate documented there (Expanded, Live, tail-is-a-fresh-
+/// non-question-agent-turn) and returns that tail's deadline
+/// (`appended_at_wall_us + PORTAL_ACTIVITY_QUIESCE_WINDOW_US`) WITHOUT comparing
+/// it to a render `now`. `agent_activity_active(state, now)` is exactly
+/// `deadline.is_some_and(|d| now <= d)`.
+///
+/// Exposed for the drive loop (hud-kbm80): the round-robin drain only re-renders
+/// a portal on a fresh coalescer update, so after the terminal append on an
+/// otherwise-idle portal nothing re-evaluates the cue and it would persist past
+/// its window — misrepresenting ongoing activity (§Agent Activity and Streaming
+/// Cue: the cue SHALL "quiesce promptly once appends stop"). The driver reads
+/// this deadline to schedule a single force-repaint past it, at which point the
+/// derivation above evaluates false and the cue clears.
+pub fn agent_activity_clear_deadline_us(state: &ProjectedPortalState) -> Option<u64> {
     if state.presentation != ProjectedPortalPresentation::Expanded
         || is_connection_degraded(state)
         || !state.has_ever_connected
     {
-        return false;
+        return None;
     }
-    state.visible_transcript.last().is_some_and(|unit| {
-        unit.output_kind != OutputKind::Viewer
-            && !unit.expects_reply
-            && now_wall_us.saturating_sub(unit.appended_at_wall_us)
-                <= PORTAL_ACTIVITY_QUIESCE_WINDOW_US
+    state.visible_transcript.last().and_then(|unit| {
+        (unit.output_kind != OutputKind::Viewer && !unit.expects_reply).then(|| {
+            unit.appended_at_wall_us
+                .saturating_add(PORTAL_ACTIVITY_QUIESCE_WINDOW_US)
+        })
     })
 }
 
@@ -3219,6 +3246,51 @@ mod tests {
         );
         assert!(activity_cue_color_runs(&state, activity_color, now_quiesced).is_empty());
         assert!(streaming_cursor_color_runs(&state, cursor_color, now_quiesced).is_empty());
+    }
+
+    /// hud-kbm80: `agent_activity_clear_deadline_us` is the time-independent
+    /// factor of `agent_activity_active` — it returns the tail's clear-due
+    /// deadline (`appended_at + PORTAL_ACTIVITY_QUIESCE_WINDOW_US`) exactly when a
+    /// cue is present, and `agent_activity_active(state, now)` is
+    /// `now <= deadline`. The drive loop schedules its one-shot quiesce repaint
+    /// off this deadline (there is otherwise no re-render to clear an idle cue).
+    #[test]
+    fn agent_activity_clear_deadline_matches_active_predicate() {
+        let appended_at = 1_000_000;
+        let deadline = appended_at + PORTAL_ACTIVITY_QUIESCE_WINDOW_US;
+
+        let mut state = make_expanded_interaction_state("portal-deadline");
+        state.visible_transcript = vec![TranscriptUnit {
+            appended_at_wall_us: appended_at,
+            ..transcript_unit(1, OutputKind::Assistant, false)
+        }];
+
+        // A live fresh agent tail exposes its deadline.
+        assert_eq!(
+            agent_activity_clear_deadline_us(&state),
+            Some(deadline),
+            "the deadline is appended_at + the quiesce window"
+        );
+        // The active predicate is exactly `now <= deadline` at the boundary.
+        assert!(
+            agent_activity_active(&state, deadline),
+            "active at the deadline"
+        );
+        assert!(
+            !agent_activity_active(&state, deadline + 1),
+            "quiesced one µs past the deadline"
+        );
+
+        // No cue → no deadline (each structural guard removes it). A degraded
+        // portal is the representative case; the other guards are covered by
+        // `agent_activity_cue_suppressed_in_non_writing_states`.
+        let mut degraded = state.clone();
+        degraded.connection_degraded = true;
+        assert_eq!(
+            agent_activity_clear_deadline_us(&degraded),
+            None,
+            "a degraded portal carries no active cue, so no deadline"
+        );
     }
 
     /// The activity cue is suppressed in every non-writing case, all evaluated at
