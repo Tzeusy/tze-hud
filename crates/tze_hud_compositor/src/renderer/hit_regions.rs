@@ -18,14 +18,19 @@
 //! - `collect_context_menu_vertices` — build vertices for the drag-handle reset
 //!   context menu popup when one is showing.
 //! - `populate_zone_hit_regions` — recompute zone interaction hit regions
-//!   (dismiss and action buttons) for the current frame.
+//!   (dismiss and action buttons) for the current frame. Also recomputes the
+//!   runtime "jump to latest" pill hit region for scrolled-back portal tiles
+//!   (hud-9ci61) via `populate_jump_to_latest_hit_regions`.
 
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::*;
 
 use super::Compositor;
 use super::draw_cmds::DragHandleEntry;
-use super::token_colors::{is_alert_banner_zone, sort_alert_banner_indices};
+use super::token_colors::{
+    is_alert_banner_zone, resolve_jump_to_latest_tokens, resolve_scroll_indicator_tokens,
+    sort_alert_banner_indices,
+};
 use crate::pipeline::{RectVertex, rect_vertices};
 
 impl Compositor {
@@ -291,6 +296,74 @@ impl Compositor {
                     }
                 }
             }
+        }
+
+        // ── Jump-to-latest pill hit region (hud-9ci61) ───────────────────────
+        // Recomputed here (not only at render time) so windowed hit-testing,
+        // which calls this method directly and independent of the render
+        // cadence, always has a fresh region to test against. Geometry
+        // mirrors `renderer/frame.rs`'s pill render block exactly — both call
+        // the same pure `compute_jump_to_latest_pill` function — so a click
+        // always lands where the pill is drawn.
+        //
+        // `zone_name` / `publisher_namespace` are not meaningful for a
+        // tile-scoped runtime affordance; this reuses the sentinel-zone
+        // convention already established for chrome drag handles
+        // (`__chrome_drag_handle__` in `SceneGraph::hit_test`).
+        let scroll_indicator_tokens = resolve_scroll_indicator_tokens(&self.token_map);
+        let jump_to_latest_tokens = resolve_jump_to_latest_tokens(&self.token_map);
+        // Collect owned tile geometry first: `visible_tiles()` borrows `scene`
+        // immutably for the lifetime of the returned `&Tile`s, which would
+        // otherwise conflict with the `scene.overlay` mutation below.
+        let tile_geoms: Vec<(SceneId, Rect)> = scene
+            .visible_tiles()
+            .into_iter()
+            .map(|tile| (tile.id, tile.bounds))
+            .collect();
+        for (tile_id, bounds) in tile_geoms {
+            let Some(scroll_cfg) = scene.tile_scroll_config(tile_id) else {
+                continue;
+            };
+            let Some(content_height) = scroll_cfg.content_height else {
+                continue;
+            };
+            let viewport_px = bounds.height;
+            let (_, scroll_offset_y) = self.display_tile_scroll_offset(scene, tile_id);
+            if tze_hud_input::compute_scroll_indicator(
+                viewport_px,
+                content_height,
+                scroll_offset_y,
+                &scroll_indicator_tokens,
+            )
+            .is_none()
+            {
+                continue; // No overflow — nothing to jump back from.
+            }
+            let scrolled_back = !scene.tile_follow_tail_at_tail(tile_id);
+            let Some(pill) = tze_hud_input::compute_jump_to_latest_pill(
+                bounds.width,
+                viewport_px,
+                scrolled_back,
+                &jump_to_latest_tokens,
+            ) else {
+                continue;
+            };
+            let pill_bounds = Rect::new(
+                bounds.x + pill.x_px,
+                bounds.y + pill.y_px,
+                pill.width_px,
+                pill.height_px,
+            );
+            scene.overlay.zone_hit_regions.push(ZoneHitRegion {
+                zone_name: "__chrome_jump_to_latest__".to_string(),
+                published_at_wall_us: 0,
+                publisher_namespace: "runtime".to_string(),
+                bounds: pill_bounds,
+                kind: ZoneInteractionKind::JumpToLatest { tile_id },
+                interaction_id: format!("jump-to-latest:{tile_id}"),
+                tab_order,
+            });
+            tab_order += 1;
         }
     }
 }

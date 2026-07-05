@@ -174,6 +174,8 @@ impl Compositor {
         // Resolve scroll-indicator tokens once per frame (not per tile) since
         // the token map does not change during the tile loop.
         let scroll_indicator_tokens = resolve_scroll_indicator_tokens(&self.token_map);
+        // Resolve "jump to latest" pill tokens once per frame (hud-9ci61).
+        let jump_to_latest_tokens = resolve_jump_to_latest_tokens(&self.token_map);
         // Resolve composer overlay tokens once per frame (hud-r3ax6).
         let composer_overlay_tokens = resolve_composer_overlay_tokens(&self.token_map);
 
@@ -276,6 +278,38 @@ impl Compositor {
                             thumb_color,
                         );
                         vertices.extend_from_slice(&thumb_verts);
+
+                        // ── Jump-to-latest pill (hud-9ci61) ──────────────────
+                        // Rendered only while the tile is scrolled away from
+                        // the tail (auto follow-tail already exists but had no
+                        // click affordance to resume it). Geometry mirrors the
+                        // hit region populated in `populate_zone_hit_regions`,
+                        // computed from the same pure function so render and
+                        // hit-test never disagree.
+                        let scrolled_back = !scene.tile_follow_tail_at_tail(tile.id);
+                        if let Some(pill) = tze_hud_input::compute_jump_to_latest_pill(
+                            tile.bounds.width,
+                            viewport_px,
+                            scrolled_back,
+                            &jump_to_latest_tokens,
+                        ) {
+                            let pill_color = self.gpu_color_raw([
+                                jump_to_latest_tokens.color_r,
+                                jump_to_latest_tokens.color_g,
+                                jump_to_latest_tokens.color_b,
+                                jump_to_latest_tokens.color_a,
+                            ]);
+                            let pill_verts = rect_vertices(
+                                tile.bounds.x + pill.x_px,
+                                tile.bounds.y + pill.y_px,
+                                pill.width_px,
+                                pill.height_px,
+                                sw,
+                                sh,
+                                pill_color,
+                            );
+                            vertices.extend_from_slice(&pill_verts);
+                        }
                     }
                 }
             }

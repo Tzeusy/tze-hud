@@ -849,6 +849,16 @@ impl HeadlessRuntime {
                         );
                     }
                     ZoneInteractionKind::DragHandle { .. } => {}
+                    ZoneInteractionKind::JumpToLatest { tile_id } => {
+                        let changed = self
+                            .input_processor
+                            .reset_tile_scroll_to_tail(*tile_id, scene);
+                        tracing::debug!(
+                            tile_id = ?tile_id,
+                            changed,
+                            "jump-to-latest: pill clicked, scroll reset to tail"
+                        );
+                    }
                 }
             }
         }
@@ -1390,6 +1400,138 @@ default_tab = true
 
         // Suppress unused variable warning for config.
         let _ = config;
+    }
+
+    /// A synthesized pointer-up over a "jump to latest" pill hit region must
+    /// invoke `InputProcessor::reset_tile_scroll_to_tail` and publish the
+    /// tail offset + `AtTail` anchor to the scene — mirrors
+    /// `process_pointer_event_dismiss_removes_notification` above, but for
+    /// the jump-to-latest wiring (hud-9ci61).
+    ///
+    /// Asserts at the state layer (scroll offset / follow-tail flag), not
+    /// pixels, per the compositor headless-render footgun in AGENTS.md.
+    #[test]
+    fn process_pointer_event_jump_to_latest_resets_scroll_to_tail() {
+        use tze_hud_scene::Capability;
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene
+            .create_tab("Main", 0)
+            .expect("tab creation must succeed");
+        let lease_id = scene.grant_lease(
+            "test-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "test-agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 400.0, 100.0), // viewport = 100px
+                1,
+            )
+            .expect("tile creation must succeed");
+        scene
+            .register_tile_scroll_config(tile_id, tze_hud_scene::TileScrollConfig::vertical())
+            .expect("scroll config registration must succeed");
+
+        let mut input_processor = InputProcessor::new();
+        let line_h = 20.0_f32;
+        let viewport_h = 100.0_f32;
+
+        // 20 lines of content (400px) — tail = 400 - 100 = 300px.
+        input_processor.notify_tile_content_appended(
+            tile_id,
+            20.0 * line_h,
+            viewport_h,
+            line_h,
+            &mut scene,
+        );
+        let (_, tail_offset) = scene.tile_scroll_offset_local(tile_id);
+        assert!(tail_offset > 0.0, "tail offset should be nonzero here");
+
+        // Scroll back up, away from the tail.
+        let _ = input_processor.process_scroll_event(
+            &ScrollEvent {
+                x: 200.0,
+                y: 50.0,
+                delta_x: 0.0,
+                delta_y: -120.0,
+            },
+            &mut scene,
+        );
+        assert!(
+            !scene.tile_follow_tail_at_tail(tile_id),
+            "tile must be scrolled back before the synthesized click"
+        );
+
+        // Register the pill hit region exactly as
+        // `populate_zone_hit_regions` would (bounds are arbitrary here — only
+        // the dispatch behavior on a `JumpToLatest` hit is under test).
+        let pill_bounds = Rect::new(150.0, 70.0, 96.0, 24.0);
+        scene.overlay.zone_hit_regions.push(ZoneHitRegion {
+            zone_name: "__chrome_jump_to_latest__".to_string(),
+            published_at_wall_us: 0,
+            publisher_namespace: "runtime".to_string(),
+            bounds: pill_bounds,
+            kind: ZoneInteractionKind::JumpToLatest { tile_id },
+            interaction_id: format!("jump-to-latest:{tile_id}"),
+            tab_order: 0,
+        });
+
+        let click_x = pill_bounds.x + pill_bounds.width / 2.0;
+        let click_y = pill_bounds.y + pill_bounds.height / 2.0;
+
+        // Pointer-down: must not reset scroll (mirrors the dismiss test's
+        // down-must-not-act assertion).
+        let down = PointerEvent {
+            x: click_x,
+            y: click_y,
+            kind: PointerEventKind::Down,
+            device_id: 0,
+            timestamp: None,
+        };
+        input_processor.process(&down, &mut scene);
+        assert!(
+            !scene.tile_follow_tail_at_tail(tile_id),
+            "pointer-down over the pill must not reset scroll"
+        );
+
+        // Pointer-up over the pill: mirrors `process_pointer_event`'s real
+        // dispatch body for `ZoneInteractionKind::JumpToLatest`.
+        let up = PointerEvent {
+            x: click_x,
+            y: click_y,
+            kind: PointerEventKind::Up,
+            device_id: 0,
+            timestamp: None,
+        };
+        let result = input_processor.process(&up, &mut scene);
+        assert!(
+            result.hit.is_zone_interaction(),
+            "click must hit the jump-to-latest zone interaction region"
+        );
+        if let HitResult::ZoneInteraction {
+            kind: ZoneInteractionKind::JumpToLatest { tile_id },
+            ..
+        } = result.hit
+        {
+            let changed = input_processor.reset_tile_scroll_to_tail(tile_id, &mut scene);
+            assert!(changed, "reset must report the offset changed");
+        } else {
+            panic!("expected a JumpToLatest zone interaction hit");
+        }
+
+        let (_, offset_after) = scene.tile_scroll_offset_local(tile_id);
+        assert!(
+            (offset_after - tail_offset).abs() < f32::EPSILON,
+            "click must snap the scene offset back to the tail ({tail_offset}); got {offset_after}"
+        );
+        assert!(
+            scene.tile_follow_tail_at_tail(tile_id),
+            "click must publish AtTail to the scene [hud-9ci61]"
+        );
     }
 
     /// Verify that when config_toml is None, the compositor token_map is empty

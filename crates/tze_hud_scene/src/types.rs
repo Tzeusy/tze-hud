@@ -2048,6 +2048,16 @@ pub enum ZoneInteractionKind {
         /// drag (hud-cpjqe).
         is_header_band: bool,
     },
+    /// Runtime "jump to latest" pill shown over a portal tile that is
+    /// scrolled away from the tail of its content (hud-9ci61).
+    ///
+    /// Activating this snaps the tile's viewport back to the tail via
+    /// `ScrollState::reset_to_tail`. The `interaction_id` follows the pattern
+    /// `"jump-to-latest:{tile_id}"`.
+    JumpToLatest {
+        /// Tile the pill belongs to.
+        tile_id: SceneId,
+    },
 }
 
 /// Element class for runtime drag handle interactions.
