@@ -941,8 +941,14 @@ fn portal_node_proto_includes_draft_text_and_caret_after_notification() {
     let display = adapter
         .composer_display()
         .expect("draft notification must populate composer_display() (§4.1 local-first)");
-    assert_eq!(display.text, "hello", "cached draft text must match notification");
-    assert_eq!(display.cursor, 5, "cached caret byte offset must match notification");
+    assert_eq!(
+        display.text, "hello",
+        "cached draft text must match notification"
+    );
+    assert_eq!(
+        display.cursor, 5,
+        "cached caret byte offset must match notification"
+    );
     assert!(!display.at_capacity, "notification was not at capacity");
     assert_eq!(
         caret_render(display),
@@ -984,7 +990,10 @@ fn portal_node_proto_includes_draft_text_and_caret_after_notification() {
         .composer_display()
         .expect("mid-cursor notification must populate composer_display()");
     assert_eq!(mid_display.text, "hello world");
-    assert_eq!(mid_display.cursor, 5, "caret byte offset must sit after 'hello'");
+    assert_eq!(
+        mid_display.cursor, 5,
+        "caret byte offset must sit after 'hello'"
+    );
     assert_eq!(
         caret_render(mid_display),
         "hello▌ world",
@@ -1073,7 +1082,8 @@ fn portal_node_proto_at_capacity_indicator_uses_composer_token() {
     };
     let blue_runs = color_runs.iter().filter(|r| is_at_capacity_blue(r)).count();
     assert_eq!(
-        blue_runs, 1,
+        blue_runs,
+        1,
         "at-capacity NodeProto must carry exactly one color_run with the injected \
          pure-blue token sentinel; got {blue_runs} among {total} run(s): {color_runs:?}",
         total = color_runs.len()
