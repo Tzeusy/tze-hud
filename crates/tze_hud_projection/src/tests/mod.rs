@@ -1542,6 +1542,168 @@ fn latest_viewer_delivery_state_flows_into_projected_portal_state() {
     );
 }
 
+/// hud-1idbl (fail-closed privacy): the delivery cue must gate on the back()
+/// item's OWN per-turn clearance, not merely on projection-level
+/// `transcript_visible`. A viewer turn whose classification exceeds the viewer's
+/// clearance is dropped from `visible_transcript` by the per-turn
+/// `policy.permits(unit.content_classification)` filter even when the projection
+/// itself is visible; if the cue still rendered → sending / ✓✓ / ✕ it would leak
+/// the presence + delivery status of hidden content. The session here is Private
+/// and the viewer clears Private (so the projection is visible and the transcript
+/// window is shown), but the submitted reply is Sensitive (above clearance) — the
+/// cue state MUST be withheld.
+#[test]
+fn latest_viewer_delivery_state_redacts_above_clearance_back_item() {
+    let mut authority = ProjectionAuthority::default();
+    attach(&mut authority, "projection-a");
+
+    // Submit a Sensitive-classified viewer reply (above the viewer's clearance).
+    assert_eq!(
+        authority
+            .submit_portal_input(
+                "projection-a",
+                PortalInputSubmission {
+                    input_id: "input-sensitive".to_string(),
+                    submission_text: "above-clearance reply".to_string(),
+                    submitted_at_wall_us: 30,
+                    expires_at_wall_us: Some(1_000),
+                    content_classification: ContentClassification::Sensitive,
+                },
+            )
+            .feedback_state,
+        PortalInputFeedbackState::Accepted,
+    );
+
+    // Viewer clears Private: the Private session projection IS visible (so
+    // `transcript_visible` is true), but the Sensitive back() item is redacted by
+    // the per-turn clearance filter.
+    let mut restricted = ProjectedPortalPolicy::permit_all();
+    restricted.viewer_clearance = ContentClassification::Private;
+
+    let state = authority
+        .projected_portal_state("projection-a", &restricted)
+        .expect("portal state materializes");
+    assert!(
+        state
+            .visible_transcript
+            .iter()
+            .all(|unit| unit.content_classification <= ContentClassification::Private),
+        "precondition: the Sensitive viewer turn is redacted from the visible transcript"
+    );
+    assert_eq!(
+        state.latest_viewer_delivery_state, None,
+        "hud-1idbl: an above-clearance back() item must withhold the delivery cue \
+         EVEN WHEN the projection transcript is otherwise visible"
+    );
+
+    // Control: raising clearance to Sensitive reveals the same turn AND its cue.
+    let mut cleared = ProjectedPortalPolicy::permit_all();
+    cleared.viewer_clearance = ContentClassification::Sensitive;
+    let revealed = authority
+        .projected_portal_state("projection-a", &cleared)
+        .expect("portal state materializes");
+    assert_eq!(
+        revealed.latest_viewer_delivery_state,
+        Some(InputDeliveryState::Pending),
+        "a viewer who clears the turn sees its delivery cue"
+    );
+}
+
+/// hud-ny8rm (liveness): an owner poll that flips a viewer turn
+/// Pending/Deferred -> Delivered changes the delivery cue (→ sending becomes
+/// ✓✓ delivered), so it MUST schedule a portal repaint. The driver only
+/// re-materializes portals from due coalescer entries; without the scheduled
+/// update the cue would stay "sending" until an unrelated publish/ack forced a
+/// repaint. Mirrors the `handle_acknowledge_input` cadence_append path.
+#[test]
+fn owner_poll_delivery_transition_schedules_portal_repaint() {
+    let mut authority = ProjectionAuthority::default();
+    let owner_token = attach(&mut authority, "projection-a");
+
+    // Submit a reply, then drain every pending portal update so the portal is at a
+    // clean idle baseline — isolating the effect of the delivery transition from
+    // attach/submit scheduling.
+    assert_eq!(
+        authority
+            .submit_portal_input("projection-a", portal_submission("input-1", "reply"))
+            .feedback_state,
+        PortalInputFeedbackState::Accepted,
+    );
+    while let Some(id) = authority.next_due_projection_id() {
+        let _ = authority.take_due_portal_update(&id, 40);
+    }
+    assert!(
+        authority.next_due_projection_id().is_none(),
+        "baseline must be idle before the owner poll"
+    );
+
+    // The owner poll transitions the reply Pending -> Delivered.
+    let poll = authority.handle_get_pending_input(
+        GetPendingInputRequest {
+            envelope: envelope(
+                ProjectionOperation::GetPendingInput,
+                "projection-a",
+                "req-poll",
+            ),
+            owner_token,
+            max_items: None,
+            max_bytes: None,
+        },
+        "caller-a",
+        41,
+    );
+    assert!(poll.accepted, "owner poll must succeed: {poll:?}");
+    assert_eq!(
+        poll.pending_input.len(),
+        1,
+        "the poll delivers the pending reply"
+    );
+
+    assert_eq!(
+        authority.next_due_projection_id().as_deref(),
+        Some("projection-a"),
+        "hud-ny8rm: a poll-driven Pending->Delivered transition must schedule a \
+         portal repaint so the delivery cue advances from → sending to ✓✓ delivered"
+    );
+}
+
+/// A poll that returns NO newly-delivered items (nothing pending) must NOT
+/// schedule a spurious repaint — the repaint is gated on an actual delivery
+/// transition (hud-ny8rm).
+#[test]
+fn owner_poll_without_delivery_transition_schedules_no_repaint() {
+    let mut authority = ProjectionAuthority::default();
+    let owner_token = attach(&mut authority, "projection-a");
+
+    // Drain attach-induced updates to an idle baseline. No input was ever
+    // submitted, so the poll finds nothing to deliver.
+    while let Some(id) = authority.next_due_projection_id() {
+        let _ = authority.take_due_portal_update(&id, 40);
+    }
+    assert!(authority.next_due_projection_id().is_none());
+
+    let poll = authority.handle_get_pending_input(
+        GetPendingInputRequest {
+            envelope: envelope(
+                ProjectionOperation::GetPendingInput,
+                "projection-a",
+                "req-poll-empty",
+            ),
+            owner_token,
+            max_items: None,
+            max_bytes: None,
+        },
+        "caller-a",
+        41,
+    );
+    assert!(poll.accepted);
+    assert!(poll.pending_input.is_empty(), "no pending input to deliver");
+    assert!(
+        authority.next_due_projection_id().is_none(),
+        "a poll with no delivery transition must not schedule a repaint"
+    );
+}
+
 /// A rejected `submit_portal_input` (e.g. timestamp overflow) must NOT append
 /// a viewer unit to the transcript.
 #[test]
