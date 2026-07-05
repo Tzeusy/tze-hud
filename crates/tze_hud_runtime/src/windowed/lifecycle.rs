@@ -825,6 +825,14 @@ impl WinitApp {
             if outcome != tze_hud_input::EditOutcome::Unchanged {
                 tracing::debug!(outcome = ?outcome, "composer: paste injected via runtime API");
                 self.push_local_composer_echo(input_started);
+                // hud-sq2ss: mirror hud-qbcp8's typing reset-to-tail for the
+                // MCP paste-inject path. `push_local_composer_echo` above only
+                // updates the local-echo overlay; without this, a viewer
+                // scrolled back through their input-pane history stays
+                // stranded when paste-injected text lands in their composer.
+                if let Some(tile_id) = self.composer_focused_tile_id() {
+                    self.reset_input_history_scroll_to_tail(tile_id);
+                }
             }
         }
     }
