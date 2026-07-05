@@ -40,13 +40,23 @@ const PORTAL_EMPTY_READY_LINE: &str = "Ready — waiting for the first message."
 /// affordances go silent under redaction.
 const PORTAL_EMPTY_REDACTED_LINE: &str = "· · ·";
 
-/// Quiet placeholder shown while a portal is attached but has never connected
-/// (portal-chat-grade-affordances §Connecting State Distinction). A starting-up
-/// portal must not read as a "ready" empty state, so the first-run treatment
-/// yields to this. hud-g1ena.6 establishes the precedence + a minimal
-/// placeholder; the distinct connecting *treatment* (token + visual language)
-/// lands under hud-g1ena.7.
-const PORTAL_CONNECTING_PLACEHOLDER_LINE: &str = "Connecting…";
+/// Connecting-state body shown while a portal is attached but its owning session
+/// has never connected (portal-chat-grade-affordances §Connecting State
+/// Distinction, `has_ever_connected == false`). A starting-up portal must not
+/// read as a "ready" empty state, so the first-run treatment yields to this.
+///
+/// Distinct from the degraded/disconnect marker on TWO axes so a starting-up
+/// portal never reads as a failing one: (1) a distinct pending glyph — `◌`
+/// (dotted, "not yet solid") vs the degraded `⊘` (circled slash) — that survives
+/// environments which do not inspect `color_runs`, and (2) the token-resolved
+/// cool `connecting_marker_color` (vs the amber `stale_marker_color`), applied
+/// via `connecting_color_runs`. Content-free: it names no identity and reveals no
+/// transcript, so — like the disconnect marker — it is redaction-independent and
+/// takes precedence over the redacted empty placeholder.
+///
+/// hud-g1ena.6 established the precedence with a minimal `"Connecting…"` string;
+/// hud-g1ena.7 replaces it with this distinct connecting treatment.
+const PORTAL_CONNECTING_LINE: &str = "◌ Connecting… — waiting for the session to come online.";
 
 /// Whether the portal is in a connection-degraded presentation state.
 ///
@@ -167,6 +177,13 @@ pub struct PortalVisualTokens {
     /// inviting by design — a presence engine's empty surface reads as calm and
     /// ready, never as an error. Source token: `portal.empty_state.color`.
     pub empty_state_color: proto::Rgba,
+    /// Color of the connecting-state marker (portal-chat-grade-affordances
+    /// §Connecting State Distinction) shown while a portal is attached but has
+    /// never connected (`has_ever_connected == false`). A cool "spinning up" hue
+    /// deliberately distinct from the amber `stale_marker_color` so a starting-up
+    /// portal never reads as failing. Ambient by design. Source token:
+    /// `portal.connecting_marker.color`.
+    pub connecting_marker_color: proto::Rgba,
 
     // Lifecycle affordance accents (cooperative-hud-projection §lifecycle).
     //
@@ -952,11 +969,21 @@ impl ResidentGrpcPortalAdapter {
                             self.visual_tokens.awaiting_reply_color,
                         ));
                         // First-run empty-state treatment (hud-g1ena.6). Absent
-                        // unless the retained transcript is empty on a connected
-                        // portal; the connecting case is deferred to hud-g1ena.7.
+                        // unless the retained transcript is empty on a portal that
+                        // has connected; the never-connected case is handled by
+                        // connecting_color_runs below (mutually exclusive gates).
                         runs.extend(empty_state_color_runs(
                             state,
                             self.visual_tokens.empty_state_color,
+                        ));
+                        // Connecting-state treatment (hud-g1ena.7,
+                        // §Connecting State Distinction). Absent unless the portal
+                        // is attached-but-never-connected with an empty transcript;
+                        // its cool token is distinct from the amber stale marker so
+                        // a starting-up portal never reads as failing.
+                        runs.extend(connecting_color_runs(
+                            state,
+                            self.visual_tokens.connecting_marker_color,
                         ));
                         runs
                     },
@@ -1459,10 +1486,13 @@ fn lifecycle_marker_color_runs(
 ///
 /// Three cases, in precedence order:
 /// 1. **Connecting takes precedence** (§Connecting State Distinction): an
-///    attached-but-never-connected portal (`!has_ever_connected`) shows a quiet
-///    connecting placeholder — never the "ready" invite — so a starting-up
-///    portal never reads as a ready-and-idle empty state. The distinct
-///    connecting treatment/token is hud-g1ena.7; this only guarantees precedence.
+///    attached-but-never-connected portal (`!has_ever_connected`) shows the
+///    distinct connecting line (`PORTAL_CONNECTING_LINE`) — never the "ready"
+///    invite — so a starting-up portal never reads as a ready-and-idle empty
+///    state. Its distinct pending glyph + token-resolved `connecting_marker_color`
+///    (via `connecting_color_runs`) keep it visually distinct from the degraded
+///    treatment, so a starting-up portal never reads as failing (hud-g1ena.7).
+///    Connecting is content-free, so it also precedes the redacted placeholder.
 /// 2. **Redacted**: a restricted viewer's `visible_transcript` is emptied
 ///    upstream, so this path is reached for them too. Under redaction identity
 ///    and inviting copy are suppressed — only a content-free placeholder shows.
@@ -1473,7 +1503,7 @@ fn lifecycle_marker_color_runs(
 /// `visible_transcript.is_empty()`, so the first appended unit replaces it.
 fn empty_portal_markdown(state: &ProjectedPortalState) -> &'static str {
     if !state.has_ever_connected {
-        return PORTAL_CONNECTING_PLACEHOLDER_LINE;
+        return PORTAL_CONNECTING_LINE;
     }
     if state.redacted {
         return PORTAL_EMPTY_REDACTED_LINE;
@@ -1489,8 +1519,8 @@ fn empty_portal_markdown(state: &ProjectedPortalState) -> &'static str {
 /// without any literal color in the render path (§6.1). Emitted only when the
 /// empty-state body is actually rendered — an Expanded portal with an empty
 /// retained transcript that has connected. The connecting case
-/// (`!has_ever_connected`) is intentionally excluded: its distinct token is
-/// deferred to hud-g1ena.7.
+/// (`!has_ever_connected`) is intentionally excluded: it carries its own distinct
+/// token via `connecting_color_runs` (hud-g1ena.7).
 fn empty_state_color_runs(
     state: &ProjectedPortalState,
     empty_state_color: proto::Rgba,
@@ -1503,6 +1533,40 @@ fn empty_state_color_runs(
             start_byte: 0,
             end_byte: 0,
             color: Some(empty_state_color),
+        }]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Build the token-styled sentinel color run for the connecting-state body
+/// (portal-chat-grade-affordances §Connecting State Distinction, hud-g1ena.7).
+///
+/// The mirror image of `empty_state_color_runs`: emitted exactly when the
+/// connecting line (`PORTAL_CONNECTING_LINE`) is rendered — an Expanded portal
+/// whose retained transcript is empty AND that has never connected
+/// (`!has_ever_connected`). Carries the token-resolved `connecting_marker_color`
+/// as a zero-length sentinel run so the connecting hue is token-driven, never a
+/// literal in the render path (§6.1). Because this fires precisely when
+/// `empty_state_color_runs` does NOT (the `has_ever_connected` gate is inverted),
+/// the two treatments are mutually exclusive — a portal is either connecting or
+/// empty-ready, never both.
+///
+/// Redaction-independent, like the connecting line itself and the stale marker:
+/// the connecting hue reveals only connection state, no identity or content, so
+/// it is emitted even for a restricted viewer.
+fn connecting_color_runs(
+    state: &ProjectedPortalState,
+    connecting_marker_color: proto::Rgba,
+) -> Vec<proto::TextColorRunProto> {
+    if state.presentation == ProjectedPortalPresentation::Expanded
+        && state.visible_transcript.is_empty()
+        && !state.has_ever_connected
+    {
+        vec![proto::TextColorRunProto {
+            start_byte: 0,
+            end_byte: 0,
+            color: Some(connecting_marker_color),
         }]
     } else {
         Vec::new()
@@ -1651,6 +1715,12 @@ pub fn portal_visual_tokens_from_part_tokens(
             g: part.empty_state_color.g,
             b: part.empty_state_color.b,
             a: part.empty_state_color.a,
+        },
+        connecting_marker_color: proto::Rgba {
+            r: part.connecting_marker_color.r,
+            g: part.connecting_marker_color.g,
+            b: part.connecting_marker_color.b,
+            a: part.connecting_marker_color.a,
         },
         lifecycle_active_color: proto::Rgba {
             r: part.lifecycle_active_color.r,
@@ -2808,22 +2878,23 @@ mod tests {
     }
 
     /// §Connecting State Distinction precedence: an attached-but-never-connected
-    /// portal (`has_ever_connected == false`) shows the quiet connecting
-    /// placeholder — never the "ready" invite — and emits NO empty-state color
-    /// run (the distinct connecting token is deferred to hud-g1ena.7).
+    /// portal (`has_ever_connected == false`) shows the distinct connecting line —
+    /// never the "ready" invite — and emits the connecting token run but NO
+    /// empty-state run (the two treatments are mutually exclusive, hud-g1ena.7).
     #[test]
     fn empty_state_yields_to_connecting_when_never_connected() {
         let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
         let adapter = ResidentGrpcPortalAdapter::new(config);
         let empty_color = adapter.visual_tokens().empty_state_color;
+        let connecting_color = adapter.visual_tokens().connecting_marker_color;
 
         let mut state = make_expanded_interaction_state("portal-connecting");
         state.has_ever_connected = false;
 
         let markdown = portal_markdown(&state, None);
         assert!(
-            markdown.contains(PORTAL_CONNECTING_PLACEHOLDER_LINE),
-            "never-connected must render the connecting placeholder: {markdown}"
+            markdown.contains(PORTAL_CONNECTING_LINE),
+            "never-connected must render the connecting line: {markdown}"
         );
         assert!(
             !markdown.contains(PORTAL_EMPTY_READY_LINE),
@@ -2833,9 +2904,109 @@ mod tests {
             !markdown.contains("<empty projection stream>"),
             "the literal placeholder must be gone even while connecting: {markdown}"
         );
+        // The connecting treatment emits its own token run and suppresses the
+        // empty-ready run — the two gates are inverted, so exactly one fires.
+        let connecting_runs = connecting_color_runs(&state, connecting_color);
+        assert_eq!(
+            connecting_runs.len(),
+            1,
+            "connecting state must emit one token-driven run"
+        );
+        assert_eq!(
+            connecting_runs[0].color.unwrap(),
+            connecting_color,
+            "run must carry the connecting_marker_color token, never a literal color"
+        );
         assert!(
             empty_state_color_runs(&state, empty_color).is_empty(),
-            "the connecting case must emit no empty-state run (deferred to hud-g1ena.7)"
+            "the connecting case must emit no empty-ready run (mutually exclusive)"
+        );
+    }
+
+    /// §Connecting State Distinction core requirement: the connecting treatment is
+    /// visually distinct from the degraded/disconnected treatment on BOTH the
+    /// text (distinct glyph + copy) and the token color — a starting-up portal
+    /// must not read as a failing one.
+    #[test]
+    fn connecting_treatment_is_distinct_from_degraded() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let tokens = adapter.visual_tokens();
+
+        // Text axis: the connecting line and the degraded marker share no glyph
+        // or copy, so environments that ignore color_runs still tell them apart.
+        assert_ne!(
+            PORTAL_CONNECTING_LINE, PORTAL_DISCONNECT_MARKER_LINE,
+            "connecting and degraded lines must differ"
+        );
+        assert!(
+            !PORTAL_CONNECTING_LINE.contains("disconnected")
+                && !PORTAL_CONNECTING_LINE.contains("stale"),
+            "connecting copy must not read as disconnected/stale: {PORTAL_CONNECTING_LINE}"
+        );
+
+        // Color axis: the connecting hue differs from the degraded/stale marker.
+        assert_ne!(
+            tokens.connecting_marker_color, tokens.stale_marker_color,
+            "connecting hue must be distinct from the degraded/stale marker"
+        );
+
+        // A never-connected portal renders connecting, NOT the degraded marker,
+        // and does not dim the transcript or disable the composer for a failure.
+        let mut connecting = make_expanded_interaction_state("portal-connecting-vs-degraded");
+        connecting.has_ever_connected = false;
+        let connecting_md = portal_markdown(&connecting, None);
+        assert!(
+            connecting_md.contains(PORTAL_CONNECTING_LINE),
+            "never-connected renders connecting: {connecting_md}"
+        );
+        assert!(
+            !connecting_md.contains(PORTAL_DISCONNECT_MARKER_LINE),
+            "never-connected must NOT render the degraded/disconnect marker: {connecting_md}"
+        );
+
+        // A previously-connected-now-dropped portal renders the degraded marker,
+        // NOT the connecting line — the inverse case, proving the split.
+        let mut degraded = make_expanded_interaction_state("portal-degraded-not-connecting");
+        degraded.connection_degraded = true;
+        let degraded_md = portal_markdown(&degraded, None);
+        assert!(
+            degraded_md.contains(PORTAL_DISCONNECT_MARKER_LINE),
+            "dropped portal renders the degraded marker: {degraded_md}"
+        );
+        assert!(
+            !degraded_md.contains(PORTAL_CONNECTING_LINE),
+            "a dropped (previously-connected) portal must NOT read as connecting: {degraded_md}"
+        );
+    }
+
+    /// The connecting treatment is content-free, so — like the degraded marker —
+    /// it is redaction-independent: a restricted viewer of a never-connected
+    /// portal still sees connecting (revealing only connection state, no content),
+    /// taking precedence over the redacted empty placeholder.
+    #[test]
+    fn connecting_treatment_is_redaction_independent() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let connecting_color = adapter.visual_tokens().connecting_marker_color;
+
+        let mut state = make_expanded_interaction_state("portal-connecting-redacted");
+        state.has_ever_connected = false;
+        state.redacted = true;
+
+        let markdown = portal_markdown(&state, None);
+        assert!(
+            markdown.contains(PORTAL_CONNECTING_LINE),
+            "a redacted never-connected portal still shows connecting: {markdown}"
+        );
+        assert!(
+            !markdown.contains(PORTAL_EMPTY_REDACTED_LINE),
+            "connecting takes precedence over the redacted empty placeholder: {markdown}"
+        );
+        assert_eq!(
+            connecting_color_runs(&state, connecting_color).len(),
+            1,
+            "the connecting token run is emitted even under redaction"
         );
     }
 
@@ -2886,7 +3057,7 @@ mod tests {
         );
         assert!(
             !markdown.contains(PORTAL_EMPTY_READY_LINE)
-                && !markdown.contains(PORTAL_CONNECTING_PLACEHOLDER_LINE)
+                && !markdown.contains(PORTAL_CONNECTING_LINE)
                 && !markdown.contains(PORTAL_EMPTY_REDACTED_LINE),
             "no empty/connecting placeholder once content exists: {markdown}"
         );
@@ -2905,5 +3076,26 @@ mod tests {
         let visual = portal_visual_tokens_from_part_tokens(&part);
         assert_eq!(visual.empty_state_color.r, part.empty_state_color.r);
         assert_eq!(visual.empty_state_color.a, part.empty_state_color.a);
+    }
+
+    /// The `connecting_marker_color` `PortalVisualTokens` field maps 1:1 from the
+    /// source `PortalPartTokens` channel (hud-g1ena.7), same single-source-of-
+    /// truth invariant as the other token-mapping tests in this module.
+    #[test]
+    fn portal_visual_tokens_from_part_tokens_maps_connecting_marker_color() {
+        let part = tze_hud_config::PortalPartTokens::default();
+        let visual = portal_visual_tokens_from_part_tokens(&part);
+        assert_eq!(
+            visual.connecting_marker_color.r,
+            part.connecting_marker_color.r
+        );
+        assert_eq!(
+            visual.connecting_marker_color.a,
+            part.connecting_marker_color.a
+        );
+        // The default connecting hue must not collide with the degraded/stale
+        // marker — the §Connecting State Distinction invariant, enforced at the
+        // mapping boundary too.
+        assert_ne!(visual.connecting_marker_color, visual.stale_marker_color);
     }
 }
