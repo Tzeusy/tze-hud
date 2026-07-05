@@ -5,6 +5,7 @@ use tze_hud_input::{
 };
 use tze_hud_scene::HitResult;
 use tze_hud_scene::types::{DragHandleElementKind, TileScrollConfig, ZoneInteractionKind};
+use unicode_width::UnicodeWidthChar;
 
 use super::input_dispatch::{deliver_composer_batch, dispatch_portal_geometry_event};
 use super::keyboard::ComposerDeliveryContext;
@@ -41,29 +42,100 @@ const INPUT_HISTORY_APPROX_FONT_SIZE_PX: f32 = 15.0;
 /// guarantees the tail-pin and never clips the newest reply.
 const INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX: f32 = INPUT_HISTORY_APPROX_FONT_SIZE_PX * 0.75;
 
+/// Conservative per-character advance (physical px) for FULL-WIDTH glyphs —
+/// East-Asian Wide/Fullwidth codepoints and emoji (`UnicodeWidthChar::width ==
+/// Some(2)`) — used to OVER-estimate wrapped rows for CJK/emoji-heavy history
+/// (hud-kaw7z).
+///
+/// The compositor shapes these to roughly one em (~15px), far wider than the
+/// 0.75em narrow-Latin advance above. Classifying them with the narrow advance
+/// over-estimates the columns-per-row, so the wrapped-row count UNDER-counts and
+/// the seeded scroll offset undershoots `real_max_scrollback` — the newest
+/// just-submitted line clips at rest (a narrow recurrence of the hud-3y7va
+/// tail-clip). A full 1em bound restores the over-count for full-width content.
+/// Full-width glyphs are 1em by definition and CJK/emoji line-break
+/// per-character (no word-wrap slack to absorb, unlike Latin prose), so 1em is a
+/// tight, safe upper bound. Keeping it separate from the narrow advance means
+/// narrow Latin text is unchanged — no wider scroll dead-zone for the common
+/// case.
+const INPUT_HISTORY_WIDE_CHAR_ADVANCE_PX: f32 = INPUT_HISTORY_APPROX_FONT_SIZE_PX;
+
 /// Composer/history horizontal text margin (physical px) mirroring the
 /// compositor's `COMPOSER_TEXT_MARGIN` in
 /// `crates/tze_hud_compositor/src/renderer/tile_render.rs`, used to derive the
 /// history band/wrap geometry the runtime seeds against (hud-3y7va).
 const INPUT_COMPOSER_TEXT_MARGIN_PX: f32 = 6.0;
 
+/// Stand-in for the compositor's viewer-echo timestamp prefix — the fixed
+/// `HH:MM␠␠` (always 7 narrow columns) that `viewer_echo_display_text` prepends
+/// to the FIRST line of every timestamped entry before wrapping
+/// (`viewer_echo_timestamp_prefix` in
+/// `crates/tze_hud_compositor/src/renderer/tile_render.rs`, hud-7ic89).
+///
+/// The wrapped-row seed must charge the same prefix or it under-counts a
+/// full-width entry that nearly fills a row: the prefix spills it onto an extra
+/// wrapped row the seed misses, and across several entries the seeded offset
+/// undershoots `real_max_scrollback` and re-clips the newest reply — a narrow
+/// recurrence of the hud-kaw7z CJK/emoji tail-clip. Every real prefix glyph
+/// (digits, `:`, spaces) is narrow (Unicode width 1), so a 7-space stand-in
+/// reproduces the prefix's wrap advance exactly without the runtime having to
+/// duplicate the compositor's clock formatting.
+const INPUT_HISTORY_TIMESTAMP_PREFIX_STANDIN: &str = "       ";
+
 /// Conservative over-estimate of the number of wrapped visual rows the
 /// compositor lays a single history entry into (hud-3y7va).
 ///
 /// The runtime has no text rasterizer, so it cannot measure the wrap-accurate
 /// row count `Compositor::prime_viewer_echo_layout` computes per frame. It
-/// approximates by filling each logical (`\n`-delimited) line into fixed-advance
-/// columns and rounding UP — deliberately biased to OVER-count (a
-/// wider-than-average `char_advance_px`, per-line ceil, an empty line counted as
-/// one row). Over-counting is safe and intended: the seeded content-height must
-/// reach or exceed the compositor's `real_max_scrollback` so the tail pins
-/// exactly, and the compositor's exact per-frame clamp is the visual authority.
-fn approx_wrapped_visual_rows(text: &str, wrap_width_px: f32, char_advance_px: f32) -> usize {
-    let cols = (wrap_width_px / char_advance_px).floor().max(1.0) as usize;
+/// approximates by summing a conservative per-character advance across each
+/// logical (`\n`-delimited) line and rounding UP — deliberately biased to
+/// OVER-count (per-character upper-bound advances, per-line ceil, an empty line
+/// counted as one row). Over-counting is safe and intended: the seeded
+/// content-height must reach or exceed the compositor's `real_max_scrollback` so
+/// the tail pins exactly, and the compositor's exact per-frame clamp is the
+/// visual authority.
+///
+/// The advance is width-aware (hud-kaw7z): full-width glyphs (CJK/emoji) shape
+/// far wider than narrow Latin, so a single flat advance either under-counts
+/// full-width content (clipping the tail) or over-inflates narrow text (a wider
+/// scroll dead-zone). Charging each glyph the wider of the two advances per its
+/// Unicode width keeps the over-count safe for both.
+fn approx_wrapped_visual_rows(
+    text: &str,
+    wrap_width_px: f32,
+    narrow_advance_px: f32,
+    wide_advance_px: f32,
+) -> usize {
+    let wrap_width_px = wrap_width_px.max(1.0);
     text.split('\n')
-        .map(|line| line.chars().count().max(1).div_ceil(cols))
+        .map(|line| {
+            let line_width_px: f32 = line
+                .chars()
+                .map(|c| char_advance_px(c, narrow_advance_px, wide_advance_px))
+                .sum();
+            (line_width_px / wrap_width_px).ceil().max(1.0) as usize
+        })
         .sum::<usize>()
         .max(1)
+}
+
+/// Conservative per-character advance (physical px): full-width glyphs
+/// (East-Asian Wide/Fullwidth codepoints and emoji, `UnicodeWidthChar::width ==
+/// Some(2)`) get the wide advance; everything else gets the narrow one
+/// (hud-kaw7z).
+///
+/// The bias is deliberately toward wide: over-classifying a narrow glyph only
+/// widens the (harmless, per-frame-re-clamped) scroll dead-zone, whereas
+/// under-classifying a wide glyph under-counts its wrapped rows and clips the
+/// newest reply at rest. Unicode width is a cell metric, not a pixel advance,
+/// but it cleanly separates the ~1em full-width scripts/emoji this over-estimate
+/// must cover from the sub-em glyphs the narrow advance already bounds.
+fn char_advance_px(c: char, narrow_advance_px: f32, wide_advance_px: f32) -> f32 {
+    if UnicodeWidthChar::width(c) == Some(2) {
+        wide_advance_px
+    } else {
+        narrow_advance_px
+    }
 }
 
 /// Conservative UNDER-estimate of the compositor's history band height (region
@@ -1139,10 +1211,23 @@ impl WinitApp {
                 // precision.
                 let band_height_px = input_history_band_height_px(tile_height_px);
                 let wrap_width_px = input_history_wrap_width_px(tile_width_px);
+                // The compositor renders each entry as `viewer_echo_display_text`
+                // — the `HH:MM␠␠` timestamp prefix (present whenever
+                // `submitted_at_wall_us != 0`, which this path always sets)
+                // followed by the text — and wraps THAT. Seed the row estimate
+                // against the same prefixed text so a full-width entry that nearly
+                // fills a row is not under-counted by the prefix spilling it onto
+                // an extra wrapped row (hud-kaw7z).
+                let seed_text = if submitted_at_wall_us != 0 {
+                    format!("{INPUT_HISTORY_TIMESTAMP_PREFIX_STANDIN}{text}")
+                } else {
+                    text.clone()
+                };
                 let added_rows = approx_wrapped_visual_rows(
-                    &text,
+                    &seed_text,
                     wrap_width_px,
                     INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX,
+                    INPUT_HISTORY_WIDE_CHAR_ADVANCE_PX,
                 );
                 let added_height_px = added_rows as f32 * INPUT_HISTORY_APPROX_LINE_HEIGHT_PX;
                 let new_total_height_px = self
@@ -3339,6 +3424,7 @@ mod tests {
             &long_line,
             wrap_width,
             INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX,
+            INPUT_HISTORY_WIDE_CHAR_ADVANCE_PX,
         );
         assert!(
             rows > 1,
@@ -3350,7 +3436,8 @@ mod tests {
             approx_wrapped_visual_rows(
                 "a\nb\nc",
                 wrap_width,
-                INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX
+                INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX,
+                INPUT_HISTORY_WIDE_CHAR_ADVANCE_PX,
             ) >= 3,
             "three hard-newline lines occupy at least three rows"
         );
@@ -3358,10 +3445,95 @@ mod tests {
             approx_wrapped_visual_rows(
                 "hi",
                 wrap_width,
-                INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX
+                INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX,
+                INPUT_HISTORY_WIDE_CHAR_ADVANCE_PX,
             ),
             1,
             "a short line occupies exactly one row"
+        );
+    }
+
+    /// Full-width content (CJK / emoji) shapes to ~1em, far wider than the 0.75em
+    /// narrow advance, so a flat narrow-only estimate over-counts columns-per-row
+    /// and UNDER-counts wrapped rows — undershooting `real_max_scrollback` and
+    /// clipping the newest reply (hud-kaw7z). The width-aware estimate must
+    /// charge full-width glyphs the wider advance so the count stays an
+    /// OVER-estimate of the compositor's real per-character CJK/emoji wrapping.
+    #[test]
+    fn approx_wrapped_visual_rows_over_counts_wide_glyphs() {
+        let wrap_width = 388.0_f32; // a 400px tile − 2×6px margin
+
+        // 60 full-width CJK ideographs on one logical line. The compositor breaks
+        // CJK per-character (no word-wrap slack) at the real ~1em advance, so a
+        // faithful lower bound on its rows is ceil(60 × 15 / 388).
+        let cjk_line: String = "字".repeat(60);
+        let compositor_rows =
+            ((60.0 * INPUT_HISTORY_WIDE_CHAR_ADVANCE_PX) / wrap_width).ceil() as usize;
+
+        let width_aware = approx_wrapped_visual_rows(
+            &cjk_line,
+            wrap_width,
+            INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX,
+            INPUT_HISTORY_WIDE_CHAR_ADVANCE_PX,
+        );
+        assert!(
+            width_aware >= compositor_rows,
+            "width-aware estimate {width_aware} must reach or exceed the \
+             compositor's real CJK wrapping {compositor_rows} (never clip the tail)"
+        );
+
+        // The pre-fix flat narrow-only estimate (both advances = narrow) is the
+        // regression: it under-counts the same content below the compositor rows.
+        let narrow_only = approx_wrapped_visual_rows(
+            &cjk_line,
+            wrap_width,
+            INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX,
+            INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX,
+        );
+        assert!(
+            narrow_only < compositor_rows,
+            "regression baseline: a narrow-only estimate {narrow_only} under-counts \
+             the compositor's CJK wrapping {compositor_rows}, clipping the tail"
+        );
+        assert!(
+            width_aware > narrow_only,
+            "the width-aware fix must count more rows than the narrow-only \
+             estimate for full-width content ({width_aware} > {narrow_only})"
+        );
+
+        // Emoji are also width-2: a line of emoji must over-count the same way and
+        // never collapse back to the narrow count.
+        let emoji_line: String = "😀".repeat(60);
+        let emoji_rows = approx_wrapped_visual_rows(
+            &emoji_line,
+            wrap_width,
+            INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX,
+            INPUT_HISTORY_WIDE_CHAR_ADVANCE_PX,
+        );
+        assert!(
+            emoji_rows >= compositor_rows,
+            "an emoji-dominated line {emoji_rows} must over-count like CJK \
+             {compositor_rows} (never clip the tail)"
+        );
+
+        // Narrow Latin text is unchanged — no wider scroll dead-zone for the
+        // common case. A 60-char Latin line lands on the same count whether or not
+        // the wide advance is in play.
+        let latin_line = "x".repeat(60);
+        assert_eq!(
+            approx_wrapped_visual_rows(
+                &latin_line,
+                wrap_width,
+                INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX,
+                INPUT_HISTORY_WIDE_CHAR_ADVANCE_PX,
+            ),
+            approx_wrapped_visual_rows(
+                &latin_line,
+                wrap_width,
+                INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX,
+                INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX,
+            ),
+            "narrow Latin text must be unaffected by the wide-glyph advance"
         );
     }
 
@@ -3448,6 +3620,143 @@ mod tests {
             "seeded offset {seeded_offset} must reach or exceed the compositor's \
              real_max_scrollback {real_max_scrollback} so the tail bottom-aligns \
              exactly; a smaller offset clips the newest reply at rest (hud-3y7va)"
+        );
+    }
+
+    /// CJK/emoji history shapes to ~1em per glyph — wider than the 0.75em narrow
+    /// advance the seed used to assume — so the pre-fix estimate under-counted
+    /// wrapped rows, undershot `real_max_scrollback`, and clipped the newest reply
+    /// (hud-kaw7z, a narrow recurrence of the hud-3y7va tail-clip). The width-aware
+    /// seed must still reach or exceed the compositor's real full-width wrapping.
+    ///
+    /// Asserted at the offset/content-height/clamp layer against an INDEPENDENT
+    /// compositor model whose full-width advance is exactly one em (the defining
+    /// advance of a full-width glyph), not against the runtime's own constants.
+    #[test]
+    fn cjk_history_seeds_offset_past_compositor_real_max_scrollback() {
+        let (scene, _tab_id, tile_id, _composer_id, _control_id) = portal_scene_with_control();
+        // `portal_scene_with_control` tile bounds are 400 × 300 (see its body).
+        let (mut app, _rx) =
+            make_windowed_keyboard_test_app(scene, FocusManager::new(), InputProcessor::new());
+
+        // Full-width CJK replies that soft-wrap: cosmic-text line-breaks CJK
+        // per-character, so each of these overflows the wrap width into several
+        // visual rows at the real ~1em advance.
+        let entries: Vec<String> = (0..10).map(|_| "字".repeat(30)).collect();
+        for entry in &entries {
+            app.append_raw_tile_viewer_echo(tile_id, entry.clone());
+        }
+
+        let seeded_offset = {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let scene = shared.scene.try_lock().unwrap();
+            assert!(
+                scene.tile_follow_tail_at_tail(tile_id),
+                "a freshly-seeded CJK history must rest at the tail"
+            );
+            scene.tile_scroll_offset_local(tile_id).1
+        };
+
+        // Compositor model (independent of the runtime's estimators): a full-width
+        // glyph advances exactly one em, and CJK breaks per-character, so a
+        // faithful lower bound on the wrapped rows is ceil(chars × em / wrap).
+        const LINE_H: f32 = 21.0; // viewer-echo font 15 × line-height 1.4
+        const FULLWIDTH_EM_PX: f32 = 15.0; // one em at the 15px viewer-echo font
+        let wrap_width = 400.0_f32 - 12.0; // tile width − 2×margin (viewer_echo_zone_width)
+        let realistic_rows: usize = entries
+            .iter()
+            .map(|e| ((e.chars().count() as f32 * FULLWIDTH_EM_PX) / wrap_width).ceil() as usize)
+            .sum();
+        let block_height = realistic_rows as f32 * LINE_H;
+        let band_height = 300.0_f32 - (LINE_H + 12.0); // region top → 1-line composer box top
+        let real_max_scrollback = (block_height - band_height).max(0.0);
+
+        assert!(
+            real_max_scrollback > 0.0,
+            "test setup: the CJK history must overflow the band (real_max={real_max_scrollback})"
+        );
+        assert!(
+            seeded_offset >= real_max_scrollback,
+            "seeded CJK offset {seeded_offset} must reach or exceed the compositor's \
+             real_max_scrollback {real_max_scrollback}; the pre-fix narrow-advance \
+             seed undershot this and clipped the newest reply (hud-kaw7z)"
+        );
+    }
+
+    /// The compositor prepends a fixed `HH:MM␠␠` timestamp prefix (7 narrow
+    /// columns) to the FIRST line of every viewer-echo entry before wrapping
+    /// (`viewer_echo_display_text`, hud-7ic89). A full-width entry sized to sit
+    /// JUST under one wrap row on its own is spilled onto a SECOND row by that
+    /// prefix. A prefix-blind seed (estimating rows from the raw entry text)
+    /// under-counts by a row per entry, so the seeded offset undershoots the
+    /// compositor's `real_max_scrollback` and the newest reply re-clips at rest —
+    /// the exact hud-kaw7z failure the width-aware seed set out to eliminate.
+    ///
+    /// Asserted at the offset/clamp layer against an INDEPENDENT compositor model:
+    /// 25 full-width glyphs advance 25 em (375px ≤ 388px wrap → one row alone),
+    /// but the nonempty timestamp prefix (7 glyphs, far more than the 13px of
+    /// remaining slack) forces a second row, so each entry occupies ≥ 2 rows.
+    #[test]
+    fn cjk_history_seed_accounts_for_timestamp_prefix_wrap() {
+        // Lock the stand-in to the compositor's real 7-column prefix width.
+        assert_eq!(
+            INPUT_HISTORY_TIMESTAMP_PREFIX_STANDIN.chars().count(),
+            7,
+            "timestamp prefix stand-in must mirror the compositor's 7-column \
+             `HH:MM␠␠` prefix"
+        );
+
+        let (scene, _tab_id, tile_id, _composer_id, _control_id) = portal_scene_with_control();
+        // `portal_scene_with_control` tile bounds are 400 × 300 (see its body).
+        let (mut app, _rx) =
+            make_windowed_keyboard_test_app(scene, FocusManager::new(), InputProcessor::new());
+
+        const LINE_H: f32 = 21.0; // viewer-echo font 15 × line-height 1.4
+        const FULLWIDTH_EM_PX: f32 = 15.0; // one em at the 15px viewer-echo font
+        let wrap_width = 400.0_f32 - 12.0; // tile width − 2×margin (viewer_echo_zone_width)
+
+        // 25 full-width glyphs = 375px ≤ 388px: exactly one wrap row on their own,
+        // with only 13px of slack — less than any nonempty prefix.
+        const FULLWIDTH_CHARS: usize = 25;
+        assert!(
+            (FULLWIDTH_CHARS as f32 * FULLWIDTH_EM_PX) <= wrap_width,
+            "test setup: {FULLWIDTH_CHARS} full-width glyphs must fit one row \
+             WITHOUT the prefix"
+        );
+        let entries: Vec<String> = (0..20).map(|_| "字".repeat(FULLWIDTH_CHARS)).collect();
+        for entry in &entries {
+            app.append_raw_tile_viewer_echo(tile_id, entry.clone());
+        }
+
+        let seeded_offset = {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let scene = shared.scene.try_lock().unwrap();
+            assert!(
+                scene.tile_follow_tail_at_tail(tile_id),
+                "a freshly-seeded CJK history must rest at the tail"
+            );
+            scene.tile_scroll_offset_local(tile_id).1
+        };
+
+        // Compositor model (independent of the runtime's estimators): each entry's
+        // first line carries the prefix, so 25 full-width glyphs plus a nonempty
+        // prefix exceed the 388px wrap and occupy at least 2 rows.
+        let realistic_rows: usize = entries.len() * 2;
+        let block_height = realistic_rows as f32 * LINE_H;
+        let band_height = 300.0_f32 - (LINE_H + 12.0); // region top → 1-line composer box top
+        let real_max_scrollback = (block_height - band_height).max(0.0);
+
+        assert!(
+            real_max_scrollback > 0.0,
+            "test setup: the prefixed CJK history must overflow the band \
+             (real_max={real_max_scrollback})"
+        );
+        assert!(
+            seeded_offset >= real_max_scrollback,
+            "seeded CJK offset {seeded_offset} must reach or exceed the compositor's \
+             real_max_scrollback {real_max_scrollback}; a prefix-blind seed \
+             under-counts each entry by a row and re-clips the newest reply \
+             (hud-kaw7z timestamp-prefix recurrence)"
         );
     }
 

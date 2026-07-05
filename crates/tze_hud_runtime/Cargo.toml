@@ -47,6 +47,7 @@ toml = { workspace = true }
 uuid = { workspace = true }
 arc-swap = { workspace = true }
 statig = { workspace = true }
+unicode-width = { workspace = true }
 
 # GStreamer — optional; activated by the `gstreamer` feature flag.
 # Cargo 1.74+ supports `{ workspace = true, optional = true }` so we use the
