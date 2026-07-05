@@ -415,6 +415,21 @@ struct WindowedRuntimeState {
     /// Cleared on focus-gain to prevent stale context from leaking across
     /// focus boundaries.
     pending_blur_delivery_context: Option<ComposerDeliveryContext>,
+    /// `(tile_id, anchor_byte)` for an in-progress composer pointer drag-select
+    /// (hud-etrs0).
+    ///
+    /// Set on `PointerDown` when the hit lands on the focused composer node,
+    /// to that node's owning tile plus the byte computed for the down
+    /// position. `tile_id` is retained (rather than re-deriving it from each
+    /// Move event's own hit-test, which may miss once the drag leaves the
+    /// node's bounds) so `PointerMove` can keep converting pointer coordinates
+    /// into the same tile-local space and extend the draft selection from
+    /// `anchor_byte` to the byte under the current pointer position via
+    /// `set_pointer_selection`. `PointerUp` clears it (the selection itself
+    /// remains — only the drag gesture ends). Also cleared when composer
+    /// focus is lost mid-drag so a stale anchor cannot leak into the next
+    /// focused composer.
+    composer_pointer_drag_anchor: Option<(tze_hud_scene::SceneId, usize)>,
     /// Per-portal resize state machines keyed by tile `SceneId`.
     ///
     /// Holds `PortalResizeState` for every portal tile that has been focused
@@ -2295,6 +2310,7 @@ impl WindowedRuntime {
             element_repositioned_tx,
             input_event_tx,
             pending_blur_delivery_context: None,
+            composer_pointer_drag_anchor: None,
             portal_resize_states: std::collections::HashMap::new(),
             consumed_portal_resize_keydowns: std::collections::HashSet::new(),
             // Placeholder; replaced in resumed() with the Arc cloned from the

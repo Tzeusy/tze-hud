@@ -280,6 +280,35 @@ impl ComposerVisualLayout {
             Some(self.lines[cur + 1].byte_at_x(goal_x))
         }
     }
+
+    /// Raw byte nearest the point `(x, y)` in composer-content pixel space —
+    /// `x`/`y` measured from the content box's top-left, after the caller has
+    /// already subtracted any margin/inset (hud-etrs0 pointer hit-test).
+    ///
+    /// Selects a visual row by splitting `content_height` evenly across
+    /// `self.lines`, then maps `x` to a byte via that row's real glyph
+    /// geometry ([`ComposerVisualLine::byte_at_x`]). The even split is exact
+    /// only while every row fits within `content_height` — the common
+    /// un-scrolled case, since the box grows to fit up to the configured
+    /// `max_lines` before it scrolls. Once the draft has scrolled past its
+    /// visible window the row estimate drifts from the true row (this layout
+    /// carries no per-row baseline / vscroll offset yet — a follow-up would
+    /// publish those alongside `glyph_x` if pointer hit-testing needs to stay
+    /// exact while scrolled).
+    ///
+    /// Returns byte `0` when there are no rows.
+    pub fn byte_at_point(&self, x: f32, y: f32, content_height: f32) -> usize {
+        let Some(last) = self.lines.len().checked_sub(1) else {
+            return 0;
+        };
+        let row = if content_height > 0.0 {
+            let frac = (y / content_height).clamp(0.0, 1.0);
+            ((frac * self.lines.len() as f32) as usize).min(last)
+        } else {
+            0
+        };
+        self.lines[row].byte_at_x(x)
+    }
 }
 
 // ─── ComposerDraft ────────────────────────────────────────────────────────────
@@ -3150,6 +3179,38 @@ mod tests {
             3,
             "far-right clamps to row end"
         );
+    }
+
+    #[test]
+    fn visual_layout_byte_at_point_selects_row_by_y_then_x_by_glyph() {
+        let l = two_row_layout();
+        // content_height=100 split across 2 rows → row 0 is y in [0,50), row 1 [50,100].
+        assert_eq!(
+            l.byte_at_point(20.0, 10.0, 100.0),
+            2,
+            "y in the top half hits row 0, x=20 → byte 2"
+        );
+        assert_eq!(
+            l.byte_at_point(20.0, 90.0, 100.0),
+            5,
+            "y in the bottom half hits row 1, x=20 → byte 5"
+        );
+        // Exactly on the row boundary rounds down into the lower row (frac == 0.5
+        // maps to row index 1 via floor(0.5 * 2) == 1).
+        assert_eq!(l.byte_at_point(20.0, 50.0, 100.0), 5);
+        // y past the content height clamps to the last row.
+        assert_eq!(l.byte_at_point(20.0, 500.0, 100.0), 5);
+        // Non-positive content_height falls back to row 0.
+        assert_eq!(l.byte_at_point(20.0, 10.0, 0.0), 2);
+    }
+
+    #[test]
+    fn visual_layout_byte_at_point_empty_layout_returns_zero() {
+        let empty = ComposerVisualLayout {
+            lines: vec![],
+            text_len: 0,
+        };
+        assert_eq!(empty.byte_at_point(20.0, 10.0, 100.0), 0);
     }
 
     #[test]
