@@ -1786,14 +1786,11 @@ fn projected_portal_state(
     // content. Mirrors the #1085 unread-divider clearance convention above.
     let latest_viewer_delivery_state = transcript_visible
         .then(|| {
-            session
-                .pending_input
-                .back()
-                .and_then(|item| {
-                    policy
-                        .permits(item.content_classification)
-                        .then_some(item.delivery_state)
-                })
+            session.pending_input.back().and_then(|item| {
+                policy
+                    .permits(item.content_classification)
+                    .then_some(item.delivery_state)
+            })
         })
         .flatten();
 
