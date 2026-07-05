@@ -224,6 +224,31 @@ pub const PORTAL_TOKEN_ACTIVITY_CUE_COLOR: &str = "portal.activity_cue.color";
 /// the tail live-writing treatment independently of the header cue.
 pub const PORTAL_TOKEN_STREAMING_CURSOR_COLOR: &str = "portal.streaming_cursor.color";
 
+// ── Ambient per-turn timestamp tokens ────────────────────────────────────────
+//
+// Ambient presentation of each transcript unit's RUNTIME-ASSIGNED wall-clock
+// arrival metadata (`appended_at_wall_us`, WALL-CLOCK domain — distinct from the
+// media/display clock, never conflated with presentation timing) per
+// portal-chat-grade-affordances §Ambient Per-Turn Timestamps (hud-g1ena.4). The
+// stamp is secondary/subordinate to turn content: quiet, token-styled, and never
+// a source of attention escalation. Timestamp VISIBILITY/GRANULARITY is governed
+// by the component profile via `portal.timestamp.granularity` (per-turn, grouped,
+// or off) rather than mandated at the pixel level.
+
+/// Color of the ambient per-turn arrival timestamp. Secondary presentation —
+/// dim/muted so a stamp reads as subordinate metadata, never as primary turn
+/// content or an alert. Defaults to the shared muted-slate quiet-signal tone
+/// (matching `portal.transcript.dim_text_color` / `portal.unread_indicator.color`)
+/// because a timestamp is quiet secondary metadata, not its own semantic accent.
+pub const PORTAL_TOKEN_TIMESTAMP_COLOR: &str = "portal.timestamp.color";
+/// Visibility/granularity of the ambient per-turn arrival timestamp, governed by
+/// the portal's component profile: `off` (no stamps — the calm default), `per_turn`
+/// (a stamp on every turn), or `grouped` (a stamp only when a turn's arrival minute
+/// differs from the previous shown turn's, so consecutive same-minute turns share
+/// one). Governs presentation, never the clock domain — the value always derives
+/// from the runtime-assigned wall-clock arrival time.
+pub const PORTAL_TOKEN_TIMESTAMP_GRANULARITY: &str = "portal.timestamp.granularity";
+
 // ── Lifecycle affordance tokens (cooperative-hud-projection §lifecycle) ───────
 //
 // Token-resolved accent colors driving the viewer-facing affordance for a
@@ -369,6 +394,59 @@ pub const PORTAL_TOKEN_SPACING_SECTION_GAP_PX: &str = "portal.spacing.section_ga
 /// `0` means unbounded — wrap to the full transcript width (current behavior).
 pub const PORTAL_TOKEN_TRANSCRIPT_MAX_MEASURE_PX: &str = "portal.transcript.max_measure_px";
 
+// ── Ambient per-turn timestamp granularity ───────────────────────────────────
+
+/// Component-profile-governed visibility/granularity of the ambient per-turn
+/// arrival timestamp (portal-chat-grade-affordances §Ambient Per-Turn Timestamps,
+/// hud-g1ena.4). Resolved from [`PORTAL_TOKEN_TIMESTAMP_GRANULARITY`].
+///
+/// This governs PRESENTATION only — how often a stamp is shown — never the clock
+/// domain. Every presented time still derives from the runtime-assigned
+/// wall-clock arrival metadata (`appended_at_wall_us`), which the adapter cannot
+/// forge. `OnDemand` visibility (reveal on hover/focus) is a promotion-era
+/// interactive affordance and is intentionally not part of the Phase-1 single-node
+/// render set; a profile that wants it uses `Off` until it ships.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TimestampGranularity {
+    /// No per-turn timestamps. The calm default: a profile opts stamps in rather
+    /// than the base surface mandating them (visibility is profile-governed).
+    #[default]
+    Off,
+    /// A wall-clock arrival stamp on every retained turn.
+    PerTurn,
+    /// A wall-clock arrival stamp only when a turn's arrival MINUTE differs from
+    /// the previous shown turn's — consecutive same-minute turns share one stamp,
+    /// keeping the transcript quiet during bursts.
+    Grouped,
+}
+
+impl TimestampGranularity {
+    /// Parse the profile token string. Accepts `off`, `per_turn`/`per-turn`, and
+    /// `grouped` (ASCII-case-insensitive); any other value returns `None` so the
+    /// resolver falls back to the default, mirroring the warn-and-default handling
+    /// of the color/numeric portal tokens.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(Self::Off),
+            "per_turn" | "per-turn" => Some(Self::PerTurn),
+            "grouped" => Some(Self::Grouped),
+            _ => None,
+        }
+    }
+
+    /// Canonical token string for this granularity — the inverse of [`parse`] and
+    /// the value carried on the resolved handshake string map.
+    ///
+    /// [`parse`]: Self::parse
+    pub fn as_token_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::PerTurn => "per_turn",
+            Self::Grouped => "grouped",
+        }
+    }
+}
+
 // ── Portal token fallback defaults ───────────────────────────────────────────
 
 /// Default values for portal tokens (used when token is absent from resolved map).
@@ -456,6 +534,16 @@ mod defaults {
     /// family with `ACTIVITY_CUE_COLOR` but a hair brighter so the tail cursor is
     /// perceptible as "live writing here" while staying ambient.
     pub const STREAMING_CURSOR_COLOR: &str = "#A6ABC8";
+
+    /// Muted slate — the ambient per-turn arrival timestamp. Shares the quiet
+    /// secondary tone of `TRANSCRIPT_DIM_TEXT_COLOR` / `UNREAD_INDICATOR_COLOR` /
+    /// `COMPOSER_PLACEHOLDER_COLOR` so a stamp reads as subordinate metadata, not
+    /// as primary turn content or an alert (§secondary presentation).
+    pub const TIMESTAMP_COLOR: &str = "#6B7689";
+    /// Ambient timestamps default OFF — visibility is profile-governed and the base
+    /// surface stays calm (a presence engine, not a chat log). A component profile
+    /// opts in with `per_turn` or `grouped`. Mirrors [`TimestampGranularity::Off`].
+    pub const TIMESTAMP_GRANULARITY: &str = "off";
 
     // Lifecycle affordance accents — ambient, mutually distinct (see token-key
     // docs above). Active: calm teal-green; attached/ready: soft blue;
@@ -612,6 +700,16 @@ pub struct PortalPartTokens {
     /// agent is actively appending.
     pub streaming_cursor_color: Rgba,
 
+    // Ambient per-turn timestamps (portal-chat-grade-affordances
+    // §Ambient Per-Turn Timestamps, hud-g1ena.4). Secondary presentation of each
+    // unit's runtime-assigned wall-clock arrival time; the adapter never hardcodes
+    // the hue or the granularity.
+    /// Color of the ambient per-turn arrival timestamp (secondary/dim).
+    pub timestamp_color: Rgba,
+    /// Visibility/granularity of the ambient per-turn arrival timestamp, governed
+    /// by the component profile (`off` / `per_turn` / `grouped`).
+    pub timestamp_granularity: TimestampGranularity,
+
     // Lifecycle affordance accents (cooperative-hud-projection §lifecycle).
     // Each maps a `ProjectionLifecycleState` group onto an ambient accent; the
     // adapter never hardcodes a lifecycle color.
@@ -746,6 +844,11 @@ impl Default for PortalPartTokens {
                 .expect("activity cue color default is valid hex"),
             streaming_cursor_color: parse_color_hex(defaults::STREAMING_CURSOR_COLOR)
                 .expect("streaming cursor color default is valid hex"),
+
+            timestamp_color: parse_color_hex(defaults::TIMESTAMP_COLOR)
+                .expect("timestamp color default is valid hex"),
+            timestamp_granularity: TimestampGranularity::parse(defaults::TIMESTAMP_GRANULARITY)
+                .expect("timestamp granularity default is a valid granularity"),
 
             lifecycle_active_color: parse_color_hex(defaults::LIFECYCLE_ACTIVE_COLOR)
                 .expect("lifecycle active color default is valid hex"),
@@ -911,6 +1014,25 @@ pub fn resolve_portal_tokens(token_map: &DesignTokenMap) -> PortalPartTokens {
         };
     }
 
+    macro_rules! resolve_granularity {
+        ($key:expr, $fallback:expr) => {
+            match token_map.get($key) {
+                None => $fallback,
+                Some(v) => match TimestampGranularity::parse(v) {
+                    Some(g) => g,
+                    None => {
+                        warn!(
+                            token_key = $key,
+                            bad_value = %v,
+                            "portal timestamp granularity is unrecognized; using default fallback",
+                        );
+                        $fallback
+                    }
+                },
+            }
+        };
+    }
+
     PortalPartTokens {
         frame_background: resolve_color!(PORTAL_TOKEN_FRAME_BACKGROUND, defaults.frame_background),
         frame_opacity: resolve_f32!(PORTAL_TOKEN_FRAME_OPACITY, defaults.frame_opacity),
@@ -994,6 +1116,12 @@ pub fn resolve_portal_tokens(token_map: &DesignTokenMap) -> PortalPartTokens {
         streaming_cursor_color: resolve_color!(
             PORTAL_TOKEN_STREAMING_CURSOR_COLOR,
             defaults.streaming_cursor_color
+        ),
+
+        timestamp_color: resolve_color!(PORTAL_TOKEN_TIMESTAMP_COLOR, defaults.timestamp_color),
+        timestamp_granularity: resolve_granularity!(
+            PORTAL_TOKEN_TIMESTAMP_GRANULARITY,
+            defaults.timestamp_granularity
         ),
 
         lifecycle_active_color: resolve_color!(
@@ -1199,6 +1327,11 @@ const PORTAL_TOKEN_DEFAULT_STRINGS: &[(&str, &str)] = &[
     (
         PORTAL_TOKEN_STREAMING_CURSOR_COLOR,
         defaults::STREAMING_CURSOR_COLOR,
+    ),
+    (PORTAL_TOKEN_TIMESTAMP_COLOR, defaults::TIMESTAMP_COLOR),
+    (
+        PORTAL_TOKEN_TIMESTAMP_GRANULARITY,
+        defaults::TIMESTAMP_GRANULARITY,
     ),
     (
         PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR,
@@ -2225,7 +2358,7 @@ mod tests {
     #[test]
     fn resolve_portal_token_strings_covers_every_key() {
         // Number of distinct portal token keys resolved by resolve_portal_tokens.
-        const EXPECTED_KEYS: usize = 52;
+        const EXPECTED_KEYS: usize = 54;
         assert_eq!(
             PORTAL_TOKEN_DEFAULT_STRINGS.len(),
             EXPECTED_KEYS,
@@ -2376,5 +2509,77 @@ mod tests {
             PortalPartTokens::default(),
             "sentinel overrides must diverge from defaults for the round-trip to be meaningful"
         );
+    }
+
+    // ── Ambient per-turn timestamp tokens (hud-g1ena.4) ───────────────────
+
+    #[test]
+    fn timestamp_granularity_parses_all_variants_case_insensitively() {
+        assert_eq!(
+            TimestampGranularity::parse("off"),
+            Some(TimestampGranularity::Off)
+        );
+        assert_eq!(
+            TimestampGranularity::parse("PER_TURN"),
+            Some(TimestampGranularity::PerTurn)
+        );
+        // Hyphen and underscore spellings both accepted.
+        assert_eq!(
+            TimestampGranularity::parse("per-turn"),
+            Some(TimestampGranularity::PerTurn)
+        );
+        assert_eq!(
+            TimestampGranularity::parse("  Grouped "),
+            Some(TimestampGranularity::Grouped)
+        );
+        // Unknown values resolve to None so the resolver falls back to default.
+        assert_eq!(TimestampGranularity::parse("hourly"), None);
+    }
+
+    #[test]
+    fn timestamp_granularity_token_string_round_trips() {
+        for g in [
+            TimestampGranularity::Off,
+            TimestampGranularity::PerTurn,
+            TimestampGranularity::Grouped,
+        ] {
+            assert_eq!(TimestampGranularity::parse(g.as_token_str()), Some(g));
+        }
+    }
+
+    #[test]
+    fn timestamp_tokens_default_off_and_secondary_slate() {
+        let tokens = resolve_portal_tokens(&empty_map());
+        // Ambient default: timestamps are OFF (visibility is profile-governed).
+        assert_eq!(tokens.timestamp_granularity, TimestampGranularity::Off);
+        // Secondary/dim presentation shares the muted-slate quiet-signal tone.
+        assert_eq!(
+            tokens.timestamp_color,
+            parse_color_hex(defaults::TRANSCRIPT_DIM_TEXT_COLOR).unwrap(),
+            "timestamp default color must be the shared secondary/dim slate"
+        );
+    }
+
+    #[test]
+    fn timestamp_granularity_override_resolves_from_profile() {
+        let mut overrides = DesignTokenMap::new();
+        overrides.insert(
+            PORTAL_TOKEN_TIMESTAMP_GRANULARITY.to_string(),
+            "grouped".to_string(),
+        );
+        let resolved = resolve_tokens(&empty_map(), &overrides);
+        let tokens = resolve_portal_tokens(&resolved);
+        assert_eq!(tokens.timestamp_granularity, TimestampGranularity::Grouped);
+    }
+
+    #[test]
+    fn timestamp_granularity_unrecognized_override_falls_back_to_default() {
+        let mut overrides = DesignTokenMap::new();
+        overrides.insert(
+            PORTAL_TOKEN_TIMESTAMP_GRANULARITY.to_string(),
+            "every-second".to_string(),
+        );
+        let tokens = resolve_portal_tokens(&overrides);
+        assert_eq!(tokens.timestamp_granularity, TimestampGranularity::Off);
     }
 }
