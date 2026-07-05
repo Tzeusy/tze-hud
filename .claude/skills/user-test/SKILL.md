@@ -47,10 +47,15 @@ zone, widget parameter types, and `widget_name` instance-discovery semantics
 ## Autonomous Testhost (hud-windows VM)
 
 When the flow needs no human eyes (or tzehouse is unavailable), target the
-IaC-managed Windows 11 VM on the Sentinel Proxmox host instead. Same account
-contract as tzehouse: `hud-user` (SCP), `admin-user` (autologon desktop owner,
+IaC-managed Windows 11 VM on the Sentinel Proxmox host instead. The VM uses its
+own literal accounts `hud-user` (SCP) and `admin-user` (autologon desktop owner,
 process control), both keyed with `~/.ssh/hud-ssh-key`. `C:\tze_hud` exists;
 firewall already allows 22/9090/50051 inbound.
+
+> **These VM accounts are NOT the tzehouse contract.** tzehouse uses different
+> real users and a different key — resolve them from the private doc
+> `docs/operations/private/tzehouse-windows.local.md` (git-ignored). Do not try
+> `hud-user`/`admin-user`/`hud-ssh-key` against tzehouse; they are rejected there.
 
 Resolve the address (and self-heal the whole surface — VM start, stale
 gpu.lock clearing per hud-7gp40, HUD task relaunch) with the canonical helper:
@@ -139,16 +144,28 @@ scenarios live in `references/`. Load the one matching the task:
 
 ### Step 0: SSH Connectivity Gate
 
-Verify key auth for **both** users (Linux):
+**First resolve the real host, users, and key.** Tracked files carry scrubbed
+placeholders (`windows-host.example` / `hud-user` / `admin-user` /
+`~/.ssh/hud-ssh-key`); the real values differ per target and live in the
+git-ignored private doc `docs/operations/private/tzehouse-windows.local.md`.
+Read it before running the gate. For the VM, use `hud_vm_env.sh` (above); for
+tzehouse, the private doc maps: file user `hud-user`→`hudbot`, admin user
+`admin-user`→`tzeus`, key `hud-ssh-key`→`~/.ssh/ecdsa_home`, host
+→`tzehouse-windows.parrot-hen.ts.net`. The default shell on tzehouse is
+**cmd.exe** (not PowerShell) — don't chain with `;`; invoke `powershell -Command`
+explicitly when you need it.
+
+Verify key auth for **both** users (Linux), substituting the resolved values:
 
 ```bash
-ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/hud-ssh-key \
-  hud-user@windows-host.example "whoami"
-ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/hud-ssh-key \
-  admin-user@windows-host.example "whoami"
+ssh -o BatchMode=yes -o IdentitiesOnly=yes -i <key> <file-user>@<host> "whoami"
+ssh -o BatchMode=yes -o IdentitiesOnly=yes -i <key> <admin-user>@<host> "whoami"
 ```
 
-Both must succeed. `hud-user` is used for file deployment (SCP). `admin-user` is used for process control (kill, scheduled task trigger) because `admin-user` owns the interactive desktop session.
+Both must succeed. The file user is used for file deployment (SCP). The admin
+user is used for process control (kill, scheduled task trigger) because it owns
+the interactive desktop session. On tzehouse both users authenticate with the
+**same** key (`~/.ssh/ecdsa_home`).
 
 ### Step 1: Deploy (SCP via hud-user)
 
