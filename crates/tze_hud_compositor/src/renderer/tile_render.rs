@@ -205,6 +205,61 @@ pub(super) fn input_history_block_top(
     tail_top + (max_scrollback - scrollback)
 }
 
+/// The input-history block geometry — the visible band `[band_top, band_bottom]`
+/// and the display-space `block_top` of its first line — for a composer whose
+/// live input box is `draft_box` within `region`, selected by the composer
+/// `anchor` (hud-3nus3).
+///
+/// The history always hugs the composer input box on the side AWAY from its
+/// anchored edge, so a viewer's submissions read adjacent to the box they typed
+/// in — never off-pane:
+/// - [`ComposerVerticalAnchor::Bottom`] (default profile) — the box rests on the
+///   region's BOTTOM edge, so the band is the space ABOVE it
+///   (`[region.y, draft_box.y]`) and the block bottom-aligns, riding the newest
+///   reply just above the box (hud-nx7yq.3 / hud-acfvp scroll).
+/// - [`ComposerVerticalAnchor::Top`] — the box rests on the region's TOP edge
+///   (exemplar two-pane input pane, hud-nottc), so the band is the space BELOW it
+///   (`[draft_box.bottom, region.bottom]`) and the block top-aligns, flowing
+///   submissions DOWNWARD beneath the box to match the anchor=Top draft-growth
+///   direction. Reusing the bottom-anchored band here would measure a zero-height
+///   band above the top-pinned box, and the whole history would silently fail to
+///   paint (the hud-3nus3 live report: input tracked, nothing rendered). Input-tile
+///   scroll for this profile is deferred to hud-acfvp, so the block pins to the
+///   band top at rest.
+///
+/// Returns `None` when the band is degenerate (non-positive height), so both the
+/// text and divider passes short-circuit identically. Free-standing (no `self`,
+/// no GPU) so the anchor geometry is unit-testable without a headless compositor,
+/// mirroring [`input_history_block_top`].
+pub(super) fn input_history_band_layout(
+    anchor: ComposerVerticalAnchor,
+    region: Rect,
+    draft_box: Rect,
+    block_height: f32,
+    scroll_offset_y: Option<f32>,
+) -> Option<(f32, f32, f32)> {
+    let (band_top, band_bottom) = match anchor {
+        ComposerVerticalAnchor::Bottom => (region.y, draft_box.y),
+        ComposerVerticalAnchor::Top => (draft_box.y + draft_box.height, region.y + region.height),
+    };
+    if band_bottom - band_top <= 0.0 {
+        return None;
+    }
+    let block_top = match anchor {
+        ComposerVerticalAnchor::Bottom => {
+            input_history_block_top(band_top, band_bottom, block_height, scroll_offset_y)
+        }
+        // Top-anchored history hugs the box from below and flows downward; it pins
+        // to the band top at rest (input-tile scroll for this profile is hud-acfvp,
+        // so the offset is intentionally unused here).
+        ComposerVerticalAnchor::Top => {
+            let _ = (block_height, scroll_offset_y);
+            band_top
+        }
+    };
+    Some((band_top, band_bottom, block_top))
+}
+
 /// Compact "HH:MM " clock prefix for a viewer-echo entry's `submitted_at_wall_us`
 /// (hud-7ic89), or `None` when it is `0` — the "no timestamp captured" sentinel
 /// already used for absent/invalid submit times elsewhere (see
@@ -1500,13 +1555,6 @@ impl Compositor {
         let opacity = self.tile_effective_opacity(tile, scene);
         let zone_width = Self::viewer_echo_zone_width(region, composer_tokens.content_inset_px);
 
-        // The band available for history: from the region top down to the box top.
-        let band_top = region.y;
-        let band_height = draft_box.y - band_top;
-        if band_height <= 0.0 {
-            return items;
-        }
-
         // Total WRAPPED visual-line count of the joined history: primed
         // (wrap-accurate) or, absent a prime this frame, the logical `\n`-split
         // count so embedded newlines still lay out one-line-per-break (hud-pncm3).
@@ -1520,17 +1568,27 @@ impl Compositor {
 
         // Slide the block within the fixed band by the input tile's displayed
         // vertical scroll offset so the viewer can scroll UP through older history
-        // (hud-acfvp). At the tail the block is bottom-aligned (NEWEST reply just
-        // above the composer box, oldest clipping off `band_top`); as the tile
-        // scrolls up the whole window slides down and reveals older replies. A
-        // tile with no scroll config pins to the tail, so the newest-fit window is
-        // byte-identical to the pre-scroll behavior. The scissor below still clips
-        // the band, so lines pushed past its edges drop out (bounded window).
+        // (hud-acfvp). For a bottom-anchored composer the tail is bottom-aligned
+        // (NEWEST reply just above the box, oldest clipping off `band_top`); a
+        // top-anchored composer instead flows submissions DOWNWARD beneath the box.
+        // A tile with no scroll config pins to the resting position, so the
+        // bottom-anchored newest-fit window is byte-identical to the pre-scroll
+        // behavior. The scissor below still clips the band, so lines pushed past
+        // its edges drop out (bounded window). The band collapses (returns) for a
+        // degenerate composer region — never silently painting off-pane.
         let scroll_offset_y = scene
             .tile_scroll_config(tile.id)
             .map(|_| self.display_tile_scroll_offset(scene, tile.id).1);
-        let block_top =
-            input_history_block_top(band_top, draft_box.y, block_height, scroll_offset_y);
+        let Some((band_top, band_bottom, block_top)) = input_history_band_layout(
+            composer_tokens.anchor,
+            region,
+            draft_box,
+            block_height,
+            scroll_offset_y,
+        ) else {
+            return items;
+        };
+        let band_height = band_bottom - band_top;
 
         // Style each entry's "HH:MM " prefix (hud-7ic89) as a muted, smaller run
         // within the single joined `TextItem` — same mechanism the markdown pass
@@ -1637,11 +1695,6 @@ impl Compositor {
         let margin = composer_tokens.content_inset_px;
         let zone_width = Self::viewer_echo_zone_width(region, composer_tokens.content_inset_px);
 
-        let band_top = region.y;
-        if draft_box.y - band_top <= 0.0 {
-            return Vec::new();
-        }
-
         // Per-entry wrapped counts: primed (wrap-accurate) or, absent a prime this
         // frame, the logical `\n`-split count per entry. Either way their sum
         // equals the total the text path uses, so boundaries stay consistent.
@@ -1659,13 +1712,21 @@ impl Compositor {
         let block_height = (total_lines as f32 * line_h).max(line_h);
         // Slide by the input tile's displayed scroll offset — identical geometry
         // to the text block (hud-acfvp) — so the turn dividers stay locked onto
-        // the boundaries between the scrolled entries. Pins to the tail when the
-        // tile has no scroll config.
+        // the boundaries between the scrolled entries. Pins to the resting position
+        // when the tile has no scroll config, and short-circuits (no dividers) on a
+        // degenerate band, exactly mirroring `collect_viewer_echo_text_items`.
         let scroll_offset_y = scene
             .tile_scroll_config(tile.id)
             .map(|_| self.display_tile_scroll_offset(scene, tile.id).1);
-        let block_top =
-            input_history_block_top(band_top, draft_box.y, block_height, scroll_offset_y);
+        let Some((band_top, band_bottom, block_top)) = input_history_band_layout(
+            composer_tokens.anchor,
+            region,
+            draft_box,
+            block_height,
+            scroll_offset_y,
+        ) else {
+            return Vec::new();
+        };
 
         viewer_echo_divider_rects(
             &per_entry,
@@ -1675,7 +1736,7 @@ impl Compositor {
             line_h,
             thickness,
             band_top,
-            draft_box.y,
+            band_bottom,
         )
     }
 
