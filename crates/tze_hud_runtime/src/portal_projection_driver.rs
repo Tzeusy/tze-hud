@@ -2185,8 +2185,7 @@ impl InProcessPortalDriver {
             .entries
             .iter()
             .filter(|(id, e)| {
-                e.activity_cue_clear_due_us
-                    .is_some_and(|due| now_us >= due)
+                e.activity_cue_clear_due_us.is_some_and(|due| now_us >= due)
                     && (e.tile_scene_id.is_some()
                         || self.effective_transport(id) == PortalTransport::ResidentGrpcBridge)
             })
@@ -5916,7 +5915,12 @@ mod tests {
             .expect("portal tile must exist in scene")
             .root_node
             .expect("portal tile must have a painted root node");
-        match &scene.nodes.get(&root_id).expect("root node must resolve").data {
+        match &scene
+            .nodes
+            .get(&root_id)
+            .expect("root node must resolve")
+            .data
+        {
             tze_hud_scene::NodeData::TextMarkdown(tm) => tm.content.clone(),
             other => panic!("expected TextMarkdown tile root, got {other:?}"),
         }

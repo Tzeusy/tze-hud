@@ -3272,7 +3272,10 @@ mod tests {
             "the deadline is appended_at + the quiesce window"
         );
         // The active predicate is exactly `now <= deadline` at the boundary.
-        assert!(agent_activity_active(&state, deadline), "active at the deadline");
+        assert!(
+            agent_activity_active(&state, deadline),
+            "active at the deadline"
+        );
         assert!(
             !agent_activity_active(&state, deadline + 1),
             "quiesced one µs past the deadline"
