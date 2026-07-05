@@ -308,7 +308,7 @@ fn make_refresh_node() -> Node {
             auto_capture: true,
             release_on_up: true,
             cursor_style: CursorStyle::Pointer,
-            tooltip: Some("Refresh dashboard content".to_string()),
+            tooltip: Box::new(Some("Refresh dashboard content".to_string())),
             ..Default::default()
         }),
     }
@@ -331,7 +331,7 @@ fn make_dismiss_node() -> Node {
             auto_capture: true,
             release_on_up: true,
             cursor_style: CursorStyle::Pointer,
-            tooltip: Some("Dismiss this tile".to_string()),
+            tooltip: Box::new(Some("Dismiss this tile".to_string())),
             ..Default::default()
         }),
     }

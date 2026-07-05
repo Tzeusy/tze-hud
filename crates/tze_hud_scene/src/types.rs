@@ -858,8 +858,15 @@ pub struct HitRegionNode {
     pub cursor_style: CursorStyle,
     /// Tooltip text shown after the pointer has hovered for 500 ms.
     /// `None` means no tooltip.
+    ///
+    /// Boxed (alongside `composer_placeholder` below) to keep `HitRegionNode`
+    /// within the 150-byte `Node` struct budget (scene-graph/spec.md line 302,
+    /// RFC 0001 §8): a bare new `Option<String>`-sized field here ties
+    /// `HitRegionNode`'s size with `TextMarkdownNode`'s and forces the
+    /// `NodeData` enum discriminant out of its niche, growing `Node` past
+    /// budget (verified empirically — see hud-se6hs).
     #[serde(default)]
-    pub tooltip: Option<String>,
+    pub tooltip: Box<Option<String>>,
     /// Per-event-type delivery filter.  All events enabled by default.
     #[serde(default)]
     pub event_mask: EventMask,
@@ -873,6 +880,23 @@ pub struct HitRegionNode {
     /// Source: spec §4.1 (hud-5jbra.4 / hud-qwqxy).
     #[serde(default)]
     pub accepts_composer_input: bool,
+    /// Per-composer override for the empty-draft placeholder hint rendered by
+    /// the compositor (`portal.composer.placeholder_color`, hud-evk0j).
+    /// Ignored when `accepts_composer_input` is `false`.
+    ///
+    /// - `None` — inherit the runtime's built-in default hint for this
+    ///   composer's type (e.g. the portal chat composer's "Type a message…" —
+    ///   `COMPOSER_DEFAULT_PLACEHOLDER` in `tze_hud_runtime`).
+    /// - `Some("")` — explicit opt-out: never show a placeholder for this
+    ///   composer, even while the draft is empty.
+    /// - `Some(text)` — show this exact hint instead of the runtime default.
+    ///
+    /// Boxed alongside `tooltip` above to stay within the `Node` struct's
+    /// 150-byte budget.
+    ///
+    /// Follow-up to hud-evk0j (source: hud-se6hs).
+    #[serde(default)]
+    pub composer_placeholder: Box<Option<String>>,
     /// ARIA-compatible accessibility metadata.
     ///
     /// Boxed to keep `HitRegionNode` (and therefore `Node`) within the
@@ -965,8 +989,9 @@ impl Default for HitRegionNode {
             release_on_up: false,
             accepts_composer_input: false,
             cursor_style: CursorStyle::Default,
-            tooltip: None,
+            tooltip: Box::default(),
             event_mask: EventMask::default(),
+            composer_placeholder: Box::default(),
             accessibility: Box::default(),
             local_style: Box::default(),
         }
