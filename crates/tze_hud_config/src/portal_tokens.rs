@@ -47,6 +47,8 @@
 //! | `portal.unread_indicator.color` | unread indicator | ambient unread-output count color (RGBA hex) |
 //! | `portal.awaiting_reply.color` | awaiting-reply indicator | ambient question/awaiting-reply cue color (RGBA hex) |
 //! | `portal.connecting_marker.color` | connecting marker | never-connected connecting cue color, distinct from the degraded/stale marker (RGBA hex) |
+//! | `portal.activity_cue.color` | activity cue | ambient header "agent is writing" cue derived from observed appends (RGBA hex) |
+//! | `portal.streaming_cursor.color` | streaming cursor | ambient tail live-writing cursor derived from observed appends (RGBA hex) |
 //! | `portal.lifecycle.active_color` | lifecycle affordance | accent for `Active` (RGBA hex) |
 //! | `portal.lifecycle.attached_color` | lifecycle affordance | accent for `Attached`/ready (RGBA hex) |
 //! | `portal.lifecycle.attention_color` | lifecycle affordance | accent for `Degraded`/`HudUnavailable` (RGBA hex) |
@@ -199,6 +201,28 @@ pub const PORTAL_TOKEN_EMPTY_STATE_COLOR: &str = "portal.empty_state.color";
 /// failing one. Ambient by design — connecting is a quiet, non-attention signal,
 /// so it matches the muted-tone convention of the other quiet-signal tokens.
 pub const PORTAL_TOKEN_CONNECTING_MARKER_COLOR: &str = "portal.connecting_marker.color";
+
+// ── Agent activity / streaming-cursor tokens ─────────────────────────────────
+//
+// Ambient cue that the owning adapter is actively appending to the transcript
+// (portal-chat-grade-affordances §Agent Activity and Streaming Cue, hud-g1ena.5).
+// DERIVED from observed append activity (`appended_at_wall_us` vs render-time
+// now) — never from a separate adapter "typing" protocol message. Strictly
+// subordinate to the ambient attention model: continuous streaming never
+// re-escalates attention, and the cue quiesces promptly when appends stop.
+
+/// Color of the ambient header activity cue shown while the agent is actively
+/// appending (a compact typing-style indicator in the portal header). Muted by
+/// design — a presence engine surfaces a quiet "writing" hint, never a loud
+/// notification. Ambient tone, distinct from the amber (stale/at-capacity),
+/// slate (unread/dim), periwinkle (awaiting-reply), sage (empty), and cyan
+/// (connecting) signal tones so "writing" carries its own quiet meaning.
+pub const PORTAL_TOKEN_ACTIVITY_CUE_COLOR: &str = "portal.activity_cue.color";
+/// Color of the ambient streaming cursor painted at the transcript tail while
+/// the agent is actively appending. Same activity semantic as
+/// `portal.activity_cue.color`; kept as a separate key so a profile can style
+/// the tail live-writing treatment independently of the header cue.
+pub const PORTAL_TOKEN_STREAMING_CURSOR_COLOR: &str = "portal.streaming_cursor.color";
 
 // ── Lifecycle affordance tokens (cooperative-hud-projection §lifecycle) ───────
 //
@@ -421,6 +445,18 @@ mod defaults {
     /// its own quiet meaning.
     pub const CONNECTING_MARKER_COLOR: &str = "#4C93A6";
 
+    /// Muted lavender-grey — a calm "writing" hue for the ambient agent-activity
+    /// header cue. Distinct from the amber (stale/at-capacity), slate
+    /// (unread/dim), periwinkle (awaiting-reply), sage (empty), and cyan
+    /// (connecting) tones so an active-append signal reads as its own quiet
+    /// meaning rather than colliding with an existing one, and deliberately
+    /// low-contrast so continuous streaming never escalates attention.
+    pub const ACTIVITY_CUE_COLOR: &str = "#8A8FB0";
+    /// Muted lavender — the transcript-tail streaming cursor. Shares the activity
+    /// family with `ACTIVITY_CUE_COLOR` but a hair brighter so the tail cursor is
+    /// perceptible as "live writing here" while staying ambient.
+    pub const STREAMING_CURSOR_COLOR: &str = "#A6ABC8";
+
     // Lifecycle affordance accents — ambient, mutually distinct (see token-key
     // docs above). Active: calm teal-green; attached/ready: soft blue;
     // attention: amber (distinct from the stale marker); inactive: muted slate.
@@ -566,6 +602,16 @@ pub struct PortalPartTokens {
     /// `stale_marker_color` so a starting-up portal does not read as failing.
     pub connecting_marker_color: Rgba,
 
+    // Agent activity / streaming cursor (portal-chat-grade-affordances
+    // §Agent Activity and Streaming Cue, hud-g1ena.5). Ambient cues derived from
+    // observed appends; the adapter never hardcodes these hues.
+    /// Color of the ambient header activity cue shown while the agent is actively
+    /// appending (compact typing-style header indicator).
+    pub activity_cue_color: Rgba,
+    /// Color of the ambient transcript-tail streaming cursor shown while the
+    /// agent is actively appending.
+    pub streaming_cursor_color: Rgba,
+
     // Lifecycle affordance accents (cooperative-hud-projection §lifecycle).
     // Each maps a `ProjectionLifecycleState` group onto an ambient accent; the
     // adapter never hardcodes a lifecycle color.
@@ -695,6 +741,11 @@ impl Default for PortalPartTokens {
                 .expect("empty state color default is valid hex"),
             connecting_marker_color: parse_color_hex(defaults::CONNECTING_MARKER_COLOR)
                 .expect("connecting marker color default is valid hex"),
+
+            activity_cue_color: parse_color_hex(defaults::ACTIVITY_CUE_COLOR)
+                .expect("activity cue color default is valid hex"),
+            streaming_cursor_color: parse_color_hex(defaults::STREAMING_CURSOR_COLOR)
+                .expect("streaming cursor color default is valid hex"),
 
             lifecycle_active_color: parse_color_hex(defaults::LIFECYCLE_ACTIVE_COLOR)
                 .expect("lifecycle active color default is valid hex"),
@@ -936,6 +987,15 @@ pub fn resolve_portal_tokens(token_map: &DesignTokenMap) -> PortalPartTokens {
             defaults.connecting_marker_color
         ),
 
+        activity_cue_color: resolve_color!(
+            PORTAL_TOKEN_ACTIVITY_CUE_COLOR,
+            defaults.activity_cue_color
+        ),
+        streaming_cursor_color: resolve_color!(
+            PORTAL_TOKEN_STREAMING_CURSOR_COLOR,
+            defaults.streaming_cursor_color
+        ),
+
         lifecycle_active_color: resolve_color!(
             PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR,
             defaults.lifecycle_active_color
@@ -1131,6 +1191,14 @@ const PORTAL_TOKEN_DEFAULT_STRINGS: &[(&str, &str)] = &[
     (
         PORTAL_TOKEN_CONNECTING_MARKER_COLOR,
         defaults::CONNECTING_MARKER_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_ACTIVITY_CUE_COLOR,
+        defaults::ACTIVITY_CUE_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_STREAMING_CURSOR_COLOR,
+        defaults::STREAMING_CURSOR_COLOR,
     ),
     (
         PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR,
@@ -2157,7 +2225,7 @@ mod tests {
     #[test]
     fn resolve_portal_token_strings_covers_every_key() {
         // Number of distinct portal token keys resolved by resolve_portal_tokens.
-        const EXPECTED_KEYS: usize = 50;
+        const EXPECTED_KEYS: usize = 52;
         assert_eq!(
             PORTAL_TOKEN_DEFAULT_STRINGS.len(),
             EXPECTED_KEYS,

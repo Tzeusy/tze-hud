@@ -77,6 +77,9 @@ PORTAL_TOKEN_AWAITING_REPLY_COLOR = "portal.awaiting_reply.color"
 PORTAL_TOKEN_EMPTY_STATE_COLOR = "portal.empty_state.color"
 PORTAL_TOKEN_CONNECTING_MARKER_COLOR = "portal.connecting_marker.color"
 
+PORTAL_TOKEN_ACTIVITY_CUE_COLOR = "portal.activity_cue.color"
+PORTAL_TOKEN_STREAMING_CURSOR_COLOR = "portal.streaming_cursor.color"
+
 PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR = "portal.lifecycle.active_color"
 PORTAL_TOKEN_LIFECYCLE_ATTACHED_COLOR = "portal.lifecycle.attached_color"
 PORTAL_TOKEN_LIFECYCLE_ATTENTION_COLOR = "portal.lifecycle.attention_color"
@@ -141,6 +144,8 @@ _RUST_DEFAULTS: dict[str, str] = {
     "AWAITING_REPLY_COLOR": "#7B85C4",
     "EMPTY_STATE_COLOR": "#5F8A78",
     "CONNECTING_MARKER_COLOR": "#4C93A6",
+    "ACTIVITY_CUE_COLOR": "#8A8FB0",
+    "STREAMING_CURSOR_COLOR": "#A6ABC8",
     "LIFECYCLE_ACTIVE_COLOR": "#4FA88A",
     "LIFECYCLE_ATTACHED_COLOR": "#5A8FC0",
     "LIFECYCLE_ATTENTION_COLOR": "#C28A3D",
@@ -199,6 +204,8 @@ CANONICAL_DEFAULTS: dict[str, str] = {
     PORTAL_TOKEN_AWAITING_REPLY_COLOR: _RUST_DEFAULTS["AWAITING_REPLY_COLOR"],
     PORTAL_TOKEN_EMPTY_STATE_COLOR: _RUST_DEFAULTS["EMPTY_STATE_COLOR"],
     PORTAL_TOKEN_CONNECTING_MARKER_COLOR: _RUST_DEFAULTS["CONNECTING_MARKER_COLOR"],
+    PORTAL_TOKEN_ACTIVITY_CUE_COLOR: _RUST_DEFAULTS["ACTIVITY_CUE_COLOR"],
+    PORTAL_TOKEN_STREAMING_CURSOR_COLOR: _RUST_DEFAULTS["STREAMING_CURSOR_COLOR"],
     PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR: _RUST_DEFAULTS["LIFECYCLE_ACTIVE_COLOR"],
     PORTAL_TOKEN_LIFECYCLE_ATTACHED_COLOR: _RUST_DEFAULTS["LIFECYCLE_ATTACHED_COLOR"],
     PORTAL_TOKEN_LIFECYCLE_ATTENTION_COLOR: _RUST_DEFAULTS["LIFECYCLE_ATTENTION_COLOR"],
@@ -314,6 +321,8 @@ class PortalPartTokens:
     awaiting_reply_color: Rgba
     empty_state_color: Rgba
     connecting_marker_color: Rgba
+    activity_cue_color: Rgba
+    streaming_cursor_color: Rgba
     lifecycle_active_color: Rgba
     lifecycle_attached_color: Rgba
     lifecycle_attention_color: Rgba
@@ -390,6 +399,8 @@ def resolve_portal_tokens(overrides: Optional[dict[str, str]] = None) -> PortalP
         awaiting_reply_color=_color(tm, PORTAL_TOKEN_AWAITING_REPLY_COLOR),
         empty_state_color=_color(tm, PORTAL_TOKEN_EMPTY_STATE_COLOR),
         connecting_marker_color=_color(tm, PORTAL_TOKEN_CONNECTING_MARKER_COLOR),
+        activity_cue_color=_color(tm, PORTAL_TOKEN_ACTIVITY_CUE_COLOR),
+        streaming_cursor_color=_color(tm, PORTAL_TOKEN_STREAMING_CURSOR_COLOR),
         lifecycle_active_color=_color(tm, PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR),
         lifecycle_attached_color=_color(tm, PORTAL_TOKEN_LIFECYCLE_ATTACHED_COLOR),
         lifecycle_attention_color=_color(tm, PORTAL_TOKEN_LIFECYCLE_ATTENTION_COLOR),
