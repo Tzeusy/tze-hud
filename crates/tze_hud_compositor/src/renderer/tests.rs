@@ -13093,6 +13093,86 @@ fn input_history_block_top_slides_with_scroll_offset() {
     );
 }
 
+/// hud-3nus3: the input-history band is placed on the side of the composer box
+/// AWAY from its anchored edge, so a viewer's submissions always have on-pane
+/// room to paint. This is the pure geometry proof for the live report "input
+/// tracked, nothing rendered" on the tzehouse exemplar (`portal.composer.anchor
+/// = top`): with a top-pinned composer box the old band-above-box collapsed to
+/// zero height and the whole history silently failed to paint. No rasterizer, no
+/// GPU — asserts the band/block geometry directly.
+#[test]
+fn input_history_band_layout_places_history_below_a_top_anchored_composer() {
+    // A tall composer region (the exemplar LEFT input pane) with a one-line box.
+    let region = Rect::new(0.0, 0.0, 400.0, 300.0);
+    let box_height = 24.0_f32;
+    let block_height = 40.0_f32;
+
+    // Bottom anchor (default): box rests on the region bottom; the band is the
+    // space ABOVE it and the block bottom-aligns just above the box — byte-for-byte
+    // the pre-fix behavior (band_top == region top, band_bottom == box top).
+    let bottom_box = Rect::new(0.0, region.height - box_height, region.width, box_height);
+    let (bt_top, bt_bottom, bt_block_top) = tile_render::input_history_band_layout(
+        ComposerVerticalAnchor::Bottom,
+        region,
+        bottom_box,
+        block_height,
+        None,
+    )
+    .expect("bottom-anchored band has positive height");
+    assert_eq!(
+        bt_top, region.y,
+        "bottom-anchor band starts at the region top"
+    );
+    assert_eq!(
+        bt_bottom, bottom_box.y,
+        "bottom-anchor band ends at the box top"
+    );
+    assert!(
+        (bt_block_top - (bt_bottom - block_height)).abs() < 0.01,
+        "bottom-anchor history bottom-aligns just above the box"
+    );
+
+    // Top anchor (exemplar two-pane input pane): box pins to the region TOP, so the
+    // OLD band (`[region.y, draft_box.y]`) would be zero-height and paint nothing.
+    // The band must instead open BELOW the box, with the block flowing downward
+    // (top-aligned) beneath it — this is the fix.
+    let top_box = Rect::new(0.0, region.y, region.width, box_height);
+    assert!(
+        top_box.y - region.y <= 0.0,
+        "precondition: the old band-above-box is degenerate for a top-pinned box"
+    );
+    let (tp_top, tp_bottom, tp_block_top) = tile_render::input_history_band_layout(
+        ComposerVerticalAnchor::Top,
+        region,
+        top_box,
+        block_height,
+        None,
+    )
+    .expect("top-anchored band must have positive height (the hud-3nus3 fix)");
+    assert!(
+        (tp_top - (top_box.y + top_box.height)).abs() < 0.01,
+        "top-anchor band starts at the box bottom, got {tp_top}"
+    );
+    assert!(
+        (tp_bottom - (region.y + region.height)).abs() < 0.01,
+        "top-anchor band ends at the region bottom, got {tp_bottom}"
+    );
+    assert!(
+        tp_bottom - tp_top > 0.0,
+        "top-anchor band has room to paint submitted history"
+    );
+    assert!(
+        (tp_block_top - tp_top).abs() < 0.01,
+        "top-anchor history flows downward from just beneath the box (top-aligned), got {tp_block_top}"
+    );
+    // The first history line sits BELOW the composer box — "beneath the composer",
+    // exactly the submit event's expected visual.
+    assert!(
+        tp_block_top >= top_box.y + top_box.height,
+        "top-anchor history paints beneath the composer box"
+    );
+}
+
 /// hud-acfvp end-to-end: the rendered input-history block honors the input tile's
 /// scroll offset. With no scroll config the block pins to the tail; registering a
 /// vertical scroll config and setting the offset to 0 slides the (overflowing)
