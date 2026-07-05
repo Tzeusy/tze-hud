@@ -290,6 +290,24 @@ impl WinitApp {
         }
     }
 
+    /// Snap the input-pane history's scroll offset back to the tail
+    /// (hud-qbcp8).
+    ///
+    /// Called on every accepted composer keystroke: unlike ordinary content
+    /// growth (which deliberately leaves a `ScrolledBack` viewport alone, spec
+    /// §3.3), a viewer who is actively typing into their own composer should
+    /// not be stranded scrolled away from their own live draft. No-op (and no
+    /// scene write) once the tile is already at the tail.
+    pub(super) fn reset_input_history_scroll_to_tail(&mut self, tile_id: tze_hud_scene::SceneId) {
+        if let Ok(state) = self.state.shared_state.try_lock()
+            && let Ok(mut scene) = state.scene.try_lock()
+        {
+            self.state
+                .input_processor
+                .reset_tile_scroll_to_tail(tile_id, &mut scene);
+        }
+    }
+
     // ── Keyboard drain helpers ────────────────────────────────────────────
 
     /// Translate a raw key-down event through the `KeyboardProcessor`, log it,
@@ -554,6 +572,10 @@ impl WinitApp {
                 }
                 ComposerDeliveryContextLookup::Unavailable => None,
             };
+            // Captured before `delivery_context` is moved into
+            // `route_and_deliver_composer_batch` below (hud-qbcp8: input-
+            // history reset-to-tail needs the tile id after that move).
+            let history_tile_id = delivery_context.as_ref().map(|c| c.tile_id);
             // Soft-wrap vertical caret movement (hud-21o6x): for ArrowUp/ArrowDown,
             // hand the input layer the compositor's latest wrapped-line layout so
             // the caret can step between visual rows. Read the reverse channel only
@@ -584,13 +606,30 @@ impl WinitApp {
             // we can suppress the push below (clear must win over push; hud-r3ax6).
             let mut key_down_is_terminal = false;
             if let Some(b) = batch {
-                key_down_is_terminal = b.cancel.is_some() || b.submission.is_some();
+                let is_submission = b.submission.is_some();
+                key_down_is_terminal = b.cancel.is_some() || is_submission;
                 if let Some(context) = delivery_context {
                     self.route_and_deliver_composer_batch(context, b);
                 }
                 if key_down_is_terminal {
                     // Submit or cancel: clear the local echo overlay.
                     self.clear_local_composer_echo();
+                }
+                // hud-npcdf: a submission sets `key_down_is_terminal`, so the
+                // reset-to-tail in the `!key_down_is_terminal` branch below is
+                // skipped — and a ProjectionAuthority-attached tile echoes its own
+                // submission async via `portal_projection_driver`'s
+                // `notify_tile_content_appended`, which honors `ScrolledBack` and
+                // does not reset. A scrolled-back viewer's just-submitted reply
+                // would then stay off-screen. Snap the input-pane history back to
+                // the tail on SUBMIT (not cancel) so the reply the viewer just
+                // sent is revealed. The raw-tile path already resets inside
+                // `append_raw_tile_viewer_echo`; `reset_input_history_scroll_to_tail`
+                // is idempotent, so the redundant call there is harmless.
+                if is_submission {
+                    if let Some(tile_id) = history_tile_id {
+                        self.reset_input_history_scroll_to_tail(tile_id);
+                    }
                 }
             }
             if consumed {
@@ -602,6 +641,11 @@ impl WinitApp {
                 // Guard: do NOT push after a terminal batch — clear must win.
                 if !key_down_is_terminal {
                     self.push_local_composer_echo(composer_input_started);
+                    // hud-qbcp8: typing should not leave the input-pane history
+                    // scrolled away from the viewer's own live draft.
+                    if let Some(tile_id) = history_tile_id {
+                        self.reset_input_history_scroll_to_tail(tile_id);
+                    }
                 }
                 return;
             }
@@ -1177,6 +1221,10 @@ impl WinitApp {
                 }
                 ComposerDeliveryContextLookup::Unavailable => None,
             };
+            // Captured before `delivery_context` is moved into
+            // `route_and_deliver_composer_batch` below (hud-qbcp8: input-
+            // history reset-to-tail needs the tile id after that move).
+            let history_tile_id = delivery_context.as_ref().map(|c| c.tile_id);
             // Capture the input-started-at instant for local-ack latency
             // measurement (hud-r3ax6 / hud-o9ybl).
             let composer_input_started = Instant::now();
@@ -1188,13 +1236,26 @@ impl WinitApp {
             // so we can suppress the push below (clear must win; hud-r3ax6).
             let mut char_is_terminal = false;
             if let Some(b) = batch {
-                char_is_terminal = b.cancel.is_some() || b.submission.is_some();
+                let is_submission = b.submission.is_some();
+                char_is_terminal = b.cancel.is_some() || is_submission;
                 if char_is_terminal {
                     // Submit or cancel: clear the local echo overlay.
                     self.clear_local_composer_echo();
                 }
                 if let Some(context) = delivery_context {
                     self.route_and_deliver_composer_batch(context, b);
+                }
+                // hud-npcdf: mirror the KeyDown submit-terminal reset so a
+                // submission arriving on the character path (e.g. an
+                // authority-attached tile) also snaps the input-pane history back
+                // to the tail — the async authority echo honors `ScrolledBack` and
+                // would otherwise strand the just-submitted reply off-screen.
+                // Idempotent alongside the raw-tile reset in
+                // `append_raw_tile_viewer_echo`.
+                if is_submission {
+                    if let Some(tile_id) = history_tile_id {
+                        self.reset_input_history_scroll_to_tail(tile_id);
+                    }
                 }
             }
             // Truncate for debug logs: raw.character carries clipboard text and
@@ -1214,6 +1275,11 @@ impl WinitApp {
                 // Guard: do NOT push after a terminal batch — clear must win.
                 if !char_is_terminal {
                     self.push_local_composer_echo(composer_input_started);
+                    // hud-qbcp8: typing should not leave the input-pane history
+                    // scrolled away from the viewer's own live draft.
+                    if let Some(tile_id) = history_tile_id {
+                        self.reset_input_history_scroll_to_tail(tile_id);
+                    }
                 }
             } else {
                 // EditOutcome::Unchanged: the draft was not mutated (e.g. the
