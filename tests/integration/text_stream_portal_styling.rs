@@ -848,15 +848,22 @@ fn composer_tokens_propagate_through_canonical_conversion() {
     );
 }
 
-/// Verifies that the published `NodeProto` output from `render_portal_message`
-/// contains the draft text with a `▌` caret marker when a draft is active.
+/// Verifies the §4.1 local-first draft contract at the projection layer: after
+/// `apply_draft_notification` delivers a state-stream update, the adapter caches
+/// the draft text + caret byte offset in its `ComposerDisplayState` immediately,
+/// with no remote roundtrip, and the next `render_portal_message` reflects the
+/// active-draft status.
 ///
-/// This is the §4.1 local-first test: after `apply_draft_notification` delivers
-/// a state-stream update, the next `render_portal_message` reflects the draft
-/// immediately without any remote roundtrip.
-///
-/// Also verifies the caret is present at the correct position and the content
-/// differs from the no-draft baseline.
+/// Layering note (hud-f6zfa / hud-2zsbf): the live draft text + `▌` caret glyph
+/// are rendered exclusively by the compositor's bottom-pinned input strip
+/// (`composer_input_box` → `composer_display_text_blink`), which is the single
+/// source of truth for the draft echo. The portal NodeProto markdown deliberately
+/// does NOT embed the draft glyphs (embedding them there produced a second,
+/// misaligned composer copy mid-transcript). So this test asserts the caret at the
+/// layer that owns it now — the adapter's `ComposerDisplayState` (text + cursor),
+/// which the compositor renders verbatim — rather than scanning the NodeProto
+/// markdown for a `▌` that no longer belongs there. The composer status line is
+/// verified to flip `ready → composing` as the draft goes active.
 #[test]
 fn portal_node_proto_includes_draft_text_and_caret_after_notification() {
     use std::collections::HashMap;
@@ -879,8 +886,25 @@ fn portal_node_proto_includes_draft_text_and_caret_after_notification() {
     );
     adapter.record_created_tile(fake_tile_id);
 
-    // ── Baseline: no draft active → composer line shows "composer: ready" ──
+    // Compose the caret string exactly as the compositor's bottom input strip
+    // does (`composer_display_text_blink`): insert the `▌` glyph at the cursor
+    // byte offset. This is the documented `ComposerDisplayState` contract, so the
+    // projection layer is verified against the same rendering the compositor
+    // applies verbatim, without reaching into the compositor's `pub(crate)` helper.
+    let caret_render = |display: &tze_hud_projection::resident_grpc::ComposerDisplayState| {
+        format!(
+            "{}▌{}",
+            &display.text[..display.cursor],
+            &display.text[display.cursor..]
+        )
+    };
 
+    // ── Baseline: no draft active → no cached composer state, status "ready" ──
+
+    assert!(
+        adapter.composer_display().is_none(),
+        "baseline: no draft notification delivered yet → composer_display() must be None"
+    );
     let baseline_cmd = adapter
         .render_portal_message(&expanded_state, 1, 0)
         .expect("baseline render must succeed");
@@ -891,7 +915,8 @@ fn portal_node_proto_includes_draft_text_and_caret_after_notification() {
     );
     assert!(
         !baseline_content.contains("▌"),
-        "baseline must not contain caret marker before any draft notification"
+        "the node markdown must never carry the caret glyph — the bottom input \
+         strip owns the draft echo (hud-f6zfa)"
     );
 
     // ── Deliver a draft notification ──
@@ -911,27 +936,43 @@ fn portal_node_proto_includes_draft_text_and_caret_after_notification() {
         ResidentGrpcDraftCommandKind::UpdateComposerDisplay
     );
 
-    // ── After notification: NodeProto content must include draft text + caret ──
+    // ── After notification: draft state cached locally, caret at end ──
 
+    let display = adapter
+        .composer_display()
+        .expect("draft notification must populate composer_display() (§4.1 local-first)");
+    assert_eq!(
+        display.text, "hello",
+        "cached draft text must match notification"
+    );
+    assert_eq!(
+        display.cursor, 5,
+        "cached caret byte offset must match notification"
+    );
+    assert!(!display.at_capacity, "notification was not at capacity");
+    assert_eq!(
+        caret_render(display),
+        "hello▌",
+        "caret must render at the end of 'hello' from the cached cursor offset"
+    );
+
+    // The node markdown flips ready → composing (the draft glyphs live in the
+    // bottom strip, not here), and still never carries the caret glyph.
     let draft_cmd = adapter
         .render_portal_message(&expanded_state, 2, 0)
         .expect("draft render must succeed");
     let draft_content = extract_text_markdown_content(draft_cmd);
-
-    // Caret marker must be present
     assert!(
-        draft_content.contains("▌"),
-        "draft render must contain caret marker ▌; got:\n{draft_content}"
+        draft_content.contains("composer: composing"),
+        "active draft must flip the composer status line to 'composing'; got:\n{draft_content}"
     );
-    // Draft text must appear before the caret
-    assert!(
-        draft_content.contains("hello▌"),
-        "draft text 'hello' must appear before caret at end; got:\n{draft_content}"
-    );
-    // Must not show the generic "composer: ready" placeholder
     assert!(
         !draft_content.contains("composer: ready"),
-        "active draft must replace 'composer: ready' placeholder"
+        "active draft must replace the 'composer: ready' placeholder"
+    );
+    assert!(
+        !draft_content.contains("▌"),
+        "the node markdown must never carry the caret glyph (hud-f6zfa)"
     );
 
     // ── Verify caret is at mid-string cursor position ──
@@ -945,14 +986,18 @@ fn portal_node_proto_includes_draft_text_and_caret_after_notification() {
     };
     adapter.apply_draft_notification(&mid_notification);
 
-    let mid_cmd = adapter
-        .render_portal_message(&expanded_state, 3, 0)
-        .expect("mid-cursor render must succeed");
-    let mid_content = extract_text_markdown_content(mid_cmd);
-
-    assert!(
-        mid_content.contains("hello▌ world"),
-        "caret must appear between 'hello' and ' world' at byte offset 5; got:\n{mid_content}"
+    let mid_display = adapter
+        .composer_display()
+        .expect("mid-cursor notification must populate composer_display()");
+    assert_eq!(mid_display.text, "hello world");
+    assert_eq!(
+        mid_display.cursor, 5,
+        "caret byte offset must sit after 'hello'"
+    );
+    assert_eq!(
+        caret_render(mid_display),
+        "hello▌ world",
+        "caret must render between 'hello' and ' world' at byte offset 5"
     );
 }
 
@@ -1022,28 +1067,31 @@ fn portal_node_proto_at_capacity_indicator_uses_composer_token() {
         "at-capacity content must contain text-visible '[!]' prefix; got:\n{text_md_content}"
     );
 
-    // Token-driven color run: must have a color_run with the injected blue sentinel
-    assert!(
-        !color_runs.is_empty(),
-        "at-capacity NodeProto must have at least one color_run carrying the token color"
-    );
-    let cap_run = &color_runs[0];
-    let run_color = cap_run
-        .color
-        .as_ref()
-        .expect("at-capacity color_run must have a color");
-    assert!(
-        run_color.b > 0.9,
-        "at-capacity color_run color.b must be ~1.0 (pure blue token sentinel); got {b}",
-        b = run_color.b
-    );
-    assert!(
-        run_color.r < 0.1,
-        "at-capacity color_run color.r must be ~0.0 (pure blue token sentinel); got {r}",
-        r = run_color.r
+    // Token-driven color run: some color_run must carry the injected pure-blue
+    // at-capacity sentinel. We identify it BY COLOR rather than by position: the
+    // published `color_runs` also carry unrelated ambient sentinels (e.g. the
+    // lifecycle-affordance run added in hud-9v3t6, which for this Active state is
+    // the teal `#4FA88A` — high green), all sharing the zero-length `[0..0]` span.
+    // Matching the composer color proves the token propagated end-to-end (override
+    // → resolve_tokens → PortalVisualTokens → adapter → rendered sentinel): had it
+    // NOT propagated, this run would carry the default copper `#B87333`, not blue.
+    let is_at_capacity_blue = |run: &tze_hud_protocol::proto::TextColorRunProto| {
+        run.color
+            .as_ref()
+            .is_some_and(|c| c.b > 0.9 && c.r < 0.1 && c.g < 0.1)
+    };
+    let blue_runs = color_runs.iter().filter(|r| is_at_capacity_blue(r)).count();
+    assert_eq!(
+        blue_runs,
+        1,
+        "at-capacity NodeProto must carry exactly one color_run with the injected \
+         pure-blue token sentinel; got {blue_runs} among {total} run(s): {color_runs:?}",
+        total = color_runs.len()
     );
 
-    // ── Verify that a non-at-capacity draft produces no color_runs ──
+    // ── Verify that a non-at-capacity draft produces no composer color_run ──
+    // (Ambient runs like the lifecycle sentinel may still be present — this only
+    // asserts the composer's at-capacity blue run is gone.)
     let normal_notification = AdapterDraftNotification {
         text: "normal text".to_string(),
         cursor: 11,
@@ -1058,9 +1106,9 @@ fn portal_node_proto_at_capacity_indicator_uses_composer_token() {
         .expect("normal render must succeed");
     let (_, runs_normal) = extract_text_markdown_with_runs(cmd_normal);
     assert!(
-        runs_normal.is_empty(),
-        "non-at-capacity draft must produce no color_runs; got {} runs",
-        runs_normal.len()
+        !runs_normal.iter().any(is_at_capacity_blue),
+        "non-at-capacity draft must not emit the composer at-capacity color_run; \
+         got: {runs_normal:?}"
     );
 }
 
