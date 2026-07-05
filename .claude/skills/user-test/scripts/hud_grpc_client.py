@@ -57,7 +57,7 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _SCRIPT_DIR)
 sys.path.insert(0, os.path.join(_SCRIPT_DIR, "proto_gen"))
 
-from proto_gen import session_pb2, session_pb2_grpc, types_pb2
+from proto_gen import session_pb2, session_pb2_grpc, types_pb2  # noqa: E402  # import must follow sys.path setup above
 
 
 # ---------------------------------------------------------------------------
@@ -922,8 +922,8 @@ class HudClient:
         await self._send(
             lease_release=session_pb2.LeaseRelease(lease_id=lease_id)
         )
-        resp = await self._wait_for("lease_response", timeout=5.0)
-        print(f"  [grpc] Lease released", flush=True)
+        await self._wait_for("lease_response", timeout=5.0)
+        print("  [grpc] Lease released", flush=True)
 
     async def open_media_ingress(
         self,
@@ -1412,7 +1412,7 @@ class HudClient:
                 )
             ],
         )
-        print(f"  [grpc] Tile root set", flush=True)
+        print("  [grpc] Tile root set", flush=True)
 
     async def add_node(
         self,
