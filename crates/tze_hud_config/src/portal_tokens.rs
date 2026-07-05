@@ -2056,7 +2056,10 @@ mod tests {
         // Mirror the tzehouse `[design_tokens]` table: portal keys are set, but
         // `portal.frame.background` is deliberately absent.
         cfg.insert(PORTAL_TOKEN_FRAME_OPACITY.to_string(), "0.98".to_string());
-        cfg.insert(PORTAL_TOKEN_FOCUS_RING_COLOR.to_string(), "#00000000".to_string());
+        cfg.insert(
+            PORTAL_TOKEN_FOCUS_RING_COLOR.to_string(),
+            "#00000000".to_string(),
+        );
         cfg.insert("portal.composer.anchor".to_string(), "top".to_string());
         assert!(
             !cfg.contains_key(PORTAL_TOKEN_FRAME_BACKGROUND),
@@ -2068,17 +2071,23 @@ mod tests {
         // The unset frame background resolves to the single-source-of-truth
         // portal default (the reviewed off-black), not the old grey slate.
         assert_eq!(
-            resolved.get(PORTAL_TOKEN_FRAME_BACKGROUND).map(String::as_str),
+            resolved
+                .get(PORTAL_TOKEN_FRAME_BACKGROUND)
+                .map(String::as_str),
             Some(defaults::FRAME_BACKGROUND),
             "unset portal.frame.background must resolve to the portal default"
         );
         assert_eq!(
-            resolved.get(PORTAL_TOKEN_FRAME_BACKGROUND).map(String::as_str),
+            resolved
+                .get(PORTAL_TOKEN_FRAME_BACKGROUND)
+                .map(String::as_str),
             Some("#0A0D11"),
             "the resolved frame background must be the reviewed opaque off-black"
         );
         assert_ne!(
-            resolved.get(PORTAL_TOKEN_FRAME_BACKGROUND).map(String::as_str),
+            resolved
+                .get(PORTAL_TOKEN_FRAME_BACKGROUND)
+                .map(String::as_str),
             Some("#111720"),
             "the resolved frame background must NOT be the grey slate that caused hud-a328c"
         );
