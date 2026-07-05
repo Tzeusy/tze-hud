@@ -440,6 +440,51 @@ fn delete_tile_removes_tile_and_nodes() {
     );
 }
 
+// ─ Ambient unread count per tile (hud-g1ena.3) ───────────────────────────
+
+#[test]
+fn tile_unread_count_set_get_and_prune() {
+    let mut scene = make_scene();
+    let tab_id = scene.create_tab("Main", 0).unwrap();
+    let lease_id = scene.grant_lease(
+        "agent",
+        300_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "agent",
+            lease_id,
+            Rect::new(0.0, 0.0, 200.0, 200.0),
+            1,
+        )
+        .unwrap();
+
+    // Defaults to 0 (no entry) — no unread badge.
+    assert_eq!(scene.tile_unread_count(tile_id), 0);
+
+    scene.set_tile_unread_count(tile_id, 3);
+    assert_eq!(scene.tile_unread_count(tile_id), 3);
+
+    // Latest-wins; 0 clears the badge locally (viewer returned to the tail).
+    scene.set_tile_unread_count(tile_id, 0);
+    assert_eq!(scene.tile_unread_count(tile_id), 0);
+
+    // Set on a nonexistent tile is a no-op.
+    scene.set_tile_unread_count(SceneId::new(), 9);
+
+    // Pruned on tile deletion.
+    scene.set_tile_unread_count(tile_id, 5);
+    scene.delete_tile(tile_id, "agent").unwrap();
+    assert_eq!(
+        scene.tile_unread_count(tile_id),
+        0,
+        "unread count must be pruned when the tile is deleted"
+    );
+    assert!(!scene.overlay.tile_unread_counts.contains_key(&tile_id));
+}
+
 // ─ Opacity out of range (spec line 109) ──────────────────────────────────
 // WHEN an agent submits UpdateTileOpacity with opacity = 1.5
 // THEN the runtime MUST reject with InvalidFieldValue

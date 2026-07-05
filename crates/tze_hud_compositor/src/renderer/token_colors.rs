@@ -592,11 +592,45 @@ pub(super) fn resolve_jump_to_latest_tokens(
         .filter(|v| v.is_finite() && *v >= 0.0)
         .unwrap_or(defaults.margin_px);
 
+    // Unread-count badge text color: "portal.jump_to_latest.text_color" as
+    // #RRGGBB[AA] (hud-g1ena.3). `JumpToLatestTokens::text_*` carry STRAIGHT
+    // (non-linear) sRGB components — matching the struct's `color_*` default
+    // convention — so `parse_hex_color`'s linear output is converted back with
+    // `linear_to_srgb` before storage; the badge builder then encodes to sRGB u8
+    // by a plain scale (no curve).
+    let (text_r, text_g, text_b, text_a) =
+        if let Some(c) = resolve_token_color(token_map, "portal.jump_to_latest.text_color") {
+            (
+                linear_to_srgb(c.r),
+                linear_to_srgb(c.g),
+                linear_to_srgb(c.b),
+                c.a,
+            )
+        } else {
+            (
+                defaults.text_r,
+                defaults.text_g,
+                defaults.text_b,
+                defaults.text_a,
+            )
+        };
+
+    let text_size_px = token_map
+        .get("portal.jump_to_latest.text_size_px")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(defaults.text_size_px);
+
     tze_hud_input::JumpToLatestTokens {
         color_r,
         color_g,
         color_b,
         color_a,
+        text_r,
+        text_g,
+        text_b,
+        text_a,
+        text_size_px,
         width_px,
         height_px,
         margin_px,

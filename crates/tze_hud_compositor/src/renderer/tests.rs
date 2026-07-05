@@ -8942,6 +8942,93 @@ async fn test_collect_text_items_applies_tile_scroll_offset() {
     );
 }
 
+/// hud-g1ena.3: the jump-to-latest pill MAY carry the ambient unread count.
+/// `collect_jump_to_latest_badge_item` yields a centered, clipped count
+/// `TextItem` only when the pill would show (content overflows + scrolled away)
+/// AND the tile carries a nonzero, non-redacted unread count; it returns `None`
+/// at the tail or with nothing unread, so the badge appears and clears with the
+/// pill (local-first, no adapter round trip).
+#[tokio::test]
+async fn jump_to_latest_badge_gates_on_scroll_and_unread_count() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(480, 320).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+    let mut scene = SceneGraph::new(480.0, 320.0);
+    let tab_id = scene.create_tab("test", 0).unwrap();
+    let lease_id = scene.grant_lease("badge-test", 120_000, vec![]);
+
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "badge-test",
+            lease_id,
+            Rect::new(0.0, 0.0, 400.0, 200.0),
+            1,
+        )
+        .unwrap();
+
+    // Content overflows the 200px viewport → the pill (and badge) may show.
+    scene
+        .register_tile_scroll_config(
+            tile_id,
+            tze_hud_scene::types::TileScrollConfig {
+                scrollable_x: false,
+                scrollable_y: true,
+                content_width: None,
+                content_height: Some(800.0),
+            },
+        )
+        .unwrap();
+
+    let jtl_tokens =
+        super::token_colors::resolve_jump_to_latest_tokens(&std::collections::HashMap::new());
+    let si_tokens =
+        super::token_colors::resolve_scroll_indicator_tokens(&std::collections::HashMap::new());
+
+    let badge = |c: &Compositor, s: &SceneGraph| {
+        let tile = s.tiles.get(&tile_id).unwrap();
+        c.collect_jump_to_latest_badge_item(tile, s, &jtl_tokens, &si_tokens)
+    };
+
+    // Scrolled away from the tail, with unread content → badge renders.
+    scene.set_tile_follow_tail_at_tail(tile_id, false);
+    scene.set_tile_unread_count(tile_id, 3);
+    let item =
+        badge(&compositor, &scene).expect("scrolled-away tile with unread must show a badge");
+    assert_eq!(&*item.text, "3 unread", "badge must carry the unread count");
+    assert_eq!(
+        item.alignment,
+        tze_hud_scene::types::TextAlign::Center,
+        "count must be centered in the pill"
+    );
+    // Clip is confined to the pill (bottom-center of the tile), never the whole tile.
+    assert!(
+        item.clip_bounds_width <= 400.0 && item.clip_bounds_height <= 200.0,
+        "badge clip must stay within the pill"
+    );
+    assert!(
+        item.pixel_y >= 100.0,
+        "pill (and badge) sits in the lower half of the tile, got y={}",
+        item.pixel_y
+    );
+
+    // Nothing unread → plain pill, no badge (a presence engine renders nothing).
+    scene.set_tile_unread_count(tile_id, 0);
+    assert!(
+        badge(&compositor, &scene).is_none(),
+        "no badge when there is nothing unread"
+    );
+
+    // Back at the tail → the pill (and therefore the badge) is hidden, even with
+    // a stale nonzero count still recorded.
+    scene.set_tile_unread_count(tile_id, 5);
+    scene.set_tile_follow_tail_at_tail(tile_id, true);
+    assert!(
+        badge(&compositor, &scene).is_none(),
+        "no badge at the tail — it clears with the pill when the viewer returns"
+    );
+}
+
 // ─── Smooth scroll / animated follow-tail (hud-bq0gl.10) ─────────────────
 
 /// `display_tile_scroll_offset` snaps to the raw scene offset in headless mode

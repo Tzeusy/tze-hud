@@ -26,6 +26,19 @@
 //! are intentionally minimal for this first pass; the owner may refine
 //! sizing, iconography, or position in a follow-up.
 //!
+//! ## Ambient unread count (hud-g1ena.3)
+//!
+//! Per portal-chat-grade-affordances §Jump-to-Latest Affordance, the pill MAY
+//! carry the ambient unread count. When the tile has a nonzero, non-redacted
+//! unread-output count (plumbed onto the tile by the portal projection driver
+//! from `ProjectedPortalState::unread_output_count`), the compositor renders
+//! the [`jump_to_latest_badge_label`] centered in the pill. The count is a
+//! quiet, token-styled label — never a notification; it updates in place as the
+//! backlog grows and clears with the pill itself the instant the viewer returns
+//! to the tail (the pill is gated on `scrolled_back`). The count is presentation
+//! of runtime-owned state; no adapter cooperation is involved in showing it, and
+//! (as with the whole affordance) an adapter can never trigger the jump.
+//!
 //! ## Local feedback first
 //!
 //! The click handler calls `ScrollState::reset_to_tail` (via
@@ -42,6 +55,17 @@ pub struct JumpToLatestTokens {
     pub color_g: f32,
     pub color_b: f32,
     pub color_a: f32,
+    /// Ambient unread-count badge text color. STRAIGHT (non-linear) sRGB
+    /// components in [0.0, 1.0], matching the `color_*` default convention above;
+    /// the compositor encodes these to sRGB u8 by a plain scale. Used only when
+    /// the pill carries an unread count (hud-g1ena.3); the plain pill (no unread)
+    /// draws no text.
+    pub text_r: f32,
+    pub text_g: f32,
+    pub text_b: f32,
+    pub text_a: f32,
+    /// Font size (px) for the unread-count badge text.
+    pub text_size_px: f32,
     /// Pill width in pixels (clamped to the tile width at render time).
     pub width_px: f32,
     /// Pill height in pixels (clamped to the tile height at render time).
@@ -62,10 +86,44 @@ impl Default for JumpToLatestTokens {
             color_g: 0x55 as f32 / 255.0,
             color_b: 0x68 as f32 / 255.0,
             color_a: 0.9,
+            // #CBD5E0 — a light neutral that reads on the #4A5568 pill without
+            // the loudness of pure white; ambient, subordinate to content.
+            text_r: 0xCB as f32 / 255.0,
+            text_g: 0xD5 as f32 / 255.0,
+            text_b: 0xE0 as f32 / 255.0,
+            text_a: 0.95,
+            text_size_px: 13.0,
             width_px: 96.0,
             height_px: 24.0,
             margin_px: 8.0,
         }
+    }
+}
+
+/// Format the ambient unread-count badge the jump-to-latest pill MAY carry
+/// (portal-chat-grade-affordances §Jump-to-Latest Affordance: "The affordance
+/// MAY carry the ambient unread count").
+///
+/// The input is the runtime-owned aggregate unread-output count already tracked
+/// end-to-end (`ProjectedPortalState::unread_output_count`, plumbed onto the
+/// tile by the portal projection driver). It is `None` when the count is
+/// redacted by the authority's `reveal_unread` policy.
+///
+/// Returns `None` — render no badge, leaving the plain pill — when:
+/// - the count is redacted (`None`), or
+/// - there is nothing unread (`Some(0)`) — a presence engine renders nothing
+///   rather than a "0 unread" marker.
+///
+/// This matches the gating of the in-transcript ambient unread indicator
+/// (`tze_hud_projection::resident_grpc::unread_indicator_line`) so the pill
+/// badge and the ambient count agree. Large counts clamp to `"999+ unread"` so
+/// the label never overflows the compact pill; the compositor additionally
+/// clips to the pill interior.
+pub fn jump_to_latest_badge_label(unread_count: Option<usize>) -> Option<String> {
+    match unread_count {
+        Some(count) if count > 999 => Some("999+ unread".to_string()),
+        Some(count) if count > 0 => Some(format!("{count} unread")),
+        _ => None,
     }
 }
 
@@ -221,5 +279,61 @@ mod tests {
         let tokens = default_tokens();
         assert!(compute_jump_to_latest_pill(0.0, 300.0, true, &tokens).is_none());
         assert!(compute_jump_to_latest_pill(400.0, -1.0, true, &tokens).is_none());
+    }
+
+    // ─── Ambient unread-count badge (hud-g1ena.3) ─────────────────────────
+
+    #[test]
+    fn badge_hidden_when_redacted() {
+        // `None` = the authority's reveal_unread policy withheld the count.
+        assert_eq!(jump_to_latest_badge_label(None), None);
+    }
+
+    #[test]
+    fn badge_hidden_when_zero() {
+        // A presence engine renders nothing rather than a "0 unread" marker,
+        // matching the ambient in-transcript indicator's gating.
+        assert_eq!(jump_to_latest_badge_label(Some(0)), None);
+    }
+
+    #[test]
+    fn badge_shows_count_when_unread() {
+        assert_eq!(
+            jump_to_latest_badge_label(Some(1)).as_deref(),
+            Some("1 unread")
+        );
+        assert_eq!(
+            jump_to_latest_badge_label(Some(42)).as_deref(),
+            Some("42 unread")
+        );
+        assert_eq!(
+            jump_to_latest_badge_label(Some(999)).as_deref(),
+            Some("999 unread")
+        );
+    }
+
+    #[test]
+    fn badge_clamps_large_counts() {
+        // Beyond 999 the label caps so it never overflows the compact pill.
+        assert_eq!(
+            jump_to_latest_badge_label(Some(1000)).as_deref(),
+            Some("999+ unread")
+        );
+        assert_eq!(
+            jump_to_latest_badge_label(Some(1_000_000)).as_deref(),
+            Some("999+ unread")
+        );
+    }
+
+    #[test]
+    fn tokens_carry_badge_text_style() {
+        // The badge text color/size travel on the same token struct as the pill
+        // fill so the compositor resolves both from `portal.jump_to_latest.*`.
+        let tokens = default_tokens();
+        assert!(tokens.text_a > 0.0, "badge text must be visible by default");
+        assert!(
+            tokens.text_size_px > 0.0,
+            "badge font size must be positive"
+        );
     }
 }

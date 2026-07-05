@@ -122,7 +122,10 @@ pub use focus::{
     FocusRingBounds, FocusRingUpdate, FocusSource, FocusTransition,
 };
 pub use focus_tree::{FocusOwner, FocusTree};
-pub use jump_to_latest::{JumpToLatestGeometry, JumpToLatestTokens, compute_jump_to_latest_pill};
+pub use jump_to_latest::{
+    JumpToLatestGeometry, JumpToLatestTokens, compute_jump_to_latest_pill,
+    jump_to_latest_badge_label,
+};
 pub use keyboard::{
     KeyboardDispatch, KeyboardDispatchKind, KeyboardModifiers, KeyboardProcessor,
     RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent,
