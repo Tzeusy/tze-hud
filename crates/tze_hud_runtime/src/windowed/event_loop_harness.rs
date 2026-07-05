@@ -132,6 +132,7 @@ impl WindowedRuntimeState {
             element_repositioned_tx: None,
             input_event_tx: None,
             pending_blur_delivery_context: None,
+            composer_pointer_drag_anchor: None,
             portal_resize_states: HashMap::new(),
             consumed_portal_resize_keydowns: HashSet::new(),
             local_composer_state: Arc::new(StdMutex::new(None)),

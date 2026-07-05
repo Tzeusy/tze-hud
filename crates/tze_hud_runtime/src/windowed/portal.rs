@@ -1838,6 +1838,7 @@ mod tests {
             element_repositioned_tx: None,
             input_event_tx: Some(input_event_tx),
             pending_blur_delivery_context: None,
+            composer_pointer_drag_anchor: None,
             portal_resize_states: std::collections::HashMap::new(),
             consumed_portal_resize_keydowns: std::collections::HashSet::new(),
             local_composer_state: Arc::new(StdMutex::new(None)),
@@ -5911,5 +5912,214 @@ mod tests {
             rel_to_frame(transcript_scaled, frame_scaled),
             rel_to_frame(read(&scene, transcript_id), read(&scene, frame_id))
         ));
+    }
+
+    // ── Composer pointer caret hit-test + drag-select (hud-etrs0) ───────────
+
+    /// Build a scene with one focusable composer `HitRegion` spanning
+    /// `(0, 0, 400, 100)` in a single active tab, ready for
+    /// `WinitApp::enqueue_pointer_event` pointer-down/move/up dispatch.
+    fn scene_with_pointer_composer() -> (tze_hud_scene::graph::SceneGraph, tze_hud_scene::SceneId) {
+        use tze_hud_scene::types::HitRegionNode;
+        use tze_hud_scene::{Capability, Node, NodeData, Rect, SceneGraph, SceneId};
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 400.0, 100.0),
+                1,
+            )
+            .unwrap();
+        let composer_id = SceneId::new();
+        scene
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: composer_id,
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: Rect::new(0.0, 0.0, 400.0, 100.0),
+                        interaction_id: "portal-composer-focus".to_string(),
+                        accepts_focus: true,
+                        accepts_pointer: true,
+                        accepts_composer_input: true,
+                        ..Default::default()
+                    }),
+                },
+            )
+            .unwrap();
+        (scene, tab_id)
+    }
+
+    /// PointerDown on the focused composer must place the caret via the real
+    /// glyph-geometry hit-test (`byte_at_point`/`byte_at_x`) once the
+    /// compositor has published a fresh wrapped visual-row layout — not the
+    /// old `(local_x / node_width) * text_byte_len` linear guess, which for
+    /// this fixture (draft "abcdef", click at node-local x=20 on row 0, text
+    /// content width ~388px after the 6px inset) would land near byte 0 or 1
+    /// instead of the glyph-accurate byte 2.
+    ///
+    /// Then a drag (PointerMove to row 1 at the same x) must extend the
+    /// selection from that anchor to the byte under the new position —
+    /// asserted at the byte/selection layer, not pixels — and PointerUp must
+    /// end the drag gesture without disturbing the selection it produced.
+    #[test]
+    fn composer_pointer_down_then_drag_selects_byte_range_via_glyph_hit_test() {
+        use tze_hud_input::{
+            ComposerVisualLayout, ComposerVisualLine, FocusManager, InputProcessor,
+        };
+
+        let (scene, tab_id) = scene_with_pointer_composer();
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+        let processor = InputProcessor::new();
+        let (mut app, _rx) = make_windowed_keyboard_test_app(scene, fm, processor);
+
+        // ── Focus the composer (empty draft) via an initial click+release. ──
+        app.state.cursor_x = 200.0;
+        app.state.cursor_y = 50.0;
+        app.enqueue_pointer_event(PointerEventKind::Down);
+        app.enqueue_pointer_event(PointerEventKind::Up);
+        assert!(
+            app.state.input_processor.is_composer_active(),
+            "pointer-down on the composer HitRegion must focus and activate the draft"
+        );
+
+        // ── Type "abcdef" so the draft has real content to hit-test against. ──
+        for ch in ["a", "b", "c", "d", "e", "f"] {
+            app.state.input_processor.route_character_to_composer(ch);
+        }
+        assert_eq!(
+            app.state
+                .input_processor
+                .composer_draft_snapshot()
+                .unwrap()
+                .0,
+            "abcdef"
+        );
+
+        // ── Publish the wrapped visual-row layout the compositor would emit
+        // for "abcdef" wrapped as "abc" / "def", with non-uniform (proportional)
+        // per-glyph advances so the test cannot pass via a uniform-width
+        // shortcut. `text_len` must match the draft (6) to be considered fresh.
+        let layout = ComposerVisualLayout {
+            lines: vec![
+                ComposerVisualLine {
+                    start_byte: 0,
+                    end_byte: 3,
+                    glyph_x: vec![(0, 0.0), (1, 5.0), (2, 15.0), (3, 30.0)],
+                },
+                ComposerVisualLine {
+                    start_byte: 3,
+                    end_byte: 6,
+                    glyph_x: vec![(3, 0.0), (4, 8.0), (5, 20.0), (6, 30.0)],
+                },
+            ],
+            text_len: 6,
+        };
+        *app.state.composer_visual_layout.lock().unwrap() = Some(layout);
+
+        // ── PointerDown at node-local (x=26, y=10): row 0 (top half of the
+        // 100px-tall node), text_x = 26 - 6px content inset = 20 → nearest
+        // glyph boundary on row 0's table is byte 2 (glyph_x distances 20, 15,
+        // 5, 10 → byte 2 wins). ──────────────────────────────────────────────
+        app.state.cursor_x = 26.0;
+        app.state.cursor_y = 10.0;
+        app.enqueue_pointer_event(PointerEventKind::Down);
+        let snapshot = app
+            .state
+            .input_processor
+            .composer_draft_snapshot()
+            .expect("composer draft must still be active");
+        assert_eq!(
+            (snapshot.1, snapshot.2),
+            (2, 2),
+            "pointer-down must place the caret at the glyph-accurate byte (2), \
+             not a selection, and not the old linear-guess byte"
+        );
+        assert_eq!(
+            app.state.composer_pointer_drag_anchor.map(|(_, b)| b),
+            Some(2),
+            "pointer-down must record a drag anchor at the placed byte"
+        );
+        // The compositor renders the caret/selection from the local echo slot,
+        // not the input processor, so the pointer caret must be published there
+        // too (hud-etrs0 local-feedback-first) or the visible caret stays stale
+        // until the next keystroke.
+        let echo = app
+            .state
+            .local_composer_state
+            .lock()
+            .unwrap()
+            .clone()
+            .flatten()
+            .expect("pointer-down must publish the composer echo");
+        assert_eq!(
+            (echo.cursor_byte, echo.selection_anchor),
+            (2, 2),
+            "pointer-down must push the placed caret into the local echo slot"
+        );
+
+        // ── PointerMove to node-local (x=26, y=90): row 1 (bottom half), same
+        // text_x=20 → row 1's table nearest byte is 5 (distances 20, 12, 0, 10
+        // → byte 5 wins). Must extend the selection from the anchor (2) to 5,
+        // not collapse or jump to an unrelated byte. ───────────────────────
+        app.state.cursor_x = 26.0;
+        app.state.cursor_y = 90.0;
+        app.enqueue_pointer_event(PointerEventKind::Move);
+        let snapshot = app
+            .state
+            .input_processor
+            .composer_draft_snapshot()
+            .expect("composer draft must still be active");
+        assert_eq!(
+            (snapshot.1, snapshot.2),
+            (5, 2),
+            "drag must extend the selection from anchor byte 2 to byte 5 under \
+             the new pointer position"
+        );
+        // The drag-extended selection must also reach the local echo slot so
+        // the highlight repaints live during the drag (hud-etrs0), not only
+        // after a later keystroke.
+        let echo = app
+            .state
+            .local_composer_state
+            .lock()
+            .unwrap()
+            .clone()
+            .flatten()
+            .expect("drag-move must publish the composer echo");
+        assert_eq!(
+            (echo.cursor_byte, echo.selection_anchor),
+            (5, 2),
+            "drag-move must push the extended selection into the local echo slot"
+        );
+
+        // ── PointerUp ends the drag gesture but must not disturb the
+        // selection it produced. ────────────────────────────────────────────
+        app.enqueue_pointer_event(PointerEventKind::Up);
+        assert_eq!(
+            app.state.composer_pointer_drag_anchor, None,
+            "pointer-up must clear the drag anchor"
+        );
+        let snapshot = app
+            .state
+            .input_processor
+            .composer_draft_snapshot()
+            .expect("composer draft must still be active");
+        assert_eq!(
+            (snapshot.1, snapshot.2),
+            (5, 2),
+            "pointer-up must not change the selection established by the drag"
+        );
     }
 }

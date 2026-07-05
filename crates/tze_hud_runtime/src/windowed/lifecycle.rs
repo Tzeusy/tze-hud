@@ -339,6 +339,24 @@ pub(super) fn pointer_down_starts_guaranteed_feedback_gesture(
     hit_affordance(x, y, &rect, portal_tokens.affordance_px).is_some()
 }
 
+/// Convert a pointer event's window-space `(x, y)` into coordinates local to
+/// `tile_id`'s bounds (hud-etrs0 composer hit-test). Falls back to the raw
+/// pointer coordinates when the tile is not currently in the scene (e.g. a
+/// drag that outlives the tile it started on).
+fn tile_local_pointer_xy(
+    scene: &SceneGraph,
+    tile_id: &tze_hud_scene::SceneId,
+    pointer_event: &PointerEvent,
+) -> (f32, f32) {
+    match scene.tiles.get(tile_id) {
+        Some(tile) => (
+            pointer_event.x - tile.bounds.x,
+            pointer_event.y - tile.bounds.y,
+        ),
+        None => (pointer_event.x, pointer_event.y),
+    }
+}
+
 pub(super) const WINDOWED_BENCHMARK_AGENT: &str = "windowed-compositor-benchmark";
 const WINDOWED_BENCHMARK_SCENE: &str = "composite_tiles_v1";
 const OVERLAY_COMPOSITE_DELTA_TARGET_US: i64 = 500;
@@ -850,6 +868,70 @@ impl WinitApp {
         false
     }
 
+    /// Map a composer-node-local pointer position to a draft byte offset
+    /// (hud-etrs0 pointer caret hit-test). `tile_local_x`/`tile_local_y` are
+    /// pointer coordinates already converted to the owning tile's local space
+    /// (see `tile_local_pointer_xy`); this clamps them into the node's bounds
+    /// before hit-testing. Returns `None` when `node_id` does not resolve to a
+    /// composer `HitRegion` in `scene`.
+    ///
+    /// Prefers the real glyph-geometry hit-test: `byte_at_point` against the
+    /// wrapped visual-row layout the compositor already publishes for
+    /// ArrowUp/ArrowDown (`self.state.composer_visual_layout`, hud-21o6x).
+    /// That layout is measured with the composer's content x origin inset by
+    /// `portal.spacing.content_inset_px`, so the node-local x is de-inset to
+    /// match before the lookup. Mirrors the arrow-key path's freshness guard
+    /// (`layout.text_len == draft.text().len()`) so a layout measured for a
+    /// since-edited draft is rejected rather than mis-locating the click.
+    ///
+    /// Falls back to the previous linear `(local_x / node_width) *
+    /// text_byte_len` proportion when there is no fresh layout — the
+    /// single-line composer profile (`portal.composer.max_lines == 1`,
+    /// hud-zlfi4) never publishes one, and a multi-line composer may not have
+    /// one yet on the first frame after focus gain.
+    fn composer_pointer_byte_offset(
+        &self,
+        scene: &SceneGraph,
+        node_id: tze_hud_scene::SceneId,
+        tile_local_x: f32,
+        tile_local_y: f32,
+    ) -> Option<usize> {
+        let node = scene.nodes.get(&node_id)?;
+        let tze_hud_scene::NodeData::HitRegion(hr) = &node.data else {
+            return None;
+        };
+        let node_w = hr.bounds.width.max(1.0);
+        let node_h = hr.bounds.height.max(1.0);
+        let local_x = (tile_local_x - hr.bounds.x).clamp(0.0, node_w);
+        let local_y = (tile_local_y - hr.bounds.y).clamp(0.0, node_h);
+
+        let draft_text_len = self
+            .state
+            .input_processor
+            .composer_draft_snapshot()
+            .map(|(text, _, _, _, _, _)| text.len());
+
+        let layout = self
+            .state
+            .composer_visual_layout
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
+        let fresh_layout = layout
+            .filter(|l| !l.lines.is_empty() && draft_text_len.is_some_and(|len| l.text_len == len));
+        if let Some(layout) = fresh_layout {
+            let content_inset =
+                tze_hud_config::resolve_portal_tokens(&self.state.global_tokens).content_inset_px;
+            let text_x =
+                (local_x - content_inset).clamp(0.0, (node_w - content_inset * 2.0).max(0.0));
+            return Some(layout.byte_at_point(text_x, local_y, node_h));
+        }
+
+        // Fallback: the pre-hud-etrs0 crude linear proportion.
+        let frac = (local_x / node_w) as f64;
+        Some((frac * draft_text_len.unwrap_or(0) as f64).round() as usize)
+    }
+
     pub(super) fn inject_windowed_benchmark_input_probe(&mut self) {
         if self.state.config.benchmark.is_none() {
             return;
@@ -922,6 +1004,12 @@ impl WinitApp {
         // locked block below; consumed after the lock is released to call
         // clear_local_composer_echo() without a borrow conflict (hud-r3ax6).
         let mut composer_focus_lost = false;
+        // Flag set when a pointer caret placement / drag-select mutates the
+        // composer draft selection inside the locked block below; consumed
+        // after the lock is released to push the updated echo to the
+        // compositor (which renders caret/selection from the local echo slot,
+        // not the input processor) without a borrow conflict (hud-etrs0).
+        let mut composer_selection_changed = false;
         // Interactive gestures require guaranteed same-frame local feedback
         // (local-feedback-first).  For those events, acquire the locks with a
         // bounded spin instead of a single `try_lock`, so a contended scene lock
@@ -1118,17 +1206,19 @@ impl WinitApp {
                     dispatch_focus_event(&self.state.input_event_tx, transition);
                 }
 
-                // ── Composer pointer-selection routing (§4.1 / hud-083az) ─────
+                // ── Composer pointer-selection routing (§4.1 / hud-083az, hud-etrs0) ──
                 // On pointer-Down, if a composer region is focused and the hit
-                // landed on that same node, position the draft cursor at the
-                // pointer location.  This satisfies the spec requirement that
-                // selection must be reachable via pointer as well as keyboard.
-                //
-                // Offset approximation: no text-layout engine is available yet
-                // (that is hud-cefll); we use a linear proportion of
-                // (local_x / node_width) * draft_text_byte_len as a
-                // best-effort cursor position.  Pointer-drag (range) selection
-                // is tracked as a follow-up ("unfiled" per hud-083az).
+                // landed on that same node, position the draft cursor via a
+                // real glyph-geometry hit-test (`byte_at_point`, backed by the
+                // wrapped visual-row layout the compositor already publishes
+                // for ArrowUp/ArrowDown — hud-21o6x), falling back to the
+                // previous linear (local_x / node_width) * text_len
+                // approximation when no layout is available yet (single-line
+                // composer profile, or the first frame after focus). See
+                // `composer_pointer_byte_offset`. While the resulting drag
+                // anchor is set, PointerMove extends the selection to the byte
+                // under the pointer and PointerUp ends the drag — the
+                // selection itself is untouched by Up.
                 if pointer_event.kind == PointerEventKind::Down {
                     if let Some(focused_node_id) =
                         self.state.input_processor.composer_focused_node()
@@ -1138,44 +1228,55 @@ impl WinitApp {
                         } = &result.hit
                         {
                             if *node_id == focused_node_id {
-                                // Compute tile-local x so we can proportion
-                                // against the node's bounds.
-                                let tile_local_x = scene
-                                    .tiles
-                                    .get(tile_id)
-                                    .map(|t| pointer_event.x - t.bounds.x)
-                                    .unwrap_or(pointer_event.x);
-
-                                let byte_offset = if let Some(node) = scene.nodes.get(node_id) {
-                                    if let tze_hud_scene::NodeData::HitRegion(hr) = &node.data {
-                                        let node_w = hr.bounds.width.max(1.0);
-                                        let local_x_clamped =
-                                            (tile_local_x - hr.bounds.x).clamp(0.0, node_w);
-                                        let frac = (local_x_clamped / node_w) as f64;
-                                        let text_len = self
-                                            .state
-                                            .input_processor
-                                            .composer_draft_snapshot()
-                                            .map(|(text, _, _, _, _, _)| text.len())
-                                            .unwrap_or(0);
-                                        (frac * text_len as f64).round() as usize
-                                    } else {
-                                        0
-                                    }
-                                } else {
-                                    0
-                                };
-
-                                self.state
-                                    .input_processor
-                                    .route_pointer_selection_to_composer(byte_offset, byte_offset);
-                                tracing::debug!(
-                                    byte_offset,
-                                    "composer: pointer-down positioned cursor via set_pointer_selection"
-                                );
+                                let (tile_local_x, tile_local_y) =
+                                    tile_local_pointer_xy(&scene, tile_id, &pointer_event);
+                                if let Some(byte_offset) = self.composer_pointer_byte_offset(
+                                    &scene,
+                                    *node_id,
+                                    tile_local_x,
+                                    tile_local_y,
+                                ) {
+                                    self.state
+                                        .input_processor
+                                        .route_pointer_selection_to_composer(
+                                            byte_offset,
+                                            byte_offset,
+                                        );
+                                    self.state.composer_pointer_drag_anchor =
+                                        Some((*tile_id, byte_offset));
+                                    composer_selection_changed = true;
+                                    tracing::debug!(
+                                        byte_offset,
+                                        "composer: pointer-down positioned cursor via byte-geometry hit-test"
+                                    );
+                                }
                             }
                         }
                     }
+                } else if pointer_event.kind == PointerEventKind::Move {
+                    if let Some((anchor_tile_id, anchor_byte)) =
+                        self.state.composer_pointer_drag_anchor
+                    {
+                        if let Some(focused_node_id) =
+                            self.state.input_processor.composer_focused_node()
+                        {
+                            let (tile_local_x, tile_local_y) =
+                                tile_local_pointer_xy(&scene, &anchor_tile_id, &pointer_event);
+                            if let Some(byte_offset) = self.composer_pointer_byte_offset(
+                                &scene,
+                                focused_node_id,
+                                tile_local_x,
+                                tile_local_y,
+                            ) {
+                                self.state
+                                    .input_processor
+                                    .route_pointer_selection_to_composer(anchor_byte, byte_offset);
+                                composer_selection_changed = true;
+                            }
+                        }
+                    }
+                } else if pointer_event.kind == PointerEventKind::Up {
+                    self.state.composer_pointer_drag_anchor = None;
                 }
 
                 // ── Zone interaction dispatch (local feedback first) ──────────
@@ -1380,9 +1481,19 @@ impl WinitApp {
         }
 
         // Post-lock: clear local composer echo if composer focus was lost inside
-        // the shared_state lock scope above (hud-r3ax6).
+        // the shared_state lock scope above (hud-r3ax6). A stale pointer
+        // drag-select anchor from that same composer must not leak into
+        // whatever region focuses next (hud-etrs0).
         if composer_focus_lost {
             self.clear_local_composer_echo();
+            self.state.composer_pointer_drag_anchor = None;
+        } else if composer_selection_changed {
+            // A pointer caret placement or drag-select changed the draft
+            // selection; publish the refreshed snapshot so the compositor
+            // renders the new caret/highlight on the next frame rather than
+            // leaving it stale until the next keystroke (hud-etrs0, §4.1
+            // local-feedback-first).
+            self.push_local_composer_echo(input_started_at);
         }
 
         // Update the OS resize/move cursor to reflect the affordance under the
