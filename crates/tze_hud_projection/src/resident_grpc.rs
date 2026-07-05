@@ -14,8 +14,8 @@ use tze_hud_protocol::proto::session as session_proto;
 use thiserror::Error;
 
 use crate::{
-    AdapterDraftBatch, AdapterDraftNotification, ContentClassification, OutputKind,
-    PortalInputFeedback, PortalInputFeedbackState, PortalInputSubmission,
+    AdapterDraftBatch, AdapterDraftNotification, ContentClassification, InputDeliveryState,
+    OutputKind, PortalInputFeedback, PortalInputFeedbackState, PortalInputSubmission,
     ProjectedPortalPresentation, ProjectedPortalState, ProjectionAuthority, ProjectionErrorCode,
     ProjectionLifecycleState, TranscriptUnit,
 };
@@ -85,6 +85,27 @@ const PORTAL_ACTIVITY_MARKER_LINE: &str = "⋯ writing";
 /// caret at the tail; the token-resolved `streaming_cursor_color` accent rides
 /// alongside via `streaming_cursor_color_runs`. Ambient, not alarming.
 const PORTAL_STREAMING_CURSOR_GLYPH: &str = " ▍";
+
+/// Ambient viewer-turn delivery-acknowledgement cue lines (hud-g1ena.1,
+/// portal-chat-grade-affordances §Viewer Turn Delivery Acknowledgement). One quiet
+/// line per presentation class, shown for the viewer's most recent echoed reply so
+/// the viewer can see whether it reached the owning adapter WITHOUT asking. Kept
+/// text-visible (so the signal survives environments that do not inspect
+/// `color_runs`) and deliberately quiet — no `!`/⚠: a delivery transition is not an
+/// attention event, and a failed cue stays ambient on the turn rather than
+/// escalating interruption class. The token-resolved class color rides alongside
+/// each via `delivery_cue_color_runs`.
+///
+/// - In-flight (Pending/Deferred): submitted, adapter has not yet taken delivery.
+const PORTAL_DELIVERY_INFLIGHT_LINE: &str = "→ sending";
+/// - Delivered (Delivered/Handled): adapter has taken (or handled) the reply. The
+///   double tick reads as "reached" and is distinct from the composer's single
+///   `✓ sent` local-accept feedback.
+const PORTAL_DELIVERY_DELIVERED_LINE: &str = "✓✓ delivered";
+/// - Failed (Rejected/Expired): rejected by the adapter or expired before
+///   delivery. A plain cross — NOT the `⚠` used for composer rejection — so it
+///   reads as "did not arrive" quietly, ambient on the turn.
+const PORTAL_DELIVERY_FAILED_LINE: &str = "✕ not delivered";
 
 /// Separator between an ambient per-turn arrival timestamp and its turn text
 /// (portal-chat-grade-affordances §Ambient Per-Turn Timestamps, hud-g1ena.4). A
@@ -348,6 +369,22 @@ pub struct PortalVisualTokens {
     /// `activity_cue_color`; a distinct token so a profile can style the tail
     /// cursor independently. Source token: `portal.streaming_cursor.color`.
     pub streaming_cursor_color: proto::Rgba,
+
+    // Viewer-turn delivery acknowledgement (portal-chat-grade-affordances
+    // §Viewer Turn Delivery Acknowledgement, hud-g1ena.1). Three ambient cue
+    // classes derived from the runtime's already-tracked `InputDeliveryState` on
+    // the viewer's echoed turn — never a new adapter round trip.
+    /// Color of the ambient in-flight (Pending/Deferred) viewer-turn delivery cue.
+    /// Source token: `portal.delivery.inflight_color`.
+    pub delivery_inflight_color: proto::Rgba,
+    /// Color of the ambient delivered (Delivered/Handled) viewer-turn delivery cue.
+    /// Source token: `portal.delivery.delivered_color`.
+    pub delivery_delivered_color: proto::Rgba,
+    /// Color of the ambient failed (Rejected/Expired) viewer-turn delivery cue.
+    /// Muted, never an alarm — a failed cue stays ambient on the turn and never
+    /// escalates the portal's interruption class. Source token:
+    /// `portal.delivery.failed_color`.
+    pub delivery_failed_color: proto::Rgba,
 
     // Ambient per-turn timestamps (portal-chat-grade-affordances
     // §Ambient Per-Turn Timestamps, hud-g1ena.4).
@@ -1224,6 +1261,15 @@ impl ResidentGrpcPortalAdapter {
                             self.visual_tokens.streaming_cursor_color,
                             now_wall_us,
                         ));
+                        // Ambient viewer-turn delivery-acknowledgement cue
+                        // (hud-g1ena.1, §Viewer Turn Delivery Acknowledgement). The
+                        // token-resolved class color (in-flight / delivered /
+                        // failed) for the viewer's latest echoed reply, derived from
+                        // the runtime's already-tracked delivery state — no adapter
+                        // round trip, no seen-state disclosure. Absent unless a cue
+                        // class is active, so it suppresses under redaction with the
+                        // transcript.
+                        runs.extend(delivery_cue_color_runs(state, &self.visual_tokens));
                         // Ambient per-turn arrival timestamps (hud-g1ena.4,
                         // §Ambient Per-Turn Timestamps). Secondary/subordinate
                         // token color for the `HH:MM` stamps that
@@ -1372,6 +1418,20 @@ fn portal_markdown_with(
     // stay ambient per presence-engine doctrine.
     if awaiting_reply(state) {
         push_line(&mut result, "? awaiting reply");
+    }
+    // Ambient viewer-turn delivery-acknowledgement cue (hud-g1ena.1, §Viewer Turn
+    // Delivery Acknowledgement). Reflects the runtime's already-tracked delivery
+    // state for the viewer's most recent echoed reply so the viewer can see whether
+    // it reached the owning adapter without asking. Three quiet classes (in-flight /
+    // delivered / failed) — no adapter round trip, no seen-state disclosure. Kept
+    // text-visible so the signal survives environments that don't inspect
+    // color_runs; the token-driven class color rides alongside via
+    // `delivery_cue_color_runs`. Ambient by design (no `!`/⚠): a delivery
+    // transition is not an attention event and a failed cue stays on the turn. `None`
+    // under redaction (the authority withholds the state), so it suppresses with the
+    // transcript.
+    if let Some(class) = delivery_cue_class(state) {
+        push_line(&mut result, class.line());
     }
     // Ambient agent-activity header cue (hud-g1ena.5, §Agent Activity and
     // Streaming Cue). A compact typing-style indicator shown while the owning
@@ -1780,6 +1840,90 @@ fn awaiting_reply_color_runs(
         }]
     } else {
         Vec::new()
+    }
+}
+
+/// The three viewer-turn delivery-acknowledgement presentation classes
+/// (hud-g1ena.1, portal-chat-grade-affordances §Viewer Turn Delivery
+/// Acknowledgement). The six `InputDeliveryState` variants the runtime tracks fold
+/// into exactly these three classes for presentation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeliveryCueClass {
+    /// Submitted but not yet taken by the adapter (`Pending` / `Deferred`).
+    InFlight,
+    /// Adapter has taken (or handled) the reply (`Delivered` / `Handled`).
+    Delivered,
+    /// Rejected by the adapter or expired before delivery (`Rejected` / `Expired`).
+    Failed,
+}
+
+impl DeliveryCueClass {
+    /// Fold an `InputDeliveryState` into its presentation class.
+    fn from_delivery_state(state: InputDeliveryState) -> Self {
+        match state {
+            InputDeliveryState::Pending | InputDeliveryState::Deferred => Self::InFlight,
+            InputDeliveryState::Delivered | InputDeliveryState::Handled => Self::Delivered,
+            InputDeliveryState::Rejected | InputDeliveryState::Expired => Self::Failed,
+        }
+    }
+
+    /// The ambient text-visible cue line for this class.
+    fn line(self) -> &'static str {
+        match self {
+            Self::InFlight => PORTAL_DELIVERY_INFLIGHT_LINE,
+            Self::Delivered => PORTAL_DELIVERY_DELIVERED_LINE,
+            Self::Failed => PORTAL_DELIVERY_FAILED_LINE,
+        }
+    }
+
+    /// The token-resolved accent color for this class, pulled from the visual
+    /// token set — never a literal color (§6.1).
+    fn color(self, tokens: &PortalVisualTokens) -> proto::Rgba {
+        match self {
+            Self::InFlight => tokens.delivery_inflight_color,
+            Self::Delivered => tokens.delivery_delivered_color,
+            Self::Failed => tokens.delivery_failed_color,
+        }
+    }
+}
+
+/// The viewer-turn delivery-acknowledgement cue class to present, or `None` when
+/// no cue applies (hud-g1ena.1, §Viewer Turn Delivery Acknowledgement).
+///
+/// Derived ENTIRELY from `state.latest_viewer_delivery_state` — the delivery state
+/// of the viewer's most recent submitted reply, which the authority reads from its
+/// existing runtime-owned `pending_input` bookkeeping. Rendering the cue therefore
+/// requires no adapter round trip and discloses no viewer read/seen state. `None`
+/// falls out for free under redaction: the authority leaves
+/// `latest_viewer_delivery_state == None` whenever the transcript is not visible to
+/// this viewer, so the cue redacts together with the echoed turn it annotates.
+fn delivery_cue_class(state: &ProjectedPortalState) -> Option<DeliveryCueClass> {
+    state
+        .latest_viewer_delivery_state
+        .map(DeliveryCueClass::from_delivery_state)
+}
+
+/// Build the token-styled sentinel color run for the viewer-turn delivery cue
+/// (hud-g1ena.1, §Viewer Turn Delivery Acknowledgement).
+///
+/// Mirrors the other Phase-1 sentinels (`awaiting_reply_color_runs`,
+/// `unread_indicator_color_runs`): a single zero-length run (`[0..0]`) carrying the
+/// token-resolved color for the active class so the visual token drives the cue
+/// without any literal color in the render path (§6.1). Emitted exactly when a cue
+/// line is rendered — i.e. when `delivery_cue_class` is `Some` — and empty
+/// otherwise, so it disappears with the transcript under redaction and when there
+/// is no tracked viewer submission.
+fn delivery_cue_color_runs(
+    state: &ProjectedPortalState,
+    tokens: &PortalVisualTokens,
+) -> Vec<proto::TextColorRunProto> {
+    match delivery_cue_class(state) {
+        Some(class) => vec![proto::TextColorRunProto {
+            start_byte: 0,
+            end_byte: 0,
+            color: Some(class.color(tokens)),
+        }],
+        None => Vec::new(),
     }
 }
 
@@ -2284,6 +2428,24 @@ pub fn portal_visual_tokens_from_part_tokens(
             b: part.streaming_cursor_color.b,
             a: part.streaming_cursor_color.a,
         },
+        delivery_inflight_color: proto::Rgba {
+            r: part.delivery_inflight_color.r,
+            g: part.delivery_inflight_color.g,
+            b: part.delivery_inflight_color.b,
+            a: part.delivery_inflight_color.a,
+        },
+        delivery_delivered_color: proto::Rgba {
+            r: part.delivery_delivered_color.r,
+            g: part.delivery_delivered_color.g,
+            b: part.delivery_delivered_color.b,
+            a: part.delivery_delivered_color.a,
+        },
+        delivery_failed_color: proto::Rgba {
+            r: part.delivery_failed_color.r,
+            g: part.delivery_failed_color.g,
+            b: part.delivery_failed_color.b,
+            a: part.delivery_failed_color.a,
+        },
         timestamp_color: proto::Rgba {
             r: part.timestamp_color.r,
             g: part.timestamp_color.g,
@@ -2391,6 +2553,7 @@ mod tests {
             pending_input_count: None,
             pending_input_bytes: None,
             last_input_feedback: None,
+            latest_viewer_delivery_state: None,
             draft_batch: None,
             geometry_batch: None,
             resized_bounds: None,
@@ -3365,6 +3528,122 @@ mod tests {
             !portal_markdown(&redacted, None, 0).contains("awaiting reply"),
             "a redacted (empty transcript) viewer must render no awaiting-reply cue"
         );
+    }
+
+    /// hud-g1ena.1 acceptance: the ambient viewer-turn delivery-acknowledgement cue
+    /// renders one quiet text line + one token-driven zero-length sentinel color run
+    /// per presentation class, folding the six `InputDeliveryState` variants into
+    /// three classes (in-flight / delivered / failed). Absent when the runtime
+    /// tracks no viewer submission (`latest_viewer_delivery_state == None`), which is
+    /// exactly the redaction case (the authority withholds the state). Rendering
+    /// reads only `latest_viewer_delivery_state` — no adapter round trip.
+    #[test]
+    fn delivery_cue_renders_three_classes_and_is_absent_without_state() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let tokens = adapter.visual_tokens().clone();
+
+        // No tracked submission → no line, no run. This is also the redaction case:
+        // the authority leaves the field None whenever the transcript is withheld.
+        let none_state = make_expanded_interaction_state("portal-delivery");
+        let none_md = portal_markdown(&none_state, None, 0);
+        for line in [
+            PORTAL_DELIVERY_INFLIGHT_LINE,
+            PORTAL_DELIVERY_DELIVERED_LINE,
+            PORTAL_DELIVERY_FAILED_LINE,
+        ] {
+            assert!(
+                !none_md.contains(line),
+                "no tracked submission must render no delivery cue: {none_md}"
+            );
+        }
+        assert!(
+            delivery_cue_color_runs(&none_state, &tokens).is_empty(),
+            "no tracked submission must emit no delivery color run"
+        );
+
+        // Each variant folds into its class: (variant, expected line, expected color).
+        let cases = [
+            (
+                InputDeliveryState::Pending,
+                PORTAL_DELIVERY_INFLIGHT_LINE,
+                tokens.delivery_inflight_color,
+            ),
+            (
+                InputDeliveryState::Deferred,
+                PORTAL_DELIVERY_INFLIGHT_LINE,
+                tokens.delivery_inflight_color,
+            ),
+            (
+                InputDeliveryState::Delivered,
+                PORTAL_DELIVERY_DELIVERED_LINE,
+                tokens.delivery_delivered_color,
+            ),
+            (
+                InputDeliveryState::Handled,
+                PORTAL_DELIVERY_DELIVERED_LINE,
+                tokens.delivery_delivered_color,
+            ),
+            (
+                InputDeliveryState::Rejected,
+                PORTAL_DELIVERY_FAILED_LINE,
+                tokens.delivery_failed_color,
+            ),
+            (
+                InputDeliveryState::Expired,
+                PORTAL_DELIVERY_FAILED_LINE,
+                tokens.delivery_failed_color,
+            ),
+        ];
+        for (variant, expected_line, expected_color) in cases {
+            let mut state = make_expanded_interaction_state("portal-delivery");
+            state.latest_viewer_delivery_state = Some(variant);
+            let md = portal_markdown(&state, None, 0);
+            assert!(
+                md.contains(expected_line),
+                "{variant:?} must render the ambient cue line {expected_line:?}: {md}"
+            );
+            // Ambient, not alarming: the failed cue must NOT borrow the composer
+            // rejection alarm glyph.
+            assert!(
+                !md.contains('⚠'),
+                "delivery cue must stay ambient (no ⚠ alarm) for {variant:?}: {md}"
+            );
+            let runs = delivery_cue_color_runs(&state, &tokens);
+            assert_eq!(
+                runs.len(),
+                1,
+                "{variant:?} must emit exactly one token-driven delivery color run"
+            );
+            assert_eq!(
+                runs[0].color.unwrap(),
+                expected_color,
+                "{variant:?} run must carry the token color, never a literal"
+            );
+            assert_eq!(runs[0].start_byte, 0, "delivery run is a zero-length sentinel");
+            assert_eq!(runs[0].end_byte, 0, "delivery run is a zero-length sentinel");
+        }
+    }
+
+    /// The three delivery `PortalVisualTokens` fields map 1:1 from their
+    /// `PortalPartTokens` counterparts (hud-g1ena.1), so a profile/token change
+    /// reskins the delivery cue end-to-end with no adapter logic change.
+    #[test]
+    fn portal_visual_tokens_from_part_tokens_maps_delivery_fields() {
+        let part = tze_hud_config::PortalPartTokens::default();
+        let visual = portal_visual_tokens_from_part_tokens(&part);
+        assert_eq!(visual.delivery_inflight_color.r, part.delivery_inflight_color.r);
+        assert_eq!(visual.delivery_inflight_color.a, part.delivery_inflight_color.a);
+        assert_eq!(
+            visual.delivery_delivered_color.g,
+            part.delivery_delivered_color.g
+        );
+        assert_eq!(visual.delivery_failed_color.b, part.delivery_failed_color.b);
+        // The three classes must be visually distinct so a viewer can tell
+        // in-flight from delivered from failed at a glance.
+        assert_ne!(visual.delivery_inflight_color, visual.delivery_delivered_color);
+        assert_ne!(visual.delivery_delivered_color, visual.delivery_failed_color);
+        assert_ne!(visual.delivery_inflight_color, visual.delivery_failed_color);
     }
 
     /// hud-g1ena.5 acceptance: build a live expanded portal whose tail is a fresh

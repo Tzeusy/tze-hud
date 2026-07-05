@@ -80,6 +80,10 @@ PORTAL_TOKEN_CONNECTING_MARKER_COLOR = "portal.connecting_marker.color"
 PORTAL_TOKEN_ACTIVITY_CUE_COLOR = "portal.activity_cue.color"
 PORTAL_TOKEN_STREAMING_CURSOR_COLOR = "portal.streaming_cursor.color"
 
+PORTAL_TOKEN_DELIVERY_INFLIGHT_COLOR = "portal.delivery.inflight_color"
+PORTAL_TOKEN_DELIVERY_DELIVERED_COLOR = "portal.delivery.delivered_color"
+PORTAL_TOKEN_DELIVERY_FAILED_COLOR = "portal.delivery.failed_color"
+
 PORTAL_TOKEN_TIMESTAMP_COLOR = "portal.timestamp.color"
 PORTAL_TOKEN_TIMESTAMP_GRANULARITY = "portal.timestamp.granularity"
 
@@ -149,6 +153,9 @@ _RUST_DEFAULTS: dict[str, str] = {
     "CONNECTING_MARKER_COLOR": "#4C93A6",
     "ACTIVITY_CUE_COLOR": "#8A8FB0",
     "STREAMING_CURSOR_COLOR": "#A6ABC8",
+    "DELIVERY_INFLIGHT_COLOR": "#6E8CA8",
+    "DELIVERY_DELIVERED_COLOR": "#57A88E",
+    "DELIVERY_FAILED_COLOR": "#B5827A",
     "TIMESTAMP_COLOR": "#6B7689",
     "TIMESTAMP_GRANULARITY": "off",
     "LIFECYCLE_ACTIVE_COLOR": "#4FA88A",
@@ -211,6 +218,9 @@ CANONICAL_DEFAULTS: dict[str, str] = {
     PORTAL_TOKEN_CONNECTING_MARKER_COLOR: _RUST_DEFAULTS["CONNECTING_MARKER_COLOR"],
     PORTAL_TOKEN_ACTIVITY_CUE_COLOR: _RUST_DEFAULTS["ACTIVITY_CUE_COLOR"],
     PORTAL_TOKEN_STREAMING_CURSOR_COLOR: _RUST_DEFAULTS["STREAMING_CURSOR_COLOR"],
+    PORTAL_TOKEN_DELIVERY_INFLIGHT_COLOR: _RUST_DEFAULTS["DELIVERY_INFLIGHT_COLOR"],
+    PORTAL_TOKEN_DELIVERY_DELIVERED_COLOR: _RUST_DEFAULTS["DELIVERY_DELIVERED_COLOR"],
+    PORTAL_TOKEN_DELIVERY_FAILED_COLOR: _RUST_DEFAULTS["DELIVERY_FAILED_COLOR"],
     PORTAL_TOKEN_TIMESTAMP_COLOR: _RUST_DEFAULTS["TIMESTAMP_COLOR"],
     PORTAL_TOKEN_TIMESTAMP_GRANULARITY: _RUST_DEFAULTS["TIMESTAMP_GRANULARITY"],
     PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR: _RUST_DEFAULTS["LIFECYCLE_ACTIVE_COLOR"],
@@ -330,6 +340,10 @@ class PortalPartTokens:
     connecting_marker_color: Rgba
     activity_cue_color: Rgba
     streaming_cursor_color: Rgba
+    # Viewer-turn delivery acknowledgement (in-flight / delivered / failed)
+    delivery_inflight_color: Rgba
+    delivery_delivered_color: Rgba
+    delivery_failed_color: Rgba
     # Ambient per-turn arrival timestamp (secondary/dim color + profile-governed
     # visibility granularity: "off" | "per_turn" | "grouped").
     timestamp_color: Rgba
@@ -428,6 +442,9 @@ def resolve_portal_tokens(overrides: Optional[dict[str, str]] = None) -> PortalP
         connecting_marker_color=_color(tm, PORTAL_TOKEN_CONNECTING_MARKER_COLOR),
         activity_cue_color=_color(tm, PORTAL_TOKEN_ACTIVITY_CUE_COLOR),
         streaming_cursor_color=_color(tm, PORTAL_TOKEN_STREAMING_CURSOR_COLOR),
+        delivery_inflight_color=_color(tm, PORTAL_TOKEN_DELIVERY_INFLIGHT_COLOR),
+        delivery_delivered_color=_color(tm, PORTAL_TOKEN_DELIVERY_DELIVERED_COLOR),
+        delivery_failed_color=_color(tm, PORTAL_TOKEN_DELIVERY_FAILED_COLOR),
         timestamp_color=_color(tm, PORTAL_TOKEN_TIMESTAMP_COLOR),
         timestamp_granularity=_granularity(tm, PORTAL_TOKEN_TIMESTAMP_GRANULARITY),
         lifecycle_active_color=_color(tm, PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR),
