@@ -1240,6 +1240,94 @@ fn unread_output_count_flows_through_to_projected_portal_state_when_revealed() {
     );
 }
 
+/// hud-g1ena.2 review regression: when a viewer's clearance filters some unread
+/// turns out of `visible_transcript`, `visible_unread_output_count` must report
+/// only the unread turns that viewer can actually see, while `unread_output_count`
+/// stays the aggregate. The in-transcript unread divider is placed with the
+/// clearance-corrected count, so a higher-classification unread turn hidden from
+/// this viewer cannot push the divider onto an already-seen visible turn.
+#[test]
+fn visible_unread_output_count_excludes_clearance_filtered_unread_turns() {
+    let mut authority = ProjectionAuthority::default();
+    let owner_token = attach(&mut authority, "projection-a");
+
+    // Three unread agent turns: one Private (visible to a Private-cleared viewer)
+    // and two Sensitive (filtered out for that viewer). Distinct logical unit ids
+    // so each is a fresh append, not an idempotent duplicate.
+    let private_turn = output_request_keyed(
+        "projection-a",
+        &owner_token,
+        "req-private",
+        "visible private turn",
+        Some("unit-private"),
+        None,
+    );
+    let mut sensitive_a = output_request_keyed(
+        "projection-a",
+        &owner_token,
+        "req-sensitive-a",
+        "hidden sensitive turn a",
+        Some("unit-sensitive-a"),
+        None,
+    );
+    sensitive_a.content_classification = ContentClassification::Sensitive;
+    let mut sensitive_b = output_request_keyed(
+        "projection-a",
+        &owner_token,
+        "req-sensitive-b",
+        "hidden sensitive turn b",
+        Some("unit-sensitive-b"),
+        None,
+    );
+    sensitive_b.content_classification = ContentClassification::Sensitive;
+
+    for (request, ts) in [(private_turn, 20), (sensitive_a, 21), (sensitive_b, 22)] {
+        assert!(
+            authority
+                .handle_publish_output(request, "caller-a", ts)
+                .accepted
+        );
+    }
+
+    // A Private-cleared viewer that still reveals the transcript and unread count.
+    let mut private_viewer = ProjectedPortalPolicy::permit_all();
+    private_viewer.viewer_clearance = ContentClassification::Private;
+
+    let visible = authority
+        .projected_portal_state("projection-a", &private_viewer)
+        .expect("portal state materializes");
+    assert_eq!(
+        visible.unread_output_count,
+        Some(3),
+        "the ambient count stays the aggregate across all clearances"
+    );
+    assert_eq!(
+        visible.visible_unread_output_count,
+        Some(1),
+        "only the single Private unread turn is visible to a Private-cleared viewer"
+    );
+    assert_eq!(
+        visible
+            .visible_transcript
+            .iter()
+            .filter(|u| u.output_kind != OutputKind::Viewer)
+            .count(),
+        1,
+        "the two Sensitive turns must be filtered out of the visible transcript"
+    );
+
+    // A fully-cleared viewer sees every unread turn: the two counts converge.
+    let cleared = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("portal state materializes");
+    assert_eq!(cleared.unread_output_count, Some(3));
+    assert_eq!(
+        cleared.visible_unread_output_count,
+        Some(3),
+        "with full clearance the visible unread count equals the aggregate"
+    );
+}
+
 // ── hud-jip0k: expects_reply (Question) signal round-trip ────────────────
 
 /// `PublishOutputRequest.expects_reply` must round-trip through

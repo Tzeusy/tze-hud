@@ -1401,23 +1401,31 @@ fn unread_indicator_color_runs(
 /// divider is inserted: the oldest retained *unseen agent-authored* turn
 /// (hud-g1ena.2, §Unread Divider and Ambient Unread Count).
 ///
-/// Returns `None` when there is nothing unread (`unread_output_count` is `None`
-/// under the `reveal_unread` redaction gate, or `Some(0)`), or when the retained
-/// window holds no agent-authored unit — in those cases no divider renders, which
-/// is exactly how the divider **clears locally when the viewer views the tail**:
-/// the authority resets the count to `0` on tail view, so this yields `None` with
-/// no adapter round trip.
+/// Returns `None` when there is nothing unread visible to this viewer
+/// (`visible_unread_output_count` is `None` under the `reveal_unread` redaction
+/// gate, or `Some(0)`), or when the retained window holds no agent-authored unit —
+/// in those cases no divider renders, which is exactly how the divider **clears
+/// locally when the viewer views the tail**: the authority resets the count to `0`
+/// on tail view, so this yields `None` with no adapter round trip.
+///
+/// The count driving placement is `visible_unread_output_count` — the number of
+/// unread units that survive this viewer's clearance filter — **not** the
+/// aggregate `unread_output_count`. A higher-classification unread turn filtered
+/// out of `visible_transcript` must not push the divider onto an already-seen
+/// visible turn; the aggregate would over-count the units below the divider and do
+/// exactly that. The ambient count near the header still shows the aggregate,
+/// which MAY legitimately exceed the units below the divider.
 ///
 /// The boundary is found by walking the retained window from the tail and
 /// counting only agent-authored units — **echoed viewer turns are never unread**
 /// per the Viewer Reply Echo requirement, so `OutputKind::Viewer` units are
-/// skipped. When the unread count exceeds the agent-authored units still retained
-/// (older unread turns coalesced or scrolled out of the bounded window), the walk
-/// exhausts and the divider sits at the **oldest retained unseen unit** — the
-/// first retained agent-authored turn — matching the spec's "the count MAY exceed
-/// the units visibly below the divider".
+/// skipped. When the (visible) unread count exceeds the agent-authored units still
+/// retained in the bounded window (older unread turns coalesced or scrolled out),
+/// the walk exhausts and the divider sits at the **oldest retained unseen unit** —
+/// the first retained agent-authored turn — matching the spec's "the count MAY
+/// exceed the units visibly below the divider".
 fn unread_divider_boundary(state: &ProjectedPortalState) -> Option<usize> {
-    let count = match state.unread_output_count {
+    let count = match state.visible_unread_output_count {
         Some(count) if count > 0 => count,
         _ => return None,
     };
@@ -1942,6 +1950,7 @@ mod tests {
             visible_transcript: vec![],
             visible_transcript_bytes: 0,
             unread_output_count: None,
+            visible_unread_output_count: None,
             pending_input_count: None,
             pending_input_bytes: None,
             last_input_feedback: None,
@@ -2603,9 +2612,9 @@ mod tests {
             transcript_unit(1, OutputKind::Assistant, false),
             transcript_unit(2, OutputKind::Assistant, false),
         ];
-        state.unread_output_count = None;
+        state.visible_unread_output_count = None;
         assert_eq!(unread_divider_boundary(&state), None);
-        state.unread_output_count = Some(0);
+        state.visible_unread_output_count = Some(0);
         assert_eq!(unread_divider_boundary(&state), None);
     }
 
@@ -2618,7 +2627,7 @@ mod tests {
             transcript_unit(2, OutputKind::Assistant, false), // unseen
             transcript_unit(3, OutputKind::Assistant, false), // unseen
         ];
-        state.unread_output_count = Some(2);
+        state.visible_unread_output_count = Some(2);
         assert_eq!(unread_divider_boundary(&state), Some(1));
     }
 
@@ -2632,7 +2641,7 @@ mod tests {
             transcript_unit(2, OutputKind::Viewer, false),
             transcript_unit(3, OutputKind::Assistant, false),
         ];
-        state.unread_output_count = Some(1);
+        state.visible_unread_output_count = Some(1);
         // Only the newest agent turn (index 2) is unread; the viewer echo at
         // index 1 is skipped, so the divider does not land on it.
         assert_eq!(unread_divider_boundary(&state), Some(2));
@@ -2649,7 +2658,7 @@ mod tests {
             transcript_unit(2, OutputKind::Assistant, false),
             transcript_unit(3, OutputKind::Assistant, false),
         ];
-        state.unread_output_count = Some(9);
+        state.visible_unread_output_count = Some(9);
         assert_eq!(unread_divider_boundary(&state), Some(1));
     }
 
@@ -2658,7 +2667,7 @@ mod tests {
     fn unread_divider_boundary_is_none_without_agent_turn() {
         let mut state = make_expanded_interaction_state("portal-unread");
         state.visible_transcript = vec![transcript_unit(1, OutputKind::Viewer, false)];
-        state.unread_output_count = Some(3);
+        state.visible_unread_output_count = Some(3);
         assert_eq!(unread_divider_boundary(&state), None);
     }
 
@@ -2693,7 +2702,7 @@ mod tests {
             transcript_unit(1, OutputKind::Assistant, false),
             transcript_unit(2, OutputKind::Assistant, false),
         ];
-        state.unread_output_count = Some(1);
+        state.visible_unread_output_count = Some(1);
 
         let runs = unread_divider_color_runs(&state, divider_color);
         assert_eq!(
@@ -2715,7 +2724,7 @@ mod tests {
             "run must carry the unread_divider_color token, never a literal color"
         );
 
-        state.unread_output_count = None;
+        state.visible_unread_output_count = None;
         assert!(
             unread_divider_color_runs(&state, divider_color).is_empty(),
             "the divider run must clear when the count clears on tail view"
@@ -2733,11 +2742,11 @@ mod tests {
         let mut collapsed = make_expanded_interaction_state("portal-unread");
         collapsed.presentation = ProjectedPortalPresentation::Collapsed;
         collapsed.visible_transcript = vec![transcript_unit(1, OutputKind::Assistant, false)];
-        collapsed.unread_output_count = Some(1);
+        collapsed.visible_unread_output_count = Some(1);
         assert!(unread_divider_color_runs(&collapsed, divider_color).is_empty());
 
         let mut empty = make_expanded_interaction_state("portal-unread");
-        empty.unread_output_count = Some(1);
+        empty.visible_unread_output_count = Some(1);
         assert!(unread_divider_color_runs(&empty, divider_color).is_empty());
     }
 
@@ -2751,7 +2760,9 @@ mod tests {
             transcript_unit_text(1, OutputKind::Assistant, "old turn"),
             transcript_unit_text(2, OutputKind::Assistant, "new turn"),
         ];
+        // Non-redacted viewer: the aggregate and clearance-corrected counts match.
         state.unread_output_count = Some(1);
+        state.visible_unread_output_count = Some(1);
         let md = portal_markdown(&state, None);
         assert!(
             md.contains(PORTAL_UNREAD_DIVIDER_LINE),
@@ -2759,11 +2770,36 @@ mod tests {
         );
 
         state.unread_output_count = None;
+        state.visible_unread_output_count = None;
         let cleared = portal_markdown(&state, None);
         assert!(
             !cleared.contains(PORTAL_UNREAD_DIVIDER_LINE),
             "the divider must clear locally when the viewer views the tail: {cleared}"
         );
+    }
+
+    /// Regression (hud-g1ena.2 review): when the viewer's clearance filters some
+    /// unread turns out of `visible_transcript`, the aggregate `unread_output_count`
+    /// exceeds the unread units the viewer can actually see. The divider must be
+    /// placed with the clearance-corrected `visible_unread_output_count`, never the
+    /// aggregate — otherwise the walk exhausts against the aggregate and clamps the
+    /// divider onto an already-seen visible turn, marking seen text as unread.
+    #[test]
+    fn unread_divider_boundary_uses_visible_count_not_aggregate() {
+        let mut state = make_expanded_interaction_state("portal-unread");
+        // Two agent turns survive clearance: an older SEEN turn and one unread
+        // turn. Two further unread turns were higher-classification and filtered
+        // out upstream, so they never reach `visible_transcript`.
+        state.visible_transcript = vec![
+            transcript_unit(1, OutputKind::Assistant, false), // seen, visible
+            transcript_unit(4, OutputKind::Assistant, false), // unread, visible
+        ];
+        // Aggregate says 3 unread; only 1 of them is visible to this viewer.
+        state.unread_output_count = Some(3);
+        state.visible_unread_output_count = Some(1);
+        // The divider sits before the single visible unread turn (index 1), NOT
+        // clamped onto the seen turn at index 0 (which the aggregate count would do).
+        assert_eq!(unread_divider_boundary(&state), Some(1));
     }
 
     /// The `unread_divider_color` `PortalVisualTokens` field maps 1:1 from the

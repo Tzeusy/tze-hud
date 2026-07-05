@@ -1712,6 +1712,33 @@ fn projected_portal_state(
         .iter()
         .map(TranscriptUnit::byte_len)
         .sum();
+    // Clearance-corrected unread count for the in-transcript unread divider
+    // (hud-g1ena.2): of the last-N non-viewer retained units (the unread suffix,
+    // N = session.unread_output_count), how many survive THIS viewer's clearance
+    // filter. The divider is placed with this count so a higher-classification
+    // unread turn filtered out of `visible_transcript` cannot push the divider
+    // onto an already-seen visible turn. `unread_output_count` stays the aggregate
+    // for the ambient count, which MAY exceed the units below the divider. Viewer
+    // echoes are never unread, so they are skipped, matching the append-side
+    // `unread_output_count` bookkeeping.
+    let visible_unread_output_count = {
+        let unread_suffix_len = session.unread_output_count;
+        let mut nonviewer_seen = 0usize;
+        let mut visible_unread = 0usize;
+        for unit in session.retained_transcript.iter().rev() {
+            if unit.output_kind == OutputKind::Viewer {
+                continue;
+            }
+            nonviewer_seen += 1;
+            if nonviewer_seen > unread_suffix_len {
+                break;
+            }
+            if policy.permits(unit.content_classification) {
+                visible_unread += 1;
+            }
+        }
+        visible_unread
+    };
     let pending_input_count = session
         .pending_input
         .iter()
@@ -1749,6 +1776,7 @@ fn projected_portal_state(
         visible_transcript,
         visible_transcript_bytes,
         unread_output_count: unread_visible.then_some(session.unread_output_count),
+        visible_unread_output_count: unread_visible.then_some(visible_unread_output_count),
         pending_input_count: pending_visible.then_some(pending_input_count),
         pending_input_bytes: pending_visible.then_some(session.pending_input_bytes),
         last_input_feedback: session.last_input_feedback.as_ref().and_then(|feedback| {
