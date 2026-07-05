@@ -1007,6 +1007,11 @@ impl Compositor {
             // `pixel_y = input_box.y + content_inset − vscroll_px` (collect path).
             row0_top: (input_box.y - region.y) + content_inset - vscroll_px,
             line_height,
+            // Visible row window: the pointer hit-test clamps into this so a click
+            // in the box padding while scrolled cannot land on a clipped row
+            // outside the window (hud-lw60x).
+            first_visible_row: first_visible,
+            visible_rows: visible_lines,
         });
 
         if let Ok(mut guard) = self.composer_visual_layout.lock() {
