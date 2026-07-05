@@ -46,6 +46,7 @@
 //! | `portal.stale_marker.color` | stale marker | content-free disconnect marker color (RGBA hex) |
 //! | `portal.unread_indicator.color` | unread indicator | ambient unread-output count color (RGBA hex) |
 //! | `portal.awaiting_reply.color` | awaiting-reply indicator | ambient question/awaiting-reply cue color (RGBA hex) |
+//! | `portal.connecting_marker.color` | connecting marker | never-connected connecting cue color, distinct from the degraded/stale marker (RGBA hex) |
 //! | `portal.lifecycle.active_color` | lifecycle affordance | accent for `Active` (RGBA hex) |
 //! | `portal.lifecycle.attached_color` | lifecycle affordance | accent for `Attached`/ready (RGBA hex) |
 //! | `portal.lifecycle.attention_color` | lifecycle affordance | accent for `Degraded`/`HudUnavailable` (RGBA hex) |
@@ -188,6 +189,15 @@ pub const PORTAL_TOKEN_AWAITING_REPLY_COLOR: &str = "portal.awaiting_reply.color
 /// surface reads as calm and ready, never as an error — so it defaults to the
 /// same muted quiet-signal family as the other ambient tokens.
 pub const PORTAL_TOKEN_EMPTY_STATE_COLOR: &str = "portal.empty_state.color";
+
+/// Color of the connecting-state marker (portal-chat-grade-affordances
+/// §Connecting State Distinction) shown while a portal is attached but its owning
+/// session has never connected (`has_ever_connected == false`). Deliberately a
+/// cool "spinning up" hue that is visually DISTINCT from the amber degraded/stale
+/// marker (`portal.stale_marker.color`) so a starting-up portal never reads as a
+/// failing one. Ambient by design — connecting is a quiet, non-attention signal,
+/// so it matches the muted-tone convention of the other quiet-signal tokens.
+pub const PORTAL_TOKEN_CONNECTING_MARKER_COLOR: &str = "portal.connecting_marker.color";
 
 // ── Lifecycle affordance tokens (cooperative-hud-projection §lifecycle) ───────
 //
@@ -390,6 +400,13 @@ mod defaults {
     /// periwinkle (awaiting-reply) tones so an empty surface reads as its own
     /// quiet "ready" signal rather than an error or an existing meaning.
     pub const EMPTY_STATE_COLOR: &str = "#5F8A78";
+    /// Muted cyan — a calm "spinning up" hue for the never-connected connecting
+    /// state (§Connecting State Distinction). Its cool cyan is deliberately
+    /// distinct from the amber `STALE_MARKER_COLOR` (degraded/disconnected) so a
+    /// starting-up portal never reads as failing; it is also distinct from the
+    /// sage empty-state and periwinkle awaiting-reply tones so connecting carries
+    /// its own quiet meaning.
+    pub const CONNECTING_MARKER_COLOR: &str = "#4C93A6";
 
     // Lifecycle affordance accents — ambient, mutually distinct (see token-key
     // docs above). Active: calm teal-green; attached/ready: soft blue;
@@ -525,6 +542,11 @@ pub struct PortalPartTokens {
     /// shown when a connected portal's retained transcript is empty. Quiet and
     /// inviting — reads as calm and ready, never as an error.
     pub empty_state_color: Rgba,
+    /// Color of the connecting-state marker (portal-chat-grade-affordances
+    /// §Connecting State Distinction) shown while a portal is attached but has
+    /// never connected. Cool "spinning up" hue, visually distinct from the amber
+    /// `stale_marker_color` so a starting-up portal does not read as failing.
+    pub connecting_marker_color: Rgba,
 
     // Lifecycle affordance accents (cooperative-hud-projection §lifecycle).
     // Each maps a `ProjectionLifecycleState` group onto an ambient accent; the
@@ -649,6 +671,8 @@ impl Default for PortalPartTokens {
                 .expect("awaiting reply color default is valid hex"),
             empty_state_color: parse_color_hex(defaults::EMPTY_STATE_COLOR)
                 .expect("empty state color default is valid hex"),
+            connecting_marker_color: parse_color_hex(defaults::CONNECTING_MARKER_COLOR)
+                .expect("connecting marker color default is valid hex"),
 
             lifecycle_active_color: parse_color_hex(defaults::LIFECYCLE_ACTIVE_COLOR)
                 .expect("lifecycle active color default is valid hex"),
@@ -883,6 +907,10 @@ pub fn resolve_portal_tokens(token_map: &DesignTokenMap) -> PortalPartTokens {
             PORTAL_TOKEN_EMPTY_STATE_COLOR,
             defaults.empty_state_color
         ),
+        connecting_marker_color: resolve_color!(
+            PORTAL_TOKEN_CONNECTING_MARKER_COLOR,
+            defaults.connecting_marker_color
+        ),
 
         lifecycle_active_color: resolve_color!(
             PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR,
@@ -1072,6 +1100,10 @@ const PORTAL_TOKEN_DEFAULT_STRINGS: &[(&str, &str)] = &[
         defaults::AWAITING_REPLY_COLOR,
     ),
     (PORTAL_TOKEN_EMPTY_STATE_COLOR, defaults::EMPTY_STATE_COLOR),
+    (
+        PORTAL_TOKEN_CONNECTING_MARKER_COLOR,
+        defaults::CONNECTING_MARKER_COLOR,
+    ),
     (
         PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR,
         defaults::LIFECYCLE_ACTIVE_COLOR,
@@ -1721,6 +1753,45 @@ mod tests {
         );
     }
 
+    // ── §Connecting State Distinction token tests (hud-g1ena.7) ──────────
+
+    /// The connecting-marker token resolves to a valid, visible color and is
+    /// distinct from the amber degraded/stale marker — the core spec requirement
+    /// that a starting-up portal not read as a failing one.
+    #[test]
+    fn connecting_marker_token_is_valid_and_distinct_from_degraded() {
+        let tokens = resolve_portal_tokens(&empty_map());
+        assert!(
+            tokens.connecting_marker_color.a > 0.0,
+            "connecting marker color must have non-zero alpha so it is visible"
+        );
+        assert_ne!(
+            tokens.connecting_marker_color, tokens.stale_marker_color,
+            "connecting must be visually distinct from the degraded/stale marker \
+             (§Connecting State Distinction)"
+        );
+    }
+
+    /// A profile-scoped override of the connecting token propagates through
+    /// `resolve_portal_tokens`, so the connecting treatment is reskinnable with no
+    /// adapter change (token-resolved, never hardcoded).
+    #[test]
+    fn connecting_marker_token_override_propagates() {
+        let mut overrides = DesignTokenMap::new();
+        overrides.insert(
+            PORTAL_TOKEN_CONNECTING_MARKER_COLOR.to_string(),
+            "#0000FF".to_string(), // blue sentinel
+        );
+        let resolved = resolve_tokens(&empty_map(), &overrides);
+        let tokens = resolve_portal_tokens(&resolved);
+        assert!(
+            tokens.connecting_marker_color.r.abs() < 1e-3
+                && tokens.connecting_marker_color.g.abs() < 1e-3
+                && (tokens.connecting_marker_color.b - 1.0).abs() < 1e-3,
+            "connecting marker color override must propagate (blue)"
+        );
+    }
+
     // ── Diagnostic warn path (hud-dcynv) ─────────────────────────────────
 
     /// Verifies that a present-but-unparseable token (color) falls back to the
@@ -2054,7 +2125,7 @@ mod tests {
     #[test]
     fn resolve_portal_token_strings_covers_every_key() {
         // Number of distinct portal token keys resolved by resolve_portal_tokens.
-        const EXPECTED_KEYS: usize = 48;
+        const EXPECTED_KEYS: usize = 49;
         assert_eq!(
             PORTAL_TOKEN_DEFAULT_STRINGS.len(),
             EXPECTED_KEYS,
