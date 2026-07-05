@@ -741,7 +741,7 @@ fn hit_region_node_new_fields_accessible() {
         auto_capture: true,
         release_on_up: true,
         cursor_style: CursorStyle::Pointer,
-        tooltip: Some("Click to submit".to_string()),
+        tooltip: Box::new(Some("Click to submit".to_string())),
         event_mask: EventMask {
             pointer_move: false,
             ..Default::default()
@@ -752,7 +752,7 @@ fn hit_region_node_new_fields_accessible() {
     assert!(node.auto_capture);
     assert!(node.release_on_up);
     assert_eq!(node.cursor_style, CursorStyle::Pointer);
-    assert_eq!(node.tooltip, Some("Click to submit".to_string()));
+    assert_eq!(*node.tooltip, Some("Click to submit".to_string()));
     assert!(!node.event_mask.pointer_move);
     assert!(node.event_mask.click); // not overridden — still true
 }

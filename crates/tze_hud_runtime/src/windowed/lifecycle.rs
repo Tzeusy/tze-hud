@@ -1148,7 +1148,7 @@ impl WinitApp {
                                             .state
                                             .input_processor
                                             .composer_draft_snapshot()
-                                            .map(|(text, _, _, _, _)| text.len())
+                                            .map(|(text, _, _, _, _, _)| text.len())
                                             .unwrap_or(0);
                                         (frac * text_len as f64).round() as usize
                                     } else {

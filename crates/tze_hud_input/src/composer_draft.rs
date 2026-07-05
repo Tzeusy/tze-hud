@@ -1457,6 +1457,15 @@ pub struct ComposerDraftManager {
     scheduler: DraftScheduler,
     /// The node_id of the currently focused composer region, if any.
     focused_node: Option<SceneId>,
+    /// Per-composer placeholder-hint override for the currently focused
+    /// composer node, mirroring `HitRegionNode::composer_placeholder`'s
+    /// three-state `Option<String>` convention (`None` = no override
+    /// configured, `Some("")` = explicit opt-out, `Some(text)` = custom
+    /// hint). Reset to `None` on every `on_focus_gained` call; the caller
+    /// (which holds scene access this manager does not) resolves the
+    /// focused node's config and supplies it via `set_focused_placeholder`
+    /// immediately afterward. Source: hud-se6hs, follow-up to hud-evk0j.
+    focused_placeholder: Option<String>,
     /// Unsent drafts retained per composer node across focus loss, so an
     /// accidental blur (clicking another portal, switching tabs) does not
     /// destroy in-progress text. Keyed by composer `node_id`. Submitted or
@@ -1509,7 +1518,30 @@ impl ComposerDraftManager {
         draft.set_suspended(suspended);
         self.draft = Some(draft);
         self.focused_node = Some(node_id);
+        // Reset to "no override" so a placeholder from a previously-focused
+        // node never leaks onto this one; the caller supplies the new node's
+        // config (if any) via `set_focused_placeholder` right after this call.
+        self.focused_placeholder = None;
         self.scheduler = DraftScheduler::new();
+    }
+
+    /// Set the composer-placeholder override for the currently focused
+    /// composer node (see `HitRegionNode::composer_placeholder`).
+    ///
+    /// Called by the input processor immediately after `on_focus_gained`,
+    /// which has scene access this manager does not, to resolve the newly
+    /// focused node's placeholder config. No-op in the sense that it does
+    /// not validate a composer is actually focused — callers only invoke it
+    /// from the focus-gained path.
+    pub fn set_focused_placeholder(&mut self, placeholder: Option<String>) {
+        self.focused_placeholder = placeholder;
+    }
+
+    /// The composer-placeholder override for the currently focused composer
+    /// node, if one was set via `set_focused_placeholder`. See
+    /// `HitRegionNode::composer_placeholder` for the three-state convention.
+    pub fn focused_placeholder(&self) -> Option<String> {
+        self.focused_placeholder.clone()
     }
 
     /// Called when the focused composer region loses focus.
@@ -2636,6 +2668,76 @@ mod tests {
             "aaaaaaaaaa",
             "draft must not contain a partial ZWJ cluster; got {:?}",
             draft.text()
+        );
+    }
+
+    // ─── ComposerDraftManager: per-composer placeholder override (hud-se6hs) ──
+
+    /// With no override set, `focused_placeholder` reports `None` — the
+    /// caller (widgets.rs) falls back to its own global default.
+    #[test]
+    fn focused_placeholder_defaults_to_none_when_unset() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+
+        assert_eq!(
+            mgr.focused_placeholder(),
+            None,
+            "no override configured — caller must fall back to its own default"
+        );
+    }
+
+    /// `set_focused_placeholder` overrides the global default with the
+    /// focused node's own hint copy.
+    #[test]
+    fn set_focused_placeholder_overrides_default() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+        mgr.set_focused_placeholder(Some("Search…".to_string()));
+
+        assert_eq!(
+            mgr.focused_placeholder(),
+            Some("Search…".to_string()),
+            "custom override must be reported verbatim"
+        );
+    }
+
+    /// An empty-string override is a distinct explicit opt-out, not "unset".
+    #[test]
+    fn set_focused_placeholder_empty_string_is_explicit_opt_out() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+        mgr.set_focused_placeholder(Some(String::new()));
+
+        assert_eq!(
+            mgr.focused_placeholder(),
+            Some(String::new()),
+            "explicit opt-out (Some(\"\")) must round-trip distinctly from unset (None)"
+        );
+    }
+
+    /// A fresh `on_focus_gained` resets the override so a placeholder from a
+    /// previously-focused composer never leaks onto the next one.
+    #[test]
+    fn on_focus_gained_resets_placeholder_override() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_a = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_a, false);
+        mgr.set_focused_placeholder(Some("Node A hint".to_string()));
+        assert_eq!(mgr.focused_placeholder(), Some("Node A hint".to_string()));
+
+        mgr.on_focus_lost();
+        let node_b = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_b, false);
+
+        assert_eq!(
+            mgr.focused_placeholder(),
+            None,
+            "re-focusing a different node without an explicit set must not inherit \
+             the previous node's override"
         );
     }
 

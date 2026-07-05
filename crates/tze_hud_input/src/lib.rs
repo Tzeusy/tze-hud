@@ -730,7 +730,10 @@ impl InputProcessor {
     ///   `try_flush_composer_draft`.
     /// - The node that gained focus has its `focused` flag set; if it accepts
     ///   composer input, the draft manager is activated via `on_focus_gained`
-    ///   (`suspended = false`; safe-mode governance is applied separately).
+    ///   (`suspended = false`; safe-mode governance is applied separately), and
+    ///   the node's `composer_placeholder` config (if any) is seeded into the
+    ///   manager via `set_focused_placeholder` so `composer_draft_snapshot`
+    ///   can report a per-composer override (hud-se6hs).
     fn apply_focus_transition_side_effects(
         &mut self,
         transition: &FocusTransition,
@@ -754,6 +757,8 @@ impl InputProcessor {
                 if node_accepts_composer_input(scene, gained_node_id) {
                     self.composer_draft_manager
                         .on_focus_gained(gained_node_id, false);
+                    self.composer_draft_manager
+                        .set_focused_placeholder(node_composer_placeholder(scene, gained_node_id));
                 }
             }
         }
@@ -1013,13 +1018,20 @@ impl InputProcessor {
 
     /// Snapshot current composer draft state for local echo rendering.
     ///
-    /// Returns `(text, cursor_byte, selection_anchor, at_capacity, focused_node_id)`
+    /// Returns
+    /// `(text, cursor_byte, selection_anchor, at_capacity, focused_node_id, placeholder_override)`
     /// when a composer region is focused, `None` otherwise.
     ///
     /// `selection_anchor` equals `cursor_byte` when no selection is active.
     /// When they differ, the selected region spans
     /// `[min(cursor_byte, selection_anchor), max(cursor_byte, selection_anchor)]`
     /// as byte offsets into `text`.
+    ///
+    /// `placeholder_override` mirrors `HitRegionNode::composer_placeholder`'s
+    /// three-state convention, resolved for the focused node at focus-gain
+    /// time: `None` — no per-composer override configured (caller should fall
+    /// back to its own default hint); `Some("")` — explicit opt-out; `Some(text)`
+    /// — this composer's own hint copy (hud-se6hs, follow-up to hud-evk0j).
     ///
     /// Used by the windowed runtime to push a [`LocalComposerState`]-equivalent
     /// snapshot to the compositor thread after every composer mutation.
@@ -1029,7 +1041,14 @@ impl InputProcessor {
     /// frame.
     pub fn composer_draft_snapshot(
         &self,
-    ) -> Option<(String, usize, usize, bool, tze_hud_scene::SceneId)> {
+    ) -> Option<(
+        String,
+        usize,
+        usize,
+        bool,
+        tze_hud_scene::SceneId,
+        Option<String>,
+    )> {
         let node_id = self.composer_draft_manager.focused_node()?;
         let draft = self.composer_draft_manager.draft()?;
         Some((
@@ -1038,6 +1057,7 @@ impl InputProcessor {
             draft.selection_anchor(),
             draft.is_at_capacity(),
             node_id,
+            self.composer_draft_manager.focused_placeholder(),
         ))
     }
 
@@ -1975,6 +1995,24 @@ fn node_accepts_composer_input(scene: &SceneGraph, node_id: SceneId) -> bool {
             false
         }
     })
+}
+
+/// Resolve the composer-placeholder override configured on a `HitRegionNode`
+/// (`HitRegionNode::composer_placeholder`), if any.
+///
+/// Mirrors the field's three-state `Option<String>` convention: `None` means
+/// no override is configured (the caller should fall back to its own
+/// default); `Some("")` is an explicit opt-out; `Some(text)` is a custom hint.
+/// Returns `None` for a missing node or a non-`HitRegion` node.
+///
+/// Used by `apply_focus_transition_side_effects` to seed the draft manager's
+/// per-focus placeholder override at focus-gain time (hud-se6hs).
+fn node_composer_placeholder(scene: &SceneGraph, node_id: SceneId) -> Option<String> {
+    let node = scene.nodes.get(&node_id)?;
+    let NodeData::HitRegion(hr) = &node.data else {
+        return None;
+    };
+    (*hr.composer_placeholder).clone()
 }
 
 /// Depth-first search for the first composer node (a `HitRegionNode` with
@@ -3981,6 +4019,105 @@ mod tests {
             processor.composer_draft_manager.focused_node(),
             Some(composer_id),
             "focused_node must be the composer node_id"
+        );
+    }
+
+    /// hud-se6hs: a composer node with no `composer_placeholder` override
+    /// reports `None` in the `composer_draft_snapshot` tuple's placeholder
+    /// slot — the caller (windowed runtime) falls back to its own default.
+    #[test]
+    fn composer_draft_snapshot_reports_no_override_when_unset() {
+        let (mut scene, tab_id, _tile_id, _composer_id, _plain_id) = setup_composer_scene();
+        let mut processor = InputProcessor::new();
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+
+        let event = PointerEvent {
+            x: 100.0,
+            y: 10.0,
+            kind: PointerEventKind::Down,
+            device_id: 0,
+            timestamp: None,
+        };
+        processor.process_with_focus(&event, &mut scene, &mut fm, tab_id);
+
+        let snapshot = processor
+            .composer_draft_snapshot()
+            .expect("composer must be active after focus");
+        assert_eq!(
+            snapshot.5, None,
+            "no per-composer override configured — must report None (inherit default)"
+        );
+    }
+
+    /// hud-se6hs: a composer node whose `HitRegionNode::composer_placeholder`
+    /// carries a custom hint threads that hint end-to-end through
+    /// `process_with_focus` → `composer_draft_snapshot`, overriding the
+    /// runtime's global default.
+    #[test]
+    fn composer_draft_snapshot_reports_custom_per_node_override() {
+        let (mut scene, tab_id, _tile_id, composer_id, _plain_id) = setup_composer_scene();
+        // Configure a non-chat composer's own hint copy on the owning node.
+        if let Some(node) = scene.nodes.get_mut(&composer_id) {
+            if let NodeData::HitRegion(hr) = &mut node.data {
+                hr.composer_placeholder = Box::new(Some("Search…".to_string()));
+            }
+        }
+        let mut processor = InputProcessor::new();
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+
+        let event = PointerEvent {
+            x: 100.0,
+            y: 10.0,
+            kind: PointerEventKind::Down,
+            device_id: 0,
+            timestamp: None,
+        };
+        processor.process_with_focus(&event, &mut scene, &mut fm, tab_id);
+
+        let snapshot = processor
+            .composer_draft_snapshot()
+            .expect("composer must be active after focus");
+        assert_eq!(
+            snapshot.5,
+            Some("Search…".to_string()),
+            "the owning node's composer_placeholder must reach the snapshot verbatim"
+        );
+    }
+
+    /// hud-se6hs: `Some("")` on `HitRegionNode::composer_placeholder` is an
+    /// explicit opt-out, distinct from the unset (`None`) case above — it
+    /// must round-trip through the snapshot as `Some("")`, not `None`, so the
+    /// windowed runtime can tell "no config" apart from "explicitly disabled".
+    #[test]
+    fn composer_draft_snapshot_reports_explicit_opt_out_distinctly() {
+        let (mut scene, tab_id, _tile_id, composer_id, _plain_id) = setup_composer_scene();
+        if let Some(node) = scene.nodes.get_mut(&composer_id) {
+            if let NodeData::HitRegion(hr) = &mut node.data {
+                hr.composer_placeholder = Box::new(Some(String::new()));
+            }
+        }
+        let mut processor = InputProcessor::new();
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+
+        let event = PointerEvent {
+            x: 100.0,
+            y: 10.0,
+            kind: PointerEventKind::Down,
+            device_id: 0,
+            timestamp: None,
+        };
+        processor.process_with_focus(&event, &mut scene, &mut fm, tab_id);
+
+        let snapshot = processor
+            .composer_draft_snapshot()
+            .expect("composer must be active after focus");
+        assert_eq!(
+            snapshot.5,
+            Some(String::new()),
+            "explicit opt-out must round-trip as Some(\"\"), distinct from unset None"
         );
     }
 

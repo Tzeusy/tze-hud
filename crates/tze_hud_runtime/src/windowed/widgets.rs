@@ -11,18 +11,36 @@ use crate::widget_hover::{
     WidgetHoverTracker, build_hover_trackers, hidden_mutations_for_removed, tick_hover_trackers,
 };
 
-/// Default empty-draft placeholder hint for the portal chat composer (hud-evk0j).
+/// Default empty-draft placeholder hint used when a composer's owning
+/// `HitRegionNode` has no `composer_placeholder` override configured
+/// (hud-evk0j).
 ///
 /// The portal composer is a chat-message composer (`portal-bottom-chat-composer`),
 /// so this matches the existing UX. Rendered — dimmed, from
 /// `portal.composer.placeholder_color` — only while the draft is empty; it is
 /// never part of the draft buffer and is never submitted.
 ///
-/// FOLLOW-UP (hud-evk0j): this is a single global default. A per-composer
-/// placeholder (sourced from the owning `HitRegionNode` / scene config) would let
-/// non-chat composers set their own hint copy; thread that through
-/// `composer_draft_snapshot` when the scene schema grows a placeholder field.
+/// Per-composer override (hud-se6hs, follow-up to hud-evk0j): a
+/// `HitRegionNode`'s `composer_placeholder` config is threaded through
+/// `composer_draft_snapshot` and resolved below — `None` inherits this
+/// default, `Some("")` opts the composer out of any placeholder, and
+/// `Some(text)` supplies non-chat composers with their own hint copy.
 const COMPOSER_DEFAULT_PLACEHOLDER: &str = "Type a message…";
+
+/// Resolve a composer's placeholder hint from its `HitRegionNode` override
+/// (as reported by `composer_draft_snapshot`), falling back to
+/// [`COMPOSER_DEFAULT_PLACEHOLDER`] when unset.
+///
+/// Mirrors `HitRegionNode::composer_placeholder`'s three-state convention:
+/// `None` (unset) → the global default; `Some("")` (explicit opt-out) →
+/// `None` (no placeholder rendered); `Some(text)` (custom) → `Some(text)`.
+fn resolve_composer_placeholder(override_config: Option<String>) -> Option<String> {
+    match override_config {
+        None => Some(COMPOSER_DEFAULT_PLACEHOLDER.to_string()),
+        Some(text) if text.is_empty() => None,
+        Some(text) => Some(text),
+    }
+}
 
 impl WinitApp {
     /// Push the current composer draft snapshot to the compositor thread for
@@ -37,7 +55,7 @@ impl WinitApp {
     ///
     /// No-ops if the draft manager reports no active draft (safety guard).
     pub(super) fn push_local_composer_echo(&mut self, input_started_at: std::time::Instant) {
-        if let Some((text, cursor_byte, selection_anchor, at_capacity, node_id)) =
+        if let Some((text, cursor_byte, selection_anchor, at_capacity, node_id, placeholder_cfg)) =
             self.state.input_processor.composer_draft_snapshot()
         {
             let state = LocalComposerState {
@@ -46,7 +64,7 @@ impl WinitApp {
                 selection_anchor,
                 at_capacity,
                 node_id,
-                placeholder: Some(COMPOSER_DEFAULT_PLACEHOLDER.to_string()),
+                placeholder: resolve_composer_placeholder(placeholder_cfg),
             };
             if let Ok(mut guard) = self.state.local_composer_state.lock() {
                 *guard = Some(Some(state));
@@ -420,6 +438,35 @@ impl WinitApp {
 mod tests {
     use super::*;
     use tze_hud_scene::graph::SceneGraph;
+
+    // ─── resolve_composer_placeholder (hud-se6hs) ─────────────────────────
+
+    /// Unset override (`None`, i.e. no `composer_placeholder` configured on
+    /// the owning `HitRegionNode`) falls back to the global default —
+    /// backward-compatible with every existing chat-composer caller.
+    #[test]
+    fn resolve_composer_placeholder_falls_back_to_default_when_unset() {
+        assert_eq!(
+            resolve_composer_placeholder(None),
+            Some(COMPOSER_DEFAULT_PLACEHOLDER.to_string())
+        );
+    }
+
+    /// A custom per-composer hint overrides the global default verbatim.
+    #[test]
+    fn resolve_composer_placeholder_uses_custom_override() {
+        assert_eq!(
+            resolve_composer_placeholder(Some("Search…".to_string())),
+            Some("Search…".to_string())
+        );
+    }
+
+    /// An explicit opt-out (`Some("")`) suppresses the placeholder entirely —
+    /// distinct from the unset case above, which still shows the default.
+    #[test]
+    fn resolve_composer_placeholder_empty_string_opts_out() {
+        assert_eq!(resolve_composer_placeholder(Some(String::new())), None);
+    }
 
     #[test]
     fn hover_tracker_region_resolves_from_widget_geometry() {

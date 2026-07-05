@@ -262,7 +262,7 @@ Expanded text stream portals SHALL reuse the existing local-first input model fo
 ---
 
 ### Requirement: HitRegionNode Primitive
-HitRegionNode SHALL be the sole interactive primitive in v1. It SHALL carry: bounds (relative to tile origin), interaction_id (agent-defined, forwarded in events), accepts_focus, accepts_pointer, auto_capture, release_on_up, cursor_style, tooltip (shown after 500ms hover), event_mask, accessibility metadata, and local_style configuration.
+HitRegionNode SHALL be the sole interactive primitive in v1. It SHALL carry: bounds (relative to tile origin), interaction_id (agent-defined, forwarded in events), accepts_focus, accepts_pointer, auto_capture, release_on_up, cursor_style, tooltip (shown after 500ms hover), event_mask, accessibility metadata, local_style configuration, and — for composer regions (`accepts_composer_input = true`) — an optional composer_placeholder override for the empty-draft hint text (unset inherits the runtime default, an explicit empty string opts the composer out of any placeholder, and a non-empty string is that composer's own hint copy).
 Source: RFC 0004 §7.1, RFC 0001 §2.4
 Scope: v1-mandatory
 
