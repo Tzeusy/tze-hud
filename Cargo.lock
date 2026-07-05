@@ -4109,6 +4109,7 @@ dependencies = [
  "tze_hud_scene",
  "tze_hud_telemetry",
  "tze_hud_widget",
+ "unicode-width",
  "uuid",
  "wgpu",
  "windows",
