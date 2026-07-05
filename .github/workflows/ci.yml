@@ -271,6 +271,10 @@ jobs:
             --test text_stream_portal_adapter \
             --test text_stream_portal_coalescing \
             --test text_stream_portal_governance \
+            --test text_stream_portal_markdown \
+            --test text_stream_portal_composer \
+            --test text_stream_portal_cadence \
+            --test text_stream_portal_styling \
             --test drag_reposition \
             --test movable_elements_e2e
 
