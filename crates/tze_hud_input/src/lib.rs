@@ -113,9 +113,9 @@ pub use command::{
     RawCommandEvent,
 };
 pub use composer_draft::{
-    ComposerDraft, ComposerDraftManager, ComposerVisualLayout, ComposerVisualLine,
-    DEFAULT_DRAFT_CAP, DraftCancel, DraftNotificationBatch, DraftScheduler, DraftStateNotification,
-    DraftSubmission, EditOutcome, MAX_DRAFT_BYTES, Selection,
+    ComposerDraft, ComposerDraftManager, ComposerInputBoxGeometry, ComposerVisualLayout,
+    ComposerVisualLine, DEFAULT_DRAFT_CAP, DraftCancel, DraftNotificationBatch, DraftScheduler,
+    DraftStateNotification, DraftSubmission, EditOutcome, MAX_DRAFT_BYTES, Selection,
 };
 pub use focus::{
     FocusGainedEvent, FocusLostEvent, FocusLostReason, FocusManager, FocusRequest, FocusResult,

@@ -963,25 +963,52 @@ impl Compositor {
         let visible_lines = composer_visible_line_count(total_lines, effective_max_lines);
         let first_visible =
             composer_vertical_line_offset(caret_line, total_lines, effective_max_lines);
+        let vscroll_px = first_visible as f32 * line_height;
         self.composer_layout = ComposerLayout {
             wrap: true,
             h_scroll_px: 0.0,
             content_width: 0.0,
             visible_lines: visible_lines as f32,
             total_lines: total_lines as f32,
-            vscroll_px: first_visible as f32 * line_height,
+            vscroll_px,
         };
 
         // Publish the wrapped VISUAL-LINE layout for the input thread's soft-wrap
         // vertical caret movement (hud-21o6x). Measured on the RAW draft (byte
         // space the caret uses), same wrap width as the render, so the input layer
         // maps caret byte ↔ visual row ↔ pixel x.
-        let visual_layout = tr.measure_composer_visual_layout(
+        let mut visual_layout = tr.measure_composer_visual_layout(
             &text,
             window_width,
             font_size_px,
             line_height_multiplier,
         );
+
+        // Publish the RENDERED input-box vertical geometry alongside the rows so
+        // the input layer's pointer hit-test maps pointer Y through the box the
+        // draft actually renders in — NOT the full node height (hud-lw60x). The
+        // box is bottom-anchored and short for a full-portal projection composer,
+        // so an even split of the node height sends every click to the last row.
+        // Derive it from the SAME `composer_input_box` the render path uses so the
+        // two cannot drift; node-local space (relative to `region.y`) matches the
+        // `local_y` the runtime feeds `byte_at_point`.
+        let input_box = Self::composer_input_box(
+            region,
+            font_size_px,
+            line_height_multiplier,
+            visible_lines as f32,
+            tokens.anchor,
+            content_inset,
+        );
+        visual_layout.input_box = Some(tze_hud_input::ComposerInputBoxGeometry {
+            box_top: input_box.y - region.y,
+            box_height: input_box.height,
+            // Visual row 0's top edge in node-local space, matching the render's
+            // `pixel_y = input_box.y + content_inset − vscroll_px` (collect path).
+            row0_top: (input_box.y - region.y) + content_inset - vscroll_px,
+            line_height,
+        });
+
         if let Ok(mut guard) = self.composer_visual_layout.lock() {
             *guard = Some(visual_layout);
         }

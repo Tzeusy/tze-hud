@@ -884,6 +884,12 @@ impl WinitApp {
     /// (`layout.text_len == draft.text().len()`) so a layout measured for a
     /// since-edited draft is rejected rather than mis-locating the click.
     ///
+    /// The node-local `local_y` is passed straight through: `byte_at_point` maps
+    /// it to a visual row via the input-box geometry the compositor publishes in
+    /// the same layout (bottom-anchored short box on a tall projection portal,
+    /// hud-lw60x), and `node_h` serves only as the even-split fallback height
+    /// when no geometry is present.
+    ///
     /// Falls back to the previous linear `(local_x / node_width) *
     /// text_byte_len` proportion when there is no fresh layout — the
     /// single-line composer profile (`portal.composer.max_lines == 1`,
