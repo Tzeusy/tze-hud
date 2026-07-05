@@ -2342,6 +2342,12 @@ pub struct PortalProjectionPublishParams {
     /// in-place into one transcript unit instead of appending. Omit for append.
     #[serde(default)]
     pub coalesce_key: Option<String>,
+    /// Optional question signal (a.k.a. `Question`): set `true` to mark this
+    /// output as a question awaiting a viewer reply. Omitted/`false` is the
+    /// exact pre-existing behavior — no ambient cue is rendered. This is a
+    /// backward-compatible, opt-in presence semantic (hud-jip0k).
+    #[serde(default)]
+    pub expects_reply: Option<bool>,
 }
 
 /// Response from `portal_projection_publish`.
@@ -2369,6 +2375,11 @@ pub struct PortalProjectionPublishResult {
 /// into the projection enums and defaults safely to `assistant` /
 /// `private` / no-coalesce when omitted. Privacy stays safe-by-default: an
 /// omitted classification is treated as `private`.
+///
+/// `expects_reply` (a.k.a. `Question`) is an optional bool signaling that this
+/// output is a question awaiting a viewer reply. Omitted/`false` is the exact
+/// pre-existing behavior (no rendered cue); `true` drives a minimal, ambient,
+/// token-styled cue on the portal (hud-jip0k). Backward-compatible opt-in.
 ///
 /// Accepted `output_kind` values (snake_case): `assistant` (default), `tool`,
 /// `status`, `error`, `other`. Any other value is rejected with
@@ -2417,6 +2428,7 @@ pub async fn handle_portal_projection_publish(
         output_kind: p.output_kind,
         content_classification: p.content_classification,
         coalesce_key: p.coalesce_key,
+        expects_reply: p.expects_reply,
         reply: reply_tx,
     })
     .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
@@ -6286,6 +6298,7 @@ mod tests {
         assert_eq!(p.output_kind, None);
         assert_eq!(p.content_classification, None);
         assert_eq!(p.coalesce_key, None);
+        assert_eq!(p.expects_reply, None);
     }
 
     #[test]
@@ -6302,6 +6315,32 @@ mod tests {
         assert_eq!(p.output_kind.as_deref(), Some("status"));
         assert_eq!(p.content_classification.as_deref(), Some("public"));
         assert_eq!(p.coalesce_key.as_deref(), Some("ck-1"));
+    }
+
+    /// hud-jip0k: `expects_reply` is optional and absent-by-default, matching
+    /// the backward-compat requirement — an omitted flag must parse identically
+    /// to a caller that predates the field.
+    #[test]
+    fn portal_publish_params_expects_reply_defaults_to_none() {
+        let p: PortalProjectionPublishParams = parse_params(json!({
+            "projection_id": "p1",
+            "owner_token": "t1",
+            "output_text": "hello"
+        }))
+        .expect("minimal publish params must parse");
+        assert_eq!(p.expects_reply, None);
+    }
+
+    #[test]
+    fn portal_publish_params_carry_expects_reply_true() {
+        let p: PortalProjectionPublishParams = parse_params(json!({
+            "projection_id": "p1",
+            "owner_token": "t1",
+            "output_text": "which option do you prefer?",
+            "expects_reply": true
+        }))
+        .expect("publish params with expects_reply must parse");
+        assert_eq!(p.expects_reply, Some(true));
     }
 
     // ── portal_projection get_pending_input / acknowledge / detach (hud-bq0gl.1) ─

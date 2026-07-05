@@ -1482,6 +1482,7 @@ mod tests {
                 content_classification: ContentClassification::Public,
                 logical_unit_id: None,
                 coalesce_key: None,
+                expects_reply: false,
             },
             "test-actor",
             now_us + 1,

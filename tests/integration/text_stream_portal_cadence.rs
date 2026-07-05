@@ -957,6 +957,7 @@ fn arrival_to_present_elapsed_measured_via_submitted_at_us() {
             content_classification: ContentClassification::Private,
             logical_unit_id: Some(format!("unit-{i}")),
             coalesce_key: None,
+            expects_reply: false,
         };
         // `server_timestamp_wall_us` is `submitted_at` so the coalescer records it.
         authority.handle_publish_output(publish, "caller-timing", submitted_at);
@@ -1074,6 +1075,7 @@ fn dual_portal_arrival_to_present_skew_bounded_by_round_robin() {
         content_classification: ContentClassification::Private,
         logical_unit_id: Some(format!("unit-{projection_id}-{seq}")),
         coalesce_key: None,
+        expects_reply: false,
     };
 
     authority.handle_publish_output(

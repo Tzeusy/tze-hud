@@ -130,6 +130,14 @@ pub struct PortalVisualTokens {
     /// by design — a presence engine surfaces a quiet count, never a loud
     /// notification badge. Source token: `portal.unread_indicator.color`.
     pub unread_indicator_color: proto::Rgba,
+    /// Color of the ambient awaiting-reply (question) indicator (hud-jip0k).
+    /// Set when the owning LLM's most recently published output has
+    /// `expects_reply == true` — a core presence semantic signaling the
+    /// output is a question awaiting a viewer reply, not a chatbot
+    /// notification. Ambient by design, matching the muted-tone convention
+    /// of the other quiet-signal indicators. Source token:
+    /// `portal.awaiting_reply.color`.
+    pub awaiting_reply_color: proto::Rgba,
 
     // Lifecycle affordance accents (cooperative-hud-projection §lifecycle).
     //
@@ -907,6 +915,13 @@ impl ResidentGrpcPortalAdapter {
                             state,
                             self.visual_tokens.unread_indicator_color,
                         ));
+                        // Ambient awaiting-reply (question) indicator
+                        // (hud-jip0k). Absent unless the most recently
+                        // published output is a pending question.
+                        runs.extend(awaiting_reply_color_runs(
+                            state,
+                            self.visual_tokens.awaiting_reply_color,
+                        ));
                         runs
                     },
                     // Transcript panes use Ellipsis to engage the TruncationCache
@@ -1005,6 +1020,18 @@ fn portal_markdown(
     // badge (CLAUDE.md doctrine).
     if let Some(line) = unread_indicator_line(state.unread_output_count) {
         push_line(&mut result, &line);
+    }
+    // Ambient awaiting-reply (question) indicator (hud-jip0k). Present only
+    // when the most recently published visible transcript unit is a question
+    // awaiting a viewer reply (`expects_reply == true`). A redacted viewer
+    // naturally gets nothing here — `visible_transcript` is already empty
+    // under redaction — and a viewer's own echoed reply becomes the new last
+    // unit (with `expects_reply == false`), which is exactly what clears the
+    // cue once answered. Minimal and text-visible so the signal survives
+    // environments that don't inspect color_runs; kept quiet (no `!`/⚠) to
+    // stay ambient per presence-engine doctrine.
+    if awaiting_reply(state) {
+        push_line(&mut result, "? awaiting reply");
     }
     // §2: content-free disconnect/stale marker. Emitted from the
     // redaction-independent `connection_degraded` flag and BEFORE the
@@ -1265,6 +1292,46 @@ fn unread_indicator_color_runs(
     }
 }
 
+/// `true` when the most recently appended visible transcript unit is a
+/// question awaiting a viewer reply (`expects_reply == true`, hud-jip0k).
+///
+/// Gating on `visible_transcript.last()` gets two things for free:
+/// - **Redaction**: a restricted viewer's `visible_transcript` is already
+///   emptied by the authority (`projected_portal_state`), so this returns
+///   `false` without any separate redaction check.
+/// - **Answered-question clearing**: a viewer's own echoed reply
+///   (`OutputKind::Viewer`) is appended with `expects_reply == false`
+///   (`submit_portal_input`), so once the viewer responds it becomes the new
+///   last unit and the cue clears — no separate "answered" bookkeeping needed.
+fn awaiting_reply(state: &ProjectedPortalState) -> bool {
+    state
+        .visible_transcript
+        .last()
+        .is_some_and(|unit| unit.expects_reply)
+}
+
+/// Build a `TextColorRunProto` for the ambient awaiting-reply (question)
+/// indicator.
+///
+/// Mirrors `unread_indicator_color_runs`/`stale_marker_color_runs`: a
+/// zero-length sentinel run (`[0..0]`) carrying the token-resolved
+/// `awaiting_reply_color` so the token drives the signal without any literal
+/// color in the render path (§6.1). Empty when nothing is awaiting reply.
+fn awaiting_reply_color_runs(
+    state: &ProjectedPortalState,
+    awaiting_reply_color: proto::Rgba,
+) -> Vec<proto::TextColorRunProto> {
+    if awaiting_reply(state) {
+        vec![proto::TextColorRunProto {
+            start_byte: 0,
+            end_byte: 0,
+            color: Some(awaiting_reply_color),
+        }]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Map a published `ProjectionLifecycleState` onto its ambient affordance accent.
 ///
 /// The seven contract variants collapse into four viewer-facing semantic groups,
@@ -1475,6 +1542,12 @@ pub fn portal_visual_tokens_from_part_tokens(
             g: part.unread_indicator_color.g,
             b: part.unread_indicator_color.b,
             a: part.unread_indicator_color.a,
+        },
+        awaiting_reply_color: proto::Rgba {
+            r: part.awaiting_reply_color.r,
+            g: part.awaiting_reply_color.g,
+            b: part.awaiting_reply_color.b,
+            a: part.awaiting_reply_color.a,
         },
         lifecycle_active_color: proto::Rgba {
             r: part.lifecycle_active_color.r,
@@ -1977,6 +2050,7 @@ mod tests {
                 content_classification: ContentClassification::Private,
                 logical_unit_id: None,
                 coalesce_key: None,
+                expects_reply: false,
                 appended_at_wall_us: 1,
             },
             TranscriptUnit {
@@ -1986,6 +2060,7 @@ mod tests {
                 content_classification: ContentClassification::Private,
                 logical_unit_id: None,
                 coalesce_key: None,
+                expects_reply: false,
                 appended_at_wall_us: 2,
             },
         ];
@@ -2188,6 +2263,125 @@ mod tests {
         assert_eq!(
             visual.unread_indicator_color.a,
             part.unread_indicator_color.a
+        );
+    }
+
+    /// The `awaiting_reply_color` `PortalVisualTokens` field maps 1:1 from the
+    /// source `PortalPartTokens` channel (hud-jip0k), same single-source-of-truth
+    /// invariant as the other token-mapping tests in this module.
+    #[test]
+    fn portal_visual_tokens_from_part_tokens_maps_awaiting_reply_color() {
+        let part = tze_hud_config::PortalPartTokens::default();
+        let visual = portal_visual_tokens_from_part_tokens(&part);
+        assert_eq!(visual.awaiting_reply_color.r, part.awaiting_reply_color.r);
+        assert_eq!(visual.awaiting_reply_color.a, part.awaiting_reply_color.a);
+    }
+
+    /// Build a minimal `TranscriptUnit` for awaiting-reply tests, varying only
+    /// `expects_reply` and `output_kind`.
+    fn transcript_unit(
+        sequence: u64,
+        output_kind: OutputKind,
+        expects_reply: bool,
+    ) -> TranscriptUnit {
+        TranscriptUnit {
+            sequence,
+            output_text: "example output".to_string(),
+            output_kind,
+            content_classification: ContentClassification::Private,
+            logical_unit_id: None,
+            coalesce_key: None,
+            expects_reply,
+            appended_at_wall_us: sequence,
+        }
+    }
+
+    /// hud-jip0k acceptance: the ambient awaiting-reply cue — both the
+    /// text-visible `"? awaiting reply"` line and the token-driven sentinel
+    /// color run — is present exactly when the most recently published
+    /// visible transcript unit has `expects_reply == true`, and ABSENT for
+    /// every backward-compat case: no transcript, `expects_reply == false`
+    /// (the default/omitted case), and once a viewer's echoed reply
+    /// (`OutputKind::Viewer`, `expects_reply == false` by construction)
+    /// becomes the new last unit.
+    #[test]
+    fn awaiting_reply_cue_gates_on_last_unit_expects_reply() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let awaiting_color = adapter.visual_tokens().awaiting_reply_color;
+
+        // Backward-compat baseline: no transcript at all — absent, exactly
+        // like every portal published before this field existed.
+        let empty = make_expanded_interaction_state("portal-question");
+        assert!(
+            !portal_markdown(&empty, None).contains("awaiting reply"),
+            "no transcript must render no awaiting-reply cue"
+        );
+        assert!(
+            awaiting_reply_color_runs(&empty, awaiting_color).is_empty(),
+            "no transcript must emit no awaiting-reply color run"
+        );
+
+        // The default/omitted case: expects_reply == false on the last unit.
+        let mut unset = make_expanded_interaction_state("portal-question");
+        unset.visible_transcript = vec![transcript_unit(1, OutputKind::Assistant, false)];
+        assert!(
+            !portal_markdown(&unset, None).contains("awaiting reply"),
+            "expects_reply == false must render no awaiting-reply cue"
+        );
+        assert!(
+            awaiting_reply_color_runs(&unset, awaiting_color).is_empty(),
+            "expects_reply == false must emit no awaiting-reply color run"
+        );
+
+        // The opt-in case: expects_reply == true on the last unit.
+        let mut question = make_expanded_interaction_state("portal-question");
+        question.visible_transcript = vec![
+            transcript_unit(1, OutputKind::Assistant, false),
+            transcript_unit(2, OutputKind::Assistant, true),
+        ];
+        let markdown = portal_markdown(&question, None);
+        assert!(
+            markdown.contains("? awaiting reply"),
+            "expects_reply == true on the last unit must render the ambient cue: {markdown}"
+        );
+        let runs = awaiting_reply_color_runs(&question, awaiting_color);
+        assert_eq!(
+            runs.len(),
+            1,
+            "expects_reply == true must emit exactly one token-driven color run"
+        );
+        assert_eq!(
+            runs[0].color.unwrap(),
+            awaiting_color,
+            "run must carry the awaiting_reply_color token, never a literal color"
+        );
+        assert_eq!(runs[0].start_byte, 0);
+        assert_eq!(runs[0].end_byte, 0);
+
+        // Answered: a viewer's echoed reply becomes the new last unit and
+        // clears the cue, with no separate "answered" bookkeeping required.
+        let mut answered = question.clone();
+        answered
+            .visible_transcript
+            .push(transcript_unit(3, OutputKind::Viewer, false));
+        assert!(
+            !portal_markdown(&answered, None).contains("awaiting reply"),
+            "a viewer's echoed reply must clear the awaiting-reply cue"
+        );
+        assert!(
+            awaiting_reply_color_runs(&answered, awaiting_color).is_empty(),
+            "a viewer's echoed reply must clear the awaiting-reply color run"
+        );
+
+        // Redaction: visible_transcript is already emptied by the authority
+        // for a restricted viewer, so the cue is absent with no separate check.
+        let mut redacted = make_expanded_interaction_state("portal-question");
+        redacted.redacted = true;
+        redacted.visible_transcript = vec![];
+        assert!(
+            !portal_markdown(&redacted, None).contains("awaiting reply"),
+            "a redacted (empty transcript) viewer must render no awaiting-reply cue"
         );
     }
 

@@ -1076,6 +1076,10 @@ impl ProjectionAuthority {
                     content_classification,
                     logical_unit_id: None,
                     coalesce_key: None,
+                    // A viewer's own echoed reply is never itself a pending
+                    // question — this is what clears the awaiting-reply cue
+                    // once the viewer responds (hud-jip0k).
+                    expects_reply: false,
                 };
                 let sequence = append_transcript_unit(
                     session,
@@ -1869,6 +1873,7 @@ fn append_transcript_unit(
                 existing.output_kind = request.output_kind;
                 existing.content_classification = request.content_classification;
                 existing.logical_unit_id = request.logical_unit_id.clone();
+                existing.expects_reply = request.expects_reply;
                 existing.appended_at_wall_us = server_timestamp_wall_us;
                 session.retained_transcript_bytes += existing.byte_len();
                 prune_retained_transcript(
@@ -1903,6 +1908,7 @@ fn append_transcript_unit(
         content_classification: request.content_classification,
         logical_unit_id: request.logical_unit_id.clone(),
         coalesce_key: request.coalesce_key.clone(),
+        expects_reply: request.expects_reply,
         appended_at_wall_us: server_timestamp_wall_us,
     };
     session.next_transcript_sequence += 1;

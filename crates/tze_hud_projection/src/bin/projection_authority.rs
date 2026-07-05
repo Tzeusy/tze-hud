@@ -1894,6 +1894,7 @@ mod tests {
                 content_classification: ContentClassification::Private,
                 logical_unit_id: Some(format!("unit-{ts}")),
                 coalesce_key: None,
+                expects_reply: false,
             },
             "test-caller",
             ts,

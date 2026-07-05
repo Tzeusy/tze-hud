@@ -45,6 +45,7 @@
 //! | `portal.transcript.dim_background` | transcript body | dimmed backdrop shown while disconnected/stale (RGBA hex) |
 //! | `portal.stale_marker.color` | stale marker | content-free disconnect marker color (RGBA hex) |
 //! | `portal.unread_indicator.color` | unread indicator | ambient unread-output count color (RGBA hex) |
+//! | `portal.awaiting_reply.color` | awaiting-reply indicator | ambient question/awaiting-reply cue color (RGBA hex) |
 //! | `portal.lifecycle.active_color` | lifecycle affordance | accent for `Active` (RGBA hex) |
 //! | `portal.lifecycle.attached_color` | lifecycle affordance | accent for `Attached`/ready (RGBA hex) |
 //! | `portal.lifecycle.attention_color` | lifecycle affordance | accent for `Degraded`/`HudUnavailable` (RGBA hex) |
@@ -171,6 +172,14 @@ pub const PORTAL_TOKEN_STALE_MARKER_COLOR: &str = "portal.stale_marker.color";
 /// tokens (`transcript.dim_text_color`, `composer.placeholder_color`) rather
 /// than an alarming accent.
 pub const PORTAL_TOKEN_UNREAD_INDICATOR_COLOR: &str = "portal.unread_indicator.color";
+
+/// Color of the ambient awaiting-reply (question) indicator (hud-jip0k). Set
+/// when the owning LLM marks a published output as `expects_reply`, signaling
+/// the just-published output is a question awaiting a viewer reply — a core
+/// presence semantic, not a chatbot affordance. Ambient by design, matching
+/// the muted tone of the other quiet-signal tokens; a presence engine never
+/// escalates this into an alert.
+pub const PORTAL_TOKEN_AWAITING_REPLY_COLOR: &str = "portal.awaiting_reply.color";
 
 // ── Lifecycle affordance tokens (cooperative-hud-projection §lifecycle) ───────
 //
@@ -348,6 +357,10 @@ mod defaults {
     /// `COMPOSER_PLACEHOLDER_COLOR` so the unread count reads as a quiet
     /// signal, not an alert.
     pub const UNREAD_INDICATOR_COLOR: &str = "#6B7689";
+    /// Muted periwinkle — distinct hue from the amber (stale/at-capacity) and
+    /// slate (unread/dim) ambient tones so a question reads as its own quiet
+    /// signal rather than colliding with an existing meaning.
+    pub const AWAITING_REPLY_COLOR: &str = "#7B85C4";
 
     // Lifecycle affordance accents — ambient, mutually distinct (see token-key
     // docs above). Active: calm teal-green; attached/ready: soft blue;
@@ -468,6 +481,11 @@ pub struct PortalPartTokens {
     /// design — a presence engine surfaces a quiet count, never a loud
     /// notification badge.
     pub unread_indicator_color: Rgba,
+    /// Color of the ambient awaiting-reply (question) indicator (hud-jip0k).
+    /// Set when the owning LLM's most recently published output has
+    /// `expects_reply == true`. Ambient by design, matching the muted tone
+    /// convention of the other quiet-signal tokens.
+    pub awaiting_reply_color: Rgba,
 
     // Lifecycle affordance accents (cooperative-hud-projection §lifecycle).
     // Each maps a `ProjectionLifecycleState` group onto an ambient accent; the
@@ -588,6 +606,8 @@ impl Default for PortalPartTokens {
                 .expect("stale marker color default is valid hex"),
             unread_indicator_color: parse_color_hex(defaults::UNREAD_INDICATOR_COLOR)
                 .expect("unread indicator color default is valid hex"),
+            awaiting_reply_color: parse_color_hex(defaults::AWAITING_REPLY_COLOR)
+                .expect("awaiting reply color default is valid hex"),
 
             lifecycle_active_color: parse_color_hex(defaults::LIFECYCLE_ACTIVE_COLOR)
                 .expect("lifecycle active color default is valid hex"),
@@ -814,6 +834,10 @@ pub fn resolve_portal_tokens(token_map: &DesignTokenMap) -> PortalPartTokens {
             PORTAL_TOKEN_UNREAD_INDICATOR_COLOR,
             defaults.unread_indicator_color
         ),
+        awaiting_reply_color: resolve_color!(
+            PORTAL_TOKEN_AWAITING_REPLY_COLOR,
+            defaults.awaiting_reply_color
+        ),
 
         lifecycle_active_color: resolve_color!(
             PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR,
@@ -997,6 +1021,10 @@ const PORTAL_TOKEN_DEFAULT_STRINGS: &[(&str, &str)] = &[
     (
         PORTAL_TOKEN_UNREAD_INDICATOR_COLOR,
         defaults::UNREAD_INDICATOR_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_AWAITING_REPLY_COLOR,
+        defaults::AWAITING_REPLY_COLOR,
     ),
     (
         PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR,
@@ -1980,7 +2008,7 @@ mod tests {
     #[test]
     fn resolve_portal_token_strings_covers_every_key() {
         // Number of distinct portal token keys resolved by resolve_portal_tokens.
-        const EXPECTED_KEYS: usize = 46;
+        const EXPECTED_KEYS: usize = 47;
         assert_eq!(
             PORTAL_TOKEN_DEFAULT_STRINGS.len(),
             EXPECTED_KEYS,

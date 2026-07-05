@@ -54,6 +54,7 @@ fn output_request(
         content_classification: ContentClassification::Private,
         logical_unit_id: Some("unit-1".to_string()),
         coalesce_key: None,
+        expects_reply: false,
     }
 }
 
@@ -1236,6 +1237,80 @@ fn unread_output_count_flows_through_to_projected_portal_state_when_revealed() {
     assert_eq!(
         redacted.unread_output_count, None,
         "unread count must stay redacted when reveal_unread is false"
+    );
+}
+
+// ── hud-jip0k: expects_reply (Question) signal round-trip ────────────────
+
+/// `PublishOutputRequest.expects_reply` must round-trip through
+/// `handle_publish_output` into the retained `TranscriptUnit.expects_reply`,
+/// and from there into `ProjectedPortalState.visible_transcript` — the shape
+/// the resident gRPC adapter renders from. Omitted/`false` is the exact
+/// pre-existing behavior (backward-compat default).
+#[test]
+fn expects_reply_round_trips_from_publish_output_to_projected_portal_state() {
+    let mut authority = ProjectionAuthority::default();
+    let owner_token = attach(&mut authority, "projection-a");
+
+    // Default/omitted case first — must match pre-existing behavior exactly.
+    // Distinct `logical_unit_id`s (via output_request_keyed) so each publish
+    // is a fresh append, not an idempotent duplicate of the other.
+    let unset = output_request_keyed(
+        "projection-a",
+        &owner_token,
+        "req-unset",
+        "plain output",
+        Some("unit-unset"),
+        None,
+    );
+    assert!(!unset.expects_reply, "expects_reply must default to false");
+    assert!(
+        authority
+            .handle_publish_output(unset, "caller-a", 20)
+            .accepted
+    );
+    let after_unset = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("portal state materializes");
+    assert_eq!(
+        after_unset
+            .visible_transcript
+            .last()
+            .map(|u| u.expects_reply),
+        Some(false),
+        "an unset expects_reply publish must round-trip as false"
+    );
+
+    // Opt-in case: a fresh request with expects_reply explicitly set.
+    let mut question = output_request_keyed(
+        "projection-a",
+        &owner_token,
+        "req-question",
+        "which option do you prefer?",
+        Some("unit-question"),
+        None,
+    );
+    question.expects_reply = true;
+    assert!(
+        authority
+            .handle_publish_output(question, "caller-a", 21)
+            .accepted
+    );
+    let after_question = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("portal state materializes");
+    assert_eq!(
+        after_question.visible_transcript.len(),
+        2,
+        "the opt-in publish must append a fresh unit, not dedupe"
+    );
+    assert_eq!(
+        after_question
+            .visible_transcript
+            .last()
+            .map(|u| u.expects_reply),
+        Some(true),
+        "expects_reply == true must round-trip to the last visible transcript unit"
     );
 }
 
@@ -3450,6 +3525,7 @@ fn output_request_keyed(
         content_classification: ContentClassification::Private,
         logical_unit_id: logical_unit_id.map(str::to_string),
         coalesce_key: coalesce_key.map(str::to_string),
+        expects_reply: false,
     }
 }
 
