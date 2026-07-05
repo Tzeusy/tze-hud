@@ -1326,6 +1326,21 @@ impl WinitApp {
                             ZoneInteractionKind::DragHandle { .. } => {
                                 // Handled by the drag state machine below — not here.
                             }
+                            ZoneInteractionKind::JumpToLatest { tile_id } => {
+                                // Local feedback first: snap the tile's
+                                // viewport back to the tail synchronously, in
+                                // the same pointer-up dispatch that produced
+                                // the hit — no adapter roundtrip (hud-9ci61).
+                                let changed = self
+                                    .state
+                                    .input_processor
+                                    .reset_tile_scroll_to_tail(*tile_id, &mut scene);
+                                tracing::debug!(
+                                    tile_id = ?tile_id,
+                                    changed,
+                                    "jump-to-latest: pill clicked, scroll reset to tail"
+                                );
+                            }
                         }
                     }
                 }

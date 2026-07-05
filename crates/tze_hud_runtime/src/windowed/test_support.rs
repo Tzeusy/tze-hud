@@ -1020,6 +1020,7 @@ mod tests {
                     // Action: just log (no dismiss).
                 }
                 ZoneInteractionKind::DragHandle { .. } => {}
+                ZoneInteractionKind::JumpToLatest { .. } => {}
             }
         }
 

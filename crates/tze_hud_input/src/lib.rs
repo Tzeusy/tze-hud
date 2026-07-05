@@ -103,6 +103,7 @@ pub mod composer_draft;
 pub mod drag;
 pub mod focus;
 pub mod focus_tree;
+pub mod jump_to_latest;
 pub mod keyboard;
 pub mod portal_resize;
 pub mod scroll_indicator;
@@ -121,6 +122,7 @@ pub use focus::{
     FocusRingBounds, FocusRingUpdate, FocusSource, FocusTransition,
 };
 pub use focus_tree::{FocusOwner, FocusTree};
+pub use jump_to_latest::{JumpToLatestGeometry, JumpToLatestTokens, compute_jump_to_latest_pill};
 pub use keyboard::{
     KeyboardDispatch, KeyboardDispatchKind, KeyboardModifiers, KeyboardProcessor,
     RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent,

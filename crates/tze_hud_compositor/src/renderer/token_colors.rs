@@ -549,6 +549,60 @@ pub(super) fn resolve_scroll_indicator_tokens(
     }
 }
 
+/// Resolve `JumpToLatestTokens` from the compositor token map (hud-9ci61).
+///
+/// Keys follow the portal token namespace (`portal.jump_to_latest.*`). Falls
+/// back to `JumpToLatestTokens::default()` for any missing or unparsable
+/// token — token defaults in both crates must stay in sync per the
+/// module-level contract in `tze_hud_input::jump_to_latest`.
+#[inline]
+pub(super) fn resolve_jump_to_latest_tokens(
+    token_map: &HashMap<String, String>,
+) -> tze_hud_input::JumpToLatestTokens {
+    let defaults = tze_hud_input::JumpToLatestTokens::default();
+
+    // Color: "portal.jump_to_latest.color" as #RRGGBB[AA].
+    let (color_r, color_g, color_b, color_a) =
+        if let Some(c) = resolve_token_color(token_map, "portal.jump_to_latest.color") {
+            (c.r, c.g, c.b, c.a)
+        } else {
+            (
+                defaults.color_r,
+                defaults.color_g,
+                defaults.color_b,
+                defaults.color_a,
+            )
+        };
+
+    let width_px = token_map
+        .get("portal.jump_to_latest.width_px")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(defaults.width_px);
+
+    let height_px = token_map
+        .get("portal.jump_to_latest.height_px")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(defaults.height_px);
+
+    let margin_px = token_map
+        .get("portal.jump_to_latest.margin_px")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(defaults.margin_px);
+
+    tze_hud_input::JumpToLatestTokens {
+        color_r,
+        color_g,
+        color_b,
+        color_a,
+        width_px,
+        height_px,
+        margin_px,
+    }
+}
+
 /// Resolve the transcript optimal-measure cap (`portal.transcript.max_measure_px`).
 ///
 /// A portal transcript otherwise wraps to the full node width, which on a wide
