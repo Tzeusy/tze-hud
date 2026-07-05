@@ -1326,7 +1326,12 @@ fn portal_markdown(
     composer_display: Option<&ComposerDisplayState>,
     now_wall_us: u64,
 ) -> String {
-    portal_markdown_with(state, composer_display, now_wall_us, TimestampGranularity::Off)
+    portal_markdown_with(
+        state,
+        composer_display,
+        now_wall_us,
+        TimestampGranularity::Off,
+    )
 }
 
 /// Render the portal body markdown, presenting ambient per-turn arrival
@@ -4141,8 +4146,7 @@ mod tests {
         // 90s past the epoch → 00:01 (seconds dropped, minute rolls).
         assert_eq!(format_wall_clock_arrival_hhmm(90_000_000), "00:01");
         // 13:45:59 UTC → still 13:45 (minute precision, ambient).
-        let thirteen_forty_five =
-            (13 * 3_600 + 45 * 60 + 59) * 1_000_000 + 999_999;
+        let thirteen_forty_five = (13 * 3_600 + 45 * 60 + 59) * 1_000_000 + 999_999;
         assert_eq!(format_wall_clock_arrival_hhmm(thirteen_forty_five), "13:45");
     }
 
@@ -4154,24 +4158,36 @@ mod tests {
         ];
         let md = visible_transcript_markdown_with(&units, None, TimestampGranularity::PerTurn);
         // Each turn carries its own runtime-assigned arrival stamp + separator.
-        assert!(md.contains(&format!("00:00{PORTAL_TIMESTAMP_SEPARATOR}first")), "{md}");
-        assert!(md.contains(&format!("00:01{PORTAL_TIMESTAMP_SEPARATOR}second")), "{md}");
+        assert!(
+            md.contains(&format!("00:00{PORTAL_TIMESTAMP_SEPARATOR}first")),
+            "{md}"
+        );
+        assert!(
+            md.contains(&format!("00:01{PORTAL_TIMESTAMP_SEPARATOR}second")),
+            "{md}"
+        );
     }
 
     #[test]
     fn grouped_granularity_coalesces_consecutive_same_minute_turns() {
         let units = vec![
-            stamped_unit(1, 0, "a"),              // 00:00, minute 0 — stamped
-            stamped_unit(2, 30_000_000, "b"),     // 00:00, minute 0 — same, no stamp
-            stamped_unit(3, 90_000_000, "c"),     // 00:01, minute 1 — new, stamped
+            stamped_unit(1, 0, "a"),          // 00:00, minute 0 — stamped
+            stamped_unit(2, 30_000_000, "b"), // 00:00, minute 0 — same, no stamp
+            stamped_unit(3, 90_000_000, "c"), // 00:01, minute 1 — new, stamped
         ];
         let md = visible_transcript_markdown_with(&units, None, TimestampGranularity::Grouped);
         // Exactly two stamps: one for the first minute, one when the minute rolls.
         assert_eq!(md.matches(PORTAL_TIMESTAMP_SEPARATOR).count(), 2, "{md}");
-        assert!(md.contains(&format!("00:00{PORTAL_TIMESTAMP_SEPARATOR}a")), "{md}");
+        assert!(
+            md.contains(&format!("00:00{PORTAL_TIMESTAMP_SEPARATOR}a")),
+            "{md}"
+        );
         // "b" shares the minute with "a" and carries no stamp of its own.
         assert!(md.contains("\n---\nb"), "{md}");
-        assert!(md.contains(&format!("00:01{PORTAL_TIMESTAMP_SEPARATOR}c")), "{md}");
+        assert!(
+            md.contains(&format!("00:01{PORTAL_TIMESTAMP_SEPARATOR}c")),
+            "{md}"
+        );
     }
 
     #[test]
@@ -4188,41 +4204,54 @@ mod tests {
         // from the runtime-assigned appended_at_wall_us, not the content.
         let units = vec![stamped_unit(1, 0, "it is really 23:59")];
         let md = visible_transcript_markdown_with(&units, None, TimestampGranularity::PerTurn);
-        assert!(md.starts_with(&format!("00:00{PORTAL_TIMESTAMP_SEPARATOR}")), "{md}");
+        assert!(
+            md.starts_with(&format!("00:00{PORTAL_TIMESTAMP_SEPARATOR}")),
+            "{md}"
+        );
     }
 
     #[test]
     fn timestamp_color_runs_are_zero_length_token_sentinels_when_enabled() {
         let mut state = make_expanded_interaction_state("ts-runs");
         state.visible_transcript = vec![stamped_unit(1, 0, "hi")];
-        let color = proto::Rgba { r: 0.42, g: 0.43, b: 0.44, a: 1.0 };
+        let color = proto::Rgba {
+            r: 0.42,
+            g: 0.43,
+            b: 0.44,
+            a: 1.0,
+        };
         let runs = timestamp_color_runs(&state, color, TimestampGranularity::PerTurn);
         assert_eq!(runs.len(), 1, "one timestamp sentinel when stamps render");
         assert_eq!(runs[0].start_byte, 0, "Phase-1 sentinel run is zero-length");
         assert_eq!(runs[0].end_byte, 0, "Phase-1 sentinel run is zero-length");
-        assert_eq!(runs[0].color, Some(color), "sentinel carries the token color");
+        assert_eq!(
+            runs[0].color,
+            Some(color),
+            "sentinel carries the token color"
+        );
     }
 
     #[test]
     fn timestamp_color_runs_absent_when_off_collapsed_or_empty() {
         let mut expanded = make_expanded_interaction_state("ts-off");
         expanded.visible_transcript = vec![stamped_unit(1, 0, "hi")];
-        let color = proto::Rgba { r: 0.4, g: 0.4, b: 0.4, a: 1.0 };
+        let color = proto::Rgba {
+            r: 0.4,
+            g: 0.4,
+            b: 0.4,
+            a: 1.0,
+        };
         // Off granularity → no sentinel even with content.
         assert!(timestamp_color_runs(&expanded, color, TimestampGranularity::Off).is_empty());
         // Empty transcript (e.g. redacted upstream) → no sentinel even when enabled.
         let mut empty = make_expanded_interaction_state("ts-empty");
         empty.visible_transcript = vec![];
-        assert!(
-            timestamp_color_runs(&empty, color, TimestampGranularity::PerTurn).is_empty()
-        );
+        assert!(timestamp_color_runs(&empty, color, TimestampGranularity::PerTurn).is_empty());
         // Collapsed presentation → the stamp is an expanded-transcript affordance.
         let mut collapsed = make_expanded_interaction_state("ts-collapsed");
         collapsed.presentation = ProjectedPortalPresentation::Collapsed;
         collapsed.visible_transcript = vec![stamped_unit(1, 0, "hi")];
-        assert!(
-            timestamp_color_runs(&collapsed, color, TimestampGranularity::PerTurn).is_empty()
-        );
+        assert!(timestamp_color_runs(&collapsed, color, TimestampGranularity::PerTurn).is_empty());
     }
 
     #[test]

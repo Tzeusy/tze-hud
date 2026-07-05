@@ -2515,7 +2515,10 @@ mod tests {
 
     #[test]
     fn timestamp_granularity_parses_all_variants_case_insensitively() {
-        assert_eq!(TimestampGranularity::parse("off"), Some(TimestampGranularity::Off));
+        assert_eq!(
+            TimestampGranularity::parse("off"),
+            Some(TimestampGranularity::Off)
+        );
         assert_eq!(
             TimestampGranularity::parse("PER_TURN"),
             Some(TimestampGranularity::PerTurn)

@@ -1229,7 +1229,8 @@ fn per_turn_timestamps_render_stamp_and_token_sentinel() {
     };
     let green_runs = color_runs.iter().filter(|r| is_timestamp_green(r)).count();
     assert_eq!(
-        green_runs, 1,
+        green_runs,
+        1,
         "exactly one timestamp sentinel with the injected green token; got {green_runs} \
          among {total} run(s): {color_runs:?}",
         total = color_runs.len()
