@@ -1193,6 +1193,7 @@ impl ProjectionAuthority {
             .max_bytes
             .unwrap_or(self.bounds.max_poll_response_bytes)
             .min(self.bounds.max_poll_response_bytes);
+        let mut cadence_append: Option<(String, u64, u64)> = None;
         let response = match self.authorize_owner(
             &request.envelope,
             &request.owner_token,
@@ -1205,6 +1206,7 @@ impl ProjectionAuthority {
                 let mut returned = Vec::new();
                 let mut remaining_count = 0usize;
                 let mut remaining_bytes = 0usize;
+                let mut delivery_transitioned = false;
                 for item in session.pending_input.iter_mut() {
                     if !matches!(
                         item.delivery_state,
@@ -1223,12 +1225,26 @@ impl ProjectionAuthority {
                     if returned.len() < max_items && used_bytes + item_bytes <= max_bytes {
                         item.delivery_state = InputDeliveryState::Delivered;
                         item.delivered_at_wall_us = Some(server_timestamp_wall_us);
+                        delivery_transitioned = true;
                         used_bytes += item_bytes;
                         returned.push(item.clone());
                     } else {
                         remaining_count += 1;
                         remaining_bytes += item_bytes;
                     }
+                }
+                // A poll that flips any item Pending/Deferred -> Delivered changes the
+                // viewer-turn delivery cue (→ sending becomes ✓✓ delivered), so it must
+                // schedule a portal repaint. The driver only re-materializes portals
+                // from due coalescer entries; without this the cue stays "sending" until
+                // an unrelated publish/ack forces a repaint (hud-ny8rm). Mirrors the
+                // `handle_acknowledge_input` cadence_append path below.
+                if delivery_transitioned {
+                    cadence_append = Some((
+                        request.envelope.projection_id.clone(),
+                        schedule_portal_state_update(session),
+                        server_timestamp_wall_us,
+                    ));
                 }
                 let mut response = ProjectionResponse::accepted(
                     &request.envelope.request_id,
@@ -1249,6 +1265,14 @@ impl ProjectionAuthority {
                 "owner authorization failed",
             ),
         };
+        if let Some((projection_id, sequence, submitted_at_wall_us)) = cadence_append {
+            self.cadence_coalescer.record_append(
+                &projection_id,
+                Vec::new(),
+                sequence,
+                submitted_at_wall_us,
+            );
+        }
         self.audit_from_response(
             &request.envelope,
             caller_identity,
@@ -1752,9 +1776,25 @@ fn projected_portal_state(
     // reordering). This is a pure read of runtime-owned state: no adapter round
     // trip and no viewer read/seen disclosure. Gated on `transcript_visible` so the
     // cue redacts together with the echoed viewer turn it annotates (a viewer who
-    // cannot see the transcript gets no delivery cue).
+    // cannot see the transcript gets no delivery cue), AND on the back() item
+    // surviving THIS viewer's per-turn clearance filter (hud-1idbl). The
+    // `visible_transcript` filter above drops each unit failing
+    // `policy.permits(unit.content_classification)`, so an above-clearance viewer
+    // turn is redacted from the transcript even when the projection itself is
+    // visible; without the same per-turn gate here the cue would still render
+    // → sending / ✓✓ delivered / ✕, leaking presence + delivery status of hidden
+    // content. Mirrors the #1085 unread-divider clearance convention above.
     let latest_viewer_delivery_state = transcript_visible
-        .then(|| session.pending_input.back().map(|item| item.delivery_state))
+        .then(|| {
+            session
+                .pending_input
+                .back()
+                .and_then(|item| {
+                    policy
+                        .permits(item.content_classification)
+                        .then_some(item.delivery_state)
+                })
+        })
         .flatten();
 
     ProjectedPortalState {
