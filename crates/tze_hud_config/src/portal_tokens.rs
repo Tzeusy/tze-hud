@@ -329,21 +329,23 @@ pub const PORTAL_TOKEN_TRANSCRIPT_MAX_MEASURE_PX: &str = "portal.transcript.max_
 /// `portal_visual_tokens_from_part_tokens`, so changing a value here propagates to
 /// both sides automatically (hud-dcynv consolidation).
 mod defaults {
-    /// Portal frame backdrop fill (RGBA hex). Translucent near-black "glass"
-    /// (black @ ~0.30) so the thin frame gap around the near-opaque panes reads
-    /// as off-black, not a lighter slate rim.
+    /// Portal frame backdrop fill (RGBA hex). Opaque near-black that matches the
+    /// transcript pane (`TRANSCRIPT_BACKGROUND`) so the thin frame gap around the
+    /// panes reads as off-black — backdrop-independent (identical regardless of
+    /// the desktop wallpaper behind the HUD).
     ///
     /// hud-a328c: this was `#111720` — an OPAQUE slate that resolves to
     /// rgba(0.067,0.090,0.125,1.0). On the runtime-handshake token path (the
     /// production path: the exemplar/portal driver adopts the runtime's resolved
     /// tokens) an unset `portal.frame.background` falls back to this default, so
     /// the opaque slate painted the frame rim a visible GREY around the black
-    /// panes. The owner's live A/B on the real-GPU HUD confirmed the reviewed
-    /// look is the exemplar's translucent-black glass (`#0000004D`), which
-    /// `--ignore-runtime-tokens` (local mirror) rendered correctly off-black.
-    /// Aligning the canonical default to the reviewed value fixes the handshake,
-    /// in-process, and bridged drivers from a single source of truth.
-    pub const FRAME_BACKGROUND: &str = "#0000004D";
+    /// panes. Owner live A/B on the real-GPU HUD chose the opaque near-black
+    /// `#0A0D11` for backdrop-independence and pane-color match. (The exemplar's
+    /// translucent-black glass `#0000004D` — what `--ignore-runtime-tokens`
+    /// rendered — was rejected because 30%-black varies with the wallpaper
+    /// behind it.) Aligning the canonical default to the reviewed value fixes
+    /// the handshake, in-process, and bridged drivers from a single source.
+    pub const FRAME_BACKGROUND: &str = "#0A0D11";
     pub const FRAME_OPACITY: &str = "0.98";
     pub const FRAME_BORDER_COLOR: &str = "#2A3344";
 
@@ -2046,7 +2048,8 @@ mod tests {
     /// `resolve_portal_token_strings` and delivers it on the session handshake;
     /// the exemplar/portal driver adopts it. Before the fix the default was the
     /// opaque slate `#111720`, which painted the frame rim grey; the reviewed
-    /// value (owner live A/B) is the translucent-black glass `#0000004D`.
+    /// value (owner live A/B) is the opaque near-black `#0A0D11` (pane-matching,
+    /// backdrop-independent).
     #[test]
     fn partial_config_resolves_unset_frame_background_to_portal_default_not_grey() {
         let mut cfg = DesignTokenMap::new();
@@ -2071,8 +2074,8 @@ mod tests {
         );
         assert_eq!(
             resolved.get(PORTAL_TOKEN_FRAME_BACKGROUND).map(String::as_str),
-            Some("#0000004D"),
-            "the resolved frame background must be the reviewed off-black glass"
+            Some("#0A0D11"),
+            "the resolved frame background must be the reviewed opaque off-black"
         );
         assert_ne!(
             resolved.get(PORTAL_TOKEN_FRAME_BACKGROUND).map(String::as_str),

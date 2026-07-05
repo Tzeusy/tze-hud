@@ -1857,11 +1857,12 @@ class PortalTokenResolutionTests(unittest.TestCase):
 
     def test_resolver_falls_back_to_canonical_defaults(self) -> None:
         tokens = portal_tokens.resolve_portal_tokens({})
-        # Canonical frame background #0000004D → black @ ~0.30 (translucent glass;
-        # hud-a328c — was the opaque slate #111720 that read as a grey frame rim).
+        # Canonical frame background #0A0D11 → opaque near-black (matches the
+        # transcript pane; hud-a328c — was the opaque slate #111720 that read as
+        # a grey frame rim; translucent #0000004D was rejected as backdrop-dependent).
         self.assertEqual(
             tuple(round(c, 4) for c in tokens.frame_background),
-            (0.0, 0.0, 0.0, round(0x4D / 255, 4)),
+            (round(0x0A / 255, 4), round(0x0D / 255, 4), round(0x11 / 255, 4), 1.0),
         )
         self.assertEqual(tokens.header_font_size_px, 16.0)
         # An unparseable override is ignored in favor of the canonical default.
