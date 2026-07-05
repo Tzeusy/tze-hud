@@ -66,6 +66,22 @@ const INPUT_HISTORY_WIDE_CHAR_ADVANCE_PX: f32 = INPUT_HISTORY_APPROX_FONT_SIZE_P
 /// history band/wrap geometry the runtime seeds against (hud-3y7va).
 const INPUT_COMPOSER_TEXT_MARGIN_PX: f32 = 6.0;
 
+/// Stand-in for the compositor's viewer-echo timestamp prefix — the fixed
+/// `HH:MM␠␠` (always 7 narrow columns) that `viewer_echo_display_text` prepends
+/// to the FIRST line of every timestamped entry before wrapping
+/// (`viewer_echo_timestamp_prefix` in
+/// `crates/tze_hud_compositor/src/renderer/tile_render.rs`, hud-7ic89).
+///
+/// The wrapped-row seed must charge the same prefix or it under-counts a
+/// full-width entry that nearly fills a row: the prefix spills it onto an extra
+/// wrapped row the seed misses, and across several entries the seeded offset
+/// undershoots `real_max_scrollback` and re-clips the newest reply — a narrow
+/// recurrence of the hud-kaw7z CJK/emoji tail-clip. Every real prefix glyph
+/// (digits, `:`, spaces) is narrow (Unicode width 1), so a 7-space stand-in
+/// reproduces the prefix's wrap advance exactly without the runtime having to
+/// duplicate the compositor's clock formatting.
+const INPUT_HISTORY_TIMESTAMP_PREFIX_STANDIN: &str = "       ";
+
 /// Conservative over-estimate of the number of wrapped visual rows the
 /// compositor lays a single history entry into (hud-3y7va).
 ///
@@ -1195,8 +1211,20 @@ impl WinitApp {
                 // precision.
                 let band_height_px = input_history_band_height_px(tile_height_px);
                 let wrap_width_px = input_history_wrap_width_px(tile_width_px);
+                // The compositor renders each entry as `viewer_echo_display_text`
+                // — the `HH:MM␠␠` timestamp prefix (present whenever
+                // `submitted_at_wall_us != 0`, which this path always sets)
+                // followed by the text — and wraps THAT. Seed the row estimate
+                // against the same prefixed text so a full-width entry that nearly
+                // fills a row is not under-counted by the prefix spilling it onto
+                // an extra wrapped row (hud-kaw7z).
+                let seed_text = if submitted_at_wall_us != 0 {
+                    format!("{INPUT_HISTORY_TIMESTAMP_PREFIX_STANDIN}{text}")
+                } else {
+                    text.clone()
+                };
                 let added_rows = approx_wrapped_visual_rows(
-                    &text,
+                    &seed_text,
                     wrap_width_px,
                     INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX,
                     INPUT_HISTORY_WIDE_CHAR_ADVANCE_PX,
@@ -3652,6 +3680,83 @@ mod tests {
             "seeded CJK offset {seeded_offset} must reach or exceed the compositor's \
              real_max_scrollback {real_max_scrollback}; the pre-fix narrow-advance \
              seed undershot this and clipped the newest reply (hud-kaw7z)"
+        );
+    }
+
+    /// The compositor prepends a fixed `HH:MM␠␠` timestamp prefix (7 narrow
+    /// columns) to the FIRST line of every viewer-echo entry before wrapping
+    /// (`viewer_echo_display_text`, hud-7ic89). A full-width entry sized to sit
+    /// JUST under one wrap row on its own is spilled onto a SECOND row by that
+    /// prefix. A prefix-blind seed (estimating rows from the raw entry text)
+    /// under-counts by a row per entry, so the seeded offset undershoots the
+    /// compositor's `real_max_scrollback` and the newest reply re-clips at rest —
+    /// the exact hud-kaw7z failure the width-aware seed set out to eliminate.
+    ///
+    /// Asserted at the offset/clamp layer against an INDEPENDENT compositor model:
+    /// 25 full-width glyphs advance 25 em (375px ≤ 388px wrap → one row alone),
+    /// but the nonempty timestamp prefix (7 glyphs, far more than the 13px of
+    /// remaining slack) forces a second row, so each entry occupies ≥ 2 rows.
+    #[test]
+    fn cjk_history_seed_accounts_for_timestamp_prefix_wrap() {
+        // Lock the stand-in to the compositor's real 7-column prefix width.
+        assert_eq!(
+            INPUT_HISTORY_TIMESTAMP_PREFIX_STANDIN.chars().count(),
+            7,
+            "timestamp prefix stand-in must mirror the compositor's 7-column \
+             `HH:MM␠␠` prefix"
+        );
+
+        let (scene, _tab_id, tile_id, _composer_id, _control_id) = portal_scene_with_control();
+        // `portal_scene_with_control` tile bounds are 400 × 300 (see its body).
+        let (mut app, _rx) =
+            make_windowed_keyboard_test_app(scene, FocusManager::new(), InputProcessor::new());
+
+        const LINE_H: f32 = 21.0; // viewer-echo font 15 × line-height 1.4
+        const FULLWIDTH_EM_PX: f32 = 15.0; // one em at the 15px viewer-echo font
+        let wrap_width = 400.0_f32 - 12.0; // tile width − 2×margin (viewer_echo_zone_width)
+
+        // 25 full-width glyphs = 375px ≤ 388px: exactly one wrap row on their own,
+        // with only 13px of slack — less than any nonempty prefix.
+        const FULLWIDTH_CHARS: usize = 25;
+        assert!(
+            (FULLWIDTH_CHARS as f32 * FULLWIDTH_EM_PX) <= wrap_width,
+            "test setup: {FULLWIDTH_CHARS} full-width glyphs must fit one row \
+             WITHOUT the prefix"
+        );
+        let entries: Vec<String> = (0..20).map(|_| "字".repeat(FULLWIDTH_CHARS)).collect();
+        for entry in &entries {
+            app.append_raw_tile_viewer_echo(tile_id, entry.clone());
+        }
+
+        let seeded_offset = {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let scene = shared.scene.try_lock().unwrap();
+            assert!(
+                scene.tile_follow_tail_at_tail(tile_id),
+                "a freshly-seeded CJK history must rest at the tail"
+            );
+            scene.tile_scroll_offset_local(tile_id).1
+        };
+
+        // Compositor model (independent of the runtime's estimators): each entry's
+        // first line carries the prefix, so 25 full-width glyphs plus a nonempty
+        // prefix exceed the 388px wrap and occupy at least 2 rows.
+        let realistic_rows: usize = entries.len() * 2;
+        let block_height = realistic_rows as f32 * LINE_H;
+        let band_height = 300.0_f32 - (LINE_H + 12.0); // region top → 1-line composer box top
+        let real_max_scrollback = (block_height - band_height).max(0.0);
+
+        assert!(
+            real_max_scrollback > 0.0,
+            "test setup: the prefixed CJK history must overflow the band \
+             (real_max={real_max_scrollback})"
+        );
+        assert!(
+            seeded_offset >= real_max_scrollback,
+            "seeded CJK offset {seeded_offset} must reach or exceed the compositor's \
+             real_max_scrollback {real_max_scrollback}; a prefix-blind seed \
+             under-counts each entry by a row and re-clips the newest reply \
+             (hud-kaw7z timestamp-prefix recurrence)"
         );
     }
 
