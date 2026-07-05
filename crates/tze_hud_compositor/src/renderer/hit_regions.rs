@@ -312,11 +312,23 @@ impl Compositor {
         // (`__chrome_drag_handle__` in `SceneGraph::hit_test`).
         let scroll_indicator_tokens = resolve_scroll_indicator_tokens(&self.token_map);
         let jump_to_latest_tokens = resolve_jump_to_latest_tokens(&self.token_map);
-        // Collect owned tile geometry first: `visible_tiles()` borrows `scene`
-        // immutably for the lifetime of the returned `&Tile`s, which would
-        // otherwise conflict with the `scene.overlay` mutation below.
-        let tile_geoms: Vec<(SceneId, Rect)> = scene
-            .visible_tiles()
+        // Order tiles FRONT-to-back by the same effective z-order the renderer
+        // draws with — `sort_tiles_with_drag_boost` returns back-to-front (drag
+        // boost included), so reversing yields top-most first. This matters
+        // when two scrolled-back tiles overlap: `SceneGraph::hit_test` returns
+        // the FIRST matching `zone_hit_regions` entry, and the renderer draws
+        // the top-most tile's pill last (on top). Pushing top-most first makes
+        // hit-test resolve to the pill actually drawn on top; the raw
+        // `visible_tiles()` (back-to-front) order would instead let a lower-z
+        // pill — possibly occluded by a higher-z tile body — steal the click
+        // (hud-9ci61).
+        //
+        // Collect owned tile geometry first: the `&Tile`s borrow `scene`
+        // immutably for their lifetime, which would otherwise conflict with the
+        // `scene.overlay` mutation below.
+        let mut ordered_tiles = Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene);
+        ordered_tiles.reverse();
+        let tile_geoms: Vec<(SceneId, Rect)> = ordered_tiles
             .into_iter()
             .map(|tile| (tile.id, tile.bounds))
             .collect();
