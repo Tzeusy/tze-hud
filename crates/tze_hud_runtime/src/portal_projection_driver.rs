@@ -168,6 +168,26 @@ fn parse_output_kind(raw: Option<&str>) -> Result<OutputKind, String> {
     }
 }
 
+/// Refresh a render state's ambient unread-output count from the freshly
+/// drained batch, preserving redaction (hud-meqet).
+///
+/// `take_due_portal_update` zeroes `session.unread_output_count` as it consumes
+/// a drain, so the subsequent `projected_portal_state` reads a stale `0` — the
+/// live count survives only on the drained `PortalTranscriptUpdate`. This maps
+/// the render state's already-gated field to the drained count:
+///
+/// - `Some(_)` — the `reveal_unread` policy gate revealed the count, so refresh
+///   it to `drained` (this is the fix: `Some(0)` from the zeroed session becomes
+///   `Some(drained)`, un-suppressing the indicator on a real coalesced drain).
+/// - `None` — the count was redacted upstream; leave it redacted. We never
+///   resurrect a redacted `None` into a leaked count.
+///
+/// A `drained` value of `0` maps a revealed slot to `Some(0)`, which the
+/// downstream indicator suppresses exactly like the redacted `None`.
+fn carry_drained_unread_count(state_count: Option<usize>, drained: usize) -> Option<usize> {
+    state_count.map(|_| drained)
+}
+
 /// Parse an optional snake_case `content_classification` string into
 /// [`ContentClassification`].
 ///
@@ -1558,11 +1578,23 @@ impl InProcessPortalDriver {
             };
 
             // Build the full projected portal state for rendering.
-            let Some(state) = self.authority.projected_portal_state(&proj_id, &policy) else {
+            let Some(mut state) = self.authority.projected_portal_state(&proj_id, &policy) else {
                 // Session was removed between take_due and state query (race).
                 self.detach_projection(&proj_id);
                 continue;
             };
+
+            // Ambient unread-output-count indicator liveness (hud-meqet).
+            // `take_due_portal_update` above zeroed `session.unread_output_count`
+            // as part of consuming the drain, so `projected_portal_state` read a
+            // stale 0 — `Some(0)` renders nothing, suppressing the indicator on
+            // EVERY real coalesced drain (the production drain-then-render order).
+            // Carry the just-drained batch's unread count from `update` into the
+            // render state so the indicator is live for all downstream paths: the
+            // resident-gRPC bridge tee (below, clones `state`) and the in-process
+            // `render_batch` create/render arms.
+            state.unread_output_count =
+                carry_drained_unread_count(state.unread_output_count, update.unread_output_count);
 
             // Per-projection transport routing (hud-g7ool). A projection routed to
             // the resident gRPC bridge is materialised SOLELY by the bridge:
@@ -3439,6 +3471,159 @@ mod tests {
                 );
             }
             other => panic!("after render drain: expected TextMarkdown tile root, got {other:?}"),
+        }
+    }
+
+    /// Unit guard for the redaction/zero semantics of the unread-count carry
+    /// (hud-meqet). The driver drives `carry_drained_unread_count` on every
+    /// drained state; this pins its three cases so redaction can never be
+    /// leaked and a genuine zero can never be surfaced as a phantom indicator.
+    #[test]
+    fn carry_drained_unread_count_preserves_redaction_and_zero() {
+        // Revealed slot (`Some`): refresh to the drained batch count. The
+        // incoming `Some(0)` models the zeroed-session read that caused the bug.
+        assert_eq!(carry_drained_unread_count(Some(0), 3), Some(3));
+        assert_eq!(carry_drained_unread_count(Some(9), 4), Some(4));
+        // Revealed but nothing drained: stays `Some(0)` — the downstream
+        // indicator suppresses this exactly like a redacted `None`.
+        assert_eq!(carry_drained_unread_count(Some(2), 0), Some(0));
+        // Redacted slot (`None`): never resurrected into a leaked count, even
+        // for a large drained batch.
+        assert_eq!(carry_drained_unread_count(None, 7), None);
+        assert_eq!(carry_drained_unread_count(None, 0), None);
+    }
+
+    /// Regression guard (hud-meqet): the ambient unread-output-count indicator
+    /// must survive the REAL production drain-then-render ordering.
+    ///
+    /// `take_due_portal_update` zeroes `session.unread_output_count` as it
+    /// consumes the drain, and the render state is built AFTER that from the
+    /// (now-zeroed) session — so `projected_portal_state` alone reports
+    /// `Some(0)` and the indicator suppresses on every real coalesced drain.
+    /// The prior tests only ever built state WITHOUT a preceding drain, leaving
+    /// this ordering structurally uncovered. Here we publish three outputs,
+    /// run the actual `drain_inner` loop, and assert the painted tile carries
+    /// the live `"3 unread"` line — while a direct `projected_portal_state`
+    /// still reads the zeroed `Some(0)`, proving the count is sourced from the
+    /// drained batch, not the session. Fails before the fix, passes after.
+    #[test]
+    fn drain_then_render_surfaces_live_unread_count() {
+        use tze_hud_projection::{
+            AdapterGeometrySnapshot, AdapterPortalRect, ProjectedPortalPolicy, ProjectionBounds,
+        };
+        use tze_hud_scene::NodeData;
+
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("test_unread_indicator"),
+            drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
+        };
+
+        // Attach.
+        let (attach_tx, mut attach_rx) =
+            tokio::sync::oneshot::channel::<Result<String, PortalOpRejection>>();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: "unread-proj".to_string(),
+            display_name: "Unread Projection".to_string(),
+            idempotency_key: None,
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
+            reply: attach_tx,
+        });
+        let owner_token = attach_rx
+            .try_recv()
+            .expect("reply must be sent synchronously")
+            .expect("Attach must be accepted");
+
+        // Publish three distinct (un-coalesced) outputs → unread_output_count = 3.
+        for i in 0..3 {
+            let (pub_tx, mut pub_rx) =
+                tokio::sync::oneshot::channel::<Result<(), PortalOpRejection>>();
+            driver.dispatch_portal_op(PortalOp::PublishOutput {
+                projection_id: "unread-proj".to_string(),
+                owner_token: owner_token.clone(),
+                output_text: format!("line-{i}"),
+                logical_unit_id: None,
+                output_kind: None,
+                content_classification: None,
+                coalesce_key: None,
+                reply: pub_tx,
+            });
+            pub_rx
+                .try_recv()
+                .expect("publish reply must be sent synchronously")
+                .expect("PublishOutput must be accepted");
+        }
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+        driver.authority_mut().push_geometry_snapshot(
+            "unread-proj",
+            AdapterGeometrySnapshot {
+                rect: AdapterPortalRect {
+                    x_px: 0,
+                    y_px: 0,
+                    width_px: 600,
+                    height_px: 200,
+                },
+                gesture_active: false,
+                sequence: 1,
+            },
+        );
+
+        // Drive the real drain: take_due (zeroes the session) THEN build state
+        // THEN render into the tile.
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+
+        // The session is now zeroed, so a direct state read reports Some(0) —
+        // this is exactly the stale read that suppressed the indicator.
+        let post_drain_state = driver
+            .authority_mut()
+            .projected_portal_state("unread-proj", &ProjectedPortalPolicy::permit_all())
+            .expect("projection must still exist after drain");
+        assert_eq!(
+            post_drain_state.unread_output_count,
+            Some(0),
+            "session unread must be zeroed post-drain — the count must be sourced \
+             from the drained batch, not the session"
+        );
+
+        // The painted tile must nonetheless carry the live drained count.
+        let tile_id = driver
+            .drive
+            .entries
+            .get("unread-proj")
+            .expect("drive entry must still exist after drain")
+            .tile_scene_id
+            .expect("drain must create a portal tile in the scene");
+        let root_id = scene
+            .tiles
+            .get(&tile_id)
+            .expect("portal tile must exist in scene")
+            .root_node
+            .expect("portal tile must have a painted root node");
+        match &scene.nodes.get(&root_id).unwrap().data {
+            NodeData::TextMarkdown(tm) => {
+                assert!(
+                    tm.content.contains("3 unread"),
+                    "the ambient unread indicator must survive drain-then-render for a \
+                     nonzero count; expected a `3 unread` line, got content: {:?}",
+                    tm.content
+                );
+            }
+            other => panic!("expected TextMarkdown tile root, got {other:?}"),
         }
     }
 
