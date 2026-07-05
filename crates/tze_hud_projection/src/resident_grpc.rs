@@ -3620,8 +3620,14 @@ mod tests {
                 expected_color,
                 "{variant:?} run must carry the token color, never a literal"
             );
-            assert_eq!(runs[0].start_byte, 0, "delivery run is a zero-length sentinel");
-            assert_eq!(runs[0].end_byte, 0, "delivery run is a zero-length sentinel");
+            assert_eq!(
+                runs[0].start_byte, 0,
+                "delivery run is a zero-length sentinel"
+            );
+            assert_eq!(
+                runs[0].end_byte, 0,
+                "delivery run is a zero-length sentinel"
+            );
         }
     }
 
@@ -3632,8 +3638,14 @@ mod tests {
     fn portal_visual_tokens_from_part_tokens_maps_delivery_fields() {
         let part = tze_hud_config::PortalPartTokens::default();
         let visual = portal_visual_tokens_from_part_tokens(&part);
-        assert_eq!(visual.delivery_inflight_color.r, part.delivery_inflight_color.r);
-        assert_eq!(visual.delivery_inflight_color.a, part.delivery_inflight_color.a);
+        assert_eq!(
+            visual.delivery_inflight_color.r,
+            part.delivery_inflight_color.r
+        );
+        assert_eq!(
+            visual.delivery_inflight_color.a,
+            part.delivery_inflight_color.a
+        );
         assert_eq!(
             visual.delivery_delivered_color.g,
             part.delivery_delivered_color.g
@@ -3641,8 +3653,14 @@ mod tests {
         assert_eq!(visual.delivery_failed_color.b, part.delivery_failed_color.b);
         // The three classes must be visually distinct so a viewer can tell
         // in-flight from delivered from failed at a glance.
-        assert_ne!(visual.delivery_inflight_color, visual.delivery_delivered_color);
-        assert_ne!(visual.delivery_delivered_color, visual.delivery_failed_color);
+        assert_ne!(
+            visual.delivery_inflight_color,
+            visual.delivery_delivered_color
+        );
+        assert_ne!(
+            visual.delivery_delivered_color,
+            visual.delivery_failed_color
+        );
         assert_ne!(visual.delivery_inflight_color, visual.delivery_failed_color);
     }
 
