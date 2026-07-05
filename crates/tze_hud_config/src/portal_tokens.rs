@@ -329,7 +329,21 @@ pub const PORTAL_TOKEN_TRANSCRIPT_MAX_MEASURE_PX: &str = "portal.transcript.max_
 /// `portal_visual_tokens_from_part_tokens`, so changing a value here propagates to
 /// both sides automatically (hud-dcynv consolidation).
 mod defaults {
-    pub const FRAME_BACKGROUND: &str = "#111720";
+    /// Portal frame backdrop fill (RGBA hex). Translucent near-black "glass"
+    /// (black @ ~0.30) so the thin frame gap around the near-opaque panes reads
+    /// as off-black, not a lighter slate rim.
+    ///
+    /// hud-a328c: this was `#111720` — an OPAQUE slate that resolves to
+    /// rgba(0.067,0.090,0.125,1.0). On the runtime-handshake token path (the
+    /// production path: the exemplar/portal driver adopts the runtime's resolved
+    /// tokens) an unset `portal.frame.background` falls back to this default, so
+    /// the opaque slate painted the frame rim a visible GREY around the black
+    /// panes. The owner's live A/B on the real-GPU HUD confirmed the reviewed
+    /// look is the exemplar's translucent-black glass (`#0000004D`), which
+    /// `--ignore-runtime-tokens` (local mirror) rendered correctly off-black.
+    /// Aligning the canonical default to the reviewed value fixes the handshake,
+    /// in-process, and bridged drivers from a single source of truth.
+    pub const FRAME_BACKGROUND: &str = "#0000004D";
     pub const FRAME_OPACITY: &str = "0.98";
     pub const FRAME_BORDER_COLOR: &str = "#2A3344";
 
@@ -2021,6 +2035,69 @@ mod tests {
             EXPECTED_KEYS,
             "no duplicate keys in the table"
         );
+    }
+
+    /// hud-a328c regression: a config whose `[design_tokens]` sets SOME portal
+    /// keys but NOT `portal.frame.background` (the tzehouse HUD config: it sets
+    /// `portal.frame.opacity`, `portal.composer.anchor`, `portal.focus_ring.color`
+    /// only) must resolve `portal.frame.background` — over the runtime handshake
+    /// path — to the portal default off-black, NOT to a grey. This is the exact
+    /// production path: the runtime builds this string map via
+    /// `resolve_portal_token_strings` and delivers it on the session handshake;
+    /// the exemplar/portal driver adopts it. Before the fix the default was the
+    /// opaque slate `#111720`, which painted the frame rim grey; the reviewed
+    /// value (owner live A/B) is the translucent-black glass `#0000004D`.
+    #[test]
+    fn partial_config_resolves_unset_frame_background_to_portal_default_not_grey() {
+        let mut cfg = DesignTokenMap::new();
+        // Mirror the tzehouse `[design_tokens]` table: portal keys are set, but
+        // `portal.frame.background` is deliberately absent.
+        cfg.insert(PORTAL_TOKEN_FRAME_OPACITY.to_string(), "0.98".to_string());
+        cfg.insert(PORTAL_TOKEN_FOCUS_RING_COLOR.to_string(), "#00000000".to_string());
+        cfg.insert("portal.composer.anchor".to_string(), "top".to_string());
+        assert!(
+            !cfg.contains_key(PORTAL_TOKEN_FRAME_BACKGROUND),
+            "precondition: the config must NOT set portal.frame.background"
+        );
+
+        let resolved = resolve_portal_token_strings(&cfg);
+
+        // The unset frame background resolves to the single-source-of-truth
+        // portal default (the reviewed off-black), not the old grey slate.
+        assert_eq!(
+            resolved.get(PORTAL_TOKEN_FRAME_BACKGROUND).map(String::as_str),
+            Some(defaults::FRAME_BACKGROUND),
+            "unset portal.frame.background must resolve to the portal default"
+        );
+        assert_eq!(
+            resolved.get(PORTAL_TOKEN_FRAME_BACKGROUND).map(String::as_str),
+            Some("#0000004D"),
+            "the resolved frame background must be the reviewed off-black glass"
+        );
+        assert_ne!(
+            resolved.get(PORTAL_TOKEN_FRAME_BACKGROUND).map(String::as_str),
+            Some("#111720"),
+            "the resolved frame background must NOT be the grey slate that caused hud-a328c"
+        );
+
+        // The set key is honored on the same handshake map …
+        assert_eq!(
+            resolved.get(PORTAL_TOKEN_FRAME_OPACITY).map(String::as_str),
+            Some("0.98"),
+            "a set portal token must be forwarded over the handshake"
+        );
+        // … and every OTHER unset portal background/color token also resolves to
+        // its portal default (same single source of truth, no generic fallback).
+        for (key, default) in PORTAL_TOKEN_DEFAULT_STRINGS {
+            if cfg.contains_key(*key) {
+                continue;
+            }
+            assert_eq!(
+                resolved.get(*key).map(String::as_str),
+                Some(*default),
+                "unset portal token {key} must resolve to its portal default"
+            );
+        }
     }
 
     /// Empty token map → the string map equals the canonical default strings
