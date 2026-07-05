@@ -188,6 +188,25 @@ fn carry_drained_unread_count(state_count: Option<usize>, drained: usize) -> Opt
     state_count.map(|_| drained)
 }
 
+/// The wall-clock instant (µs) at which the drive loop should force one repaint
+/// so `state`'s agent-activity / streaming-cursor cue quiesces (hud-kbm80), or
+/// `None` when the state carries no cue active as of `now_us` — in which case
+/// there is nothing to schedule a quiesce for.
+///
+/// Returns the first instant the cue reads false (the derivation deadline from
+/// [`resident_grpc::agent_activity_clear_deadline_us`] plus one µs), but only
+/// when that deadline is still ahead of `now_us` (the cue is live now). A tail
+/// already stale at render time needs no scheduled repaint — it is quiesced the
+/// moment it paints — so this returns `None` for it, clearing any prior deadline.
+fn activity_cue_clear_due_us(
+    state: &tze_hud_projection::ProjectedPortalState,
+    now_us: u64,
+) -> Option<u64> {
+    tze_hud_projection::resident_grpc::agent_activity_clear_deadline_us(state)
+        .filter(|deadline| *deadline >= now_us)
+        .map(|deadline| deadline.saturating_add(1))
+}
+
 /// Parse an optional snake_case `content_classification` string into
 /// [`ContentClassification`].
 ///
@@ -379,6 +398,24 @@ struct DriveEntry {
     /// repaint, on any normal render, and on reconnect — so the pass is
     /// one-shot rather than re-rendering an idle degraded tile every drain.
     needs_degraded_repaint: bool,
+    /// One-shot wall-clock deadline (µs since epoch) at which the drive loop must
+    /// force a repaint so the agent-activity / streaming-cursor cue quiesces
+    /// (hud-kbm80).
+    ///
+    /// The ambient "⋯ writing" header line + "▍" tail cursor are DERIVED from the
+    /// newest transcript unit's `appended_at_wall_us` vs the render `now`
+    /// (`resident_grpc::agent_activity_active`) and quiesce once that tail ages
+    /// past `PORTAL_ACTIVITY_QUIESCE_WINDOW_US`. But the round-robin due-loop in
+    /// [`InProcessPortalDriver::drain_inner`] only re-renders a portal on a fresh
+    /// coalescer update — so after the terminal append on an otherwise-idle
+    /// portal nothing re-evaluates the cue and it would persist indefinitely,
+    /// misrepresenting ongoing activity. Each materialisation records the instant
+    /// the cue first reads false (the derivation deadline + 1); a post-due-loop
+    /// pass forces one repaint at/after it, then clears this back to `None`
+    /// (one-shot). A fresh append re-materialises and overwrites the deadline, so
+    /// continued streaming simply extends it; a state that carries no active cue
+    /// clears it.
+    activity_cue_clear_due_us: Option<u64>,
 }
 
 /// In-process state for the portal projection drive loop.
@@ -445,6 +482,7 @@ impl InProcessPortalDriveState {
                 prev_content_height_px: 0.0,
                 hud_disconnected: false,
                 needs_degraded_repaint: false,
+                activity_cue_clear_due_us: None,
             },
         );
     }
@@ -1598,6 +1636,22 @@ impl InProcessPortalDriver {
             state.unread_output_count =
                 carry_drained_unread_count(state.unread_output_count, update.unread_output_count);
 
+            // One-shot cue-quiesce scheduling (hud-kbm80). The agent-activity /
+            // streaming-cursor cue is derived from the newest transcript unit's
+            // appended-at vs the render `now`, but the round-robin due-loop only
+            // revisits a portal on a fresh coalescer update — so after the terminal
+            // append on an otherwise-idle portal the cue would persist past its
+            // window and misrepresent ongoing activity. Record the instant past
+            // which the cue reads false against THIS materialised state; the
+            // post-due-loop pass repaints once at/after it so the cue clears without
+            // external traffic. Overwritten every materialisation, so a fresh append
+            // simply extends the deadline and a now-quiesced state clears it. Set
+            // before the transport branch so it applies to both the in-process tiled
+            // path and the bridged tee.
+            if let Some(entry) = self.drive.entries.get_mut(&proj_id) {
+                entry.activity_cue_clear_due_us = activity_cue_clear_due_us(&state, now_us);
+            }
+
             // Per-projection transport routing (hud-g7ool). A projection routed to
             // the resident gRPC bridge is materialised SOLELY by the bridge:
             // forward its coalesced state as a `Publish` and SUPPRESS the in-process
@@ -2102,6 +2156,104 @@ impl InProcessPortalDriver {
             }
         }
 
+        // Forced agent-activity cue-quiesce pass (hud-kbm80).
+        //
+        // The ambient "⋯ writing" header line + "▍" streaming cursor are derived
+        // from the newest transcript unit's `appended_at_wall_us` vs the render
+        // `now` (`resident_grpc::agent_activity_active`) and quiesce once that tail
+        // ages past `PORTAL_ACTIVITY_QUIESCE_WINDOW_US`. But the round-robin due-loop
+        // above only revisits a portal on a fresh coalescer update — so after the
+        // terminal append on an otherwise-idle portal nothing re-renders it and the
+        // cue persists indefinitely, misrepresenting ongoing activity
+        // (portal-chat-grade-affordances §Agent Activity and Streaming Cue: the cue
+        // SHALL "quiesce promptly once appends stop"). Each materialisation recorded
+        // `activity_cue_clear_due_us` (the first instant the cue reads false); here
+        // we force exactly one repaint per flagged entry at/after that instant, under
+        // the same scene lock, so the cue clears with no external traffic. The
+        // deadline is one-shot (cleared here; overwritten by any fresh append's
+        // materialisation above), so a quiesced idle portal is not repainted every
+        // drain.
+        //
+        // Bridged projections are admitted too (hud-vne15), mirroring the degraded
+        // pass: a bridged projection has no in-process tile, so the tile-only filter
+        // would exclude it and its cue would never quiesce on the remote portal.
+        // Admit an entry when it has a tile OR is bridged; the loop re-tees the
+        // quiesced state for the bridged case and repaints the tile for the
+        // in-process case.
+        let cue_quiesce_ids: Vec<String> = self
+            .drive
+            .entries
+            .iter()
+            .filter(|(id, e)| {
+                e.activity_cue_clear_due_us
+                    .is_some_and(|due| now_us >= due)
+                    && (e.tile_scene_id.is_some()
+                        || self.effective_transport(id) == PortalTransport::ResidentGrpcBridge)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for proj_id in cue_quiesce_ids {
+            // Re-derive state so the repaint reflects the current transcript (and
+            // re-runs the cue derivation, which is now false past the deadline). If
+            // the session vanished since the deadline was scheduled, drop the
+            // now-orphaned drive entry instead of repainting.
+            let Some(state) = self.authority.projected_portal_state(&proj_id, &policy) else {
+                self.detach_projection(&proj_id);
+                continue;
+            };
+            // Per-projection transport routing (hud-g7ool / hud-vne15): a bridged
+            // projection's quiesced state is forwarded over the bridge and its
+            // in-process repaint suppressed, mirroring the degraded pass. Clear the
+            // one-shot deadline here so a tile-less bridged entry does not re-tee a
+            // `Publish` every drain.
+            if self.effective_transport(&proj_id) == PortalTransport::ResidentGrpcBridge {
+                if let Some(entry) = self.drive.entries.get_mut(&proj_id) {
+                    entry.activity_cue_clear_due_us = None;
+                }
+                if let Some(tx) = &self.resident_grpc_bridge_tx {
+                    let _ = tx.try_send(BridgeMessage::Publish {
+                        projection_id: proj_id.clone(),
+                        state: Box::new(state.clone()),
+                    });
+                }
+                continue;
+            }
+            let Some(entry) = self.drive.entries.get_mut(&proj_id) else {
+                continue;
+            };
+            // Clear first: a render failure must not re-flag the entry for a retry
+            // on every subsequent drain (the deadline has passed; the derivation is
+            // false now and the next genuine publish will repaint regardless).
+            entry.activity_cue_clear_due_us = None;
+            let Some(tile_scene_id) = entry.tile_scene_id else {
+                continue;
+            };
+            match entry.adapter.render_batch(&state, now_us) {
+                Ok(batch) => {
+                    tze_hud_protocol::convert::apply_portal_render_batch_to_scene(
+                        scene,
+                        tile_scene_id,
+                        PORTAL_DRIVER_NAMESPACE,
+                        &batch,
+                    );
+                    tracing::debug!(
+                        proj_id = %proj_id,
+                        tile_id = ?tile_scene_id,
+                        "portal drain: forced agent-activity cue-quiesce repaint (hud-kbm80)"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        proj_id = %proj_id,
+                        tile_id = ?tile_scene_id,
+                        error = ?e,
+                        "portal drain: cue-quiesce repaint render_batch failed; \
+                         cue not cleared this cycle"
+                    );
+                }
+            }
+        }
+
         // Portal health snapshot — emitted at debug level after each drain cycle
         // (hud-bq0gl.14).  Carries:
         //   • per-cycle update/deferral counts
@@ -2215,6 +2367,12 @@ mod tests {
         ProjectionBounds, ProjectionOperation, ProviderKind, PublishOutputRequest,
     };
     use tze_hud_scene::SceneGraph;
+
+    /// The header marker line the resident adapter paints while the agent is
+    /// actively appending (mirrors `resident_grpc::PORTAL_ACTIVITY_MARKER_LINE`,
+    /// which is private to that module). Used to assert the cue's presence /
+    /// quiescence in the painted tile markdown.
+    const PORTAL_ACTIVITY_MARKER_TEXT: &str = "⋯ writing";
 
     fn test_envelope(
         operation: ProjectionOperation,
@@ -5717,6 +5875,276 @@ mod tests {
         assert_eq!(
             scene.version, version_after_degraded,
             "an idle degraded tile must not be repainted again on the next drain"
+        );
+    }
+
+    // ── Agent-activity cue autonomous quiesce (hud-kbm80) ────────────────────
+    //
+    // The ambient "⋯ writing" header line + "▍" streaming cursor are derived from
+    // the newest transcript unit's appended-at vs the render `now`. The drive loop
+    // only re-renders a portal on a fresh coalescer update, so on a fully idle
+    // portal the cue would persist past its window and misrepresent ongoing
+    // activity. These tests pin the spec-SHALL fix: a one-shot force-repaint
+    // scheduled at the derivation deadline quiesces the cue with no external
+    // traffic — for the in-process tiled path and the bridged tee (hud-vne15) —
+    // one-shot (not re-fired every tick), and reset/extended by a fresh append.
+
+    /// Bring `proj` to a LIVE (ever-connected, non-degraded) state so the
+    /// activity cue can fire (`has_ever_connected` gate).
+    fn record_live_connection(driver: &mut InProcessPortalDriver, proj: &str) {
+        driver
+            .authority_mut()
+            .record_hud_connection(
+                proj,
+                HudConnectionMetadata {
+                    connection_id: format!("conn-{proj}"),
+                    authenticated_session_id: format!("sess-{proj}"),
+                    granted_capabilities: vec!["create_tiles".to_string()],
+                    connected_at_wall_us: 50,
+                    last_reconnect_wall_us: 50,
+                },
+            )
+            .expect("record_hud_connection must succeed for an attached projection");
+    }
+
+    /// The tile root's painted markdown content (panics if the tile has no
+    /// painted `TextMarkdown` root — that would itself be a paint regression).
+    fn tile_markdown(scene: &SceneGraph, tile_id: SceneId) -> String {
+        let root_id = scene
+            .tiles
+            .get(&tile_id)
+            .expect("portal tile must exist in scene")
+            .root_node
+            .expect("portal tile must have a painted root node");
+        match &scene.nodes.get(&root_id).expect("root node must resolve").data {
+            tze_hud_scene::NodeData::TextMarkdown(tm) => tm.content.clone(),
+            other => panic!("expected TextMarkdown tile root, got {other:?}"),
+        }
+    }
+
+    /// A fully-idle in-process portal must quiesce its activity cue on its own:
+    /// after the terminal append, a one-shot force-repaint past the quiesce
+    /// window clears the "⋯ writing" header + streaming cursor with no new update.
+    #[test]
+    fn activity_cue_quiesces_after_deadline_without_new_update() {
+        let mut driver = InProcessPortalDriver::new();
+        let proj = "proj-cue-quiesce";
+        let token = attach_and_get_token(&mut driver, proj);
+        driver.attach_projection(proj, Vec::new());
+        record_live_connection(&mut driver, proj);
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        // Publish a fresh agent turn; drain within the quiesce window so the tile
+        // paints the ambient activity cue.
+        publish(&mut driver, proj, &token, "streaming line", 100);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+
+        let tile_id = driver
+            .drive
+            .entries
+            .get(proj)
+            .unwrap()
+            .tile_scene_id
+            .expect("first drain must create the portal tile");
+        assert!(
+            tile_markdown(&scene, tile_id).contains(PORTAL_ACTIVITY_MARKER_TEXT),
+            "the activity cue must be painted while the agent tail is fresh"
+        );
+
+        // The materialisation scheduled a one-shot cue-quiesce repaint.
+        let due = driver
+            .drive
+            .entries
+            .get(proj)
+            .unwrap()
+            .activity_cue_clear_due_us
+            .expect("a live fresh agent tail must schedule a cue-quiesce repaint");
+
+        // Drain at/after the deadline with NO new update: the forced pass repaints
+        // once, re-running the (now-false) cue derivation → cue cleared.
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), due);
+        assert!(
+            !tile_markdown(&scene, tile_id).contains(PORTAL_ACTIVITY_MARKER_TEXT),
+            "the cue SHALL quiesce promptly once appends stop, even on an idle portal \
+             (portal-chat-grade-affordances §Agent Activity and Streaming Cue)"
+        );
+        // One-shot: the deadline is consumed.
+        assert!(
+            driver
+                .drive
+                .entries
+                .get(proj)
+                .unwrap()
+                .activity_cue_clear_due_us
+                .is_none(),
+            "the forced quiesce repaint must clear its one-shot deadline"
+        );
+
+        // A further idle drain must not repaint again (one-shot, not every tick).
+        let version_after_quiesce = scene.version;
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), due + 1_000_000);
+        assert_eq!(
+            scene.version, version_after_quiesce,
+            "a quiesced idle portal must not be repainted on every subsequent drain"
+        );
+    }
+
+    /// A fresh append before the deadline must reset/extend it: the earlier
+    /// scheduled quiesce must not fire while the agent is still streaming.
+    #[test]
+    fn fresh_append_extends_activity_cue_deadline() {
+        let mut driver = InProcessPortalDriver::new();
+        let proj = "proj-cue-extend";
+        let token = attach_and_get_token(&mut driver, proj);
+        driver.attach_projection(proj, Vec::new());
+        record_live_connection(&mut driver, proj);
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        // First append + drain schedules the initial deadline.
+        publish(&mut driver, proj, &token, "line one", 100);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+        let tile_id = driver
+            .drive
+            .entries
+            .get(proj)
+            .unwrap()
+            .tile_scene_id
+            .unwrap();
+        let due1 = driver
+            .drive
+            .entries
+            .get(proj)
+            .unwrap()
+            .activity_cue_clear_due_us
+            .expect("first fresh tail schedules a deadline");
+
+        // A fresh append past the rate window re-materialises and must push the
+        // deadline forward (the cue keeps streaming, not quiescing).
+        let ts_two = PORTAL_UPDATE_RATE_WINDOW_WALL_US;
+        let drain_two_now = PORTAL_UPDATE_RATE_WINDOW_WALL_US * 2;
+        publish(&mut driver, proj, &token, "line two", ts_two);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), drain_two_now);
+        let due2 = driver
+            .drive
+            .entries
+            .get(proj)
+            .unwrap()
+            .activity_cue_clear_due_us
+            .expect("a fresh append re-schedules the deadline");
+        assert!(
+            due2 > due1,
+            "a fresh append must extend the cue-quiesce deadline (due2 {due2} > due1 {due1})"
+        );
+
+        // Draining at the ORIGINAL deadline must NOT quiesce: the fresh append
+        // moved the deadline out, so the cue is still live and stays painted.
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), due1);
+        assert!(
+            tile_markdown(&scene, tile_id).contains(PORTAL_ACTIVITY_MARKER_TEXT),
+            "the cue must remain while a fresh append keeps the tail within the window"
+        );
+        assert_eq!(
+            driver
+                .drive
+                .entries
+                .get(proj)
+                .unwrap()
+                .activity_cue_clear_due_us,
+            Some(due2),
+            "the extended deadline must be retained (the old one must not have fired)"
+        );
+    }
+
+    /// The bridged tee path must also quiesce (hud-vne15): a bridged projection
+    /// has no in-process tile, so the pass forwards a fresh `Publish` at the
+    /// deadline carrying the now-quiesced state, one-shot.
+    #[test]
+    fn bridged_activity_cue_quiesce_forwarded_to_bridge() {
+        let mut driver = InProcessPortalDriver::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<BridgeMessage>(16);
+        driver.set_resident_grpc_bridge_tx(Some(tx));
+
+        let proj = "proj-bridged-cue";
+        let token = attach_and_get_token(&mut driver, proj);
+        driver.attach_projection(proj, Vec::new());
+        driver.set_projection_transport(proj, PortalTransport::ResidentGrpcBridge);
+        record_live_connection(&mut driver, proj);
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        // Materialise once over the bridge (live), drain that Publish so the
+        // channel only carries post-deadline traffic below.
+        publish(&mut driver, proj, &token, "bridged streaming", 100);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+        while rx.try_recv().is_ok() {}
+
+        // A bridged projection has no in-process tile, yet the live materialisation
+        // scheduled the one-shot cue-quiesce deadline.
+        assert!(
+            driver
+                .drive
+                .entries
+                .get(proj)
+                .unwrap()
+                .tile_scene_id
+                .is_none(),
+            "a bridged projection must have no in-process tile"
+        );
+        let due = driver
+            .drive
+            .entries
+            .get(proj)
+            .unwrap()
+            .activity_cue_clear_due_us
+            .expect("a bridged live fresh tail must schedule a cue-quiesce repaint");
+
+        // Drain at the deadline with no new publish: the pass must forward exactly
+        // one Publish (the bridge re-materialises the quiesced state remotely).
+        let version_before = scene.version;
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), due);
+
+        let mut quiesce_publishes = 0;
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                BridgeMessage::Publish { projection_id, .. } => {
+                    assert_eq!(projection_id, proj, "unexpected projection id in tee");
+                    quiesce_publishes += 1;
+                }
+                other => panic!("unexpected bridge message on a cue-quiesce drain: {other:?}"),
+            }
+        }
+        assert_eq!(
+            quiesce_publishes, 1,
+            "a bridged cue quiesce must forward exactly one Publish to the bridge"
+        );
+        assert_eq!(
+            scene.version, version_before,
+            "a bridged cue quiesce must not mutate the in-process scene"
+        );
+
+        // One-shot: the deadline is consumed; a further idle drain tees nothing.
+        assert!(
+            driver
+                .drive
+                .entries
+                .get(proj)
+                .unwrap()
+                .activity_cue_clear_due_us
+                .is_none(),
+            "the forwarded quiesce state must clear the one-shot deadline"
+        );
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), due + 1_000_000);
+        assert!(
+            rx.try_recv().is_err(),
+            "an idle quiesced bridged entry must not be re-teed on the next drain"
         );
     }
 
