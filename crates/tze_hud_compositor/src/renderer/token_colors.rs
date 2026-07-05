@@ -687,12 +687,28 @@ pub(super) struct ViewerEchoTokens {
     pub(super) color: [u8; 4],
     /// Viewer-line font size in physical pixels.
     pub(super) font_size_px: f32,
+    /// Muted color for the per-message timestamp prefix (hud-7ic89), distinct
+    /// from `color` so the clock reads as ambient metadata rather than message
+    /// body text.
+    pub(super) timestamp_color: [u8; 4],
+    /// Size multiplier applied to the timestamp prefix's `StyledRunItem`,
+    /// relative to `font_size_px` — keeps the clock visually smaller/quieter
+    /// than the message it precedes (hud-7ic89).
+    pub(super) timestamp_font_scale: f32,
 }
 
 /// Default viewer-echo text color: a calm blue (#8AB4F8) distinct from the
 /// near-white transcript body text, so viewer replies read as their own kind.
 const VIEWER_ECHO_DEFAULT_COLOR: [u8; 4] = [0x8A, 0xB4, 0xF8, 0xFF];
 const VIEWER_ECHO_DEFAULT_FONT_SIZE_PX: f32 = 15.0;
+
+/// Default timestamp color: the same dimmed slate (#6B7689) already used as
+/// the composer's empty-draft placeholder default
+/// (`ComposerOverlayTokens::placeholder_color`, `portal.composer.placeholder_color`)
+/// — this namespace has no dedicated muted/secondary-text token yet, so this
+/// reuses the closest existing one rather than inventing a new hardcoded hue.
+const VIEWER_ECHO_DEFAULT_TIMESTAMP_COLOR: [u8; 4] = [0x6B, 0x76, 0x89, 0xFF];
+const VIEWER_ECHO_DEFAULT_TIMESTAMP_FONT_SCALE: f32 = 0.85;
 
 /// Resolve [`ViewerEchoTokens`] from the compositor token map.
 ///
@@ -712,9 +728,22 @@ pub(super) fn resolve_viewer_echo_tokens(token_map: &HashMap<String, String>) ->
         .unwrap_or(VIEWER_ECHO_DEFAULT_FONT_SIZE_PX)
         .clamp(6.0, 200.0);
 
+    let timestamp_color = resolve_token_color(token_map, "portal.viewer_echo.timestamp_color")
+        .map(crate::text::rgba_to_srgb_u8)
+        .unwrap_or(VIEWER_ECHO_DEFAULT_TIMESTAMP_COLOR);
+
+    let timestamp_font_scale = token_map
+        .get("portal.viewer_echo.timestamp_font_scale")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(VIEWER_ECHO_DEFAULT_TIMESTAMP_FONT_SCALE)
+        .clamp(0.3, 1.0);
+
     ViewerEchoTokens {
         color,
         font_size_px,
+        timestamp_color,
+        timestamp_font_scale,
     }
 }
 

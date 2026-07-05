@@ -645,7 +645,7 @@ async fn test_viewer_echo_renders_kind_distinct_line_above_composer() {
     // No echoes yet → no viewer-echo text items.
     let before = compositor.collect_text_items(&scene, 400.0, 300.0);
     assert!(
-        !before.iter().any(|t| &*t.text == "hello there"),
+        !before.iter().any(|t| t.text.contains("hello there")),
         "no viewer echo should render before any submission"
     );
 
@@ -657,8 +657,14 @@ async fn test_viewer_echo_renders_kind_distinct_line_above_composer() {
     let after = compositor.collect_text_items(&scene, 400.0, 300.0);
     let echo = after
         .iter()
-        .find(|t| &*t.text == "hello there")
+        .find(|t| t.text.contains("hello there"))
         .expect("viewer echo line must render after a submission");
+    // hud-7ic89: the entry's timestamp (derived from submitted_at_wall_us=1,
+    // i.e. 1 microsecond past UTC midnight) prefixes the message.
+    assert_eq!(
+        &*echo.text, "00:00  hello there",
+        "viewer echo text is timestamp-prefixed"
+    );
 
     // Kind-distinct: carries the token-driven viewer color (default accent blue),
     // not the near-white transcript text color.
@@ -796,7 +802,7 @@ async fn test_viewer_echo_stack_tracks_live_composer_box() {
     let echo_y = |c: &Compositor, scene: &SceneGraph| -> f32 {
         c.collect_text_items(scene, 400.0, 300.0)
             .iter()
-            .find(|t| &*t.text == "the reply")
+            .find(|t| t.text.contains("the reply"))
             .expect("viewer echo must render")
             .pixel_y
     };
@@ -936,8 +942,9 @@ async fn test_viewer_echo_renders_embedded_newline_as_multiple_lines() {
     let echo = find_echo(&items);
 
     assert_eq!(
-        &*echo.text, "line one\nline two",
-        "the embedded newline must be preserved in the echo text (not stripped)"
+        &*echo.text, "00:00  line one\nline two",
+        "the embedded newline must be preserved in the echo text (not stripped), \
+         with the hud-7ic89 timestamp prefixing only the entry once (not per line)"
     );
     assert!(
         echo.bounds_width < 1000.0,
@@ -954,6 +961,96 @@ async fn test_viewer_echo_renders_embedded_newline_as_multiple_lines() {
     assert!(
         (echo.pixel_y + echo.bounds_height - box_top).abs() < 0.5,
         "block bottom must align to the live composer box top"
+    );
+}
+
+/// hud-7ic89: each retained viewer-echo entry's timestamp (derived from
+/// `submitted_at_wall_us`) must reach the render path as a distinct, token-styled
+/// `StyledRunItem` over the joined `TextItem` — muted color, smaller scale — not
+/// silently dropped by the `.text`-only render helpers. Asserted at the
+/// styled-runs/text-item layer (no pixel readback).
+#[tokio::test]
+async fn test_viewer_echo_timestamp_renders_as_styled_run() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(400, 300).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+    let (scene, tile_id) = viewer_echo_test_scene();
+
+    // Two entries with distinct, known submit times (12:00:00 and 13:30:45 UTC
+    // day-seconds) so both the prefix text and its byte-range placement in the
+    // `\n`-joined block are independently verifiable.
+    let noon_us = (12 * 3600) as u64 * 1_000_000;
+    let afternoon_us = (13 * 3600 + 30 * 60 + 45) as u64 * 1_000_000;
+    compositor
+        .viewer_echoes
+        .append(tile_id, "first reply".to_owned(), noon_us);
+    compositor
+        .viewer_echoes
+        .append(tile_id, "second reply".to_owned(), afternoon_us);
+    compositor.prime_viewer_echo_layout(&scene);
+
+    let tile = scene.visible_tiles()[0].clone();
+    let tokens = super::token_colors::resolve_viewer_echo_tokens(&compositor.token_map);
+    let items = compositor.collect_viewer_echo_text_items(&tile, &scene, 400.0, 300.0, &tokens);
+    let echo = find_echo(&items);
+
+    assert_eq!(
+        &*echo.text, "12:00  first reply\n13:30  second reply",
+        "joined block carries both entries' derived timestamp prefixes"
+    );
+    assert_eq!(
+        echo.styled_runs.len(),
+        2,
+        "one timestamp styled-run per entry, got {:?}",
+        echo.styled_runs
+    );
+    for run in echo.styled_runs.iter() {
+        assert_eq!(
+            run.color,
+            Some(tokens.timestamp_color),
+            "timestamp run must use the muted token color, not the message color"
+        );
+        assert_eq!(
+            run.size_scale,
+            Some(tokens.timestamp_font_scale),
+            "timestamp run must apply the token-driven smaller scale"
+        );
+    }
+    assert_eq!(
+        &echo.text[echo.styled_runs[0].start_byte..echo.styled_runs[0].end_byte],
+        "12:00  ",
+        "first run's byte range must cover exactly the first entry's prefix"
+    );
+    assert_eq!(
+        &echo.text[echo.styled_runs[1].start_byte..echo.styled_runs[1].end_byte],
+        "13:30  ",
+        "second run's byte range must cover exactly the second entry's prefix, \
+         offset past the '\\n' joiner and the first entry's full display text"
+    );
+}
+
+/// hud-7ic89: an entry with `submitted_at_wall_us == 0` (no timestamp captured —
+/// e.g. a legacy append path) must render its text unchanged, with no styled run
+/// and no panic — the backward-compatibility requirement.
+#[tokio::test]
+async fn test_viewer_echo_zero_timestamp_renders_without_prefix_or_run() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(400, 300).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+    let (scene, tile_id) = viewer_echo_test_scene();
+
+    compositor
+        .viewer_echoes
+        .append(tile_id, "no timestamp here".to_owned(), 0);
+    compositor.prime_viewer_echo_layout(&scene);
+
+    let tile = scene.visible_tiles()[0].clone();
+    let tokens = super::token_colors::resolve_viewer_echo_tokens(&compositor.token_map);
+    let items = compositor.collect_viewer_echo_text_items(&tile, &scene, 400.0, 300.0, &tokens);
+    let echo = find_echo(&items);
+
+    assert_eq!(&*echo.text, "no timestamp here");
+    assert!(
+        echo.styled_runs.is_empty(),
+        "a zero-timestamp entry must not emit a timestamp styled run"
     );
 }
 
