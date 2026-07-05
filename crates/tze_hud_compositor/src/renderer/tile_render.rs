@@ -1396,7 +1396,8 @@ impl Compositor {
         ];
 
         let font_size_px = jump_to_latest_tokens.text_size_px.max(1.0);
-        let line_height_multiplier = crate::markdown::MarkdownTokens::default().line_height_multiplier;
+        let line_height_multiplier =
+            crate::markdown::MarkdownTokens::default().line_height_multiplier;
         let line_height = (font_size_px * line_height_multiplier).max(1.0);
 
         // Pill origin in absolute pixels; vertically center one text line inside it.

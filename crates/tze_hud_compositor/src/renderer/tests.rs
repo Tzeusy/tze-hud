@@ -8993,7 +8993,8 @@ async fn jump_to_latest_badge_gates_on_scroll_and_unread_count() {
     // Scrolled away from the tail, with unread content → badge renders.
     scene.set_tile_follow_tail_at_tail(tile_id, false);
     scene.set_tile_unread_count(tile_id, 3);
-    let item = badge(&compositor, &scene).expect("scrolled-away tile with unread must show a badge");
+    let item =
+        badge(&compositor, &scene).expect("scrolled-away tile with unread must show a badge");
     assert_eq!(&*item.text, "3 unread", "badge must carry the unread count");
     assert_eq!(
         item.alignment,

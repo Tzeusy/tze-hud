@@ -298,8 +298,14 @@ mod tests {
 
     #[test]
     fn badge_shows_count_when_unread() {
-        assert_eq!(jump_to_latest_badge_label(Some(1)).as_deref(), Some("1 unread"));
-        assert_eq!(jump_to_latest_badge_label(Some(42)).as_deref(), Some("42 unread"));
+        assert_eq!(
+            jump_to_latest_badge_label(Some(1)).as_deref(),
+            Some("1 unread")
+        );
+        assert_eq!(
+            jump_to_latest_badge_label(Some(42)).as_deref(),
+            Some("42 unread")
+        );
         assert_eq!(
             jump_to_latest_badge_label(Some(999)).as_deref(),
             Some("999 unread")
