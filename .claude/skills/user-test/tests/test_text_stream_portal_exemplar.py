@@ -1072,7 +1072,71 @@ class PromotionGateEvidenceSchemaTests(unittest.TestCase):
 # ── Sustained soak phase (hud-pnofj) ──────────────────────────────────────────
 
 
+class _SoakRetryStubClient:
+    """Minimal client stub for run_soak tests. run_soak enables a bounded
+    mutation-ack retry on its client for the soak's duration and resets it in a
+    finally; publish_portal is faked in these tests, so configure_mutation_retry
+    is the only client method exercised. Records its calls so the enable/reset
+    wiring can be asserted (hud-n5bqp)."""
+
+    def __init__(self) -> None:
+        self.retry_calls: list[tuple[int, float]] = []
+
+    def configure_mutation_retry(self, retries: int, backoff_s: float = 0.5) -> None:
+        self.retry_calls.append((retries, backoff_s))
+
+
 class SoakPhaseTests(unittest.TestCase):
+    def test_run_soak_enables_then_resets_bounded_mutation_retry(self) -> None:
+        # The soak driver must turn the bounded retry ON for the run and reset it
+        # to fail-fast (0) afterward so other phases are unaffected (hud-n5bqp).
+        client = _SoakRetryStubClient()
+        now = 0.0
+
+        original_publish = portal.publish_portal
+        original_sleep = portal.asyncio.sleep
+        original_monotonic = portal.time.monotonic
+
+        def fake_monotonic() -> float:
+            return now
+
+        async def fake_publish_portal(*args, body: str, **kwargs) -> None:
+            nonlocal now
+            now += 0.05
+
+        async def fake_sleep(delay_s: float) -> None:
+            nonlocal now
+            now += delay_s
+
+        async def run() -> None:
+            await portal.run_soak(
+                client=client,
+                lease_id=b"lease",
+                tiles=_portal_tiles(),
+                body_full="\n".join(f"seed {i}" for i in range(5)),
+                transcript=[],
+                duration_s=0.5,
+                interval_ms=250,
+                window_lines=3,
+                mutation_lock=asyncio.Lock(),
+            )
+
+        portal.publish_portal = fake_publish_portal
+        portal.asyncio.sleep = fake_sleep
+        portal.time.monotonic = fake_monotonic
+        try:
+            asyncio.run(run())
+        finally:
+            portal.publish_portal = original_publish
+            portal.asyncio.sleep = original_sleep
+            portal.time.monotonic = original_monotonic
+
+        self.assertEqual(
+            client.retry_calls[0],
+            (portal.SOAK_MUTATION_RETRIES, portal.SOAK_MUTATION_RETRY_BACKOFF_S),
+        )
+        self.assertEqual(client.retry_calls[-1][0], 0)
+
     def test_soak_tail_history_stays_bounded_to_window_lines(self) -> None:
         seed = [f"seed {i}" for i in range(5)]
         lines = list(seed[-3:])
@@ -1111,7 +1175,7 @@ class SoakPhaseTests(unittest.TestCase):
         async def run() -> list[dict]:
             transcript: list[dict] = []
             await portal.run_soak(
-                client=object(),
+                client=_SoakRetryStubClient(),
                 lease_id=b"lease",
                 tiles=_portal_tiles(),
                 body_full="\n".join(f"seed {i}" for i in range(5)),
@@ -1223,7 +1287,7 @@ class SoakPhaseTests(unittest.TestCase):
 
         async def run(marker_dir: Path) -> None:
             await portal.run_soak(
-                client=object(),
+                client=_SoakRetryStubClient(),
                 lease_id=b"lease",
                 tiles=_portal_tiles(),
                 body_full="\n".join(f"seed {i}" for i in range(5)),
@@ -1279,7 +1343,7 @@ class SoakPhaseTests(unittest.TestCase):
 
         async def run(marker_dir: Path) -> None:
             await portal.run_soak(
-                client=object(),
+                client=_SoakRetryStubClient(),
                 lease_id=b"lease",
                 tiles=_portal_tiles(),
                 body_full="\n".join(f"seed {i}" for i in range(5)),

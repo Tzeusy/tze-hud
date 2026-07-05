@@ -635,6 +635,15 @@ class HudClient:
         self._batch_send_wall_us: "dict[bytes, int]" = {}
         self._batch_send_order: list[bytes] = []
         self.last_mutation_batch_id: Optional[bytes] = None
+        # ── Bounded mutation-ack retry policy (hud-n5bqp) ─────────────────────
+        # A single transient mutation-ack blip (a momentary tailnet stall or
+        # runtime pause) should not abort a full-duration soak. Long-lived
+        # callers enable a small retry budget via configure_mutation_retry();
+        # the default (0 retries) preserves fail-fast behavior for every other
+        # caller. submit_mutation_batch reads these when its own retry args are
+        # left unset.
+        self._mutation_retry_budget: int = 0
+        self._mutation_retry_backoff_s: float = 0.5
 
     async def __aenter__(self):
         await self.connect()
@@ -1215,13 +1224,83 @@ class HudClient:
 
     # ─── Tile operations ──────────────────────────────────────────────────
 
+    def configure_mutation_retry(self, retries: int, backoff_s: float = 0.5) -> None:
+        """Set the per-client bounded-retry policy for submit_mutation_batch.
+
+        Long-lived callers (the portal soak) enable a small retry budget so a
+        single transient mutation-ack timeout — a momentary tailnet stall or
+        runtime pause — does not abort a full-duration run. The default (0
+        retries) preserves fail-fast behavior for every other caller.
+        ``retries`` is the number of resubmits attempted *after* the first
+        send; ``backoff_s`` is the base delay, applied with exponential
+        growth between attempts.
+        """
+        self._mutation_retry_budget = max(0, int(retries))
+        self._mutation_retry_backoff_s = max(0.0, float(backoff_s))
+
     async def submit_mutation_batch(
         self,
         lease_id: bytes,
         mutations: list[types_pb2.MutationProto],
         timeout: float = 5.0,
+        retries: Optional[int] = None,
+        retry_backoff_s: Optional[float] = None,
     ) -> session_pb2.MutationResult:
-        """Submit a mutation batch and return the accepted result."""
+        """Submit a mutation batch and return the accepted result.
+
+        A mutation-ack (``mutation_result``) that fails to arrive within
+        ``timeout`` raises ``TimeoutError``. For sustained runs (the portal
+        soak) a single transient ack blip should not abort the whole run, so
+        an optional bounded retry resubmits the batch — with a fresh
+        ``batch_id`` — up to ``retries`` times, sleeping ``retry_backoff_s``
+        (exponential) between attempts. Every retry is logged visibly so a
+        *recurring* ack wall is still detectable rather than silently
+        swallowed; once the budget is exhausted the ``TimeoutError``
+        propagates and the caller still aborts. Rejections (``RuntimeError``)
+        are never retried — only ack timeouts. ``retries`` and
+        ``retry_backoff_s`` fall back to the per-client policy set by
+        ``configure_mutation_retry`` (default: no retries).
+        """
+        budget = self._mutation_retry_budget if retries is None else max(0, retries)
+        backoff_s = (
+            self._mutation_retry_backoff_s
+            if retry_backoff_s is None
+            else max(0.0, retry_backoff_s)
+        )
+        attempt = 0
+        while True:
+            try:
+                return await self._submit_mutation_batch_once(
+                    lease_id, mutations, timeout
+                )
+            except TimeoutError:
+                if attempt >= budget:
+                    raise
+                attempt += 1
+                delay = backoff_s * (2 ** (attempt - 1)) if backoff_s > 0 else 0.0
+                # Visible so a recurring ack wall is still detectable — the
+                # soak must not silently swallow a systemic stall (hud-n5bqp).
+                print(
+                    f"  [grpc] mutation-ack timeout after {timeout:.1f}s "
+                    f"(retry {attempt}/{budget}); resubmitting batch after "
+                    f"{delay:.2f}s backoff",
+                    flush=True,
+                )
+                if delay > 0:
+                    await asyncio.sleep(delay)
+
+    async def _submit_mutation_batch_once(
+        self,
+        lease_id: bytes,
+        mutations: list[types_pb2.MutationProto],
+        timeout: float,
+    ) -> session_pb2.MutationResult:
+        """Submit one mutation batch and wait for its ack (single attempt).
+
+        Raises ``TimeoutError`` if no matching ``mutation_result`` arrives
+        within ``timeout``; the bounded-retry wrapper in
+        ``submit_mutation_batch`` decides whether to resubmit.
+        """
         batch_id = _uuid_bytes()
         await self._send(
             mutation_batch=session_pb2.MutationBatch(

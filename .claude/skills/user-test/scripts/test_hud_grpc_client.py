@@ -9,6 +9,7 @@
 # ]
 # ///
 import asyncio
+import contextlib
 import io
 import unittest
 from unittest.mock import AsyncMock
@@ -396,6 +397,155 @@ class HudGrpcClientTests(unittest.IsolatedAsyncioTestCase):
             "PERMISSION_DENIED.*requested lease scope exceeds session-granted capabilities",
         ):
             await client.request_lease(ttl_ms=120_000)
+
+    # ── Bounded mutation-ack retry (hud-n5bqp) ────────────────────────────────
+    def _mutation_retry_client(self):
+        """Build a client whose transport is stubbed so submit_mutation_batch
+        can be exercised without a real gRPC stream. Returns (client,
+        sent_batch_ids, set_wait) where sent_batch_ids records every batch id
+        actually sent and set_wait installs a scripted _wait_for."""
+        client = HudClient("example.invalid:50051", psk="test-key")
+        sent_batch_ids: list[bytes] = []
+
+        async def capture_send(**payload_kwargs):
+            batch = payload_kwargs.get("mutation_batch")
+            if batch is not None:
+                sent_batch_ids.append(bytes(batch.batch_id))
+            return 0
+
+        client._send = capture_send
+
+        def set_wait(fn):
+            client._wait_for = fn
+
+        return client, sent_batch_ids, set_wait
+
+    @staticmethod
+    def _accepted_result(batch_id: bytes):
+        return session_pb2.ServerMessage(
+            mutation_result=session_pb2.MutationResult(
+                batch_id=batch_id,
+                accepted=True,
+            )
+        )
+
+    async def test_submit_mutation_batch_retries_single_transient_timeout(self):
+        """A single transient mutation-ack timeout is retried (resubmitted with
+        a fresh batch id) and the call still succeeds — the soak continues."""
+        client, sent_batch_ids, set_wait = self._mutation_retry_client()
+        calls = {"n": 0}
+
+        async def flaky_wait(payload_name, timeout, matcher=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TimeoutError("Timed out waiting for mutation_result")
+            return self._accepted_result(sent_batch_ids[-1])
+
+        set_wait(flaky_wait)
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            mr = await client.submit_mutation_batch(
+                b"\x01" * 16, [], timeout=0.05, retries=3, retry_backoff_s=0.0,
+            )
+
+        self.assertTrue(mr.accepted)
+        # Original send + exactly one resubmit, each with a distinct batch id.
+        self.assertEqual(len(sent_batch_ids), 2)
+        self.assertNotEqual(sent_batch_ids[0], sent_batch_ids[1])
+        # The retry is logged visibly (a recurring wall must stay detectable).
+        self.assertIn("mutation-ack timeout", buf.getvalue())
+        self.assertIn("retry 1/3", buf.getvalue())
+
+    async def test_submit_mutation_batch_aborts_after_exhausting_retries(self):
+        """A sustained ack wall (every attempt times out) still aborts once the
+        bounded retry budget is exhausted — the blip tolerance is not infinite."""
+        client, sent_batch_ids, set_wait = self._mutation_retry_client()
+
+        async def always_timeout(payload_name, timeout, matcher=None):
+            raise TimeoutError("Timed out waiting for mutation_result")
+
+        set_wait(always_timeout)
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            with self.assertRaises(TimeoutError):
+                await client.submit_mutation_batch(
+                    b"\x01" * 16, [], timeout=0.01, retries=2, retry_backoff_s=0.0,
+                )
+
+        # First attempt + 2 retries = 3 sends, then the TimeoutError propagates.
+        self.assertEqual(len(sent_batch_ids), 3)
+        self.assertEqual(buf.getvalue().count("mutation-ack timeout"), 2)
+
+    async def test_submit_mutation_batch_default_is_fail_fast(self):
+        """With no retry policy configured (the default), a single ack timeout
+        aborts immediately — non-soak callers keep fail-fast semantics."""
+        client, sent_batch_ids, set_wait = self._mutation_retry_client()
+
+        async def always_timeout(payload_name, timeout, matcher=None):
+            raise TimeoutError("Timed out waiting for mutation_result")
+
+        set_wait(always_timeout)
+
+        with self.assertRaises(TimeoutError):
+            await client.submit_mutation_batch(b"\x01" * 16, [], timeout=0.01)
+
+        self.assertEqual(len(sent_batch_ids), 1)
+
+    async def test_configure_mutation_retry_applies_as_call_default(self):
+        """configure_mutation_retry sets the per-client budget used when
+        submit_mutation_batch is called without explicit retry args — the lever
+        the soak driver pulls before publishing through its helpers."""
+        client, sent_batch_ids, set_wait = self._mutation_retry_client()
+        client.configure_mutation_retry(2, backoff_s=0.0)
+        calls = {"n": 0}
+
+        async def flaky_wait(payload_name, timeout, matcher=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TimeoutError("Timed out waiting for mutation_result")
+            return self._accepted_result(sent_batch_ids[-1])
+
+        set_wait(flaky_wait)
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            mr = await client.submit_mutation_batch(b"\x01" * 16, [], timeout=0.05)
+
+        self.assertTrue(mr.accepted)
+        self.assertEqual(len(sent_batch_ids), 2)
+        # Resetting the policy to 0 restores fail-fast.
+        client.configure_mutation_retry(0)
+        calls["n"] = 0
+        sent_batch_ids.clear()
+        with self.assertRaises(TimeoutError):
+            await client.submit_mutation_batch(b"\x01" * 16, [], timeout=0.01)
+        self.assertEqual(len(sent_batch_ids), 1)
+
+    async def test_submit_mutation_batch_does_not_retry_rejection(self):
+        """A rejected batch (RuntimeError) is a real failure, not a transient
+        blip — it must propagate immediately without resubmission."""
+        client, sent_batch_ids, set_wait = self._mutation_retry_client()
+
+        async def reject_wait(payload_name, timeout, matcher=None):
+            return session_pb2.ServerMessage(
+                mutation_result=session_pb2.MutationResult(
+                    batch_id=sent_batch_ids[-1],
+                    accepted=False,
+                    error_code="MUTATION_REJECTED",
+                    error_message="lease expired",
+                )
+            )
+
+        set_wait(reject_wait)
+
+        with self.assertRaisesRegex(RuntimeError, "MUTATION_REJECTED"):
+            await client.submit_mutation_batch(
+                b"\x01" * 16, [], timeout=0.05, retries=3, retry_backoff_s=0.0,
+            )
+
+        self.assertEqual(len(sent_batch_ids), 1)
 
 
 if __name__ == "__main__":

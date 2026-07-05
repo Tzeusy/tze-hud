@@ -4464,6 +4464,16 @@ async def run_rapid(
 # keying on ``soak-complete.marker`` cannot false-pass a soak that died early.
 SOAK_COMPLETE_MARKER_NAME = "soak-complete.marker"
 SOAK_ABORTED_MARKER_NAME = "soak-aborted.marker"
+
+# A full-duration soak must survive a single transient mutation-ack blip (a
+# momentary tailnet stall or runtime pause) rather than aborting ~146s short of
+# the 60-min target (hud-n5bqp). run_soak enables a small bounded retry on the
+# client for the duration of the soak: each transient ack timeout resubmits the
+# batch (fresh id) up to SOAK_MUTATION_RETRIES times with exponential backoff,
+# every retry logs visibly, and the run still aborts once the budget is
+# exhausted — so a genuine sustained-load ack wall is surfaced, not masked.
+SOAK_MUTATION_RETRIES = 3
+SOAK_MUTATION_RETRY_BACKOFF_S = 1.0
 SOAK_COMPLETE_TOKEN = "SOAK_COMPLETE"
 SOAK_ABORTED_TOKEN = "SOAK_ABORTED"
 # A genuinely completed soak must reach at least this fraction of its intended
@@ -4562,73 +4572,82 @@ async def run_soak(
     t0 = time.monotonic()
     next_checkpoint = 60.0
     cycle = 0
+    # Tolerate a single transient mutation-ack blip for the duration of the soak
+    # (hud-n5bqp); restore fail-fast for other callers in the finally.
+    client.configure_mutation_retry(
+        SOAK_MUTATION_RETRIES, SOAK_MUTATION_RETRY_BACKOFF_S,
+    )
     try:
-        while True:
-            cycle_started = time.monotonic()
-            elapsed = cycle_started - t0
-            if elapsed >= duration_s:
-                break
-            cycle += 1
-            append_soak_tail_line(lines, seed, cycle, elapsed, window_lines)
-            window = bounded_transcript(lines, 0, window_lines)
-            await publish_portal(
-                client, lease_id, tiles,
-                title="Exemplar Review Portal",
-                subtitle="sustained streaming soak (task 5.5)",
-                body=window,
-                footer_meta=f"soak  •  cycle {cycle}  •  t+{elapsed:.0f}s / {duration_s:.0f}s",
-                include_tile_setup=(cycle == 1),
-                mutation_lock=mutation_lock,
-            )
-            if elapsed >= next_checkpoint:
-                emit_step_event(transcript, 11, "checkpoint", {
-                    "code": "soak:progress",
-                    "title": "Soak progress",
-                    "action": f"sustained streaming at cycle {cycle}",
-                    "expected_visual": "portal still scrolling smoothly; no flicker",
-                }, cycle=cycle, elapsed_s=round(elapsed, 1), window_lines=window_lines)
-                next_checkpoint = (int(elapsed // 60.0) + 1) * 60.0
-            cycle_elapsed_s = time.monotonic() - cycle_started
-            await asyncio.sleep(max(0.0, interval_s - cycle_elapsed_s))
-    except Exception as exc:
-        # Early termination (e.g. lease expired mid-soak). Record a distinct
-        # aborted marker with the reason so no completion marker is left behind,
-        # then re-raise so the run still surfaces as a failure to its caller.
+        try:
+            while True:
+                cycle_started = time.monotonic()
+                elapsed = cycle_started - t0
+                if elapsed >= duration_s:
+                    break
+                cycle += 1
+                append_soak_tail_line(lines, seed, cycle, elapsed, window_lines)
+                window = bounded_transcript(lines, 0, window_lines)
+                await publish_portal(
+                    client, lease_id, tiles,
+                    title="Exemplar Review Portal",
+                    subtitle="sustained streaming soak (task 5.5)",
+                    body=window,
+                    footer_meta=f"soak  •  cycle {cycle}  •  t+{elapsed:.0f}s / {duration_s:.0f}s",
+                    include_tile_setup=(cycle == 1),
+                    mutation_lock=mutation_lock,
+                )
+                if elapsed >= next_checkpoint:
+                    emit_step_event(transcript, 11, "checkpoint", {
+                        "code": "soak:progress",
+                        "title": "Soak progress",
+                        "action": f"sustained streaming at cycle {cycle}",
+                        "expected_visual": "portal still scrolling smoothly; no flicker",
+                    }, cycle=cycle, elapsed_s=round(elapsed, 1), window_lines=window_lines)
+                    next_checkpoint = (int(elapsed // 60.0) + 1) * 60.0
+                cycle_elapsed_s = time.monotonic() - cycle_started
+                await asyncio.sleep(max(0.0, interval_s - cycle_elapsed_s))
+        except Exception as exc:
+            # Early termination (e.g. lease expired mid-soak, or a mutation-ack
+            # wall that outlasted the bounded retry). Record a distinct aborted
+            # marker with the reason so no completion marker is left behind, then
+            # re-raise so the run still surfaces as a failure to its caller.
+            actual_s = time.monotonic() - t0
+            reason = f"{type(exc).__name__}: {exc}"
+            if marker_dir is not None:
+                write_soak_outcome_marker(
+                    marker_dir,
+                    completed=False,
+                    intended_s=duration_s,
+                    actual_s=actual_s,
+                    cycles=cycle,
+                    reason=reason,
+                )
+            emit_step_event(transcript, 11, "failed", {
+                "code": "soak:aborted",
+                "title": "Sustained streaming soak aborted",
+                "action": f"soak terminated early after {cycle} cycles",
+                "expected_visual": "soak did NOT reach full duration; run is a FAIL",
+            }, cycles=cycle, duration_s=round(actual_s, 3),
+               intended_duration_s=round(duration_s, 3), error=reason)
+            raise
         actual_s = time.monotonic() - t0
-        reason = f"{type(exc).__name__}: {exc}"
+        emit_step_event(transcript, 11, "completed", {
+            "code": "soak",
+            "title": "Sustained streaming soak",
+            "action": f"completed {cycle} cycles over {actual_s:.0f}s",
+            "expected_visual": "portal settled on last tail window",
+        }, cycles=cycle, duration_s=round(actual_s, 1))
         if marker_dir is not None:
             write_soak_outcome_marker(
                 marker_dir,
-                completed=False,
+                completed=True,
                 intended_s=duration_s,
                 actual_s=actual_s,
                 cycles=cycle,
-                reason=reason,
+                reason="",
             )
-        emit_step_event(transcript, 11, "failed", {
-            "code": "soak:aborted",
-            "title": "Sustained streaming soak aborted",
-            "action": f"soak terminated early after {cycle} cycles",
-            "expected_visual": "soak did NOT reach full duration; run is a FAIL",
-        }, cycles=cycle, duration_s=round(actual_s, 3),
-           intended_duration_s=round(duration_s, 3), error=reason)
-        raise
-    actual_s = time.monotonic() - t0
-    emit_step_event(transcript, 11, "completed", {
-        "code": "soak",
-        "title": "Sustained streaming soak",
-        "action": f"completed {cycle} cycles over {actual_s:.0f}s",
-        "expected_visual": "portal settled on last tail window",
-    }, cycles=cycle, duration_s=round(actual_s, 1))
-    if marker_dir is not None:
-        write_soak_outcome_marker(
-            marker_dir,
-            completed=True,
-            intended_s=duration_s,
-            actual_s=actual_s,
-            cycles=cycle,
-            reason="",
-        )
+    finally:
+        client.configure_mutation_retry(0)
 
 
 async def run_composer_smoke(
