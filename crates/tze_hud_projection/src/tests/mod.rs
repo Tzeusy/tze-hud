@@ -1200,6 +1200,45 @@ fn collapsed_redacted_projection_preserves_geometry_and_suppresses_private_affor
     );
 }
 
+// ── hud-meqet: unread-output count reaches the render boundary un-nulled ──
+
+/// `unread_output_count` is computed on the session (`ProjectionSession`) and
+/// must flow through to `ProjectedPortalState` un-nulled whenever the viewer
+/// policy reveals it — this is the authority-side half of the render
+/// boundary; `resident_grpc.rs`'s `portal_markdown`/`unread_indicator_*` tests
+/// cover the other half (actually drawing it). Before hud-meqet the value
+/// made it this far correctly but was silently dropped by the render path, so
+/// this test pins the authority contract explicitly.
+#[test]
+fn unread_output_count_flows_through_to_projected_portal_state_when_revealed() {
+    let mut authority = ProjectionAuthority::default();
+    let owner_token = attach(&mut authority, "projection-a");
+    let output = output_request("projection-a", &owner_token, "req-output");
+    assert!(
+        authority
+            .handle_publish_output(output, "caller-a", 20)
+            .accepted
+    );
+
+    let visible = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("portal state materializes");
+    assert_eq!(
+        visible.unread_output_count,
+        Some(1),
+        "unread_output_count must reach ProjectedPortalState un-nulled when \
+         the viewer policy reveals it"
+    );
+
+    let redacted = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::default())
+        .expect("redacted portal state still materializes");
+    assert_eq!(
+        redacted.unread_output_count, None,
+        "unread count must stay redacted when reveal_unread is false"
+    );
+}
+
 // ── hud-o7h1r: viewer reply echoed into portal transcript ─────────────────
 
 /// A successful `submit_portal_input` appends a `Viewer`-kind transcript unit

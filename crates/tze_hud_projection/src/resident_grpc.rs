@@ -126,6 +126,10 @@ pub struct PortalVisualTokens {
     pub transcript_dim_background: proto::Rgba,
     /// Color of the content-free stale/disconnect marker (ambient, not alarming).
     pub stale_marker_color: proto::Rgba,
+    /// Color of the ambient unread-output-count indicator (hud-meqet). Muted
+    /// by design — a presence engine surfaces a quiet count, never a loud
+    /// notification badge. Source token: `portal.unread_indicator.color`.
+    pub unread_indicator_color: proto::Rgba,
 
     // Lifecycle affordance accents (cooperative-hud-projection §lifecycle).
     //
@@ -897,6 +901,12 @@ impl ResidentGrpcPortalAdapter {
                             self.composer_display.as_ref(),
                             self.visual_tokens.composer_at_capacity_color,
                         ));
+                        // Ambient unread-output-count indicator (hud-meqet). Absent
+                        // when there is nothing unread or the count is redacted.
+                        runs.extend(unread_indicator_color_runs(
+                            state,
+                            self.visual_tokens.unread_indicator_color,
+                        ));
                         runs
                     },
                     // Transcript panes use Ellipsis to engage the TruncationCache
@@ -988,6 +998,14 @@ fn portal_markdown(
             state.portal_id, state.presentation, state.attention
         ),
     );
+    // Ambient unread-output-count indicator (hud-meqet). `unread_output_count`
+    // is `None` when redacted (`reveal_unread` policy gate) and `Some(0)` when
+    // there is nothing unread — both render nothing. This is a presence engine,
+    // not a notification engine: a quiet count near the header, never a loud
+    // badge (CLAUDE.md doctrine).
+    if let Some(line) = unread_indicator_line(state.unread_output_count) {
+        push_line(&mut result, &line);
+    }
     // §2: content-free disconnect/stale marker. Emitted from the
     // redaction-independent `connection_degraded` flag and BEFORE the
     // redaction-gated lifecycle line, so it remains present (and reveals nothing)
@@ -1211,6 +1229,42 @@ fn stale_marker_color_runs(
     }]
 }
 
+/// Ambient one-line unread-output-count affordance, e.g. `"3 unread"`.
+///
+/// Returns `None` when the count is redacted (`unread_output_count == None`,
+/// gated by the authority's `reveal_unread` policy) or when there is nothing
+/// unread (`Some(0)`) — a presence engine renders nothing rather than a "0
+/// unread" line. Never a loud/alarming marker: just a quiet count, styled
+/// separately via `unread_indicator_color_runs` (§6.1: token-resolved, never
+/// hardcoded).
+fn unread_indicator_line(unread_output_count: Option<usize>) -> Option<String> {
+    match unread_output_count {
+        Some(count) if count > 0 => Some(format!("{count} unread")),
+        _ => None,
+    }
+}
+
+/// Build a `TextColorRunProto` for the ambient unread-output-count indicator.
+///
+/// Mirrors `stale_marker_color_runs`/`composer_color_runs`: a zero-length
+/// sentinel run (`[0..0]`) carrying the token-resolved `unread_indicator_color`
+/// so the token drives the signal without any literal color in the render path
+/// (§6.1). Empty when there is nothing unread or the count is redacted —
+/// matching `unread_indicator_line`'s gating exactly.
+fn unread_indicator_color_runs(
+    state: &ProjectedPortalState,
+    unread_indicator_color: proto::Rgba,
+) -> Vec<proto::TextColorRunProto> {
+    match state.unread_output_count {
+        Some(count) if count > 0 => vec![proto::TextColorRunProto {
+            start_byte: 0,
+            end_byte: 0,
+            color: Some(unread_indicator_color),
+        }],
+        _ => Vec::new(),
+    }
+}
+
 /// Map a published `ProjectionLifecycleState` onto its ambient affordance accent.
 ///
 /// The seven contract variants collapse into four viewer-facing semantic groups,
@@ -1415,6 +1469,12 @@ pub fn portal_visual_tokens_from_part_tokens(
             g: part.stale_marker_color.g,
             b: part.stale_marker_color.b,
             a: part.stale_marker_color.a,
+        },
+        unread_indicator_color: proto::Rgba {
+            r: part.unread_indicator_color.r,
+            g: part.unread_indicator_color.g,
+            b: part.unread_indicator_color.b,
+            a: part.unread_indicator_color.a,
         },
         lifecycle_active_color: proto::Rgba {
             r: part.lifecycle_active_color.r,
@@ -2052,6 +2112,82 @@ mod tests {
         assert!(
             stale_marker_color_runs(&live, stale).is_empty(),
             "live state must emit no stale color run"
+        );
+    }
+
+    /// hud-meqet: `unread_output_count` was already threaded (un-nulled)
+    /// through to `ProjectedPortalState` by the authority, but the render
+    /// path never read it, so it was never drawn. A nonzero, visible count
+    /// must emit an ambient text-item line ("N unread") plus a token-driven
+    /// sentinel color run (mirroring the stale-marker/composer Phase-1
+    /// convention); zero or redacted (`None`) must emit neither — a presence
+    /// engine renders nothing rather than a "0 unread" line or a loud badge.
+    #[test]
+    fn unread_output_count_renders_ambient_indicator_only_when_nonzero() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let unread_color = adapter.visual_tokens().unread_indicator_color;
+
+        let mut present = make_expanded_interaction_state("portal-badge");
+        present.unread_output_count = Some(3);
+        let markdown = portal_markdown(&present, None);
+        assert!(
+            markdown.contains("3 unread"),
+            "nonzero unread count must render an ambient text-item indicator: {markdown}"
+        );
+        let runs = unread_indicator_color_runs(&present, unread_color);
+        assert_eq!(
+            runs.len(),
+            1,
+            "nonzero unread count must emit one token-driven color run"
+        );
+        assert_eq!(
+            runs[0].color.unwrap(),
+            unread_color,
+            "run must carry the unread_indicator_color token, never a literal color"
+        );
+        assert_eq!(runs[0].start_byte, 0);
+        assert_eq!(runs[0].end_byte, 0);
+
+        let mut zero = make_expanded_interaction_state("portal-badge");
+        zero.unread_output_count = Some(0);
+        let zero_markdown = portal_markdown(&zero, None);
+        assert!(
+            !zero_markdown.contains("unread"),
+            "zero unread count must render nothing: {zero_markdown}"
+        );
+        assert!(
+            unread_indicator_color_runs(&zero, unread_color).is_empty(),
+            "zero unread count must emit no color run"
+        );
+
+        let mut redacted = make_expanded_interaction_state("portal-badge");
+        redacted.unread_output_count = None;
+        let redacted_markdown = portal_markdown(&redacted, None);
+        assert!(
+            !redacted_markdown.contains("unread"),
+            "redacted (None) unread count must render nothing: {redacted_markdown}"
+        );
+        assert!(
+            unread_indicator_color_runs(&redacted, unread_color).is_empty(),
+            "redacted (None) unread count must emit no color run"
+        );
+    }
+
+    /// The `unread_indicator_color` `PortalVisualTokens` field maps 1:1 from
+    /// the source `PortalPartTokens` channel (single-source-of-truth
+    /// invariant, same as the other token-mapping tests in this module).
+    #[test]
+    fn portal_visual_tokens_from_part_tokens_maps_unread_indicator_color() {
+        let part = tze_hud_config::PortalPartTokens::default();
+        let visual = portal_visual_tokens_from_part_tokens(&part);
+        assert_eq!(
+            visual.unread_indicator_color.r,
+            part.unread_indicator_color.r
+        );
+        assert_eq!(
+            visual.unread_indicator_color.a,
+            part.unread_indicator_color.a
         );
     }
 

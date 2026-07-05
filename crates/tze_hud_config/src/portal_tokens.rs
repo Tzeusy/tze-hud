@@ -44,6 +44,7 @@
 //! | `portal.transcript.dim_text_color` | transcript body | dimmed text shown while disconnected/stale (RGBA hex) |
 //! | `portal.transcript.dim_background` | transcript body | dimmed backdrop shown while disconnected/stale (RGBA hex) |
 //! | `portal.stale_marker.color` | stale marker | content-free disconnect marker color (RGBA hex) |
+//! | `portal.unread_indicator.color` | unread indicator | ambient unread-output count color (RGBA hex) |
 //! | `portal.lifecycle.active_color` | lifecycle affordance | accent for `Active` (RGBA hex) |
 //! | `portal.lifecycle.attached_color` | lifecycle affordance | accent for `Attached`/ready (RGBA hex) |
 //! | `portal.lifecycle.attention_color` | lifecycle affordance | accent for `Degraded`/`HudUnavailable` (RGBA hex) |
@@ -163,6 +164,13 @@ pub const PORTAL_TOKEN_TRANSCRIPT_DIM_BACKGROUND: &str = "portal.transcript.dim_
 /// "ambient stale state" without escalating attention (spec: going stale does
 /// not self-escalate attention).
 pub const PORTAL_TOKEN_STALE_MARKER_COLOR: &str = "portal.stale_marker.color";
+
+/// Color of the ambient unread-output-count indicator (hud-meqet). A presence
+/// engine surfaces a quiet count, never a loud notification badge — this
+/// defaults to the same muted-slate tone as the other ambient/quiet-signal
+/// tokens (`transcript.dim_text_color`, `composer.placeholder_color`) rather
+/// than an alarming accent.
+pub const PORTAL_TOKEN_UNREAD_INDICATOR_COLOR: &str = "portal.unread_indicator.color";
 
 // ── Lifecycle affordance tokens (cooperative-hud-projection §lifecycle) ───────
 //
@@ -336,6 +344,10 @@ mod defaults {
     pub const TRANSCRIPT_DIM_TEXT_COLOR: &str = "#6B7689";
     pub const TRANSCRIPT_DIM_BACKGROUND: &str = "#07090C";
     pub const STALE_MARKER_COLOR: &str = "#B87333";
+    /// Muted slate — same ambient tone as `TRANSCRIPT_DIM_TEXT_COLOR` /
+    /// `COMPOSER_PLACEHOLDER_COLOR` so the unread count reads as a quiet
+    /// signal, not an alert.
+    pub const UNREAD_INDICATOR_COLOR: &str = "#6B7689";
 
     // Lifecycle affordance accents — ambient, mutually distinct (see token-key
     // docs above). Active: calm teal-green; attached/ready: soft blue;
@@ -452,6 +464,10 @@ pub struct PortalPartTokens {
     pub transcript_dim_background: Rgba,
     /// Color of the content-free stale/disconnect marker (ambient, not alarming).
     pub stale_marker_color: Rgba,
+    /// Color of the ambient unread-output-count indicator (hud-meqet). Muted by
+    /// design — a presence engine surfaces a quiet count, never a loud
+    /// notification badge.
+    pub unread_indicator_color: Rgba,
 
     // Lifecycle affordance accents (cooperative-hud-projection §lifecycle).
     // Each maps a `ProjectionLifecycleState` group onto an ambient accent; the
@@ -570,6 +586,8 @@ impl Default for PortalPartTokens {
                 .expect("transcript dim background default is valid hex"),
             stale_marker_color: parse_color_hex(defaults::STALE_MARKER_COLOR)
                 .expect("stale marker color default is valid hex"),
+            unread_indicator_color: parse_color_hex(defaults::UNREAD_INDICATOR_COLOR)
+                .expect("unread indicator color default is valid hex"),
 
             lifecycle_active_color: parse_color_hex(defaults::LIFECYCLE_ACTIVE_COLOR)
                 .expect("lifecycle active color default is valid hex"),
@@ -792,6 +810,10 @@ pub fn resolve_portal_tokens(token_map: &DesignTokenMap) -> PortalPartTokens {
             PORTAL_TOKEN_STALE_MARKER_COLOR,
             defaults.stale_marker_color
         ),
+        unread_indicator_color: resolve_color!(
+            PORTAL_TOKEN_UNREAD_INDICATOR_COLOR,
+            defaults.unread_indicator_color
+        ),
 
         lifecycle_active_color: resolve_color!(
             PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR,
@@ -971,6 +993,10 @@ const PORTAL_TOKEN_DEFAULT_STRINGS: &[(&str, &str)] = &[
     (
         PORTAL_TOKEN_STALE_MARKER_COLOR,
         defaults::STALE_MARKER_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_UNREAD_INDICATOR_COLOR,
+        defaults::UNREAD_INDICATOR_COLOR,
     ),
     (
         PORTAL_TOKEN_LIFECYCLE_ACTIVE_COLOR,
@@ -1954,7 +1980,7 @@ mod tests {
     #[test]
     fn resolve_portal_token_strings_covers_every_key() {
         // Number of distinct portal token keys resolved by resolve_portal_tokens.
-        const EXPECTED_KEYS: usize = 45;
+        const EXPECTED_KEYS: usize = 46;
         assert_eq!(
             PORTAL_TOKEN_DEFAULT_STRINGS.len(),
             EXPECTED_KEYS,
