@@ -1098,7 +1098,7 @@ fn portal_markdown(
             // instead of the literal `<empty projection stream>`. The first
             // appended unit replaces it (this branch is empty-only).
             if state.visible_transcript.is_empty() {
-                push_line(&mut result, &empty_portal_markdown(state));
+                push_line(&mut result, empty_portal_markdown(state));
             } else {
                 push_line(
                     &mut result,
@@ -1471,14 +1471,14 @@ fn lifecycle_marker_color_runs(
 ///
 /// Yields immediately to real content: the caller only renders this when
 /// `visible_transcript.is_empty()`, so the first appended unit replaces it.
-fn empty_portal_markdown(state: &ProjectedPortalState) -> String {
+fn empty_portal_markdown(state: &ProjectedPortalState) -> &'static str {
     if !state.has_ever_connected {
-        return PORTAL_CONNECTING_PLACEHOLDER_LINE.to_string();
+        return PORTAL_CONNECTING_PLACEHOLDER_LINE;
     }
     if state.redacted {
-        return PORTAL_EMPTY_REDACTED_LINE.to_string();
+        return PORTAL_EMPTY_REDACTED_LINE;
     }
-    PORTAL_EMPTY_READY_LINE.to_string()
+    PORTAL_EMPTY_READY_LINE
 }
 
 /// Build the token-styled sentinel color run for the first-run empty-state body.
