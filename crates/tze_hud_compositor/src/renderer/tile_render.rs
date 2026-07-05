@@ -35,6 +35,7 @@ use tze_hud_scene::types::*;
 use crate::pipeline::{RectVertex, rect_vertices};
 
 use super::Compositor;
+use super::ViewerEchoEntry;
 use super::draw_cmds::{TexturedDrawCmd, compute_fit_mode};
 use super::image_cache::{
     ComposerLayout, caret_visible_at, composer_display_text_blink, composer_region_fit_lines,
@@ -202,6 +203,44 @@ pub(super) fn input_history_block_top(
     // (offset 0) the oldest line rests on the band top; when the history fits the
     // band `max_scrollback` is 0 and the block never moves.
     tail_top + (max_scrollback - scrollback)
+}
+
+/// Compact "HH:MM " clock prefix for a viewer-echo entry's `submitted_at_wall_us`
+/// (hud-7ic89), or `None` when it is `0` — the "no timestamp captured" sentinel
+/// already used for absent/invalid submit times elsewhere (see
+/// `tze_hud_projection::authority`'s `submitted_at_wall_us == 0` check). `None`
+/// lets a legacy append path without a real submit time render its entry with
+/// no prefix rather than a misleading "00:00".
+///
+/// Formatted in UTC rather than local time: the workspace carries no
+/// timezone-conversion dependency (chrono/time — confirmed absent from
+/// `Cargo.lock`), and a clock-of-day only needs day-seconds modulo arithmetic,
+/// so this stays pure `std` with zero new dependencies. If local display is
+/// wanted later, this is the single seam to extend.
+///
+/// Free-standing (no `self`) so the derivation is unit-testable without a
+/// headless compositor, mirroring [`viewer_echo_divider_rects`].
+pub(super) fn viewer_echo_timestamp_prefix(submitted_at_wall_us: u64) -> Option<String> {
+    if submitted_at_wall_us == 0 {
+        return None;
+    }
+    let secs_of_day = (submitted_at_wall_us / 1_000_000) % 86_400;
+    let hour = secs_of_day / 3600;
+    let minute = (secs_of_day % 3600) / 60;
+    Some(format!("{hour:02}:{minute:02}  "))
+}
+
+/// The DISPLAY text for a viewer-echo entry: its timestamp prefix (if any,
+/// hud-7ic89) followed by the entry's submitted text.
+///
+/// Kept separate from [`ViewerEchoEntry::text`] deliberately — the store stays
+/// a pure record of what the viewer submitted, and formatting for presentation
+/// lives entirely at the render seam.
+pub(super) fn viewer_echo_display_text(entry: &ViewerEchoEntry) -> String {
+    match viewer_echo_timestamp_prefix(entry.submitted_at_wall_us) {
+        Some(prefix) => format!("{prefix}{}", entry.text),
+        None => entry.text.clone(),
+    }
 }
 
 impl Compositor {
@@ -1241,23 +1280,57 @@ impl Compositor {
     /// The retained viewer-echo entries for `tile` joined oldest-first with `\n`,
     /// so the rendered block reads top (oldest) to bottom (newest) and embedded
     /// newlines from Ctrl+Enter drafts (#992) break as their own lines (hud-pncm3).
+    ///
+    /// Joins the DISPLAY text (each entry's timestamp-prefixed form, hud-7ic89)
+    /// rather than the raw submitted text, so this stays byte-for-byte the text
+    /// the block actually paints.
     fn viewer_echo_joined_text(&self, tile_id: SceneId) -> Option<String> {
-        let entries = self.viewer_echoes.entries_for(tile_id)?;
-        Some(
-            entries
-                .iter()
-                .map(|e| e.text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )
+        Some(self.viewer_echo_entry_texts(tile_id)?.join("\n"))
     }
 
-    /// The retained viewer-echo entry texts for `tile`, oldest-first, each as its
-    /// own owned `String` so the layout prime can measure per-entry wrapped line
-    /// counts for the turn dividers (hud-hsc1t).
+    /// The retained viewer-echo entry DISPLAY texts for `tile`, oldest-first,
+    /// each as its own owned `String` so the layout prime can measure per-entry
+    /// wrapped line counts for the turn dividers (hud-hsc1t).
+    ///
+    /// Each entry is prefixed with its compact "HH:MM " clock (hud-7ic89, see
+    /// [`viewer_echo_timestamp_prefix`]) when `submitted_at_wall_us` is
+    /// non-zero, so wrap measurement here and the render collect below stay
+    /// consistent with the text actually painted — a bare `.text` accessor
+    /// would silently drop the timestamp from both.
     fn viewer_echo_entry_texts(&self, tile_id: SceneId) -> Option<Vec<String>> {
         let entries = self.viewer_echoes.entries_for(tile_id)?;
-        Some(entries.iter().map(|e| e.text.clone()).collect())
+        Some(entries.iter().map(viewer_echo_display_text).collect())
+    }
+
+    /// Byte ranges within the JOINED viewer-echo text (as produced by
+    /// [`Self::viewer_echo_joined_text`]) covering each entry's timestamp
+    /// prefix, if any (hud-7ic89). Consumed by
+    /// [`Self::collect_viewer_echo_text_items`] to style the clock distinctly
+    /// (muted color, smaller scale) from the message body within the same
+    /// wrapped `TextItem`, without a second draw pass or extra layout math.
+    ///
+    /// Mirrors the join order/separator of `viewer_echo_joined_text` exactly
+    /// (oldest-first, `\n`-joined) so the returned offsets land on the prefix
+    /// bytes of the text that function produces.
+    fn viewer_echo_timestamp_byte_ranges(&self, tile_id: SceneId) -> Vec<(usize, usize)> {
+        let mut ranges = Vec::new();
+        let Some(entries) = self.viewer_echoes.entries_for(tile_id) else {
+            return ranges;
+        };
+        let mut cursor = 0usize;
+        for (i, entry) in entries.iter().enumerate() {
+            if i > 0 {
+                cursor += 1; // the '\n' joiner
+            }
+            match viewer_echo_timestamp_prefix(entry.submitted_at_wall_us) {
+                Some(prefix) => {
+                    ranges.push((cursor, cursor + prefix.len()));
+                    cursor += prefix.len() + entry.text.len();
+                }
+                None => cursor += entry.text.len(),
+            }
+        }
+        ranges
     }
 
     /// Measure the wrapped visual-line count of each tile's viewer-echo history
@@ -1427,6 +1500,26 @@ impl Compositor {
         let block_top =
             input_history_block_top(band_top, draft_box.y, block_height, scroll_offset_y);
 
+        // Style each entry's "HH:MM " prefix (hud-7ic89) as a muted, smaller run
+        // within the single joined `TextItem` — same mechanism the markdown pass
+        // uses for heading/inline-code spans (`StyledRunItem`), so the clock reads
+        // as ambient metadata beside the message body with no extra draw pass.
+        let styled_runs: Box<[crate::text::StyledRunItem]> = self
+            .viewer_echo_timestamp_byte_ranges(tile.id)
+            .into_iter()
+            .map(|(start_byte, end_byte)| crate::text::StyledRunItem {
+                start_byte,
+                end_byte,
+                weight: None,
+                italic: false,
+                monospace: false,
+                color: Some(tokens.timestamp_color),
+                background_color: None,
+                size_scale: Some(tokens.timestamp_font_scale),
+                fill_line_width: false,
+            })
+            .collect();
+
         items.push(crate::text::TextItem {
             text: Arc::from(joined.as_str()),
             pixel_x: region.x + margin,
@@ -1453,7 +1546,7 @@ impl Compositor {
             outline_width: None,
             opacity,
             color_runs: Box::new([]),
-            styled_runs: Box::new([]),
+            styled_runs,
             line_height_multiplier,
             viewport: crate::overflow::TruncationViewport::HeadAnchored,
         });
@@ -1916,6 +2009,65 @@ impl Compositor {
         for child_id in &node.children {
             self.render_node(*child_id, tile, scene, vertices, textured_cmds, sw, sh);
         }
+    }
+}
+
+#[cfg(test)]
+mod viewer_echo_timestamp_tests {
+    use super::*;
+
+    /// `submitted_at_wall_us == 0` is the "no timestamp captured" sentinel
+    /// (mirroring `tze_hud_projection::authority`'s own `== 0` check) — no
+    /// prefix, so a legacy append without a real submit time renders unchanged
+    /// (hud-7ic89 backward-compatibility requirement).
+    #[test]
+    fn zero_submitted_at_yields_no_prefix() {
+        assert_eq!(viewer_echo_timestamp_prefix(0), None);
+    }
+
+    /// A known wall-clock microsecond value derives the expected "HH:MM  "
+    /// clock string: 12:34:56 UTC on any day is `12*3600 + 34*60 + 56` seconds
+    /// into that day.
+    #[test]
+    fn nonzero_submitted_at_derives_hh_mm_prefix() {
+        let secs_of_day = 12 * 3600 + 34 * 60 + 56;
+        let us = secs_of_day as u64 * 1_000_000;
+        assert_eq!(viewer_echo_timestamp_prefix(us), Some("12:34  ".to_owned()));
+    }
+
+    /// The day-seconds derivation wraps at 24h (only time-of-day matters, not
+    /// the date), and rounds down to the minute (56 seconds past 12:34 is
+    /// still "12:34").
+    #[test]
+    fn prefix_wraps_at_day_boundary_and_truncates_seconds() {
+        let one_day_us = 86_400u64 * 1_000_000;
+        let half_past_midnight_us = one_day_us + 30 * 60 * 1_000_000; // +00:30
+        assert_eq!(
+            viewer_echo_timestamp_prefix(half_past_midnight_us),
+            Some("00:30  ".to_owned()),
+            "a value past one full day must wrap to the correct time-of-day"
+        );
+    }
+
+    /// [`viewer_echo_display_text`] prepends the derived prefix to the entry's
+    /// submitted text unchanged, and leaves a zero-timestamp entry's text as-is.
+    #[test]
+    fn display_text_prefixes_message_when_timestamped() {
+        let timestamped = ViewerEchoEntry {
+            text: "hello there".to_owned(),
+            submitted_at_wall_us: (12 * 3600 + 34 * 60) * 1_000_000,
+        };
+        assert_eq!(viewer_echo_display_text(&timestamped), "12:34  hello there");
+
+        let untimestamped = ViewerEchoEntry {
+            text: "hello there".to_owned(),
+            submitted_at_wall_us: 0,
+        };
+        assert_eq!(
+            viewer_echo_display_text(&untimestamped),
+            "hello there",
+            "a zero (no-timestamp) entry must render its text unchanged"
+        );
     }
 }
 
