@@ -1761,7 +1761,7 @@ impl InProcessPortalDriver {
                             // exists) the adapter renders the content batch and we
                             // apply it directly to the scene — the same content the
                             // gRPC family publishes over the wire.
-                            match entry.adapter.render_batch(&state) {
+                            match entry.adapter.render_batch(&state, now_us) {
                                 Ok(batch) => {
                                     tze_hud_protocol::convert::apply_portal_render_batch_to_scene(
                                         scene,
@@ -1828,7 +1828,7 @@ impl InProcessPortalDriver {
                     // gRPC family publishes over the wire; we apply it directly to
                     // the scene. The geometry/scroll tracking below is preserved —
                     // it consumes the same `update` for follow-tail accounting.
-                    match entry.adapter.render_batch(&state) {
+                    match entry.adapter.render_batch(&state, now_us) {
                         Ok(batch) => {
                             tze_hud_protocol::convert::apply_portal_render_batch_to_scene(
                                 scene,
@@ -2076,7 +2076,7 @@ impl InProcessPortalDriver {
             let Some(tile_scene_id) = entry.tile_scene_id else {
                 continue;
             };
-            match entry.adapter.render_batch(&state) {
+            match entry.adapter.render_batch(&state, now_us) {
                 Ok(batch) => {
                     tze_hud_protocol::convert::apply_portal_render_batch_to_scene(
                         scene,

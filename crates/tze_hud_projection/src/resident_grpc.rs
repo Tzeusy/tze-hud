@@ -71,6 +71,39 @@ const PORTAL_CONNECTING_LINE: &str = "◌ Connecting… — waiting for the sess
 /// the other Phase-1 single-node markers).
 const PORTAL_UNREAD_DIVIDER_LINE: &str = "─── unread ───";
 
+/// Ambient header activity marker (portal-chat-grade-affordances §Agent Activity
+/// and Streaming Cue, hud-g1ena.5) shown while the owning adapter is actively
+/// appending to the transcript. A compact typing-style indicator — quiet ellipsis
+/// glyph, no `!`/⚠ — so continuous streaming reads as ambient presence, never a
+/// notification (doctrine: not a notification engine). The token-resolved
+/// `activity_cue_color` accent rides alongside via `activity_cue_color_runs`.
+const PORTAL_ACTIVITY_MARKER_LINE: &str = "⋯ writing";
+
+/// Transcript-tail streaming cursor glyph appended to the latest agent turn while
+/// content is actively appending. A slim left half-block reads as a live-writing
+/// caret at the tail; the token-resolved `streaming_cursor_color` accent rides
+/// alongside via `streaming_cursor_color_runs`. Ambient, not alarming.
+const PORTAL_STREAMING_CURSOR_GLYPH: &str = " ▍";
+
+/// Quiescence window (µs) for the agent-activity / streaming-cursor cue.
+///
+/// The cue derives from the tail transcript unit's runtime-assigned
+/// `appended_at_wall_us` (unforgeable — adapters cannot set arrival times)
+/// compared to the render's wall-clock now: the agent is "actively appending"
+/// only while the newest append is within this window. This is what makes the
+/// cue quiesce promptly once appends stop, and — critically for the single-node
+/// Phase-1 model — it means a portal re-rendered for an UNRELATED reason (resize,
+/// draft keystroke, collapse) long after the last append shows no cursor, because
+/// `now - appended_at` exceeds the window. Kept short so streaming reads as live
+/// yet the cue settles quickly when the agent goes quiet (ambient, not sticky).
+///
+/// Phase-1 limitation: the drive loop re-renders a portal only on its own append
+/// traffic (there is no autonomous heartbeat tick), so a truly idle portal holds
+/// the last-rendered cursor until the next operation touches it. Any subsequent
+/// render past the window quiesces it. Promotion-era work adds precise tail
+/// positioning and a heartbeat repaint.
+const PORTAL_ACTIVITY_QUIESCE_WINDOW_US: u64 = 2_000_000;
+
 /// Whether the portal is in a connection-degraded presentation state.
 ///
 /// Keyed off the redaction-independent `connection_degraded` flag (set by the
@@ -79,6 +112,46 @@ const PORTAL_UNREAD_DIVIDER_LINE: &str = "─── unread ───";
 /// viewer.
 fn is_connection_degraded(state: &ProjectedPortalState) -> bool {
     state.connection_degraded
+}
+
+/// Whether the owning adapter is actively appending to the transcript right now
+/// (portal-chat-grade-affordances §Agent Activity and Streaming Cue, hud-g1ena.5).
+///
+/// DERIVED entirely from observed append activity — the newest visible transcript
+/// unit's runtime-assigned `appended_at_wall_us` compared to the render's
+/// wall-clock `now_wall_us` — never from a separate adapter "typing" protocol or
+/// the adapter-declared `lifecycle_state` (which is forgeable; appended-at is
+/// not). The cue fires only while ALL hold:
+///
+/// - **Expanded** presentation — the cursor is a transcript-tail affordance and
+///   the header cue rides the expanded header; collapsed keeps its compact card.
+/// - **Live** — not `connection_degraded` and `has_ever_connected`; a degraded or
+///   never-connected portal must never imply an active stream (§clear live
+///   signals on disconnect; connecting takes precedence over activity).
+/// - **Tail is a fresh agent turn** — the last unit is agent output (`!= Viewer`)
+///   and NOT `expects_reply` (a question awaiting a reply is quiescing, not
+///   writing, and already carries its own awaiting-reply cue), appended within
+///   [`PORTAL_ACTIVITY_QUIESCE_WINDOW_US`] of now.
+///
+/// Redaction falls out for free: a restricted viewer's `visible_transcript` is
+/// emptied upstream, so `last()` is `None` and the cue is suppressed along with
+/// transcript previews (§activity cue suppressed under redaction). Because the
+/// gate is a freshness window, continuous streaming keeps re-satisfying it
+/// without any attention re-escalation, and it quiesces promptly once appends
+/// stop (§activity cue is not a notification).
+fn agent_activity_active(state: &ProjectedPortalState, now_wall_us: u64) -> bool {
+    if state.presentation != ProjectedPortalPresentation::Expanded
+        || is_connection_degraded(state)
+        || !state.has_ever_connected
+    {
+        return false;
+    }
+    state.visible_transcript.last().is_some_and(|unit| {
+        unit.output_kind != OutputKind::Viewer
+            && !unit.expects_reply
+            && now_wall_us.saturating_sub(unit.appended_at_wall_us)
+                <= PORTAL_ACTIVITY_QUIESCE_WINDOW_US
+    })
 }
 
 /// Client-side materialization budget for one resident portal update.
@@ -206,6 +279,18 @@ pub struct PortalVisualTokens {
     /// portal never reads as failing. Ambient by design. Source token:
     /// `portal.connecting_marker.color`.
     pub connecting_marker_color: proto::Rgba,
+    /// Color of the ambient header activity cue (portal-chat-grade-affordances
+    /// §Agent Activity and Streaming Cue, hud-g1ena.5) shown while the owning
+    /// adapter is actively appending to the transcript. Derived from observed
+    /// appends (`appended_at_wall_us` vs render-time now), never a separate
+    /// "typing" protocol. Muted/ambient — continuous streaming never
+    /// re-escalates attention. Source token: `portal.activity_cue.color`.
+    pub activity_cue_color: proto::Rgba,
+    /// Color of the ambient transcript-tail streaming cursor shown while the
+    /// agent is actively appending. Same activity semantic as
+    /// `activity_cue_color`; a distinct token so a profile can style the tail
+    /// cursor independently. Source token: `portal.streaming_cursor.color`.
+    pub streaming_cursor_color: proto::Rgba,
 
     // Lifecycle affordance accents (cooperative-hud-projection §lifecycle).
     //
@@ -537,8 +622,13 @@ impl ResidentGrpcPortalAdapter {
     /// a JSON drain record, without taking a prost dependency on the binary.
     /// The output is the same string that `portal_node` places in
     /// `TextMarkdownNodeProto::content`.
-    pub fn render_portal_markdown(&self, state: &ProjectedPortalState) -> String {
-        portal_markdown(state, self.composer_display.as_ref())
+    ///
+    /// `now_wall_us` is the render's wall-clock reference used to derive the
+    /// ambient agent-activity / streaming-cursor cue from observed appends
+    /// (hud-g1ena.5); callers pass the same timestamp they hand to
+    /// `render_portal_message` so the drain-record markdown matches the tile.
+    pub fn render_portal_markdown(&self, state: &ProjectedPortalState, now_wall_us: u64) -> String {
+        portal_markdown(state, self.composer_display.as_ref(), now_wall_us)
     }
 
     /// Move the compact affordance. The next collapsed render publishes this
@@ -560,7 +650,9 @@ impl ResidentGrpcPortalAdapter {
         let (kind, payload) = if self.tile_id.is_some() {
             (
                 ResidentGrpcPortalCommandKind::ReusePortalTile,
-                session_proto::client_message::Payload::MutationBatch(self.render_batch(state)?),
+                session_proto::client_message::Payload::MutationBatch(
+                    self.render_batch(state, timestamp_wall_us)?,
+                ),
             )
         } else {
             (
@@ -599,7 +691,9 @@ impl ResidentGrpcPortalAdapter {
             ResidentGrpcPortalCommandKind::RenderPortal,
             sequence,
             timestamp_wall_us,
-            session_proto::client_message::Payload::MutationBatch(self.render_batch(state)?),
+            session_proto::client_message::Payload::MutationBatch(
+                self.render_batch(state, timestamp_wall_us)?,
+            ),
             started,
         ))
     }
@@ -796,9 +890,16 @@ impl ResidentGrpcPortalAdapter {
     ///
     /// Requires `record_created_tile` to have been called first (returns
     /// [`ResidentGrpcAdapterError::MissingPortalTile`] otherwise).
+    ///
+    /// `now_wall_us` is the render's wall-clock reference (the same timestamp the
+    /// caller stamps on the outbound message). It is used only to derive the
+    /// ambient agent-activity / streaming-cursor cue from observed appends
+    /// (hud-g1ena.5) — a portal re-rendered long after its last append shows no
+    /// cursor because `now - appended_at` exceeds the quiesce window.
     pub fn render_batch(
         &self,
         state: &ProjectedPortalState,
+        now_wall_us: u64,
     ) -> Result<session_proto::MutationBatch, ResidentGrpcAdapterError> {
         let tile_id = self
             .tile_id
@@ -821,7 +922,7 @@ impl ResidentGrpcPortalAdapter {
                     proto::PublishToTileMutation {
                         element_id: tile_id.clone(),
                         bounds: Some(self.bounds_for_state(state)),
-                        node: Some(self.portal_node(state, root_id_le)),
+                        node: Some(self.portal_node(state, root_id_le, now_wall_us)),
                     },
                 )),
             },
@@ -920,7 +1021,12 @@ impl ResidentGrpcPortalAdapter {
         })
     }
 
-    fn portal_node(&self, state: &ProjectedPortalState, root_id_le: Vec<u8>) -> proto::NodeProto {
+    fn portal_node(
+        &self,
+        state: &ProjectedPortalState,
+        root_id_le: Vec<u8>,
+        now_wall_us: u64,
+    ) -> proto::NodeProto {
         // §6.1 enforcement: every visual value sourced from self.visual_tokens —
         // no literal colors, font sizes, or opacities permitted here.
         let bounds = self.local_bounds_for_state(state);
@@ -954,7 +1060,7 @@ impl ResidentGrpcPortalAdapter {
             id: root_id_le,
             data: Some(proto::node_proto::Data::TextMarkdown(
                 proto::TextMarkdownNodeProto {
-                    content: portal_markdown(state, self.composer_display.as_ref()),
+                    content: portal_markdown(state, self.composer_display.as_ref(), now_wall_us),
                     bounds: Some(bounds),
                     font_size_px,
                     color: Some(text_color),
@@ -1015,6 +1121,25 @@ impl ResidentGrpcPortalAdapter {
                         runs.extend(connecting_color_runs(
                             state,
                             self.visual_tokens.connecting_marker_color,
+                        ));
+                        // Ambient agent-activity header cue + transcript-tail
+                        // streaming cursor (hud-g1ena.5, §Agent Activity and
+                        // Streaming Cue). Both derive from observed appends
+                        // (`appended_at_wall_us` vs `now_wall_us`) via
+                        // `agent_activity_active`; absent unless the tail is a
+                        // fresh agent turn on a live expanded portal, so they
+                        // quiesce promptly and suppress under redaction. Header +
+                        // cursor take distinct tokens so a profile can style them
+                        // apart. Kept in the HEADER + latest-turn-cursor region.
+                        runs.extend(activity_cue_color_runs(
+                            state,
+                            self.visual_tokens.activity_cue_color,
+                            now_wall_us,
+                        ));
+                        runs.extend(streaming_cursor_color_runs(
+                            state,
+                            self.visual_tokens.streaming_cursor_color,
+                            now_wall_us,
                         ));
                         runs
                     },
@@ -1096,6 +1221,7 @@ impl ResidentGrpcPortalAdapter {
 fn portal_markdown(
     state: &ProjectedPortalState,
     composer_display: Option<&ComposerDisplayState>,
+    now_wall_us: u64,
 ) -> String {
     let mut result = String::new();
     let title = state.display_name.as_deref().unwrap_or("Projected session");
@@ -1126,6 +1252,19 @@ fn portal_markdown(
     // stay ambient per presence-engine doctrine.
     if awaiting_reply(state) {
         push_line(&mut result, "? awaiting reply");
+    }
+    // Ambient agent-activity header cue (hud-g1ena.5, §Agent Activity and
+    // Streaming Cue). A compact typing-style indicator shown while the owning
+    // adapter is actively appending — derived purely from observed appends via
+    // `agent_activity_active` (the tail is a fresh, non-question agent turn on a
+    // live expanded portal). Mutually exclusive with the awaiting-reply cue above
+    // (that requires `expects_reply`; this requires `!expects_reply`). Text-
+    // visible so the signal survives environments that don't inspect color_runs;
+    // the token-driven `activity_cue_color` rides alongside via
+    // `activity_cue_color_runs`. Kept quiet (no `!`/⚠) — continuous streaming
+    // must never escalate attention (doctrine: not a notification engine).
+    if agent_activity_active(state, now_wall_us) {
+        push_line(&mut result, PORTAL_ACTIVITY_MARKER_LINE);
     }
     // §2: content-free disconnect/stale marker. Emitted from the
     // redaction-independent `connection_degraded` flag and BEFORE the
@@ -1158,13 +1297,24 @@ fn portal_markdown(
             if state.visible_transcript.is_empty() {
                 push_line(&mut result, empty_portal_markdown(state));
             } else {
-                push_line(
-                    &mut result,
-                    &visible_transcript_markdown(
-                        &state.visible_transcript,
-                        unread_divider_boundary(state),
-                    ),
+                // Transcript body carries the in-transcript unread divider
+                // (hud-g1ena.2, via `unread_divider_boundary`) plus, when the agent
+                // is actively appending, an ambient streaming cursor at the tail of
+                // the latest turn (hud-g1ena.5). The cursor is appended AFTER
+                // `visible_transcript_markdown` (not inside it) so this stays clear
+                // of the transcript-body region and the glyph reads as a
+                // live-writing caret at the very tail. The token-driven
+                // `streaming_cursor_color` rides alongside via
+                // `streaming_cursor_color_runs`; `agent_activity_active` is the
+                // single gate for both the glyph and the sentinel run.
+                let mut body = visible_transcript_markdown(
+                    &state.visible_transcript,
+                    unread_divider_boundary(state),
                 );
+                if agent_activity_active(state, now_wall_us) {
+                    body.push_str(PORTAL_STREAMING_CURSOR_GLYPH);
+                }
+                push_line(&mut result, &body);
             }
             push_line(&mut result, "");
             if is_connection_degraded(state) {
@@ -1682,6 +1832,68 @@ fn connecting_color_runs(
     }
 }
 
+/// Build the token-styled sentinel color run for the ambient header activity cue
+/// (hud-g1ena.5, §Agent Activity and Streaming Cue).
+///
+/// Mirrors the other Phase-1 sentinels (`stale_marker_color_runs`,
+/// `awaiting_reply_color_runs`): a zero-length run (`[0..0]`) carrying the
+/// token-resolved `activity_cue_color` so the token drives the header cue without
+/// any literal color in the render path (§6.1). Emitted exactly when
+/// [`agent_activity_active`] holds — the agent is actively appending on a live
+/// expanded portal — matching the `PORTAL_ACTIVITY_MARKER_LINE` header text so
+/// the text-visible and machine-readable signals agree. Absent (empty vec)
+/// otherwise, so it quiesces with the append cadence and suppresses under
+/// redaction exactly like the header line.
+fn activity_cue_color_runs(
+    state: &ProjectedPortalState,
+    activity_cue_color: proto::Rgba,
+    now_wall_us: u64,
+) -> Vec<proto::TextColorRunProto> {
+    if agent_activity_active(state, now_wall_us) {
+        vec![proto::TextColorRunProto {
+            start_byte: 0,
+            end_byte: 0,
+            color: Some(activity_cue_color),
+        }]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Build the token-styled sentinel color run for the ambient transcript-tail
+/// streaming cursor (hud-g1ena.5, §Agent Activity and Streaming Cue).
+///
+/// The mirror of `activity_cue_color_runs` for the tail cursor: a zero-length
+/// sentinel run (`[0..0]`) carrying the token-resolved `streaming_cursor_color`,
+/// gated by the same [`agent_activity_active`] predicate that appends the
+/// `PORTAL_STREAMING_CURSOR_GLYPH` to the transcript body. Kept a distinct run
+/// (and token) from the header cue so a profile can style the tail cursor apart,
+/// while both quiesce together when appends stop.
+///
+/// ## Phase-1 scope note
+///
+/// Precise per-glyph coloring of the tail cursor requires the byte offset of the
+/// appended glyph in the single-node content, which is fragile in the raw-tile
+/// model (see `composer_color_runs`). For Phase-1 the cursor is a zero-length
+/// sentinel at byte 0 carrying the token color; the text-visible glyph marks the
+/// tail position. Promotion-era structured multi-node layout will position the
+/// cursor precisely.
+fn streaming_cursor_color_runs(
+    state: &ProjectedPortalState,
+    streaming_cursor_color: proto::Rgba,
+    now_wall_us: u64,
+) -> Vec<proto::TextColorRunProto> {
+    if agent_activity_active(state, now_wall_us) {
+        vec![proto::TextColorRunProto {
+            start_byte: 0,
+            end_byte: 0,
+            color: Some(streaming_cursor_color),
+        }]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Render the retained transcript window to markdown, inserting the in-transcript
 /// unread divider (hud-g1ena.2) before the oldest retained unseen agent-authored
 /// turn when `unread_boundary` names its index.
@@ -1853,6 +2065,18 @@ pub fn portal_visual_tokens_from_part_tokens(
             g: part.connecting_marker_color.g,
             b: part.connecting_marker_color.b,
             a: part.connecting_marker_color.a,
+        },
+        activity_cue_color: proto::Rgba {
+            r: part.activity_cue_color.r,
+            g: part.activity_cue_color.g,
+            b: part.activity_cue_color.b,
+            a: part.activity_cue_color.a,
+        },
+        streaming_cursor_color: proto::Rgba {
+            r: part.streaming_cursor_color.r,
+            g: part.streaming_cursor_color.g,
+            b: part.streaming_cursor_color.b,
+            a: part.streaming_cursor_color.a,
         },
         lifecycle_active_color: proto::Rgba {
             r: part.lifecycle_active_color.r,
@@ -2048,7 +2272,7 @@ mod tests {
             state.interaction_enabled = false;
             state.lifecycle_state = Some(lifecycle);
             let batch = adapter
-                .render_batch(&state)
+                .render_batch(&state, 0)
                 .expect("render_batch must succeed");
 
             assert!(
@@ -2103,7 +2327,7 @@ mod tests {
         redacted.interaction_enabled = false;
         redacted.lifecycle_state = None;
         let batch = adapter
-            .render_batch(&redacted)
+            .render_batch(&redacted, 0)
             .expect("render_batch must succeed");
         assert!(!has_add_node(&batch));
         let accent = accent_of(&batch).expect("a clearing accent mutation is still emitted");
@@ -2129,7 +2353,7 @@ mod tests {
         let state = make_expanded_interaction_state("portal-composer-test");
 
         let batch = adapter
-            .render_batch(&state)
+            .render_batch(&state, 0)
             .expect("render_batch must succeed with interaction_enabled");
 
         // Should be 4 mutations: PublishToTile, UpdateTileInputMode,
@@ -2212,7 +2436,7 @@ mod tests {
         ));
 
         let batch = adapter
-            .render_batch(&state)
+            .render_batch(&state, 0)
             .expect("render_batch must succeed with resized bounds");
 
         // The PublishToTile bounds (1st mutation) must carry the resized ORIGIN
@@ -2253,7 +2477,7 @@ mod tests {
         let mut plain = make_expanded_interaction_state("portal-noresize-test");
         plain.resized_bounds = None;
         let plain_batch = adapter
-            .render_batch(&plain)
+            .render_batch(&plain, 0)
             .expect("render_batch must succeed without resized bounds");
         if let Some(tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(an)) =
             &plain_batch.mutations[3].mutation
@@ -2284,7 +2508,7 @@ mod tests {
         state.interaction_enabled = false;
 
         let batch = adapter
-            .render_batch(&state)
+            .render_batch(&state, 0)
             .expect("render_batch must succeed");
 
         // Should be 3 mutations: PublishToTile + UpdateTileInputMode +
@@ -2308,7 +2532,7 @@ mod tests {
         let state = make_expanded_interaction_state("portal-root-id");
 
         let batch = adapter
-            .render_batch(&state)
+            .render_batch(&state, 0)
             .expect("render_batch must succeed");
 
         // The PublishToTile mutation must carry a NodeProto with a non-empty ID.
@@ -2407,7 +2631,7 @@ mod tests {
 
         let mut live = make_expanded_interaction_state("portal-degraded-colors");
         live.connection_degraded = false;
-        let live_node = adapter.portal_node(&live, vec![0u8; 16]);
+        let live_node = adapter.portal_node(&live, vec![0u8; 16], 0);
         let live_tm = text_markdown_node(&live_node);
         assert_eq!(
             live_tm.color.unwrap(),
@@ -2422,7 +2646,7 @@ mod tests {
 
         let mut degraded = make_expanded_interaction_state("portal-degraded-colors");
         degraded.connection_degraded = true;
-        let degraded_node = adapter.portal_node(&degraded, vec![0u8; 16]);
+        let degraded_node = adapter.portal_node(&degraded, vec![0u8; 16], 0);
         let degraded_tm = text_markdown_node(&degraded_node);
         assert_eq!(
             degraded_tm.color.unwrap(),
@@ -2449,7 +2673,7 @@ mod tests {
         state.display_name = None;
         state.visible_transcript = vec![];
 
-        let markdown = portal_markdown(&state, None);
+        let markdown = portal_markdown(&state, None, 0);
 
         assert!(
             markdown.contains(PORTAL_DISCONNECT_MARKER_LINE),
@@ -2464,7 +2688,7 @@ mod tests {
         // A non-degraded state must NOT show the marker.
         let mut live = make_expanded_interaction_state("portal-marker");
         live.connection_degraded = false;
-        let live_md = portal_markdown(&live, None);
+        let live_md = portal_markdown(&live, None, 0);
         assert!(
             !live_md.contains(PORTAL_DISCONNECT_MARKER_LINE),
             "live portal must not show the disconnect marker"
@@ -2514,7 +2738,7 @@ mod tests {
 
         let mut present = make_expanded_interaction_state("portal-badge");
         present.unread_output_count = Some(3);
-        let markdown = portal_markdown(&present, None);
+        let markdown = portal_markdown(&present, None, 0);
         assert!(
             markdown.contains("3 unread"),
             "nonzero unread count must render an ambient text-item indicator: {markdown}"
@@ -2535,7 +2759,7 @@ mod tests {
 
         let mut zero = make_expanded_interaction_state("portal-badge");
         zero.unread_output_count = Some(0);
-        let zero_markdown = portal_markdown(&zero, None);
+        let zero_markdown = portal_markdown(&zero, None, 0);
         assert!(
             !zero_markdown.contains("unread"),
             "zero unread count must render nothing: {zero_markdown}"
@@ -2547,7 +2771,7 @@ mod tests {
 
         let mut redacted = make_expanded_interaction_state("portal-badge");
         redacted.unread_output_count = None;
-        let redacted_markdown = portal_markdown(&redacted, None);
+        let redacted_markdown = portal_markdown(&redacted, None, 0);
         assert!(
             !redacted_markdown.contains("unread"),
             "redacted (None) unread count must render nothing: {redacted_markdown}"
@@ -2763,7 +2987,10 @@ mod tests {
         // Non-redacted viewer: the aggregate and clearance-corrected counts match.
         state.unread_output_count = Some(1);
         state.visible_unread_output_count = Some(1);
-        let md = portal_markdown(&state, None);
+        // Render past the agent-activity quiesce window (units appended at 1..=2)
+        // so this divider assertion is isolated from the streaming-cursor cue.
+        let now = PORTAL_ACTIVITY_QUIESCE_WINDOW_US + 10;
+        let md = portal_markdown(&state, None, now);
         assert!(
             md.contains(PORTAL_UNREAD_DIVIDER_LINE),
             "an unread agent turn must render the in-transcript divider: {md}"
@@ -2771,7 +2998,7 @@ mod tests {
 
         state.unread_output_count = None;
         state.visible_unread_output_count = None;
-        let cleared = portal_markdown(&state, None);
+        let cleared = portal_markdown(&state, None, now);
         assert!(
             !cleared.contains(PORTAL_UNREAD_DIVIDER_LINE),
             "the divider must clear locally when the viewer views the tail: {cleared}"
@@ -2856,7 +3083,7 @@ mod tests {
         // like every portal published before this field existed.
         let empty = make_expanded_interaction_state("portal-question");
         assert!(
-            !portal_markdown(&empty, None).contains("awaiting reply"),
+            !portal_markdown(&empty, None, 0).contains("awaiting reply"),
             "no transcript must render no awaiting-reply cue"
         );
         assert!(
@@ -2868,7 +3095,7 @@ mod tests {
         let mut unset = make_expanded_interaction_state("portal-question");
         unset.visible_transcript = vec![transcript_unit(1, OutputKind::Assistant, false)];
         assert!(
-            !portal_markdown(&unset, None).contains("awaiting reply"),
+            !portal_markdown(&unset, None, 0).contains("awaiting reply"),
             "expects_reply == false must render no awaiting-reply cue"
         );
         assert!(
@@ -2882,7 +3109,7 @@ mod tests {
             transcript_unit(1, OutputKind::Assistant, false),
             transcript_unit(2, OutputKind::Assistant, true),
         ];
-        let markdown = portal_markdown(&question, None);
+        let markdown = portal_markdown(&question, None, 0);
         assert!(
             markdown.contains("? awaiting reply"),
             "expects_reply == true on the last unit must render the ambient cue: {markdown}"
@@ -2908,7 +3135,7 @@ mod tests {
             .visible_transcript
             .push(transcript_unit(3, OutputKind::Viewer, false));
         assert!(
-            !portal_markdown(&answered, None).contains("awaiting reply"),
+            !portal_markdown(&answered, None, 0).contains("awaiting reply"),
             "a viewer's echoed reply must clear the awaiting-reply cue"
         );
         assert!(
@@ -2922,8 +3149,182 @@ mod tests {
         redacted.redacted = true;
         redacted.visible_transcript = vec![];
         assert!(
-            !portal_markdown(&redacted, None).contains("awaiting reply"),
+            !portal_markdown(&redacted, None, 0).contains("awaiting reply"),
             "a redacted (empty transcript) viewer must render no awaiting-reply cue"
+        );
+    }
+
+    /// hud-g1ena.5 acceptance: build a live expanded portal whose tail is a fresh
+    /// agent turn and assert the ambient activity cue is fully present — the
+    /// text-visible header marker, the tail streaming cursor glyph, and BOTH
+    /// token-driven zero-length sentinel color runs (header + cursor). Then assert
+    /// it QUIESCES once the newest append ages past the window: no marker, no
+    /// cursor, no runs. Derivation is purely from the observed
+    /// `appended_at_wall_us` vs the render `now` — no separate typing signal.
+    #[test]
+    fn agent_activity_cue_present_while_appending_and_quiesces_after_window() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let activity_color = adapter.visual_tokens().activity_cue_color;
+        let cursor_color = adapter.visual_tokens().streaming_cursor_color;
+
+        let appended_at = 1_000_000;
+        let now_fresh = appended_at + 500_000; // within the quiesce window
+        let now_quiesced = appended_at + PORTAL_ACTIVITY_QUIESCE_WINDOW_US + 1;
+
+        let mut state = make_expanded_interaction_state("portal-activity");
+        state.visible_transcript = vec![TranscriptUnit {
+            appended_at_wall_us: appended_at,
+            ..transcript_unit(1, OutputKind::Assistant, false)
+        }];
+
+        // Actively appending: header marker + tail cursor glyph + both runs.
+        assert!(agent_activity_active(&state, now_fresh));
+        let fresh_md = portal_markdown(&state, None, now_fresh);
+        assert!(
+            fresh_md.contains(PORTAL_ACTIVITY_MARKER_LINE),
+            "active append must render the ambient header activity marker: {fresh_md}"
+        );
+        assert!(
+            fresh_md.contains(PORTAL_STREAMING_CURSOR_GLYPH),
+            "active append must render the tail streaming cursor glyph: {fresh_md}"
+        );
+        let header_runs = activity_cue_color_runs(&state, activity_color, now_fresh);
+        let cursor_runs = streaming_cursor_color_runs(&state, cursor_color, now_fresh);
+        assert_eq!(header_runs.len(), 1, "one activity header sentinel run");
+        assert_eq!(cursor_runs.len(), 1, "one streaming cursor sentinel run");
+        for (run, expected) in [
+            (&header_runs[0], activity_color),
+            (&cursor_runs[0], cursor_color),
+        ] {
+            assert_eq!(
+                run.color.unwrap(),
+                expected,
+                "run carries token color, never a literal"
+            );
+            assert_eq!(run.start_byte, 0, "sentinel run is zero-length");
+            assert_eq!(run.end_byte, 0, "sentinel run is zero-length");
+        }
+
+        // Quiesced: the same tail is now stale relative to `now`.
+        assert!(!agent_activity_active(&state, now_quiesced));
+        let quiesced_md = portal_markdown(&state, None, now_quiesced);
+        assert!(
+            !quiesced_md.contains(PORTAL_ACTIVITY_MARKER_LINE),
+            "cue must quiesce once appends stop: {quiesced_md}"
+        );
+        assert!(
+            !quiesced_md.contains(PORTAL_STREAMING_CURSOR_GLYPH),
+            "cursor must quiesce once appends stop: {quiesced_md}"
+        );
+        assert!(activity_cue_color_runs(&state, activity_color, now_quiesced).is_empty());
+        assert!(streaming_cursor_color_runs(&state, cursor_color, now_quiesced).is_empty());
+    }
+
+    /// The activity cue is suppressed in every non-writing case, all evaluated at
+    /// a `now` that WOULD be fresh for an agent tail — proving each guard, not the
+    /// window: a viewer-authored tail (the agent is not writing), a question
+    /// awaiting a reply (quiescing, and its own cue owns that state), an empty
+    /// transcript (redaction / first-run), a connection-degraded portal, a
+    /// never-connected ("connecting") portal, and the collapsed presentation.
+    #[test]
+    fn agent_activity_cue_suppressed_in_non_writing_states() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let activity_color = adapter.visual_tokens().activity_cue_color;
+        let cursor_color = adapter.visual_tokens().streaming_cursor_color;
+        let appended_at = 1_000_000;
+        let now = appended_at + 500_000; // fresh — so only the guards can suppress
+
+        let assert_suppressed = |state: &ProjectedPortalState, case: &str| {
+            assert!(
+                !agent_activity_active(state, now),
+                "{case}: predicate must be false"
+            );
+            let md = portal_markdown(state, None, now);
+            assert!(
+                !md.contains(PORTAL_ACTIVITY_MARKER_LINE),
+                "{case}: no header marker: {md}"
+            );
+            assert!(
+                !md.contains(PORTAL_STREAMING_CURSOR_GLYPH),
+                "{case}: no cursor glyph: {md}"
+            );
+            assert!(
+                activity_cue_color_runs(state, activity_color, now).is_empty(),
+                "{case}: no header run"
+            );
+            assert!(
+                streaming_cursor_color_runs(state, cursor_color, now).is_empty(),
+                "{case}: no cursor run"
+            );
+        };
+
+        let agent_tail = || TranscriptUnit {
+            appended_at_wall_us: appended_at,
+            ..transcript_unit(1, OutputKind::Assistant, false)
+        };
+
+        // Viewer-authored tail: the on-screen viewer, not the agent, is the last
+        // author — the agent is not appending.
+        let mut viewer_tail = make_expanded_interaction_state("portal-activity");
+        viewer_tail.visible_transcript = vec![TranscriptUnit {
+            appended_at_wall_us: appended_at,
+            ..transcript_unit(1, OutputKind::Viewer, false)
+        }];
+        assert_suppressed(&viewer_tail, "viewer tail");
+
+        // Question awaiting a reply: quiescing, and the awaiting-reply cue owns it.
+        let mut awaiting = make_expanded_interaction_state("portal-activity");
+        awaiting.visible_transcript = vec![TranscriptUnit {
+            appended_at_wall_us: appended_at,
+            ..transcript_unit(1, OutputKind::Assistant, true)
+        }];
+        assert_suppressed(&awaiting, "awaiting reply");
+        assert!(
+            portal_markdown(&awaiting, None, now).contains("awaiting reply"),
+            "awaiting-reply cue owns this state instead of the activity cue"
+        );
+
+        // Empty transcript (redaction / first-run): no tail to derive from.
+        let empty = make_expanded_interaction_state("portal-activity");
+        assert_suppressed(&empty, "empty transcript");
+
+        // Connection-degraded: the surface must not imply an active stream.
+        let mut degraded = make_expanded_interaction_state("portal-activity");
+        degraded.visible_transcript = vec![agent_tail()];
+        degraded.connection_degraded = true;
+        assert_suppressed(&degraded, "degraded");
+
+        // Never connected ("connecting"): connecting takes precedence over activity.
+        let mut connecting = make_expanded_interaction_state("portal-activity");
+        connecting.visible_transcript = vec![agent_tail()];
+        connecting.has_ever_connected = false;
+        assert_suppressed(&connecting, "connecting");
+
+        // Collapsed presentation: the cursor is an expanded-transcript affordance.
+        let mut collapsed = make_expanded_interaction_state("portal-activity");
+        collapsed.visible_transcript = vec![agent_tail()];
+        collapsed.presentation = ProjectedPortalPresentation::Collapsed;
+        assert_suppressed(&collapsed, "collapsed");
+    }
+
+    /// The `activity_cue_color` / `streaming_cursor_color` `PortalVisualTokens`
+    /// fields map 1:1 from the source `PortalPartTokens` channels
+    /// (single-source-of-truth invariant, matching the other token-mapping tests).
+    #[test]
+    fn portal_visual_tokens_from_part_tokens_maps_activity_and_cursor_fields() {
+        let part = tze_hud_config::PortalPartTokens::default();
+        let visual = portal_visual_tokens_from_part_tokens(&part);
+        assert_eq!(visual.activity_cue_color.r, part.activity_cue_color.r);
+        assert_eq!(visual.activity_cue_color.a, part.activity_cue_color.a);
+        assert_eq!(
+            visual.streaming_cursor_color.r,
+            part.streaming_cursor_color.r
+        );
+        assert_eq!(
+            visual.streaming_cursor_color.a,
+            part.streaming_cursor_color.a
         );
     }
 
@@ -3024,12 +3425,12 @@ mod tests {
 
         let mut active = make_expanded_interaction_state("portal-lc-transition");
         active.lifecycle_state = Some(ProjectionLifecycleState::Active);
-        let active_node = adapter.portal_node(&active, vec![0u8; 16]);
+        let active_node = adapter.portal_node(&active, vec![0u8; 16], 0);
         let active_tm = text_markdown_node(&active_node);
 
         let mut detached = make_expanded_interaction_state("portal-lc-transition");
         detached.lifecycle_state = Some(ProjectionLifecycleState::Detached);
-        let detached_node = adapter.portal_node(&detached, vec![0u8; 16]);
+        let detached_node = adapter.portal_node(&detached, vec![0u8; 16], 0);
         let detached_tm = text_markdown_node(&detached_node);
 
         // The render path reflects each state distinctly.
@@ -3091,7 +3492,7 @@ mod tests {
         // guard must take precedence.
         state.interaction_enabled = true;
 
-        let markdown = portal_markdown(&state, None);
+        let markdown = portal_markdown(&state, None, 0);
         assert!(
             !markdown.contains("composer: ready"),
             "§2: degraded portal must not imply an active composer stream"
@@ -3118,7 +3519,7 @@ mod tests {
             sequence: 1,
         };
 
-        let markdown = portal_markdown(&state, Some(&display));
+        let markdown = portal_markdown(&state, Some(&display), 0);
 
         // The draft text + caret live ONLY in the bottom input strip, never in
         // the transcript-flow markdown — otherwise the draft appears twice at
@@ -3152,7 +3553,7 @@ mod tests {
             sequence: 2,
         };
 
-        let markdown = portal_markdown(&state, Some(&display));
+        let markdown = portal_markdown(&state, Some(&display), 0);
 
         assert!(
             !markdown.contains("some capped draft text"),
@@ -3222,7 +3623,7 @@ mod tests {
         let state = make_expanded_interaction_state("portal-empty");
         assert!(state.visible_transcript.is_empty(), "precondition: empty");
 
-        let markdown = portal_markdown(&state, None);
+        let markdown = portal_markdown(&state, None, 0);
         assert!(
             !markdown.contains("<empty projection stream>"),
             "the literal placeholder must be gone: {markdown}"
@@ -3257,7 +3658,7 @@ mod tests {
         let mut state = make_expanded_interaction_state("portal-connecting");
         state.has_ever_connected = false;
 
-        let markdown = portal_markdown(&state, None);
+        let markdown = portal_markdown(&state, None, 0);
         assert!(
             markdown.contains(PORTAL_CONNECTING_LINE),
             "never-connected must render the connecting line: {markdown}"
@@ -3321,7 +3722,7 @@ mod tests {
         // and does not dim the transcript or disable the composer for a failure.
         let mut connecting = make_expanded_interaction_state("portal-connecting-vs-degraded");
         connecting.has_ever_connected = false;
-        let connecting_md = portal_markdown(&connecting, None);
+        let connecting_md = portal_markdown(&connecting, None, 0);
         assert!(
             connecting_md.contains(PORTAL_CONNECTING_LINE),
             "never-connected renders connecting: {connecting_md}"
@@ -3335,7 +3736,7 @@ mod tests {
         // NOT the connecting line — the inverse case, proving the split.
         let mut degraded = make_expanded_interaction_state("portal-degraded-not-connecting");
         degraded.connection_degraded = true;
-        let degraded_md = portal_markdown(&degraded, None);
+        let degraded_md = portal_markdown(&degraded, None, 0);
         assert!(
             degraded_md.contains(PORTAL_DISCONNECT_MARKER_LINE),
             "dropped portal renders the degraded marker: {degraded_md}"
@@ -3360,7 +3761,7 @@ mod tests {
         state.has_ever_connected = false;
         state.redacted = true;
 
-        let markdown = portal_markdown(&state, None);
+        let markdown = portal_markdown(&state, None, 0);
         assert!(
             markdown.contains(PORTAL_CONNECTING_LINE),
             "a redacted never-connected portal still shows connecting: {markdown}"
@@ -3389,7 +3790,7 @@ mod tests {
         let mut state = make_expanded_interaction_state("portal-redacted-empty");
         state.redacted = true;
 
-        let markdown = portal_markdown(&state, None);
+        let markdown = portal_markdown(&state, None, 0);
         assert!(
             markdown.contains(PORTAL_EMPTY_REDACTED_LINE),
             "redacted empty portal must render the content-free placeholder: {markdown}"
@@ -3416,7 +3817,7 @@ mod tests {
         let mut state = make_expanded_interaction_state("portal-first-content");
         state.visible_transcript = vec![transcript_unit(1, OutputKind::Assistant, false)];
 
-        let markdown = portal_markdown(&state, None);
+        let markdown = portal_markdown(&state, None, 0);
         assert!(
             markdown.contains("example output"),
             "real content must render: {markdown}"

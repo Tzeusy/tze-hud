@@ -1514,7 +1514,7 @@ fn drain_and_emit_portal_updates(
 
         // Render the portal markdown — the semantic content of the tile.
         // This is what portal_node places in TextMarkdownNodeProto::content.
-        let portal_markdown = adapter.render_portal_markdown(&state);
+        let portal_markdown = adapter.render_portal_markdown(&state, server_timestamp_wall_us);
 
         // Determine the command kind: CreatePortalTile if no tile yet registered,
         // RenderPortal otherwise. The gRPC session layer uses this to decide
