@@ -391,7 +391,13 @@ mod defaults {
 
     pub const DIVIDER_COLOR: &str = "#46536E";
 
-    pub const COLLAPSED_BACKGROUND: &str = "#1A1F28";
+    // Collapsed/minimized portal card backdrop. Off-black in the portal palette
+    // family — a hair lifted from the frame (`FRAME_BACKGROUND` #0A0D11) so a
+    // minimized card stays perceptible against the desktop, but no longer reads
+    // as the grey it used to (`#1A1F28`). hud-0hj7f: the frame fix (hud-a328c,
+    // #0A0D11) only covered the expanded frame; the minimized state kept a
+    // separate grey token, so window-mgmt minimize still flashed grey.
+    pub const COLLAPSED_BACKGROUND: &str = "#12161C";
     pub const COLLAPSED_TEXT_COLOR: &str = "#C8D6E8";
     pub const COLLAPSED_FONT_SIZE: &str = "14";
 
