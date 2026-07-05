@@ -84,6 +84,7 @@ PORTAL_TOKEN_LIFECYCLE_INACTIVE_COLOR = "portal.lifecycle.inactive_color"
 PORTAL_TOKEN_LIFECYCLE_ACCENT_WIDTH_PX = "portal.lifecycle.accent_width_px"
 
 PORTAL_TOKEN_DIVIDER_COLOR = "portal.divider.color"
+PORTAL_TOKEN_UNREAD_DIVIDER_COLOR = "portal.unread_divider.color"
 
 PORTAL_TOKEN_COLLAPSED_BACKGROUND = "portal.collapsed_card.background"
 PORTAL_TOKEN_COLLAPSED_TEXT_COLOR = "portal.collapsed_card.text_color"
@@ -146,6 +147,7 @@ _RUST_DEFAULTS: dict[str, str] = {
     "LIFECYCLE_INACTIVE_COLOR": "#5A6373",
     "LIFECYCLE_ACCENT_WIDTH_PX": "4",
     "DIVIDER_COLOR": "#46536E",
+    "UNREAD_DIVIDER_COLOR": "#586A8C",
     "COLLAPSED_BACKGROUND": "#12161C",
     "COLLAPSED_TEXT_COLOR": "#C8D6E8",
     "COLLAPSED_FONT_SIZE": "14",
@@ -203,6 +205,7 @@ CANONICAL_DEFAULTS: dict[str, str] = {
     PORTAL_TOKEN_LIFECYCLE_INACTIVE_COLOR: _RUST_DEFAULTS["LIFECYCLE_INACTIVE_COLOR"],
     PORTAL_TOKEN_LIFECYCLE_ACCENT_WIDTH_PX: _RUST_DEFAULTS["LIFECYCLE_ACCENT_WIDTH_PX"],
     PORTAL_TOKEN_DIVIDER_COLOR: _RUST_DEFAULTS["DIVIDER_COLOR"],
+    PORTAL_TOKEN_UNREAD_DIVIDER_COLOR: _RUST_DEFAULTS["UNREAD_DIVIDER_COLOR"],
     PORTAL_TOKEN_COLLAPSED_BACKGROUND: _RUST_DEFAULTS["COLLAPSED_BACKGROUND"],
     PORTAL_TOKEN_COLLAPSED_TEXT_COLOR: _RUST_DEFAULTS["COLLAPSED_TEXT_COLOR"],
     PORTAL_TOKEN_COLLAPSED_FONT_SIZE: _RUST_DEFAULTS["COLLAPSED_FONT_SIZE"],
@@ -317,6 +320,7 @@ class PortalPartTokens:
     lifecycle_inactive_color: Rgba
     lifecycle_accent_width_px: float
     divider_color: Rgba
+    unread_divider_color: Rgba
     collapsed_background: Rgba
     collapsed_text_color: Rgba
     collapsed_font_size_px: float
@@ -392,6 +396,7 @@ def resolve_portal_tokens(overrides: Optional[dict[str, str]] = None) -> PortalP
         lifecycle_inactive_color=_color(tm, PORTAL_TOKEN_LIFECYCLE_INACTIVE_COLOR),
         lifecycle_accent_width_px=_px(tm, PORTAL_TOKEN_LIFECYCLE_ACCENT_WIDTH_PX),
         divider_color=_color(tm, PORTAL_TOKEN_DIVIDER_COLOR),
+        unread_divider_color=_color(tm, PORTAL_TOKEN_UNREAD_DIVIDER_COLOR),
         collapsed_background=_color(tm, PORTAL_TOKEN_COLLAPSED_BACKGROUND),
         collapsed_text_color=_color(tm, PORTAL_TOKEN_COLLAPSED_TEXT_COLOR),
         collapsed_font_size_px=_px(tm, PORTAL_TOKEN_COLLAPSED_FONT_SIZE),

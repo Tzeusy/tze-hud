@@ -992,6 +992,19 @@ pub struct ProjectedPortalState {
     pub visible_transcript_bytes: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unread_output_count: Option<usize>,
+    /// Count of unread agent-authored outputs that survive this viewer's
+    /// clearance filter — i.e. how many of the aggregate `unread_output_count`
+    /// units actually appear in `visible_transcript`. Redaction-gated identically
+    /// to `unread_output_count` (`None` when the count is not revealed).
+    ///
+    /// The in-transcript unread divider (hud-g1ena.2) is placed with THIS count,
+    /// never the aggregate: a viewer whose clearance filters out a
+    /// higher-classification unread turn must not have the divider pushed onto an
+    /// already-seen visible turn (the aggregate would over-count the units below
+    /// the divider). `unread_output_count` stays the aggregate for the ambient
+    /// count, which MAY legitimately exceed the units below the divider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_unread_output_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_input_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
