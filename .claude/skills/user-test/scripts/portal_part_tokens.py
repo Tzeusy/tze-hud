@@ -119,7 +119,7 @@ PORTAL_TOKEN_SPACING_SECTION_GAP_PX = "portal.spacing.section_gap_px"
 # Keeping the Rust const name as the key makes that structural comparison exact.
 
 _RUST_DEFAULTS: dict[str, str] = {
-    "FRAME_BACKGROUND": "#111720",
+    "FRAME_BACKGROUND": "#0A0D11",
     "FRAME_OPACITY": "0.98",
     "FRAME_BORDER_COLOR": "#2A3344",
     "HEADER_TEXT_COLOR": "#F5F8FF",
