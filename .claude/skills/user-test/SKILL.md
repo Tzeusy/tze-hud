@@ -163,8 +163,8 @@ ssh -o BatchMode=yes -o IdentitiesOnly=yes -i <key> <admin-user>@<host> "whoami"
 
 Both must succeed. The file user is used for file deployment (SCP). The admin
 user is used for process control (kill, scheduled task trigger) because it owns
-the interactive desktop session. On tzehouse both users authenticate with the
-**same** key (the identity named in the private doc).
+the interactive desktop session. Whether tzehouse's two roles share one key or
+use separate keys is part of what the private doc resolves — don't assume.
 
 ### Step 1: Deploy (SCP via hud-user)
 
