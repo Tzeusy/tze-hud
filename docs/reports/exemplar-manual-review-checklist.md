@@ -17,7 +17,7 @@ Reviewed: 2026-04-09
 | 8 | [Gauge Widget](#8-gauge-widget) | **done** | Automation batch + manual visual sign-off completed on 2026-04-09 (ultra-minimal track, hover-only readout/label, tuned spacing/colors) |
 | 9 | [Progress Bar](#9-progress-bar) | **automation-pass** | Step + color-sweep batches passed on 2026-04-09; manual visual sign-off pending |
 | 10 | [Status Indicator](#10-status-indicator) | **automation-pass** | Enum/theme/label/validation batches passed on 2026-04-09; manual visual sign-off pending |
-| 11 | [Text Stream Portals](#11-text-stream-portals) | **phase-1-gate-failed** | `hud-qfyfg` assessed RFC 0013 section 7.2 on 2026-06-19 and recorded a machine FAIL in `docs/reports/hud-qfyfg-text-stream-portal-phase1-promotion-gate-20260619.md`. `hud-ofe76` live exemplar-script evidence ran across markdown, overflow, composer edit, OS-input window management, cadence, profile swap, and cleanup, but cadence failed and human visual confirmation was not collected. `hud-kylt0` cooperative-projection evidence confirmed Windows reachability but found the HTTP MCP facade gated by `resident_mcp` or missing deployed lifecycle methods. C5/PR #899 landed the soak driver only; no 60-minute <=5 MiB memory-drift artifact is present. |
+| 11 | [Text Stream Portals](#11-text-stream-portals) | **phase-1-promoted** | **Owner PROMOTE decision 2026-07-05 (Tzeusy)** — `docs/reports/hud-qfyfg-text-stream-portal-phase1-promotion-gate-20260705.md`. Grey-frame blocker fixed (`hud-a328c`/#1075, off-black `#0A0D11`) and owner-verified live on the runtime-token path; collapsed-card grey darkened (`hud-0hj7f`/#1079). Composer interaction verified live; lease self-termination fixed (`hud-hk8kl`, soak ran 57.6 min) with flat memory (27–34 MiB); cadence within budget (`over_budget_count=0`). Full-duration soak (`hud-5kq8k`) and minor polish (`hud-n5bqp`, `hud-3nus3`, `hud-4e6c0`) accepted as tracked follow-ups. |
 
 ---
 
@@ -372,24 +372,28 @@ and `portal_projection_detach` all returned `CAPABILITY_REQUIRED` with
 resident-capable ingress and deployed lifecycle method coverage, not by Windows
 reachability.
 
-**Promotion gate assessment (2026-06-19 / `hud-qfyfg`):** RFC 0013 section
-7.2 does not pass. The machine assessment is archived at
-`docs/reports/hud-qfyfg-text-stream-portal-phase1-promotion-gate-20260619.md`.
-The raw-tile pilot remains the authoritative scope until the failed or missing
-gate inputs are corrected and owner approval is explicitly recorded.
+**Promotion gate decision (2026-07-05 / `hud-qfyfg`):** RFC 0013 section 7.2
+**PASSES — owner PROMOTE decision by Tzeusy.** The decision is recorded at
+`docs/reports/hud-qfyfg-text-stream-portal-phase1-promotion-gate-20260705.md`
+(supersedes the 2026-06-19 and 2026-07-04 machine FAIL assessments). The
+grey-frame blocker was fixed and owner-verified live; lease/memory/cadence were
+proven good; remaining items are accepted as tracked follow-ups. Promotion
+authorizes first-class portal surface work (`hud-tc153`) to proceed.
 
 ### Phase-1 Promotion Sign-Off
 
-| Gate item | Outcome | Evidence / required follow-up |
+| Gate item | Outcome | Evidence / follow-up |
 |---|---|---|
-| Overall RFC 0013 section 7.2 promotion decision | **FAIL - machine assessment only** | `docs/reports/hud-qfyfg-text-stream-portal-phase1-promotion-gate-20260619.md`; owner approval is not present. |
-| Exemplar-script adapter six-axis live run | **PARTIAL / FAIL** | `hud-ofe76` reference-tagged run covered the six axes and cleanup, but cadence failed with 5/20 appends over `16.6ms` (`p95=21.033ms`, `max=56.205ms`) and human visual confirmations remain uncollected. |
-| Cooperative-projection adapter + agent ergonomics | **BLOCKED** | `hud-kylt0` proved Windows/HUD reachability, but projection lifecycle calls were blocked by `resident_mcp` or missing deployed methods; no attach -> stream -> poll/ack input -> detach demonstration exists through the vendored skill surface. |
-| C5 sustained soak evidence | **NOT SIGNED OFF** | PR #899 landed the constant-window `soak` phase and tests, but no completed 60-minute reference-host portal soak artifact proves <=5 MiB memory drift. |
-| Repeated raw-tile complexity criterion | **MACHINE PASS, not sufficient** | The exemplar-script path now uses six raw tiles, split root/child mutation batches, capture tiles, drag shields, minimized-icon state, explicit cleanup, and OS-input diagnostics. Promotion still fails because other gate criteria are missing or failed. |
-| Governance stability criterion | **PARTIAL / FAIL for promotion** | Integration tests cover redaction, safe mode, freeze, orphan, chrome exclusion, and ambient attention. Live Phase-1 evidence only proves ordinary cleanup/lease release; redaction, safe mode, freeze, and explicit orphan/grace behavior still need refreshed live confirmation. |
-| Presence-thesis boundary | **MACHINE PASS, owner-gated** | Evidence remains content-layer, lease-governed, bounded, below chrome, and subordinate to the presence model. This is not owner approval. |
-| No terminal semantics | **MACHINE PASS** | No PTY hosting, VT100/xterm compatibility, alternate screen, terminal mouse reporting, terminal keystroke passthrough, dedicated portal transport, or process lifecycle ownership is introduced. |
+| Overall RFC 0013 section 7.2 promotion decision | **PASS — owner PROMOTE (Tzeusy, 2026-07-05)** | `docs/reports/hud-qfyfg-text-stream-portal-phase1-promotion-gate-20260705.md`. |
+| Visual sign-off (task 7.4) | **PASS (owner, live)** | Grey frame fixed (`hud-a328c`/#1075 → off-black `#0A0D11`) and owner-verified off-black live on the runtime-token path; collapsed-card grey darkened (`hud-0hj7f`/#1079 → `#12161C`). Evidence `liveverify-signoff-20260705-105700/`. |
+| Owner promotion approval (task 7.7) | **GRANTED** | Tzeusy, 2026-07-05. |
+| Exemplar-script adapter six-axis live run | **PASS** | Markdown, overflow, composer edit, OS-input window-mgmt, cadence, profile swap, cleanup all exercised live (`hud-ofe76` + 2026-07-05 reconcile pass); cadence now within budget. |
+| Cooperative-projection adapter + agent ergonomics | **PASS** | Cooperative render recovered/durable; resident ingress confirmed; owner verified live. |
+| C5 sustained soak evidence | **ACCEPTED PARTIAL** | Lease self-termination fixed (`hud-hk8kl`) — soak ran 57.6 min (13303 cycles) vs prior 608 s; memory flat (27–34 MiB, no trend). Full 3600 s completion deferred to `hud-5kq8k`; transient abort `hud-n5bqp`. Owner accepts partial. |
+| Repeated raw-tile complexity criterion | **PASS** | Six raw tiles, split root/child mutation batches, capture tiles, drag shields, minimized-icon state, explicit cleanup, OS-input diagnostics — recurring complexity a first-class surface should absorb. |
+| Governance stability criterion | **PASS (owner-accepted)** | Redaction/safe-mode/freeze/orphan covered by 9 passing integration tests; orphan/grace live-drivable. Owner accepts integration coverage for Phase-1. |
+| Presence-thesis boundary | **PASS (owner)** | Content-layer, lease-governed, bounded, below chrome, subordinate to the presence model. |
+| No terminal semantics | **PASS** | No PTY hosting, VT100/xterm compatibility, alternate screen, terminal mouse reporting, terminal keystroke passthrough, dedicated portal transport, or process lifecycle ownership is introduced. |
 
 ### Capability summary
 
