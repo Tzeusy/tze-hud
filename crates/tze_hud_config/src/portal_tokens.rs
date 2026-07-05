@@ -52,6 +52,7 @@
 //! | `portal.lifecycle.attention_color` | lifecycle affordance | accent for `Degraded`/`HudUnavailable` (RGBA hex) |
 //! | `portal.lifecycle.inactive_color` | lifecycle affordance | accent for `Detached`/`CleanupPending`/`Expired` (RGBA hex) |
 //! | `portal.divider.color` | divider | separator line color (RGBA hex) |
+//! | `portal.unread_divider.color` | unread divider | in-transcript unread-boundary rule color (RGBA hex) |
 //! | `portal.collapsed_card.background` | collapsed card | compact view backdrop (RGBA hex) |
 //! | `portal.collapsed_card.text_color` | collapsed card | compact text color (RGBA hex) |
 //! | `portal.collapsed_card.font_size` | collapsed card | compact text font size in px |
@@ -231,6 +232,18 @@ pub const PORTAL_TOKEN_LIFECYCLE_INACTIVE_COLOR: &str = "portal.lifecycle.inacti
 pub const PORTAL_TOKEN_LIFECYCLE_ACCENT_WIDTH_PX: &str = "portal.lifecycle.accent_width_px";
 
 pub const PORTAL_TOKEN_DIVIDER_COLOR: &str = "portal.divider.color";
+
+/// Color of the in-transcript unread divider (hud-g1ena.2,
+/// portal-chat-grade-affordances §Unread Divider and Ambient Unread Count). The
+/// rule marks the boundary before the oldest retained unseen agent-authored turn
+/// when the viewer returns to a portal with unread content. Distinct from the
+/// generic turn separator `portal.divider.color` so a viewer can tell the unread
+/// boundary from an ordinary turn break, yet still ambient — a presence engine
+/// marks where unread begins without behaving like a notification. Defaults to a
+/// muted steel-blue in the cool ambient family, harmonizing with the slate
+/// `portal.unread_indicator.color` count while reading brighter than the plain
+/// separator.
+pub const PORTAL_TOKEN_UNREAD_DIVIDER_COLOR: &str = "portal.unread_divider.color";
 
 pub const PORTAL_TOKEN_COLLAPSED_BACKGROUND: &str = "portal.collapsed_card.background";
 pub const PORTAL_TOKEN_COLLAPSED_TEXT_COLOR: &str = "portal.collapsed_card.text_color";
@@ -420,6 +433,11 @@ mod defaults {
     pub const LIFECYCLE_ACCENT_WIDTH_PX: &str = "4";
 
     pub const DIVIDER_COLOR: &str = "#46536E";
+    /// Muted steel-blue — brighter and bluer than the plain turn separator
+    /// (`DIVIDER_COLOR` #46536E) so the unread boundary reads as distinct, while
+    /// staying in the cool ambient family alongside the slate unread count
+    /// (`UNREAD_INDICATOR_COLOR` #6B7689). Ambient, not alarming.
+    pub const UNREAD_DIVIDER_COLOR: &str = "#586A8C";
 
     // Collapsed/minimized portal card backdrop. Off-black in the portal palette
     // family — a hair lifted from the frame (`FRAME_BACKGROUND` #0A0D11) so a
@@ -566,6 +584,10 @@ pub struct PortalPartTokens {
 
     // Divider
     pub divider_color: Rgba,
+    /// Color of the in-transcript unread divider (hud-g1ena.2). Marks the boundary
+    /// before the oldest retained unseen agent-authored turn; distinct from the
+    /// generic `divider_color` turn separator, ambient by design.
+    pub unread_divider_color: Rgba,
 
     // Collapsed card
     pub collapsed_background: Rgba,
@@ -687,6 +709,8 @@ impl Default for PortalPartTokens {
 
             divider_color: parse_color_hex(defaults::DIVIDER_COLOR)
                 .expect("divider color default is valid hex"),
+            unread_divider_color: parse_color_hex(defaults::UNREAD_DIVIDER_COLOR)
+                .expect("unread divider color default is valid hex"),
 
             collapsed_background: parse_color_hex(defaults::COLLAPSED_BACKGROUND)
                 .expect("collapsed background default is valid hex"),
@@ -934,6 +958,10 @@ pub fn resolve_portal_tokens(token_map: &DesignTokenMap) -> PortalPartTokens {
         ),
 
         divider_color: resolve_color!(PORTAL_TOKEN_DIVIDER_COLOR, defaults.divider_color),
+        unread_divider_color: resolve_color!(
+            PORTAL_TOKEN_UNREAD_DIVIDER_COLOR,
+            defaults.unread_divider_color
+        ),
 
         collapsed_background: resolve_color!(
             PORTAL_TOKEN_COLLAPSED_BACKGROUND,
@@ -1125,6 +1153,10 @@ const PORTAL_TOKEN_DEFAULT_STRINGS: &[(&str, &str)] = &[
         defaults::LIFECYCLE_ACCENT_WIDTH_PX,
     ),
     (PORTAL_TOKEN_DIVIDER_COLOR, defaults::DIVIDER_COLOR),
+    (
+        PORTAL_TOKEN_UNREAD_DIVIDER_COLOR,
+        defaults::UNREAD_DIVIDER_COLOR,
+    ),
     (
         PORTAL_TOKEN_COLLAPSED_BACKGROUND,
         defaults::COLLAPSED_BACKGROUND,
@@ -2125,7 +2157,7 @@ mod tests {
     #[test]
     fn resolve_portal_token_strings_covers_every_key() {
         // Number of distinct portal token keys resolved by resolve_portal_tokens.
-        const EXPECTED_KEYS: usize = 49;
+        const EXPECTED_KEYS: usize = 50;
         assert_eq!(
             PORTAL_TOKEN_DEFAULT_STRINGS.len(),
             EXPECTED_KEYS,

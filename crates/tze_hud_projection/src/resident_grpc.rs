@@ -13,10 +13,10 @@ use tze_hud_protocol::proto::session as session_proto;
 use thiserror::Error;
 
 use crate::{
-    AdapterDraftBatch, AdapterDraftNotification, ContentClassification, PortalInputFeedback,
-    PortalInputFeedbackState, PortalInputSubmission, ProjectedPortalPresentation,
-    ProjectedPortalState, ProjectionAuthority, ProjectionErrorCode, ProjectionLifecycleState,
-    TranscriptUnit,
+    AdapterDraftBatch, AdapterDraftNotification, ContentClassification, OutputKind,
+    PortalInputFeedback, PortalInputFeedbackState, PortalInputSubmission,
+    ProjectedPortalPresentation, ProjectedPortalState, ProjectionAuthority, ProjectionErrorCode,
+    ProjectionLifecycleState, TranscriptUnit,
 };
 
 /// Content-free disconnect/stale marker line rendered when the portal's driving
@@ -57,6 +57,19 @@ const PORTAL_EMPTY_REDACTED_LINE: &str = "· · ·";
 /// hud-g1ena.6 established the precedence with a minimal `"Connecting…"` string;
 /// hud-g1ena.7 replaces it with this distinct connecting treatment.
 const PORTAL_CONNECTING_LINE: &str = "◌ Connecting… — waiting for the session to come online.";
+
+/// In-transcript unread divider marker (hud-g1ena.2,
+/// portal-chat-grade-affordances §Unread Divider and Ambient Unread Count).
+///
+/// A quiet boundary label rendered before the oldest retained unseen
+/// agent-authored turn when the viewer returns to a portal with unread content.
+/// Ambient, not alarming (no `!`/⚠) — a presence engine marks *where* unread
+/// begins without behaving like a notification; the *how many* is carried
+/// separately by the ambient unread count near the header. The token-resolved
+/// color rides a zero-length sentinel (`unread_divider_color_runs`); precise
+/// per-line coloring is deferred to the promotion-era structured layout (like
+/// the other Phase-1 single-node markers).
+const PORTAL_UNREAD_DIVIDER_LINE: &str = "─── unread ───";
 
 /// Whether the portal is in a connection-degraded presentation state.
 ///
@@ -163,6 +176,15 @@ pub struct PortalVisualTokens {
     /// by design — a presence engine surfaces a quiet count, never a loud
     /// notification badge. Source token: `portal.unread_indicator.color`.
     pub unread_indicator_color: proto::Rgba,
+    /// Color of the in-transcript unread divider (hud-g1ena.2,
+    /// portal-chat-grade-affordances §Unread Divider and Ambient Unread Count).
+    /// Marks the boundary before the oldest retained unseen agent-authored turn
+    /// when the viewer returns to a portal with unread content. Distinct from the
+    /// generic turn separator so a viewer can tell the unread boundary from an
+    /// ordinary turn break, yet still ambient — a presence engine marks where
+    /// unread begins without behaving like a notification. Source token:
+    /// `portal.unread_divider.color`.
+    pub unread_divider_color: proto::Rgba,
     /// Color of the ambient awaiting-reply (question) indicator (hud-jip0k).
     /// Set when the owning LLM's most recently published output has
     /// `expects_reply == true` — a core presence semantic signaling the
@@ -961,6 +983,15 @@ impl ResidentGrpcPortalAdapter {
                             state,
                             self.visual_tokens.unread_indicator_color,
                         ));
+                        // In-transcript unread divider (hud-g1ena.2). Absent unless
+                        // an Expanded portal's non-empty retained window contains an
+                        // unread agent-authored turn; clears with the count on tail
+                        // view. Distinct token from the ambient count above so the
+                        // boundary rule and the count can be reskinned separately.
+                        runs.extend(unread_divider_color_runs(
+                            state,
+                            self.visual_tokens.unread_divider_color,
+                        ));
                         // Ambient awaiting-reply (question) indicator
                         // (hud-jip0k). Absent unless the most recently
                         // published output is a pending question.
@@ -1129,7 +1160,10 @@ fn portal_markdown(
             } else {
                 push_line(
                     &mut result,
-                    &visible_transcript_markdown(&state.visible_transcript),
+                    &visible_transcript_markdown(
+                        &state.visible_transcript,
+                        unread_divider_boundary(state),
+                    ),
                 );
             }
             push_line(&mut result, "");
@@ -1363,6 +1397,73 @@ fn unread_indicator_color_runs(
     }
 }
 
+/// Index into `visible_transcript` **before** which the in-transcript unread
+/// divider is inserted: the oldest retained *unseen agent-authored* turn
+/// (hud-g1ena.2, §Unread Divider and Ambient Unread Count).
+///
+/// Returns `None` when there is nothing unread (`unread_output_count` is `None`
+/// under the `reveal_unread` redaction gate, or `Some(0)`), or when the retained
+/// window holds no agent-authored unit — in those cases no divider renders, which
+/// is exactly how the divider **clears locally when the viewer views the tail**:
+/// the authority resets the count to `0` on tail view, so this yields `None` with
+/// no adapter round trip.
+///
+/// The boundary is found by walking the retained window from the tail and
+/// counting only agent-authored units — **echoed viewer turns are never unread**
+/// per the Viewer Reply Echo requirement, so `OutputKind::Viewer` units are
+/// skipped. When the unread count exceeds the agent-authored units still retained
+/// (older unread turns coalesced or scrolled out of the bounded window), the walk
+/// exhausts and the divider sits at the **oldest retained unseen unit** — the
+/// first retained agent-authored turn — matching the spec's "the count MAY exceed
+/// the units visibly below the divider".
+fn unread_divider_boundary(state: &ProjectedPortalState) -> Option<usize> {
+    let count = match state.unread_output_count {
+        Some(count) if count > 0 => count,
+        _ => return None,
+    };
+    let mut agent_seen = 0usize;
+    let mut boundary = None;
+    for (index, unit) in state.visible_transcript.iter().enumerate().rev() {
+        if unit.output_kind != OutputKind::Viewer {
+            agent_seen += 1;
+            boundary = Some(index);
+            if agent_seen == count {
+                break;
+            }
+        }
+    }
+    boundary
+}
+
+/// Build the token-styled sentinel color run for the in-transcript unread divider
+/// (hud-g1ena.2, §Unread Divider and Ambient Unread Count).
+///
+/// Mirrors the other Phase-1 sentinels (`unread_indicator_color_runs`,
+/// `stale_marker_color_runs`): a zero-length run (`[0..0]`) carrying the
+/// token-resolved `unread_divider_color` so the visual token drives the divider
+/// treatment without any literal color in the render path (§6.1). Emitted exactly
+/// when the divider line is actually rendered — an Expanded portal with a
+/// non-empty retained transcript whose retained window contains an unread
+/// agent-authored turn (`unread_divider_boundary` is `Some`). Empty otherwise, so
+/// it disappears the moment the count clears on tail view.
+fn unread_divider_color_runs(
+    state: &ProjectedPortalState,
+    unread_divider_color: proto::Rgba,
+) -> Vec<proto::TextColorRunProto> {
+    if state.presentation == ProjectedPortalPresentation::Expanded
+        && !state.visible_transcript.is_empty()
+        && unread_divider_boundary(state).is_some()
+    {
+        vec![proto::TextColorRunProto {
+            start_byte: 0,
+            end_byte: 0,
+            color: Some(unread_divider_color),
+        }]
+    } else {
+        Vec::new()
+    }
+}
+
 /// `true` when the most recently appended visible transcript unit is a
 /// question awaiting a viewer reply (`expects_reply == true`, hud-jip0k).
 ///
@@ -1573,7 +1674,17 @@ fn connecting_color_runs(
     }
 }
 
-fn visible_transcript_markdown(units: &[TranscriptUnit]) -> String {
+/// Render the retained transcript window to markdown, inserting the in-transcript
+/// unread divider (hud-g1ena.2) before the oldest retained unseen agent-authored
+/// turn when `unread_boundary` names its index.
+///
+/// The unread divider is a distinct labeled marker (`PORTAL_UNREAD_DIVIDER_LINE`),
+/// not a bare `---` thematic break, so it reads as the unread boundary rather than
+/// an ordinary turn separator (the compositor styles all `---` breaks with the
+/// single global `portal.divider.color`, so a bare break could not be told apart
+/// in this single-node markdown path). Its token-resolved color rides a separate
+/// zero-length sentinel (`unread_divider_color_runs`).
+fn visible_transcript_markdown(units: &[TranscriptUnit], unread_boundary: Option<usize>) -> String {
     let mut result = String::new();
     for (index, unit) in units.iter().enumerate() {
         if index > 0 {
@@ -1584,6 +1695,13 @@ fn visible_transcript_markdown(units: &[TranscriptUnit]) -> String {
             // so the history reads as discrete turns. Content-free geometry: under
             // redaction `units` is emptied upstream, so no separators are emitted.
             result.push_str("\n---\n");
+        }
+        if unread_boundary == Some(index) {
+            // Unread divider before the oldest retained unseen agent-authored turn.
+            // A quiet labeled marker (not a bare `---`) so it is distinguishable
+            // from the ordinary turn separator above. Own line, then the turn text.
+            result.push_str(PORTAL_UNREAD_DIVIDER_LINE);
+            result.push('\n');
         }
         result.push_str(clamp_utf8(&unit.output_text, 4_096));
     }
@@ -1703,6 +1821,12 @@ pub fn portal_visual_tokens_from_part_tokens(
             g: part.unread_indicator_color.g,
             b: part.unread_indicator_color.b,
             a: part.unread_indicator_color.a,
+        },
+        unread_divider_color: proto::Rgba {
+            r: part.unread_divider_color.r,
+            g: part.unread_divider_color.g,
+            b: part.unread_divider_color.b,
+            a: part.unread_divider_color.a,
         },
         awaiting_reply_color: proto::Rgba {
             r: part.awaiting_reply_color.r,
@@ -2241,7 +2365,7 @@ mod tests {
             },
         ];
 
-        let markdown = visible_transcript_markdown(&units);
+        let markdown = visible_transcript_markdown(&units, None);
 
         // First entry, then a turn separator, then the clamped second entry.
         assert!(markdown.starts_with("first\n---\n"));
@@ -2451,6 +2575,205 @@ mod tests {
         let visual = portal_visual_tokens_from_part_tokens(&part);
         assert_eq!(visual.awaiting_reply_color.r, part.awaiting_reply_color.r);
         assert_eq!(visual.awaiting_reply_color.a, part.awaiting_reply_color.a);
+    }
+
+    // ── Unread divider (hud-g1ena.2, §Unread Divider and Ambient Unread Count) ──
+
+    /// A `TranscriptUnit` with explicit text + kind for divider-placement tests.
+    fn transcript_unit_text(sequence: u64, output_kind: OutputKind, text: &str) -> TranscriptUnit {
+        TranscriptUnit {
+            sequence,
+            output_text: text.to_string(),
+            output_kind,
+            content_classification: ContentClassification::Private,
+            logical_unit_id: None,
+            coalesce_key: None,
+            expects_reply: false,
+            appended_at_wall_us: sequence,
+        }
+    }
+
+    /// No unread content → no divider boundary. Covers both the redacted /
+    /// not-revealed count (`None`) and the nothing-unread count (`Some(0)`), which
+    /// is exactly how the divider clears locally when the viewer views the tail.
+    #[test]
+    fn unread_divider_boundary_is_none_without_unread() {
+        let mut state = make_expanded_interaction_state("portal-unread");
+        state.visible_transcript = vec![
+            transcript_unit(1, OutputKind::Assistant, false),
+            transcript_unit(2, OutputKind::Assistant, false),
+        ];
+        state.unread_output_count = None;
+        assert_eq!(unread_divider_boundary(&state), None);
+        state.unread_output_count = Some(0);
+        assert_eq!(unread_divider_boundary(&state), None);
+    }
+
+    /// The divider sits before the oldest retained unseen agent-authored turn.
+    #[test]
+    fn unread_divider_boundary_marks_oldest_unseen_agent_turn() {
+        let mut state = make_expanded_interaction_state("portal-unread");
+        state.visible_transcript = vec![
+            transcript_unit(1, OutputKind::Assistant, false), // seen
+            transcript_unit(2, OutputKind::Assistant, false), // unseen
+            transcript_unit(3, OutputKind::Assistant, false), // unseen
+        ];
+        state.unread_output_count = Some(2);
+        assert_eq!(unread_divider_boundary(&state), Some(1));
+    }
+
+    /// Echoed viewer turns are never unread (Viewer Reply Echo): a viewer echo
+    /// interleaved with agent turns is skipped when counting the boundary.
+    #[test]
+    fn unread_divider_boundary_skips_viewer_echo() {
+        let mut state = make_expanded_interaction_state("portal-unread");
+        state.visible_transcript = vec![
+            transcript_unit(1, OutputKind::Assistant, false),
+            transcript_unit(2, OutputKind::Viewer, false),
+            transcript_unit(3, OutputKind::Assistant, false),
+        ];
+        state.unread_output_count = Some(1);
+        // Only the newest agent turn (index 2) is unread; the viewer echo at
+        // index 1 is skipped, so the divider does not land on it.
+        assert_eq!(unread_divider_boundary(&state), Some(2));
+    }
+
+    /// When older unread turns have coalesced or scrolled out of the bounded
+    /// window, the count MAY exceed the retained agent turns; the divider then
+    /// sits at the oldest RETAINED unseen (agent) unit, not on a viewer echo.
+    #[test]
+    fn unread_divider_boundary_clamps_to_oldest_retained_when_count_exceeds_window() {
+        let mut state = make_expanded_interaction_state("portal-unread");
+        state.visible_transcript = vec![
+            transcript_unit(1, OutputKind::Viewer, false),
+            transcript_unit(2, OutputKind::Assistant, false),
+            transcript_unit(3, OutputKind::Assistant, false),
+        ];
+        state.unread_output_count = Some(9);
+        assert_eq!(unread_divider_boundary(&state), Some(1));
+    }
+
+    /// Only viewer echoes retained → nothing is ever unread, so no divider.
+    #[test]
+    fn unread_divider_boundary_is_none_without_agent_turn() {
+        let mut state = make_expanded_interaction_state("portal-unread");
+        state.visible_transcript = vec![transcript_unit(1, OutputKind::Viewer, false)];
+        state.unread_output_count = Some(3);
+        assert_eq!(unread_divider_boundary(&state), None);
+    }
+
+    /// The divider marker line is inserted before the boundary turn, distinct
+    /// from the ordinary `---` turn separator, and never appears without a
+    /// boundary.
+    #[test]
+    fn visible_transcript_markdown_inserts_unread_divider_before_boundary() {
+        let units = vec![
+            transcript_unit_text(1, OutputKind::Assistant, "alpha"),
+            transcript_unit_text(2, OutputKind::Assistant, "bravo"),
+        ];
+        let md = visible_transcript_markdown(&units, Some(1));
+        assert_eq!(md, format!("alpha\n---\n{PORTAL_UNREAD_DIVIDER_LINE}\nbravo"));
+        let plain = visible_transcript_markdown(&units, None);
+        assert!(!plain.contains(PORTAL_UNREAD_DIVIDER_LINE));
+    }
+
+    /// The divider color run is a zero-length token sentinel (§6.1: token-driven,
+    /// no literal color) and clears when the count clears on tail view.
+    #[test]
+    fn unread_divider_color_runs_emit_zero_length_token_sentinel() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let divider_color = adapter.visual_tokens().unread_divider_color;
+
+        let mut state = make_expanded_interaction_state("portal-unread");
+        state.visible_transcript = vec![
+            transcript_unit(1, OutputKind::Assistant, false),
+            transcript_unit(2, OutputKind::Assistant, false),
+        ];
+        state.unread_output_count = Some(1);
+
+        let runs = unread_divider_color_runs(&state, divider_color);
+        assert_eq!(runs.len(), 1, "an unread agent turn must emit one divider run");
+        assert_eq!(
+            runs[0].start_byte, 0,
+            "divider run must be a zero-length sentinel"
+        );
+        assert_eq!(
+            runs[0].end_byte, 0,
+            "divider run must be a zero-length sentinel"
+        );
+        assert_eq!(
+            runs[0].color.unwrap(),
+            divider_color,
+            "run must carry the unread_divider_color token, never a literal color"
+        );
+
+        state.unread_output_count = None;
+        assert!(
+            unread_divider_color_runs(&state, divider_color).is_empty(),
+            "the divider run must clear when the count clears on tail view"
+        );
+    }
+
+    /// The in-transcript divider is an expanded-only affordance and needs
+    /// transcript content to divide: absent in collapsed and on an empty window.
+    #[test]
+    fn unread_divider_color_runs_absent_in_collapsed_and_empty() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let divider_color = adapter.visual_tokens().unread_divider_color;
+
+        let mut collapsed = make_expanded_interaction_state("portal-unread");
+        collapsed.presentation = ProjectedPortalPresentation::Collapsed;
+        collapsed.visible_transcript = vec![transcript_unit(1, OutputKind::Assistant, false)];
+        collapsed.unread_output_count = Some(1);
+        assert!(unread_divider_color_runs(&collapsed, divider_color).is_empty());
+
+        let mut empty = make_expanded_interaction_state("portal-unread");
+        empty.unread_output_count = Some(1);
+        assert!(unread_divider_color_runs(&empty, divider_color).is_empty());
+    }
+
+    /// End-to-end through `portal_markdown`: an unread agent turn renders the
+    /// divider, and viewing the tail (count → `None`) clears it locally with no
+    /// adapter round trip.
+    #[test]
+    fn portal_markdown_renders_unread_divider_and_clears_on_tail_view() {
+        let mut state = make_expanded_interaction_state("portal-unread");
+        state.visible_transcript = vec![
+            transcript_unit_text(1, OutputKind::Assistant, "old turn"),
+            transcript_unit_text(2, OutputKind::Assistant, "new turn"),
+        ];
+        state.unread_output_count = Some(1);
+        let md = portal_markdown(&state, None);
+        assert!(
+            md.contains(PORTAL_UNREAD_DIVIDER_LINE),
+            "an unread agent turn must render the in-transcript divider: {md}"
+        );
+
+        state.unread_output_count = None;
+        let cleared = portal_markdown(&state, None);
+        assert!(
+            !cleared.contains(PORTAL_UNREAD_DIVIDER_LINE),
+            "the divider must clear locally when the viewer views the tail: {cleared}"
+        );
+    }
+
+    /// The `unread_divider_color` `PortalVisualTokens` field maps 1:1 from the
+    /// source `PortalPartTokens` channel and is distinct from the ambient unread
+    /// count token so the two affordances can be reskinned separately.
+    #[test]
+    fn portal_visual_tokens_from_part_tokens_maps_unread_divider_color() {
+        let part = tze_hud_config::PortalPartTokens::default();
+        let visual = portal_visual_tokens_from_part_tokens(&part);
+        assert_eq!(visual.unread_divider_color.r, part.unread_divider_color.r);
+        assert_eq!(visual.unread_divider_color.g, part.unread_divider_color.g);
+        assert_eq!(visual.unread_divider_color.b, part.unread_divider_color.b);
+        assert_eq!(visual.unread_divider_color.a, part.unread_divider_color.a);
+        assert_ne!(
+            visual.unread_divider_color, visual.unread_indicator_color,
+            "unread divider and ambient count must be distinct tokens"
+        );
     }
 
     /// Build a minimal `TranscriptUnit` for awaiting-reply tests, varying only
