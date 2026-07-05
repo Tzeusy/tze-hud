@@ -149,11 +149,10 @@ placeholders (`windows-host.example` / `hud-user` / `admin-user` /
 `~/.ssh/hud-ssh-key`); the real values differ per target and live in the
 git-ignored private doc `docs/operations/private/tzehouse-windows.local.md`.
 Read it before running the gate. For the VM, use `hud_vm_env.sh` (above); for
-tzehouse, the private doc maps: file user `hud-user`→`hudbot`, admin user
-`admin-user`→`tzeus`, key `hud-ssh-key`→`~/.ssh/ecdsa_home`, host
-→`tzehouse-windows.parrot-hen.ts.net`. The default shell on tzehouse is
-**cmd.exe** (not PowerShell) — don't chain with `;`; invoke `powershell -Command`
-explicitly when you need it.
+tzehouse, read the real file user, admin user, key, and host from that private
+doc — never inline them into this tracked file (AGENTS.md placeholder contract).
+Note tzehouse's default shell is **cmd.exe** (not PowerShell) — don't chain with
+`;`; invoke `powershell -Command` explicitly when you need it.
 
 Verify key auth for **both** users (Linux), substituting the resolved values:
 
@@ -165,7 +164,7 @@ ssh -o BatchMode=yes -o IdentitiesOnly=yes -i <key> <admin-user>@<host> "whoami"
 Both must succeed. The file user is used for file deployment (SCP). The admin
 user is used for process control (kill, scheduled task trigger) because it owns
 the interactive desktop session. On tzehouse both users authenticate with the
-**same** key (`~/.ssh/ecdsa_home`).
+**same** key (the identity named in the private doc).
 
 ### Step 1: Deploy (SCP via hud-user)
 
