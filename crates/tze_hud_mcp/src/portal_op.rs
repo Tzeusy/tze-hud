@@ -140,6 +140,11 @@ pub enum PortalOp {
         /// key collapse in-place into a single transcript unit rather than
         /// appending. `None` means append (no coalescing).
         coalesce_key: Option<String>,
+        /// Optional question signal: `true` means this output is a question
+        /// awaiting a viewer reply — a core presence semantic, not a chatbot
+        /// affordance. `None`/`false` is the exact pre-existing behavior (no
+        /// cue rendered); this is a backward-compatible opt-in (hud-jip0k).
+        expects_reply: Option<bool>,
         /// One-shot response channel: `Ok(())` on success or a
         /// [`PortalOpRejection`] carrying the stable error code on
         /// validation / auth failure.

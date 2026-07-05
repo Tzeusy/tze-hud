@@ -302,6 +302,23 @@ mod tests {
         }
     }
 
+    /// hud-jip0k: `expects_reply` (the `Question` signal) must appear in the
+    /// `portal_projection_publish` tools/list schema purely by virtue of living
+    /// on `PortalProjectionPublishParams` — the same drift-proof property
+    /// `wait_ms_field_flows_through_from_struct` locks for the sibling tool.
+    #[test]
+    fn expects_reply_field_flows_through_from_struct() {
+        let schema = input_schema("portal_projection_publish");
+        assert!(
+            prop_names(&schema).contains(&"expects_reply".to_string()),
+            "expects_reply must be derived into the inputSchema automatically"
+        );
+        assert!(
+            !required(&schema).contains(&"expects_reply".to_string()),
+            "expects_reply is optional and must not be required"
+        );
+    }
+
     /// Mechanism-level proof (independent of any real tool): adding a field to a
     /// `#[derive(JsonSchema)]` params struct surfaces in the derived inputSchema
     /// with no hand-editing. This is the property that makes schema.rs

@@ -1086,6 +1086,7 @@ impl InProcessPortalDriver {
                 output_kind,
                 content_classification,
                 coalesce_key,
+                expects_reply,
                 reply,
             } => {
                 // Parse the optional snake_case classification strings into the
@@ -1127,6 +1128,7 @@ impl InProcessPortalDriver {
                     content_classification,
                     logical_unit_id,
                     coalesce_key,
+                    expects_reply: expects_reply.unwrap_or(false),
                 };
                 let resp = self
                     .authority
@@ -2272,6 +2274,7 @@ mod tests {
                 content_classification: ContentClassification::Private,
                 logical_unit_id: Some(format!("unit-{ts}")),
                 coalesce_key: None,
+                expects_reply: false,
             },
             "test-caller",
             ts,
@@ -3218,6 +3221,7 @@ mod tests {
             output_kind: None,
             content_classification: None,
             coalesce_key: None,
+            expects_reply: None,
             reply: pub_tx,
         });
 
@@ -3291,6 +3295,7 @@ mod tests {
                 output_kind: None,
                 content_classification: None,
                 coalesce_key: None,
+                expects_reply: None,
                 reply: tx,
             });
         }
@@ -3370,6 +3375,7 @@ mod tests {
             output_kind: None,
             content_classification: None,
             coalesce_key: None,
+            expects_reply: None,
             reply: pub_tx,
         });
         pub_rx
@@ -3448,6 +3454,7 @@ mod tests {
             output_kind: None,
             content_classification: None,
             coalesce_key: None,
+            expects_reply: None,
             reply: pub_tx2,
         });
         let drain2_now_us = PORTAL_UPDATE_RATE_WINDOW_WALL_US * 2 + 1;
@@ -3558,6 +3565,7 @@ mod tests {
                 output_kind: None,
                 content_classification: None,
                 coalesce_key: None,
+                expects_reply: None,
                 reply: pub_tx,
             });
             pub_rx
@@ -3681,6 +3689,7 @@ mod tests {
                 output_kind: None,
                 content_classification: None,
                 coalesce_key: None,
+                expects_reply: None,
                 reply: ptx,
             });
             prx.try_recv()
@@ -3878,6 +3887,7 @@ mod tests {
             output_kind: None,
             content_classification: None,
             coalesce_key: None,
+            expects_reply: None,
             reply: pub_tx,
         });
         pub_rx
@@ -4768,12 +4778,109 @@ mod tests {
             output_kind: Some("status".to_string()),
             content_classification: Some("public".to_string()),
             coalesce_key: Some("ck-1".to_string()),
+            expects_reply: None,
             reply: pub_tx,
         });
         pub_rx
             .try_recv()
             .expect("reply sent synchronously")
             .expect("publish with explicit classification + coalesce_key must be accepted");
+    }
+
+    /// `expects_reply` (the `Question` signal, hud-jip0k) must thread through
+    /// `dispatch_portal_op(PublishOutput)` into the authority: an explicit
+    /// `Some(true)` must round-trip to `true` on the retained transcript unit,
+    /// and an omitted `None` must round-trip to `false` — the exact
+    /// pre-existing behavior for every caller that predates this field.
+    #[test]
+    fn dispatch_publish_threads_expects_reply() {
+        use tze_hud_projection::{ProjectedPortalPolicy, ProjectionBounds};
+
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("test_publish_expects_reply"),
+            drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
+        };
+
+        let (attach_tx, mut attach_rx) =
+            tokio::sync::oneshot::channel::<Result<String, PortalOpRejection>>();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: "question-proj".to_string(),
+            display_name: "Question Projection".to_string(),
+            idempotency_key: None,
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
+            reply: attach_tx,
+        });
+        let owner_token = attach_rx
+            .try_recv()
+            .expect("reply sent synchronously")
+            .expect("attach accepted");
+
+        // Omitted expects_reply — must round-trip to false (backward-compat).
+        let (pub_tx, mut pub_rx) = tokio::sync::oneshot::channel::<Result<(), PortalOpRejection>>();
+        driver.dispatch_portal_op(PortalOp::PublishOutput {
+            projection_id: "question-proj".to_string(),
+            owner_token: owner_token.clone(),
+            output_text: "plain output".to_string(),
+            logical_unit_id: Some("unit-plain".to_string()),
+            output_kind: None,
+            content_classification: None,
+            coalesce_key: None,
+            expects_reply: None,
+            reply: pub_tx,
+        });
+        pub_rx
+            .try_recv()
+            .expect("reply sent synchronously")
+            .expect("publish with omitted expects_reply must be accepted");
+
+        // Explicit expects_reply: Some(true) — must round-trip to true.
+        let (pub_tx, mut pub_rx) = tokio::sync::oneshot::channel::<Result<(), PortalOpRejection>>();
+        driver.dispatch_portal_op(PortalOp::PublishOutput {
+            projection_id: "question-proj".to_string(),
+            owner_token,
+            output_text: "which option do you prefer?".to_string(),
+            logical_unit_id: Some("unit-question".to_string()),
+            output_kind: None,
+            content_classification: None,
+            coalesce_key: None,
+            expects_reply: Some(true),
+            reply: pub_tx,
+        });
+        pub_rx
+            .try_recv()
+            .expect("reply sent synchronously")
+            .expect("publish with expects_reply: Some(true) must be accepted");
+
+        let state = driver
+            .authority_mut()
+            .projected_portal_state("question-proj", &ProjectedPortalPolicy::permit_all())
+            .expect("portal state materializes");
+        assert_eq!(
+            state.visible_transcript.len(),
+            2,
+            "both publishes must append distinct units"
+        );
+        assert!(
+            !state.visible_transcript[0].expects_reply,
+            "omitted expects_reply must round-trip to false"
+        );
+        assert!(
+            state.visible_transcript[1].expects_reply,
+            "expects_reply: Some(true) must round-trip to true"
+        );
     }
 
     /// An unrecognized `content_classification` must be rejected at the driver
@@ -4820,6 +4927,7 @@ mod tests {
             output_kind: None,
             content_classification: Some("top-secret".to_string()),
             coalesce_key: None,
+            expects_reply: None,
             reply: pub_tx,
         });
         let result = pub_rx
@@ -5141,6 +5249,7 @@ mod tests {
             output_kind: None,
             content_classification: None,
             coalesce_key: None,
+            expects_reply: None,
             reply: tx,
         });
         let after = rx.blocking_recv().expect("publish reply must arrive");
@@ -5323,6 +5432,7 @@ mod tests {
             output_kind: None,
             content_classification: None,
             coalesce_key: None,
+            expects_reply: None,
             reply: tx,
         });
         rx.blocking_recv()

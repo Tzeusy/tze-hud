@@ -400,6 +400,12 @@ pub struct PublishOutputRequest {
     pub logical_unit_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coalesce_key: Option<String>,
+    /// Optional question signal (a.k.a. `Question`): `true` marks this output
+    /// as a question awaiting a viewer reply. Defaults to `false` — omitted is
+    /// the exact pre-existing behavior (no cue rendered). Backward-compatible
+    /// opt-in presence semantic (hud-jip0k).
+    #[serde(default)]
+    pub expects_reply: bool,
 }
 
 impl PublishOutputRequest {
@@ -717,6 +723,12 @@ pub struct TranscriptUnit {
     pub logical_unit_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coalesce_key: Option<String>,
+    /// `true` when this unit is a question awaiting a viewer reply
+    /// (hud-jip0k). `#[serde(default)]` so retained/serialized units from
+    /// before this field existed deserialize as `false` — the exact
+    /// pre-existing behavior.
+    #[serde(default)]
+    pub expects_reply: bool,
     pub appended_at_wall_us: u64,
 }
 

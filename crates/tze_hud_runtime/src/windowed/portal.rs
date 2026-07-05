@@ -3511,6 +3511,7 @@ mod tests {
                 content_classification: ContentClassification::Private,
                 logical_unit_id: Some("unit-1".to_string()),
                 coalesce_key: None,
+                expects_reply: false,
             },
             "test-caller",
             100,

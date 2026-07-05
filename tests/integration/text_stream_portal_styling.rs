@@ -135,6 +135,7 @@ fn build_expanded_state(
             content_classification: ContentClassification::Private,
             logical_unit_id: Some(format!("unit-{projection_id}")),
             coalesce_key: None,
+            expects_reply: false,
         },
         "codex-session",
         21,
