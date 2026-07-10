@@ -1067,16 +1067,6 @@ async fn cooperative_projection_resident_grpc_adapter_drives_projected_portal_li
         expect_created_tile(ResidentGrpcPortalCommandKind::CreatePortalTile, created_msg)?;
     adapter.record_created_tile(tile_id.clone());
 
-    let reuse_cmd =
-        adapter.ensure_portal_tile_message(&initial_state, session.next_seq(), now_wall_us())?;
-    assert_eq!(
-        reuse_cmd.kind,
-        ResidentGrpcPortalCommandKind::ReusePortalTile,
-        "reattach/idempotent render should reuse the existing portal tile"
-    );
-    let reuse_msg = send_resident_command(&mut session, reuse_cmd).await?;
-    expect_accepted_mutation(reuse_msg)?;
-
     let published = authority.handle_publish_output(
         PublishOutputRequest {
             envelope: OperationEnvelope {
@@ -1277,7 +1267,7 @@ async fn cooperative_projection_resident_grpc_adapter_drives_projected_portal_li
         );
     }
     assert_eq!(
-        session.sequence, 10,
+        session.sequence, 9,
         "resident portal lifecycle should complete without opening an auxiliary stream"
     );
     Ok(())

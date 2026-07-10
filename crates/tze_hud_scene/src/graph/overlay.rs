@@ -702,13 +702,6 @@ impl SceneGraph {
         Ok(())
     }
 
-    /// Clear the portal surface descriptor for a tile (no-op if unset).
-    pub fn clear_portal_surface(&mut self, tile_id: SceneId) {
-        if self.overlay.portal_surfaces.remove(&tile_id).is_some() {
-            self.version += 1;
-        }
-    }
-
     /// Get the portal surface descriptor for a tile, if any.
     pub fn portal_surface(&self, tile_id: SceneId) -> Option<&PortalSurface> {
         self.overlay.portal_surfaces.get(&tile_id)

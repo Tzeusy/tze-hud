@@ -823,8 +823,13 @@ impl ResidentGrpcPortalAdapter {
         self.config.compact_bounds.y = y;
     }
 
-    /// Create a content-layer portal tile if needed; otherwise publish a reuse
-    /// render into the existing tile.
+    /// Build the one-time `CreatePortalTile` command for a projection that has no
+    /// content-layer tile yet.
+    ///
+    /// Callers (`resident_grpc_bridge`, `projection_authority`) only invoke this
+    /// when `tile_id().is_none()`; once the tile exists, every subsequent render
+    /// goes through [`render_portal_message`](Self::render_portal_message), so
+    /// there is no reuse path here.
     pub fn ensure_portal_tile_message(
         &self,
         state: &ProjectedPortalState,
@@ -832,35 +837,28 @@ impl ResidentGrpcPortalAdapter {
         timestamp_wall_us: u64,
     ) -> Result<ResidentGrpcPortalCommand, ResidentGrpcAdapterError> {
         let started = Instant::now();
-        let (kind, payload) = if self.tile_id.is_some() {
-            (
-                ResidentGrpcPortalCommandKind::ReusePortalTile,
-                session_proto::client_message::Payload::MutationBatch(
-                    self.render_batch(state, timestamp_wall_us)?,
-                ),
-            )
-        } else {
-            (
-                ResidentGrpcPortalCommandKind::CreatePortalTile,
-                session_proto::client_message::Payload::MutationBatch(
-                    session_proto::MutationBatch {
-                        batch_id: new_scene_id_bytes(),
-                        lease_id: self.config.lease_id.clone(),
-                        mutations: vec![proto::MutationProto {
-                            mutation: Some(proto::mutation_proto::Mutation::CreateTile(
-                                proto::CreateTileMutation {
-                                    tab_id: Vec::new(),
-                                    bounds: Some(self.bounds_for_state(state)),
-                                    z_order: self.config.z_order,
-                                },
-                            )),
-                        }],
-                        timing: None,
-                    },
-                ),
-            )
-        };
-        Ok(self.command(kind, sequence, timestamp_wall_us, payload, started))
+        let payload =
+            session_proto::client_message::Payload::MutationBatch(session_proto::MutationBatch {
+                batch_id: new_scene_id_bytes(),
+                lease_id: self.config.lease_id.clone(),
+                mutations: vec![proto::MutationProto {
+                    mutation: Some(proto::mutation_proto::Mutation::CreateTile(
+                        proto::CreateTileMutation {
+                            tab_id: Vec::new(),
+                            bounds: Some(self.bounds_for_state(state)),
+                            z_order: self.config.z_order,
+                        },
+                    )),
+                }],
+                timing: None,
+            });
+        Ok(self.command(
+            ResidentGrpcPortalCommandKind::CreatePortalTile,
+            sequence,
+            timestamp_wall_us,
+            payload,
+            started,
+        ))
     }
 
     /// Render expanded/collapsed projected state into the existing resident
@@ -1242,9 +1240,9 @@ impl ResidentGrpcPortalAdapter {
         // escape hatch. The one-time structural `SetPortalSurface` declaration and
         // the per-render coalescible `UpdatePortalSurfaceState` patch are added by
         // `render_batch_with_surface`. Keeping them out of `render_batch` is
-        // load-bearing: a direct raw-tile caller (e.g. the `ReusePortalTile`
-        // create-path reuse) must never send an `UpdatePortalSurfaceState` before
-        // the surface is declared — the wire session server rejects such a batch
+        // load-bearing: any direct raw-tile caller must never send an
+        // `UpdatePortalSurfaceState` before the surface is declared — the wire
+        // session server rejects such a batch
         // ATOMICALLY (the whole batch), unlike the in-process warn-and-skip path.
 
         Ok(session_proto::MutationBatch {

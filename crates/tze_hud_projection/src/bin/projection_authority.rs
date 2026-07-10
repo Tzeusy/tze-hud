@@ -681,7 +681,7 @@ fn portal_routes_for_demo(
                 "agent_id": agent_id,
                 "requested_capabilities": requested_capabilities,
                 "lease_ttl_ms": lease_ttl_ms,
-                "materialization": "resident_raw_tile",
+                "materialization": "first_class_surface_raw_tile",
                 "replay": "resident_grpc_text_stream_portal",
             })),
             _ => None,
