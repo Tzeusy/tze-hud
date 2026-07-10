@@ -2,7 +2,7 @@
 
 - Date: 2026-06-20
 - Bead: `hud-x24po`
-- Host: `tzehouse-windows.parrot-hen.ts.net:50051`
+- Host: `windows-host.example:50051`
 - HUD: `TzeHudPortalVal`, deployed `tze_hud.toml` (agent-alpha/beta/gamma registered), overlay
 - Auth: dedicated user-test PSK (`MCP_TEST_PSK`) + `--agent-id agent-alpha`
 

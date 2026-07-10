@@ -2,7 +2,7 @@
 
 - Date: 2026-06-20
 - Beads: `hud-gog64.8` (10-min record-only soak), `hud-156qr` (soak acceptance evidence)
-- Host: `tzehouse-windows.parrot-hen.ts.net` (`100.87.181.125`)
+- Host: `windows-host.example` (`198.51.100.125`)
 - HUD: isolated `TzeHud8dht5Media`, enabled config, gRPC 50052 / MCP 9092, PID 32604
 - PSK: dedicated user-test PSK (`MCP_TEST_PSK`); producer matched
 

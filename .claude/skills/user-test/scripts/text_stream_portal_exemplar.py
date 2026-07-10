@@ -1328,6 +1328,8 @@ def windows_diagnostic_input_script(
         "  $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height",
         "  $g = [System.Drawing.Graphics]::FromImage($bmp)",
         "  $g.CopyFromScreen($b.X, $b.Y, 0, 0, $bmp.Size)",
+        "  $dir = Split-Path -Parent $path",
+        "  if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }",
         "  $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)",
         "  $g.Dispose(); $bmp.Dispose()",
         "  Start-Sleep -Milliseconds 120",

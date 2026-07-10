@@ -2,7 +2,7 @@
 
 - Date: 2026-06-20
 - Bead: `hud-i0jdz` (follow-up from `hud-nfl7n`)
-- Host: `tzehouse-windows.parrot-hen.ts.net`, exe `C:\tze_hud\tze_hud.exe` (main, 06-20 build)
+- Host: `windows-host.example`, exe `C:\tze_hud\tze_hud.exe` (main, 06-20 build)
 - Harness: `scripts/ci/windows/windowed-fullscreen-overlay-perf.ps1` (fix `d0df9fd2`)
 - GPU: freed (prod `TzeHudOverlay` stopped) before each run.
 

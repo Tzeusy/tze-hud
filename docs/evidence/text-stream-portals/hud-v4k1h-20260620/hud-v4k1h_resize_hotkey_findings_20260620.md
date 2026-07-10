@@ -2,7 +2,7 @@
 
 - Date: 2026-06-20
 - Beads: `hud-v4k1h`, `hud-sp8l7`
-- Host: `tzehouse-windows.parrot-hen.ts.net:50051`, user-test PSK + `agent-alpha`
+- Host: `windows-host.example:50051`, user-test PSK + `agent-alpha`
 
 ## DEFINITIVE ROOT CAUSE (operator-confirmed reproduction, 2026-06-20)
 
@@ -109,6 +109,9 @@ observation paths both failed for structural reasons:
 ## Artifacts
 
 - `resize-hotkey-transcript.json`, `resize-hotkey-logged-transcript.json`
-- `resize-{baseline,grow,shrink}.png` (desktop-only; demonstrates the GDI-capture
-  limitation, not a resize failure)
+- `resize-{baseline,grow,shrink}.png` — **removed before publish.** The GDI
+  `CopyFromScreen` path captured the full desktop (not the layered overlay), so
+  the images only demonstrated the capture limitation, not a resize outcome, and
+  incidentally included unrelated on-screen content. The `resize-hotkey-*`
+  transcripts above carry the actual resize evidence.
 - `hud-portal-debug.log` (0 bytes — capture limitation)

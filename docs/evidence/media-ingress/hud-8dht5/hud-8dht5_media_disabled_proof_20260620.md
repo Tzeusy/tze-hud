@@ -2,7 +2,7 @@
 
 - Date: 2026-06-20
 - Beads: `hud-8dht5` (host-unreachable blocker), `hud-eqn3m` (prove disabled-start path)
-- Host: `tzehouse-windows.parrot-hen.ts.net` (Tailscale `100.87.181.125`)
+- Host: `windows-host.example` (Tailscale `198.51.100.125`)
 - Driver: `/user-test` skill, `windows_media_ingress_exemplar.py local-producer`
 
 ## Summary
@@ -23,7 +23,7 @@ Branch `origin/agent/hud-eqn3m` adds the regression test
 
 ## Reachability (clears the hud-8dht5 blocker)
 
-- `tailscale ping` → pong 4 ms to `100.87.181.125`.
+- `tailscale ping` → pong 4 ms to `198.51.100.125`.
 - TCP `22`, `9090`, `50051` OPEN; `50052` initially closed (prod HUD does not
   bind the media port) — exactly the pre-proof condition.
 
@@ -50,7 +50,7 @@ Branch `origin/agent/hud-eqn3m` adds the regression test
   "reject_code": "MEDIA_DISABLED",
   "reject_reason": "media ingress is disabled by runtime configuration",
   "expected_reject_code": "MEDIA_DISABLED",
-  "target": "tzehouse-windows.parrot-hen.ts.net:50052",
+  "target": "windows-host.example:50052",
   "zone_name": "media-pip",
   "video_only": true
 }

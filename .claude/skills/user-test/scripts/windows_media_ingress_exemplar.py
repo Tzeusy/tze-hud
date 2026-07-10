@@ -325,7 +325,7 @@ async def run_local_producer(args: argparse.Namespace) -> dict[str, Any]:
         capabilities=["media_ingress", "publish_zone:media-pip", "read_telemetry"],
         initial_subscriptions=["SCENE_TOPOLOGY"],
     ) as client:
-        if expect_reject:
+        if expect_reject is not None:
             # Authenticated admission-rejection proof: the session must establish
             # (PSK accepted) and MediaIngressOpen must be rejected with exactly the
             # expected reject_code. A clean admission is a failure for this lane.

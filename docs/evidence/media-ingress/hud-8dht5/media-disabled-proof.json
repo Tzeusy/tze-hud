@@ -27,7 +27,7 @@
   "rejected_at_unix": 1781954467,
   "sdp_offer_bytes": 711,
   "source_label": "synthetic-color-bars",
-  "target": "tzehouse-windows.parrot-hen.ts.net:50052",
+  "target": "windows-host.example:50052",
   "video_only": true,
   "zone_name": "media-pip"
 }

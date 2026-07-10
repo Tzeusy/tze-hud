@@ -4,13 +4,13 @@
     "tag": "TzeHouse",
     "hostname": "Tzeusy",
     "collected_hostname": "Tzeusy",
-    "target_host": "tzehouse-windows.parrot-hen.ts.net",
+    "target_host": "windows-host.example",
     "gpu": "NVIDIA GeForce RTX 3080",
     "gpu_driver": "32.0.15.9636",
     "os": "Linux 5.15.0-181-generic",
     "is_reference": false
   },
-  "target": "tzehouse-windows.parrot-hen.ts.net:50051",
+  "target": "windows-host.example:50051",
   "doc": "about/heart-and-soul/README.md",
   "phases": "baseline,resize-hotkey",
   "scene_width": 3840.0,
@@ -28,7 +28,7 @@
       "title": "Text Stream Portal live scenario",
       "action": "connect and open resident session",
       "expected_visual": "operator follows JSON step transcript",
-      "target": "tzehouse-windows.parrot-hen.ts.net:50051",
+      "target": "windows-host.example:50051",
       "doc": "about/heart-and-soul/README.md",
       "phases": "baseline,resize-hotkey"
     },
@@ -84,7 +84,7 @@
       "title": "Focus-scoped Ctrl +/- portal resize",
       "action": "focus composer, then inject Ctrl+Equal (grow) and Ctrl+Minus (shrink) with screenshots",
       "expected_visual": "portal grows on Ctrl+Equal and shrinks on Ctrl+Minus; PNGs capture the change",
-      "host": "tzehouse-windows.parrot-hen.ts.net",
+      "host": "windows-host.example",
       "user": "tzeus",
       "action_labels": [
         "focus-composer",
