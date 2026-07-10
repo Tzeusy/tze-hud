@@ -400,6 +400,35 @@ impl SceneGraph {
         Ok(())
     }
 
+    /// Set the lifecycle accent with a full lease + capability gate (checked path).
+    ///
+    /// Mirrors the checked tile-content mutations
+    /// ([`set_tile_root_checked`](Self::set_tile_root_checked),
+    /// [`update_tile_input_mode`](Self::update_tile_input_mode),
+    /// [`set_portal_surface`](Self::set_portal_surface)): namespace isolation, a
+    /// live `require_active_lease`, and `ModifyOwnTiles`. The unchecked
+    /// [`set_tile_lifecycle_accent`](Self::set_tile_lifecycle_accent) only checks
+    /// tile existence, so the in-process portal render-batch path
+    /// (`apply_portal_render_batch_to_scene`) — which bypasses the `apply_batch`
+    /// Stage-1 lease check — could otherwise mutate the accent overlay and bump
+    /// `scene.version` under a safe-mode-suspended (or orphaned/expired) lease,
+    /// escaping lease suspension (hud-a745w). `require_active_lease` accepts only
+    /// the `Active` state, so the lease-grace degraded repaint — which reconnects
+    /// the driver lease to `Active` before rendering (hud-i429x) — still applies,
+    /// exactly matching the sibling `set_tile_root_checked` content paint in the
+    /// same batch.
+    pub fn set_tile_lifecycle_accent_checked(
+        &mut self,
+        tile_id: SceneId,
+        accent: LifecycleAccent,
+        agent_namespace: &str,
+    ) -> Result<(), ValidationError> {
+        let lease_id = self.portal_tile_lease_checked(tile_id, agent_namespace)?;
+        self.require_active_lease(lease_id)?;
+        self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
+        self.set_tile_lifecycle_accent(tile_id, accent)
+    }
+
     /// Clear the lifecycle-affordance accent for a tile (no-op if unset).
     ///
     /// Bumps `scene.version` only when an accent was actually present, so a
@@ -414,6 +443,25 @@ impl SceneGraph {
         {
             self.version += 1;
         }
+    }
+
+    /// Clear the lifecycle accent with a full lease + capability gate (checked path).
+    ///
+    /// The clear-side counterpart to
+    /// [`set_tile_lifecycle_accent_checked`](Self::set_tile_lifecycle_accent_checked):
+    /// a suspended/orphaned/expired lease must not be able to mutate the accent
+    /// overlay (or bump `scene.version`) through the in-process portal render-batch
+    /// path, even to clear it (hud-a745w).
+    pub fn clear_tile_lifecycle_accent_checked(
+        &mut self,
+        tile_id: SceneId,
+        agent_namespace: &str,
+    ) -> Result<(), ValidationError> {
+        let lease_id = self.portal_tile_lease_checked(tile_id, agent_namespace)?;
+        self.require_active_lease(lease_id)?;
+        self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
+        self.clear_tile_lifecycle_accent(tile_id);
+        Ok(())
     }
 
     /// Get the lifecycle-affordance accent for a tile, if any.

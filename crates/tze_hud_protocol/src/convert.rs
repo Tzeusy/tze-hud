@@ -1554,15 +1554,34 @@ pub fn apply_portal_render_batch_to_scene(
                     })
                 });
                 match accent {
+                    // Checked variants enforce the same live-lease + `ModifyOwnTiles`
+                    // gate as the sibling `set_tile_root_checked` content paint in
+                    // this batch (hud-a745w): a suspended/orphaned/expired lease must
+                    // not mutate the accent overlay or bump `scene.version`, so the
+                    // accent cannot escape safe-mode/lease suspension here (this path
+                    // bypasses the `apply_batch` Stage-1 lease check). The lease-grace
+                    // degraded repaint reconnects the driver lease to Active before
+                    // rendering, so it still applies.
                     Some(accent) => {
-                        if let Err(e) = scene.set_tile_lifecycle_accent(tile_id, accent) {
+                        if let Err(e) =
+                            scene.set_tile_lifecycle_accent_checked(tile_id, accent, namespace)
+                        {
                             tracing::warn!(
                                 ?e,
                                 "portal in-process apply: SetTileLifecycleAccent failed"
                             );
                         }
                     }
-                    None => scene.clear_tile_lifecycle_accent(tile_id),
+                    None => {
+                        if let Err(e) =
+                            scene.clear_tile_lifecycle_accent_checked(tile_id, namespace)
+                        {
+                            tracing::warn!(
+                                ?e,
+                                "portal in-process apply: ClearTileLifecycleAccent failed"
+                            );
+                        }
+                    }
                 }
             }
             Some(Mutation::AddNode(an)) => {
