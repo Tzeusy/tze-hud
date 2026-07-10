@@ -136,6 +136,10 @@ impl SceneGraph {
         self.overlay.tile_follow_tail_at_tail.remove(&tile_id);
         self.overlay.tile_unread_counts.remove(&tile_id);
         self.overlay.tile_lifecycle_accents.remove(&tile_id);
+        // hud-iofav: the derived composer hit-region node is dropped with the root
+        // subtree above; prune the tile's composer-interaction overlay + node map.
+        self.overlay.tile_composer_interactions.remove(&tile_id);
+        self.overlay.tile_composer_nodes.remove(&tile_id);
         self.overlay.portal_surfaces.remove(&tile_id);
         self.overlay.drag_active_elements.remove(&tile_id);
         self.overlay.viewer_geometry_locked.remove(&tile_id);

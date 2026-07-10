@@ -453,6 +453,33 @@ fn convert_proto_mutations(
                     }
                 }
             }
+            Some(crate::proto::mutation_proto::Mutation::SetTileComposerInteraction(stci)) => {
+                match bytes_to_scene_id(&stci.tile_id) {
+                    Ok(tile_id) => {
+                        // Absent composer = clear (interaction disabled), mirroring
+                        // the accent's absent-color clear.
+                        let region = stci
+                            .composer
+                            .as_ref()
+                            .map(convert::proto_hit_region_to_scene);
+                        scene_mutations
+                            .push(SceneMutation::SetTileComposerInteraction { tile_id, region });
+                        // No `pending_touch_ids` entry: the composer hit region is
+                        // runtime overlay state, not a published element, so it must
+                        // not bump the tile's element-store `last_published_at`
+                        // (mirrors SetTileLifecycleAccent). The present-gate redraw is
+                        // armed by the version bump in
+                        // `set/clear_tile_composer_interaction` (overlay.rs).
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = stci.tile_id.len(),
+                            "SetTileComposerInteraction{log_suffix}: invalid tile_id length \
+                             (expected 16 bytes); mutation skipped — SDK bug or wire corruption"
+                        );
+                    }
+                }
+            }
             Some(crate::proto::mutation_proto::Mutation::SetPortalSurface(sps)) => {
                 match bytes_to_scene_id(&sps.tile_id) {
                     Ok(tile_id) => {

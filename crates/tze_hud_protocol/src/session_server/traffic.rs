@@ -153,6 +153,15 @@ pub(super) fn classify_inbound_batch(batch: &MutationBatch) -> TrafficClass {
                 // accent above. It must NOT mark the batch Transactional so a
                 // steady-state portal stays on the coalescible path (hud-hwk2m).
                 Mutation::SetTileUnreadCount(_) => {}
+                // Composer interaction hit region — a coalescible content/state
+                // update, exactly like the lifecycle accent and unread count above.
+                // The runtime derives the hit-region scene node from this overlay
+                // state and re-attaches it after each transcript republish, so it
+                // must NOT mark the batch Transactional: that is precisely what a
+                // per-republish composer `AddNode` did, flipping an interaction-
+                // enabled streaming portal off the coalescible path on the hottest
+                // path (hud-mzk74 / hud-iofav).
+                Mutation::SetTileComposerInteraction(_) => {}
                 // Declaring/replacing the first-class portal surface is structural
                 // (identity + parts) — Transactional (RFC 0013 §7.2 promotion).
                 Mutation::SetPortalSurface(_) => return TrafficClass::Transactional,
@@ -247,6 +256,61 @@ mod inbound_tests {
             TrafficClass::StateStream,
             "a portal republish carrying the unread badge count must remain coalescible StateStream"
         );
+    }
+
+    /// hud-iofav: the interaction-path counterpart to the hud-mzk74 guard above.
+    /// An interaction-enabled portal's FULL streaming republish — content
+    /// (`PublishToTile`) + input mode + accent + the composer interaction hit region
+    /// (`SetTileComposerInteraction`) + unread count — must stay StateStream. The
+    /// composer rides coalescible overlay state, never a per-republish `AddNode`, so
+    /// the hottest path (a streaming transcript with an interactive composer) stays
+    /// on the latest-wins coalescible path under freeze/backpressure.
+    #[test]
+    fn interaction_enabled_streaming_republish_stays_state_stream() {
+        use crate::proto::{HitRegionNodeProto, SetTileComposerInteractionMutation};
+        let b = batch(vec![
+            Mutation::PublishToTile(Default::default()),
+            Mutation::UpdateTileInputMode(Default::default()),
+            Mutation::SetTileLifecycleAccent(SetTileLifecycleAccentMutation {
+                tile_id: vec![0u8; 16],
+                color: None,
+                width_px: 4.0,
+            }),
+            Mutation::SetTileComposerInteraction(SetTileComposerInteractionMutation {
+                tile_id: vec![0u8; 16],
+                composer: Some(HitRegionNodeProto {
+                    accepts_composer_input: true,
+                    accepts_pointer: true,
+                    accepts_focus: true,
+                    ..Default::default()
+                }),
+            }),
+            Mutation::SetTileUnreadCount(SetTileUnreadCountMutation {
+                tile_id: vec![0u8; 16],
+                count: 2,
+            }),
+        ]);
+        assert_eq!(
+            classify_inbound_batch(&b),
+            TrafficClass::StateStream,
+            "an interaction-enabled streaming portal republish must remain coalescible \
+             StateStream (composer rides overlay state, not a per-republish AddNode — hud-iofav)"
+        );
+    }
+
+    /// A bare composer-interaction mutation is a pure content/state update →
+    /// StateStream (coalescible), never Transactional. The clear form (absent
+    /// composer) classifies identically.
+    #[test]
+    fn composer_interaction_alone_is_state_stream() {
+        use crate::proto::SetTileComposerInteractionMutation;
+        let b = batch(vec![Mutation::SetTileComposerInteraction(
+            SetTileComposerInteractionMutation {
+                tile_id: vec![0u8; 16],
+                composer: None,
+            },
+        )]);
+        assert_eq!(classify_inbound_batch(&b), TrafficClass::StateStream);
     }
 
     /// A bare unread-count mutation is a pure content update → StateStream.

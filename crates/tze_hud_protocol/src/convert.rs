@@ -45,6 +45,31 @@ pub fn proto_rgba_to_scene(c: &proto::Rgba) -> Rgba {
     Rgba::new(c.r, c.g, c.b, c.a)
 }
 
+/// Convert a protobuf `HitRegionNodeProto` to a scene [`HitRegionNode`].
+///
+/// Shared by the node-tree conversion ([`proto_node_to_scene`]) and the
+/// `SetTileComposerInteraction` composer-spec decode (session-server + in-process
+/// apply paths, hud-iofav), so a composer hit region carried as coalescible
+/// overlay state decodes identically to one carried in a node tree. Missing
+/// `bounds` fall back to the same default as the node path.
+pub fn proto_hit_region_to_scene(hr: &proto::HitRegionNodeProto) -> HitRegionNode {
+    let bounds = hr
+        .bounds
+        .as_ref()
+        .map(proto_rect_to_scene)
+        .unwrap_or(Rect::new(0.0, 0.0, 100.0, 50.0));
+    HitRegionNode {
+        bounds,
+        interaction_id: hr.interaction_id.clone(),
+        accepts_focus: hr.accepts_focus,
+        accepts_pointer: hr.accepts_pointer,
+        auto_capture: hr.auto_capture,
+        release_on_up: hr.release_on_up,
+        accepts_composer_input: hr.accepts_composer_input,
+        ..Default::default()
+    }
+}
+
 /// Convert a protobuf NodeProto to a scene Node.
 pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
     let id = if n.id.is_empty() {
@@ -119,21 +144,7 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
             })
         }
         Some(proto::node_proto::Data::HitRegion(hr)) => {
-            let bounds = hr
-                .bounds
-                .as_ref()
-                .map(proto_rect_to_scene)
-                .unwrap_or(Rect::new(0.0, 0.0, 100.0, 50.0));
-            NodeData::HitRegion(HitRegionNode {
-                bounds,
-                interaction_id: hr.interaction_id.clone(),
-                accepts_focus: hr.accepts_focus,
-                accepts_pointer: hr.accepts_pointer,
-                auto_capture: hr.auto_capture,
-                release_on_up: hr.release_on_up,
-                accepts_composer_input: hr.accepts_composer_input,
-                ..Default::default()
-            })
+            NodeData::HitRegion(proto_hit_region_to_scene(hr))
         }
         Some(proto::node_proto::Data::StaticImage(si)) => {
             let bounds = si
@@ -1492,8 +1503,12 @@ pub fn proto_to_widget_registry_snapshot(
 ///   [`SceneGraph::clear_tile_lifecycle_accent`].
 /// - `SetTileUnreadCount` → [`SceneGraph::set_tile_unread_count`] (the ambient
 ///   jump-to-latest pill badge count; `0` clears it).
-/// - `AddNode` → [`SceneGraph::add_node_to_tile_checked`] (the composer hit
-///   region, present only when interaction is enabled).
+/// - `SetTileComposerInteraction` → [`SceneGraph::set_tile_composer_interaction`]
+///   / [`SceneGraph::clear_tile_composer_interaction`] (the composer hit region as
+///   coalescible overlay state; the scene derives + re-attaches the node under the
+///   tile root after each republish, so an interaction-enabled streaming portal
+///   stays StateStream-coalescible, hud-iofav). `AddNode` is still accepted here
+///   for any other caller, but `render_batch` no longer produces one.
 /// - `SetPortalSurface` → [`SceneGraph::set_portal_surface`] (the one-time
 ///   first-class 8-part surface declaration, hud-rpm9s).
 /// - `UpdatePortalSurfaceState` → [`SceneGraph::update_portal_surface_state`]
@@ -1605,6 +1620,39 @@ pub fn apply_portal_render_batch_to_scene(
                     scene.set_tile_unread_count_checked(tile_id, stuc.count as usize, namespace)
                 {
                     tracing::warn!(?e, "portal in-process apply: SetTileUnreadCount failed");
+                }
+            }
+            Some(Mutation::SetTileComposerInteraction(stci)) => {
+                // Composer interaction hit region (hud-iofav). `composer = None`
+                // clears it (interaction disabled). The runtime stores the spec as
+                // overlay state and derives/re-attaches the hit-region scene node
+                // after each transcript republish — so it never rides a
+                // per-republish `AddNode` (which would flip the batch Transactional,
+                // hud-mzk74). Checked path (matching the sibling accent/unread arms):
+                // a suspended/orphaned/expired or `ModifyOwnTiles`-revoked lease must
+                // not mutate the overlay or bump `scene.version` (hud-a745w).
+                match stci.composer.as_ref() {
+                    Some(hr) => {
+                        let region = proto_hit_region_to_scene(hr);
+                        if let Err(e) =
+                            scene.set_tile_composer_interaction_checked(tile_id, region, namespace)
+                        {
+                            tracing::warn!(
+                                ?e,
+                                "portal in-process apply: SetTileComposerInteraction failed"
+                            );
+                        }
+                    }
+                    None => {
+                        if let Err(e) =
+                            scene.clear_tile_composer_interaction_checked(tile_id, namespace)
+                        {
+                            tracing::warn!(
+                                ?e,
+                                "portal in-process apply: ClearTileComposerInteraction failed"
+                            );
+                        }
+                    }
                 }
             }
             Some(Mutation::AddNode(an)) => {

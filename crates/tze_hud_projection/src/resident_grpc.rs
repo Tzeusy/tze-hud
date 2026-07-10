@@ -1094,15 +1094,13 @@ impl ResidentGrpcPortalAdapter {
             .clone()
             .ok_or(ResidentGrpcAdapterError::MissingPortalTile)?;
 
-        // Generate an explicit root node ID so we can reference it as parent_id
-        // in the composer hit-region AddNodeMutation within the same batch.
-        //
-        // NodeProto.id wire encoding: little-endian UUID bytes (per RFC 0001 §4.1).
-        // AddNodeMutation.parent_id wire encoding: big-endian RFC 4122 bytes.
-        // These two encodings reference the same underlying UUID.
+        // Generate an explicit root node ID (little-endian UUID bytes per RFC 0001
+        // §4.1) so the published transcript root has a stable, inspectable identity.
+        // The composer hit region is no longer parented to it via an in-batch
+        // `AddNode` (see the `SetTileComposerInteraction` mutation below), so no
+        // big-endian parent-id encoding is needed here (hud-iofav).
         let root_uuid = uuid::Uuid::now_v7();
         let root_id_le = root_uuid.to_bytes_le().to_vec();
-        let root_id_be = root_uuid.as_bytes().to_vec();
 
         let mut mutations = vec![
             proto::MutationProto {
@@ -1159,49 +1157,55 @@ impl ResidentGrpcPortalAdapter {
             )),
         });
 
-        // When interaction is enabled, publish a composer hit region as a child
-        // of the portal root so the runtime's ComposerDraftManager can activate.
-        // Without this AddNodeMutation, accepts_composer_input is never true in
-        // any wire-driven scene (is_composer_active() always returns false).
-        if state.interaction_enabled {
-            let composer_bounds = self.local_bounds_for_state(state);
-            let composer_interaction_id = format!("{}-composer", state.portal_id);
-            mutations.push(proto::MutationProto {
-                mutation: Some(proto::mutation_proto::Mutation::AddNode(
-                    proto::AddNodeMutation {
-                        // Clone: the unread-count badge mutation below also needs
-                        // `tile_id` (it is pushed after this composer AddNode).
-                        tile_id: tile_id.clone(),
-                        parent_id: root_id_be,
-                        node: Some(proto::NodeProto {
-                            id: Vec::new(),
-                            data: Some(proto::node_proto::Data::HitRegion(
-                                proto::HitRegionNodeProto {
-                                    bounds: Some(composer_bounds),
-                                    interaction_id: composer_interaction_id,
-                                    accepts_focus: true,
-                                    // accepts_pointer MUST be true for click-to-focus
-                                    // (hud-v4k1h). SceneGraph::hit_test only returns
-                                    // HitResult::NodeHit for HitRegion nodes with
-                                    // accepts_pointer = true; InputProcessor::process_with_focus
-                                    // only acquires keyboard focus on a NodeHit. With this
-                                    // false, a pointer-down on the composer fell through to a
-                                    // bare TileHit, so the portal never gained focus and every
-                                    // keystroke / Ctrl+= resize chord was silently dropped even
-                                    // though the OS delivered it. The three local-render composer
-                                    // sites in windowed/portal.rs already set this true; the
-                                    // wire-driven projection path had diverged.
-                                    accepts_pointer: true,
-                                    auto_capture: false,
-                                    release_on_up: false,
-                                    accepts_composer_input: true,
-                                },
-                            )),
-                        }),
-                    },
-                )),
-            });
-        }
+        // Composer interaction hit region (hud-iofav). A coalescible StateStream
+        // tile-update carrying the composer hit-region spec as per-tile overlay
+        // state — deliberately NOT a per-republish `AddNode`. An `AddNode` marks the
+        // whole batch Transactional (`classify_inbound_batch`), which on an
+        // interaction-enabled streaming portal — the HOTTEST path — defeats
+        // StateStream latest-wins coalescing under freeze/backpressure (hud-mzk74).
+        // Stored as overlay state, the runtime derives the hit-region scene node and
+        // RE-ATTACHES it under the tile root after every `PublishToTile` content
+        // republish (which replaces the whole node tree), so the composer survives
+        // consecutive renders while the batch stays coalescible. The derived node is
+        // a real scene node, so `hit_test`, focus acquisition, and the
+        // `ComposerDraftManager` all operate exactly as with the former `AddNode`.
+        //
+        // Emitted every render so the latest spec coalesces (mirroring the lifecycle
+        // accent + unread count above): `Some(..)` when interaction is enabled, and
+        // an absent composer (`None`) CLEARS it when interaction is disabled — the
+        // enable→disable transition detaches the derived node, exactly like the
+        // redaction-gated accent clear.
+        let composer = if state.interaction_enabled {
+            Some(proto::HitRegionNodeProto {
+                bounds: Some(self.local_bounds_for_state(state)),
+                interaction_id: format!("{}-composer", state.portal_id),
+                accepts_focus: true,
+                // accepts_pointer MUST be true for click-to-focus (hud-v4k1h).
+                // SceneGraph::hit_test only returns HitResult::NodeHit for HitRegion
+                // nodes with accepts_pointer = true; InputProcessor::process_with_focus
+                // only acquires keyboard focus on a NodeHit. With this false, a
+                // pointer-down on the composer falls through to a bare TileHit, so the
+                // portal never gains focus and every keystroke / Ctrl+= resize chord
+                // is silently dropped even though the OS delivered it. Carried through
+                // to the derived scene node unchanged.
+                accepts_pointer: true,
+                auto_capture: false,
+                release_on_up: false,
+                accepts_composer_input: true,
+            })
+        } else {
+            None
+        };
+        mutations.push(proto::MutationProto {
+            mutation: Some(proto::mutation_proto::Mutation::SetTileComposerInteraction(
+                proto::SetTileComposerInteractionMutation {
+                    // Clone: the unread-count badge mutation below also needs
+                    // `tile_id` (it is pushed last, after this composer mutation).
+                    tile_id: tile_id.clone(),
+                    composer,
+                },
+            )),
+        });
 
         // Ambient unread-output count for the jump-to-latest pill badge
         // (hud-hwk2m, portal-chat-grade-affordances §Jump-to-Latest Affordance).
@@ -3337,10 +3341,11 @@ mod tests {
 
     // ── Composer hit region activation (hud-hxe91) ────────────────────────────
 
-    /// render_batch must emit an AddNodeMutation with a HitRegionNodeProto
-    /// carrying accepts_composer_input=true when interaction_enabled is true.
-    /// This is the production path that unblocks is_composer_active() in
-    /// wire-driven scenes.
+    /// render_batch must emit a coalescible `SetTileComposerInteraction` mutation
+    /// carrying a HitRegionNodeProto with accepts_composer_input=true when
+    /// interaction_enabled is true — NOT an `AddNode` (which would flip the batch
+    /// Transactional, hud-mzk74 / hud-iofav). This is the production path that
+    /// unblocks is_composer_active() in wire-driven scenes.
     #[test]
     fn render_batch_emits_composer_hit_region_when_interaction_enabled() {
         let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
@@ -3355,15 +3360,29 @@ mod tests {
             .expect("render_batch must succeed with interaction_enabled");
 
         // Should be 5 mutations: PublishToTile, UpdateTileInputMode,
-        // SetTileLifecycleAccent (always emitted, hud-m48i0), AddNode (composer hit
-        // region), SetTileUnreadCount (always emitted last, hud-hwk2m). `render_batch`
-        // is the pure raw-tile escape hatch — it emits NO first-class surface
-        // mutation (those are added only by `render_batch_with_surface`, hud-rpm9s).
+        // SetTileLifecycleAccent (always emitted, hud-m48i0),
+        // SetTileComposerInteraction (composer hit region, hud-iofav),
+        // SetTileUnreadCount (always emitted last, hud-hwk2m). `render_batch` is the
+        // pure raw-tile escape hatch — it emits NO first-class surface mutation
+        // (those are added only by `render_batch_with_surface`, hud-rpm9s).
         assert_eq!(
             batch.mutations.len(),
             5,
             "interaction_enabled=true must produce PublishToTile + UpdateTileInputMode + \
-             SetTileLifecycleAccent + AddNode (composer hit region) + SetTileUnreadCount"
+             SetTileLifecycleAccent + SetTileComposerInteraction (composer hit region) + \
+             SetTileUnreadCount"
+        );
+        // Crucially, NO structural AddNode — the composer rides coalescible overlay
+        // state so an interaction-enabled streaming publish stays StateStream.
+        assert!(
+            !batch.mutations.iter().any(|m| matches!(
+                &m.mutation,
+                Some(tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
+                    _
+                ))
+            )),
+            "interaction-enabled render must emit NO AddNode (would flip the batch \
+             Transactional — hud-mzk74 / hud-iofav)"
         );
         // No first-class surface mutation on the raw-tile path.
         assert!(
@@ -3376,49 +3395,48 @@ mod tests {
             "render_batch must emit no first-class surface mutation"
         );
 
-        // The fourth mutation must be AddNode with accepts_composer_input=true
-        // (SetTileUnreadCount is pushed last, so the composer stays at index 3).
-        let add_node_mutation = &batch.mutations[3];
-        match &add_node_mutation.mutation {
-            Some(tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(an)) => {
-                assert_eq!(
-                    an.parent_id.len(),
-                    16,
-                    "parent_id must be 16 bytes (big-endian UUID)"
+        // The fourth mutation must be SetTileComposerInteraction carrying the
+        // composer spec (SetTileUnreadCount is pushed last, so the composer stays at
+        // index 3).
+        let composer_mutation = &batch.mutations[3];
+        match &composer_mutation.mutation {
+            Some(
+                tze_hud_protocol::proto::mutation_proto::Mutation::SetTileComposerInteraction(stci),
+            ) => {
+                let hr = stci
+                    .composer
+                    .as_ref()
+                    .expect("interaction-enabled must carry a composer spec");
+                assert!(
+                    hr.accepts_composer_input,
+                    "composer hit region must have accepts_composer_input=true"
                 );
-                let node = an.node.as_ref().expect("AddNode must carry a NodeProto");
-                match &node.data {
-                    Some(tze_hud_protocol::proto::node_proto::Data::HitRegion(hr)) => {
-                        assert!(
-                            hr.accepts_composer_input,
-                            "composer hit region must have accepts_composer_input=true"
-                        );
-                        assert!(
-                            hr.accepts_focus,
-                            "composer hit region must have accepts_focus=true"
-                        );
-                        // hud-v4k1h: click-to-focus requires accepts_pointer=true so
-                        // SceneGraph::hit_test yields a NodeHit that process_with_focus
-                        // can focus. A false here silently breaks pointer focus + typing.
-                        assert!(
-                            hr.accepts_pointer,
-                            "composer hit region must have accepts_pointer=true (click-to-focus)"
-                        );
-                        assert!(
-                            hr.interaction_id.contains("portal-composer-test"),
-                            "interaction_id must contain the portal_id: got '{}'",
-                            hr.interaction_id
-                        );
-                        assert!(
-                            hr.interaction_id.ends_with("-composer"),
-                            "interaction_id must end with '-composer': got '{}'",
-                            hr.interaction_id
-                        );
-                    }
-                    other => panic!("AddNode node data must be HitRegion, got {other:?}"),
-                }
+                assert!(
+                    hr.accepts_focus,
+                    "composer hit region must have accepts_focus=true"
+                );
+                // hud-v4k1h: click-to-focus requires accepts_pointer=true so
+                // SceneGraph::hit_test yields a NodeHit that process_with_focus
+                // can focus. A false here silently breaks pointer focus + typing.
+                assert!(
+                    hr.accepts_pointer,
+                    "composer hit region must have accepts_pointer=true (click-to-focus)"
+                );
+                assert!(
+                    hr.interaction_id.contains("portal-composer-test"),
+                    "interaction_id must contain the portal_id: got '{}'",
+                    hr.interaction_id
+                );
+                assert!(
+                    hr.interaction_id.ends_with("-composer"),
+                    "interaction_id must end with '-composer': got '{}'",
+                    hr.interaction_id
+                );
             }
-            other => panic!("Fourth mutation must be AddNode (composer hit region), got {other:?}"),
+            other => panic!(
+                "Fourth mutation must be SetTileComposerInteraction (composer hit region), \
+                 got {other:?}"
+            ),
         }
     }
 
@@ -3466,23 +3484,26 @@ mod tests {
 
         // The composer hit region (4th mutation) must cover the grown height —
         // proving the body bounds followed the resize, not the config size.
-        let add_node_mutation = &batch.mutations[3];
-        match &add_node_mutation.mutation {
-            Some(tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(an)) => {
-                let node = an.node.as_ref().expect("AddNode must carry a NodeProto");
-                match &node.data {
-                    Some(tze_hud_protocol::proto::node_proto::Data::HitRegion(hr)) => {
-                        let bounds = hr.bounds.as_ref().expect("composer must carry bounds");
-                        assert_eq!(
-                            bounds.height, grown_h,
-                            "composer/body must size to the resized height {grown_h}, got {}",
-                            bounds.height
-                        );
-                    }
-                    other => panic!("AddNode node data must be HitRegion, got {other:?}"),
-                }
+        let composer_mutation = &batch.mutations[3];
+        match &composer_mutation.mutation {
+            Some(
+                tze_hud_protocol::proto::mutation_proto::Mutation::SetTileComposerInteraction(stci),
+            ) => {
+                let hr = stci
+                    .composer
+                    .as_ref()
+                    .expect("composer spec must be present");
+                let bounds = hr.bounds.as_ref().expect("composer must carry bounds");
+                assert_eq!(
+                    bounds.height, grown_h,
+                    "composer/body must size to the resized height {grown_h}, got {}",
+                    bounds.height
+                );
             }
-            other => panic!("Fourth mutation must be AddNode (composer hit region), got {other:?}"),
+            other => panic!(
+                "Fourth mutation must be SetTileComposerInteraction (composer hit region), \
+                 got {other:?}"
+            ),
         }
 
         // Sanity: an Expanded state with NO resized_bounds still uses config height.
@@ -3491,25 +3512,29 @@ mod tests {
         let plain_batch = adapter
             .render_batch(&plain, 0)
             .expect("render_batch must succeed without resized bounds");
-        if let Some(tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(an)) =
-            &plain_batch.mutations[3].mutation
+        if let Some(
+            tze_hud_protocol::proto::mutation_proto::Mutation::SetTileComposerInteraction(stci),
+        ) = &plain_batch.mutations[3].mutation
         {
-            let hr = match &an.node.as_ref().unwrap().data {
-                Some(tze_hud_protocol::proto::node_proto::Data::HitRegion(hr)) => hr,
-                other => panic!("expected HitRegion, got {other:?}"),
-            };
+            let hr = stci
+                .composer
+                .as_ref()
+                .expect("composer spec must be present");
             assert_eq!(
                 hr.bounds.as_ref().unwrap().height,
                 DEFAULT_EXPANDED_H,
                 "without resized_bounds the body must keep the config height"
             );
         } else {
-            panic!("expected AddNode composer mutation");
+            panic!("expected SetTileComposerInteraction composer mutation");
         }
     }
 
-    /// When interaction_enabled is false, render_batch must NOT emit an
-    /// AddNodeMutation for the composer hit region.
+    /// When interaction_enabled is false, render_batch must emit a CLEARING
+    /// `SetTileComposerInteraction` (absent composer) — never an `AddNode` for the
+    /// composer hit region. Emitting the clear every render (mirroring the accent's
+    /// redaction clear) means an enable→disable transition detaches the derived
+    /// composer node while a steady-state disabled portal stays idle (hud-iofav).
     #[test]
     fn render_batch_does_not_emit_composer_hit_region_when_interaction_disabled() {
         let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
@@ -3523,17 +3548,18 @@ mod tests {
             .render_batch(&state, 0)
             .expect("render_batch must succeed");
 
-        // Should be 4 mutations: PublishToTile + UpdateTileInputMode +
-        // SetTileLifecycleAccent (always emitted, hud-m48i0) + SetTileUnreadCount
-        // (always emitted, hud-hwk2m). No AddNode (interaction disabled) and no
-        // first-class surface mutation (`render_batch` is the pure raw-tile escape
-        // hatch, hud-rpm9s).
+        // Should be 5 mutations: PublishToTile + UpdateTileInputMode +
+        // SetTileLifecycleAccent (always emitted, hud-m48i0) +
+        // SetTileComposerInteraction (a CLEAR — absent composer, hud-iofav) +
+        // SetTileUnreadCount (always emitted, hud-hwk2m). No AddNode (interaction
+        // disabled) and no first-class surface mutation (`render_batch` is the pure
+        // raw-tile escape hatch, hud-rpm9s).
         assert_eq!(
             batch.mutations.len(),
-            4,
-            "interaction_enabled=false must produce exactly 4 mutations \
+            5,
+            "interaction_enabled=false must produce exactly 5 mutations \
              (PublishToTile + UpdateTileInputMode + SetTileLifecycleAccent + \
-              SetTileUnreadCount, no AddNode)"
+              SetTileComposerInteraction(clear) + SetTileUnreadCount, no AddNode)"
         );
         assert!(
             !batch.mutations.iter().any(|m| matches!(
@@ -3546,10 +3572,31 @@ mod tests {
             )),
             "interaction_enabled=false must emit no AddNode and no first-class surface mutation"
         );
+        // The composer mutation must be a CLEAR (absent composer spec).
+        let composer_mutation = batch
+            .mutations
+            .iter()
+            .find_map(|m| match &m.mutation {
+                Some(
+                    tze_hud_protocol::proto::mutation_proto::Mutation::SetTileComposerInteraction(
+                        stci,
+                    ),
+                ) => Some(stci),
+                _ => None,
+            })
+            .expect("disabled render must still emit a SetTileComposerInteraction (clear)");
+        assert!(
+            composer_mutation.composer.is_none(),
+            "interaction_enabled=false must clear the composer (absent composer spec)"
+        );
     }
 
-    /// The portal root node must carry an explicit (non-empty) ID so the
-    /// AddNodeMutation can reference it as parent_id in the same batch.
+    /// The portal root node must carry an explicit (non-empty) ID so the published
+    /// transcript root has a stable, inspectable identity. Post-hud-iofav the
+    /// composer hit region is no longer parented to the root via an in-batch
+    /// `AddNode` (it rides `SetTileComposerInteraction` overlay state and the scene
+    /// re-derives the node), so the root id no longer needs a paired big-endian
+    /// parent-id encoding.
     #[test]
     fn portal_node_carries_explicit_root_id() {
         let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
@@ -3571,22 +3618,6 @@ mod tests {
                     16,
                     "portal root NodeProto.id must be 16 bytes (explicit little-endian UUID)"
                 );
-                // The AddNodeMutation's parent_id must match the same UUID (different encoding).
-                // Both are 16 bytes; the relationship is verified by the runtime.
-                // Index 3: SetTileLifecycleAccent occupies index 2 (hud-m48i0).
-                match &batch.mutations[3].mutation {
-                    Some(tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(an)) => {
-                        assert_eq!(an.parent_id.len(), 16, "parent_id must be 16 bytes");
-                        // Verify they're NOT byte-equal (they encode the same UUID
-                        // in different endian orders).
-                        assert_ne!(
-                            root.id, an.parent_id,
-                            "NodeProto.id (little-endian) and parent_id (big-endian) must differ \
-                             for the same UUID — same UUID, different wire encodings"
-                        );
-                    }
-                    other => panic!("Fourth mutation must be AddNode, got {other:?}"),
-                }
             }
             other => panic!("First mutation must be PublishToTile, got {other:?}"),
         }

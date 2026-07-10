@@ -287,6 +287,18 @@ pub enum SceneMutation {
         tile_id: SceneId,
         count: usize,
     },
+    /// Set (or clear) the composer interaction hit region an interaction-enabled
+    /// portal exposes over its host tile (hud-iofav). Coalescible StateStream
+    /// tile-update (RFC 0005 §3.3), mirroring `SetTileLifecycleAccent`: the spec is
+    /// stored as overlay state keyed by `tile_id` and the scene derives a
+    /// hit-region child of the tile root from it, re-attaching that node after each
+    /// transcript republish — so an interaction-enabled portal's streaming publish
+    /// never rides a per-republish `AddNode` (which would flip the batch
+    /// Transactional, hud-mzk74). `region = None` clears it (interaction disabled).
+    SetTileComposerInteraction {
+        tile_id: SceneId,
+        region: Option<HitRegionNode>,
+    },
     // ── Portal surface (RFC 0013 §7.2 promotion; hud-tc153) ───────────────
     /// Declare or replace the first-class portal surface descriptor over a tile.
     ///
@@ -344,6 +356,7 @@ impl SceneMutation {
             SceneMutation::SetScrollOffset { .. } => "SetScrollOffset",
             SceneMutation::SetTileLifecycleAccent { .. } => "SetTileLifecycleAccent",
             SceneMutation::SetTileUnreadCount { .. } => "SetTileUnreadCount",
+            SceneMutation::SetTileComposerInteraction { .. } => "SetTileComposerInteraction",
             SceneMutation::SetPortalSurface { .. } => "SetPortalSurface",
             SceneMutation::UpdatePortalSurfaceState { .. } => "UpdatePortalSurfaceState",
         }
@@ -1013,6 +1026,24 @@ impl SceneGraph {
                 self.set_tile_unread_count_checked(*tile_id, *count, namespace)?;
                 Ok(vec![])
             }
+            // ── Composer interaction hit region (hud-iofav) ──────────────
+            SceneMutation::SetTileComposerInteraction { tile_id, region } => {
+                // Checked path enforces namespace isolation + live lease +
+                // `ModifyOwnTiles`, matching the sibling `SetTileLifecycleAccent`
+                // and `SetTileUnreadCount` arms (hud-a745w): a suspended/orphaned/
+                // expired or capability-revoked lease must not attach the composer
+                // node or bump `scene.version`. The derived hit region is runtime
+                // overlay state, not a published element, so no `pending_touch_ids`
+                // entry — the co-travelling `PublishToTile` content mutation's
+                // repaint carries it.
+                match region {
+                    Some(r) => {
+                        self.set_tile_composer_interaction_checked(*tile_id, r.clone(), namespace)?
+                    }
+                    None => self.clear_tile_composer_interaction_checked(*tile_id, namespace)?,
+                }
+                Ok(vec![])
+            }
             // ── Portal surface (RFC 0013 §7.2 promotion) ─────────────────
             SceneMutation::SetPortalSurface { tile_id, surface } => {
                 // Checked path enforces namespace isolation + live
@@ -1424,6 +1455,222 @@ mod tests {
             scene.tile_lifecycle_accent(tile_id),
             None,
             "accent overlay state must be cleaned up on tile deletion"
+        );
+    }
+
+    /// Build a leased scene with a portal tile at the display origin whose root is
+    /// a TextMarkdown "transcript" node — the shape an interaction-enabled portal
+    /// republishes each streaming render (hud-iofav).
+    #[cfg(test)]
+    fn transcript_scene_with_tile(text: &str) -> (SceneGraph, SceneId) {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let create = make_batch(
+            "agent",
+            vec![SceneMutation::CreateTile {
+                tab_id,
+                namespace: "agent".to_string(),
+                lease_id,
+                bounds: Rect::new(0.0, 0.0, 300.0, 200.0),
+                z_order: 1,
+            }],
+        );
+        let tile_id = scene.apply_batch(&create).created_ids[0];
+        let set_root = make_batch(
+            "agent",
+            vec![SceneMutation::SetTileRoot {
+                tile_id,
+                node: transcript_root(text),
+            }],
+        );
+        assert!(scene.apply_batch(&set_root).applied);
+        (scene, tile_id)
+    }
+
+    #[cfg(test)]
+    fn transcript_root(text: &str) -> Node {
+        Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: text.to_string(),
+                bounds: Rect::new(0.0, 0.0, 300.0, 200.0),
+                font_size_px: 14.0,
+                font_family: FontFamily::default(),
+                color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+                background: None,
+                alignment: TextAlign::default(),
+                overflow: TextOverflow::default(),
+                color_runs: Box::default(),
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    fn composer_region() -> HitRegionNode {
+        HitRegionNode {
+            bounds: Rect::new(0.0, 0.0, 300.0, 200.0),
+            interaction_id: "portal-42-composer".to_string(),
+            accepts_focus: true,
+            accepts_pointer: true,
+            accepts_composer_input: true,
+            ..Default::default()
+        }
+    }
+
+    /// Return the tile root's HitRegion child that accepts composer input, if any.
+    #[cfg(test)]
+    fn composer_child(scene: &SceneGraph, tile_id: SceneId) -> Option<(SceneId, HitRegionNode)> {
+        let root_id = scene.tiles.get(&tile_id)?.root_node?;
+        let root = scene.nodes.get(&root_id)?;
+        for child_id in &root.children {
+            if let Some(child) = scene.nodes.get(child_id) {
+                if let NodeData::HitRegion(hr) = &child.data {
+                    if hr.accepts_composer_input {
+                        return Some((*child_id, hr.clone()));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// The interaction-path regression guard for hud-iofav (the missing counterpart
+    /// to the hud-mzk74 non-interactive tests): a `SetTileComposerInteraction`
+    /// attaches a composer hit-region node under the tile root, and that node —
+    /// with `accepts_composer_input` and click-to-focus `accepts_pointer` — SURVIVES
+    /// consecutive transcript republishes (each `SetTileRoot` replaces the whole
+    /// node tree). The scene re-derives it from overlay state, so the streaming
+    /// render never has to re-send a per-republish `AddNode` (which would flip the
+    /// batch Transactional and defeat StateStream coalescing on the hottest path).
+    #[test]
+    fn composer_interaction_hit_region_survives_consecutive_transcript_republishes() {
+        let (mut scene, tile_id) = transcript_scene_with_tile("render 1");
+
+        // Enable interaction: the composer hit region attaches under the root.
+        let enable = make_batch(
+            "agent",
+            vec![SceneMutation::SetTileComposerInteraction {
+                tile_id,
+                region: Some(composer_region()),
+            }],
+        );
+        assert!(scene.apply_batch(&enable).applied);
+
+        let (composer_id_1, hr1) =
+            composer_child(&scene, tile_id).expect("composer hit region must attach on enable");
+        assert!(
+            hr1.accepts_composer_input,
+            "attached composer must accept composer input"
+        );
+        assert!(
+            hr1.accepts_pointer,
+            "attached composer must accept pointer (click-to-focus, hud-v4k1h)"
+        );
+        assert_eq!(hr1.interaction_id, "portal-42-composer");
+        // Click-to-focus resolves to the composer node via hit_test (the tile sits
+        // at the display origin, so display coords == tile-local coords here).
+        assert_eq!(
+            scene.hit_test(150.0, 100.0),
+            HitResult::NodeHit {
+                tile_id,
+                node_id: composer_id_1,
+                interaction_id: "portal-42-composer".to_string(),
+            },
+            "a click inside the composer must resolve to the composer NodeHit"
+        );
+
+        // Republish the transcript root twice (consecutive streaming renders). Each
+        // republish replaces the whole node tree; the composer must be re-derived.
+        for (i, text) in ["render 2", "render 3"].iter().enumerate() {
+            let republish = make_batch(
+                "agent",
+                vec![SceneMutation::SetTileRoot {
+                    tile_id,
+                    node: transcript_root(text),
+                }],
+            );
+            assert!(scene.apply_batch(&republish).applied);
+
+            // The transcript content updated…
+            let root_id = scene.tiles.get(&tile_id).unwrap().root_node.unwrap();
+            match &scene.nodes.get(&root_id).unwrap().data {
+                NodeData::TextMarkdown(tm) => assert_eq!(&tm.content, text),
+                other => panic!("root must be TextMarkdown after republish, got {other:?}"),
+            }
+
+            // …and the composer hit region SURVIVED, still accepting composer input
+            // and still click-to-focus.
+            let (composer_id, hr) = composer_child(&scene, tile_id)
+                .unwrap_or_else(|| panic!("composer hit region must survive republish {}", i + 2));
+            assert!(
+                hr.accepts_composer_input,
+                "composer must still accept composer input after republish {}",
+                i + 2
+            );
+            assert_eq!(
+                scene.hit_test(150.0, 100.0),
+                HitResult::NodeHit {
+                    tile_id,
+                    node_id: composer_id,
+                    interaction_id: "portal-42-composer".to_string(),
+                },
+                "composer must remain click-to-focus after republish {}",
+                i + 2
+            );
+        }
+
+        // Disable interaction: the derived composer node is detached.
+        let disable = make_batch(
+            "agent",
+            vec![SceneMutation::SetTileComposerInteraction {
+                tile_id,
+                region: None,
+            }],
+        );
+        assert!(scene.apply_batch(&disable).applied);
+        assert!(
+            composer_child(&scene, tile_id).is_none(),
+            "disabling interaction must detach the composer hit region"
+        );
+        assert!(
+            !scene.hit_test(150.0, 100.0).is_node_hit(),
+            "after disable a click must no longer resolve to a composer NodeHit"
+        );
+    }
+
+    /// A `SetTileComposerInteraction` authored by an agent that does NOT own the
+    /// tile must be rejected (lease/namespace gate), leaving no composer node
+    /// attached — mirroring the accent's cross-namespace guard (hud-a745w).
+    #[test]
+    fn set_tile_composer_interaction_rejects_cross_namespace() {
+        let (mut scene, tile_id) = transcript_scene_with_tile("render 1");
+        // A different namespace with its own lease must not attach a composer.
+        let _intruder = scene.grant_lease(
+            "intruder",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let hostile = make_batch(
+            "intruder",
+            vec![SceneMutation::SetTileComposerInteraction {
+                tile_id,
+                region: Some(composer_region()),
+            }],
+        );
+        let result = scene.apply_batch(&hostile);
+        assert!(
+            !result.applied,
+            "cross-namespace composer interaction must be rejected"
+        );
+        assert!(
+            composer_child(&scene, tile_id).is_none(),
+            "a rejected composer interaction must not attach a hit region"
         );
     }
 
