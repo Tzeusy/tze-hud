@@ -647,14 +647,22 @@ pub struct ResidentGrpcPortalAdapter {
     /// produce the draft text + caret + at-capacity visual without any remote
     /// roundtrip.
     composer_display: Option<ComposerDisplayState>,
-    /// Whether the first-class portal surface descriptor has been declared for
-    /// this portal's tile yet (hud-rpm9s). The one-time `SetPortalSurface`
-    /// declaration is structural (Transactional) and must ride exactly one render
-    /// batch — the first one after the tile exists — so subsequent steady-state
-    /// renders stay on the coalescible StateStream path (carrying only the
-    /// `UpdatePortalSurfaceState` lifecycle/display patch). Set by
-    /// [`render_batch_with_surface`](Self::render_batch_with_surface).
-    surface_declared: bool,
+    /// The portal-surface part **topology** last declared for this tile, or
+    /// `None` before the first declaration (hud-rpm9s).
+    ///
+    /// The structural `SetPortalSurface` declaration is Transactional and must
+    /// ride exactly one render batch **per topology** — so steady-state renders
+    /// stay on the coalescible StateStream path (carrying only the
+    /// `UpdatePortalSurfaceState` lifecycle/display patch). But the declared part
+    /// set depends on `(presentation, interaction_enabled)` — an Expanded portal
+    /// declares Header/Transcript/(Composer) while a Collapsed one declares a
+    /// CollapsedCard — so a presentation/interaction transition CHANGES the part
+    /// topology and must **re-declare** (a fresh `SetPortalSurface`); otherwise
+    /// the coalescible patch would flip `display_state` without ever adding the
+    /// matching part (hud-rpm9s review). This tracks the last-declared topology so
+    /// [`render_batch_with_surface`](Self::render_batch_with_surface) re-declares
+    /// only when it actually changes, and coalescibly patches otherwise.
+    declared_topology: Option<(ProjectedPortalPresentation, bool)>,
 }
 
 /// Local composer draft display state cached in the adapter.
@@ -693,7 +701,7 @@ impl ResidentGrpcPortalAdapter {
             last_draft_sequence: 0,
             visual_tokens: PortalVisualTokens::default(),
             composer_display: None,
-            surface_declared: false,
+            declared_topology: None,
         }
     }
 
@@ -713,7 +721,7 @@ impl ResidentGrpcPortalAdapter {
             last_draft_sequence: 0,
             visual_tokens: tokens,
             composer_display: None,
-            surface_declared: false,
+            declared_topology: None,
         }
     }
 
@@ -1240,19 +1248,22 @@ impl ResidentGrpcPortalAdapter {
         })
     }
 
-    /// Build the portal-content batch AND, exactly once per portal, prepend the
-    /// one-time first-class `SetPortalSurface` declaration (hud-rpm9s).
+    /// Build the portal-content batch AND drive the promoted portal through the
+    /// first-class surface API — declaring or coalescibly patching as needed
+    /// (hud-rpm9s).
     ///
     /// This is the migrated render entry point for the cooperative projection
-    /// consumers (the in-process driver and the resident-authority wire loop).
-    /// It drives the promoted portal through the first-class surface API:
-    /// - the FIRST render **prepends** a structural (Transactional)
-    ///   `SetPortalSurface` declaring the governed 8-part descriptor. The
-    ///   declaration already carries the full lifecycle/display state, so no
-    ///   `UpdatePortalSurfaceState` patch is emitted on that first render —
-    ///   avoiding any in-batch declare-then-patch ordering dependency (the wire
-    ///   session server applies a batch atomically);
-    /// - EVERY SUBSEQUENT render **appends** a coalescible (StateStream)
+    /// consumers (the in-process driver and the resident-authority wire loop):
+    /// - when the part **topology** changes — the first render, or a
+    ///   `(presentation, interaction_enabled)` transition that adds/removes parts
+    ///   (e.g. Expanded↔Collapsed swaps Header/Transcript/Composer for a
+    ///   CollapsedCard) — it **prepends** a structural (Transactional)
+    ///   `SetPortalSurface` that re-declares the full descriptor. The declaration
+    ///   already carries the full lifecycle/display state, so NO
+    ///   `UpdatePortalSurfaceState` patch is emitted on that render — avoiding any
+    ///   in-batch declare-then-patch ordering dependency (the wire session server
+    ///   applies a batch atomically);
+    /// - when the topology is unchanged, it **appends** a coalescible (StateStream)
     ///   `UpdatePortalSurfaceState` syncing the surface's lifecycle/display,
     ///   mirroring the `SetTileLifecycleAccent` treatment; a redacted lifecycle
     ///   (`lifecycle_state == None`) encodes UNSPECIFIED = "leave unchanged" so
@@ -1261,6 +1272,10 @@ impl ResidentGrpcPortalAdapter {
     ///   the retained escape hatch — the surface descriptor governs, the raw
     ///   tiles paint.
     ///
+    /// Re-declaration is bounded to genuine topology transitions (profile-swap /
+    /// collapse-expand / interaction toggle), which are infrequent, so the
+    /// steady-state render stays on the coalescible path.
+    ///
     /// Requires `record_created_tile` first (same contract as `render_batch`).
     pub fn render_batch_with_surface(
         &mut self,
@@ -1268,13 +1283,15 @@ impl ResidentGrpcPortalAdapter {
         now_wall_us: u64,
     ) -> Result<session_proto::MutationBatch, ResidentGrpcAdapterError> {
         let mut batch = self.render_batch(state, now_wall_us)?;
-        if !self.surface_declared {
-            // First render: declare the surface (carries full state); no patch.
+        let topology = (state.presentation, state.interaction_enabled);
+        if self.declared_topology != Some(topology) {
+            // First declaration OR a topology-changing transition: (re)declare the
+            // full surface (carries full state); no patch in the same batch.
             let declaration = self.portal_surface_declaration_mutation(state)?;
             batch.mutations.insert(0, declaration);
-            self.surface_declared = true;
+            self.declared_topology = Some(topology);
         } else {
-            // Steady state: coalescible lifecycle/display patch only.
+            // Same topology: coalescible lifecycle/display patch only.
             let tile_id = self
                 .tile_id
                 .clone()
@@ -1294,7 +1311,7 @@ impl ResidentGrpcPortalAdapter {
 
     /// Whether the first-class portal surface has been declared yet (test/inspection).
     pub fn surface_declared(&self) -> bool {
-        self.surface_declared
+        self.declared_topology.is_some()
     }
 
     /// Build the one-time structural `SetPortalSurface` mutation declaring the
@@ -3033,6 +3050,66 @@ mod tests {
             surface.display_state,
             proto::PortalDisplayStateProto::PortalDisplayStateCollapsed as i32,
             "collapsed portal must declare a Collapsed display state"
+        );
+    }
+
+    /// A presentation transition changes the part topology, so
+    /// `render_batch_with_surface` must RE-declare (a fresh `SetPortalSurface`
+    /// carrying the new part set) rather than only patch — otherwise the scene
+    /// would flip `display_state` to Collapsed without ever adding the
+    /// `CollapsedCard` part (hud-rpm9s review).
+    #[test]
+    fn render_batch_with_surface_redeclares_on_presentation_change() {
+        let config = ResidentGrpcPortalConfig::new(vec![8u8; 16]);
+        let mut adapter = ResidentGrpcPortalAdapter::new(config);
+        adapter.record_created_tile(vec![9u8; 16]);
+
+        let expanded = make_expanded_interaction_state("portal-topology");
+        let mut collapsed = make_expanded_interaction_state("portal-topology");
+        collapsed.presentation = ProjectedPortalPresentation::Collapsed;
+
+        let has_set = |b: &session_proto::MutationBatch| {
+            b.mutations
+                .iter()
+                .any(|m| matches!(&m.mutation, Some(M::SetPortalSurface(_))))
+        };
+        let has_patch = |b: &session_proto::MutationBatch| {
+            b.mutations
+                .iter()
+                .any(|m| matches!(&m.mutation, Some(M::UpdatePortalSurfaceState(_))))
+        };
+
+        // 1) First expanded render → declares.
+        let a = adapter.render_batch_with_surface(&expanded, 0).unwrap();
+        assert!(
+            has_set(&a) && !has_patch(&a),
+            "first render declares, no patch"
+        );
+
+        // 2) Same expanded topology → coalescible patch only.
+        let b = adapter.render_batch_with_surface(&expanded, 1).unwrap();
+        assert!(!has_set(&b) && has_patch(&b), "same topology patches only");
+
+        // 3) Collapse → topology changed → RE-declare with the CollapsedCard part.
+        let c = adapter.render_batch_with_surface(&collapsed, 2).unwrap();
+        assert!(
+            has_set(&c) && !has_patch(&c),
+            "presentation change must re-declare (SetPortalSurface), not patch"
+        );
+        let surface = set_portal_surface_of(&c).expect("re-declaration carries a surface");
+        assert!(
+            surface
+                .parts
+                .iter()
+                .any(|p| p.kind == proto::PortalPartKindProto::PortalPartKindCollapsedCard as i32),
+            "re-declared surface must carry the CollapsedCard part"
+        );
+
+        // 4) Same collapsed topology → coalescible patch only.
+        let d = adapter.render_batch_with_surface(&collapsed, 3).unwrap();
+        assert!(
+            !has_set(&d) && has_patch(&d),
+            "steady collapsed topology patches only"
         );
     }
 
