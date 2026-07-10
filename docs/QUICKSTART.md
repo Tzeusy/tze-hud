@@ -1,0 +1,218 @@
+# tze_hud Quickstart — portal as your primary LLM interface
+
+**Goal:** in under 10 minutes, get the tze_hud runtime up and have a fresh
+Claude or Codex session project itself onto your screen as a live text-stream
+portal — so the portal becomes how you watch and talk to the session.
+
+**Doctrine:** this is *cooperative opt-in projection*. The runtime owns the
+screen (placement, timing, composition, permissions); the LLM session
+*chooses* to attach and publish. Nothing is scraped from your terminal.
+
+> Platform note: the steps below are for running the portal on your **own Linux
+> desktop** (a local display server / X or Wayland session). For fullscreen wall
+> displays, overlay mode on Windows, or cross-machine deployment, see the
+> **Cross-Machine Deployment** and **TigerVNC** sections of the top-level
+> [`README.md`](../README.md). A headless CI box cannot open a GUI window.
+
+---
+
+## TL;DR (the one command)
+
+From the repo root (`mayor/rig/`):
+
+```bash
+# Build the runtime once (5–10 min the first time), then bootstrap + launch.
+cargo build --bin tze_hud --release
+scripts/quickstart.sh --window-mode overlay
+```
+
+`quickstart.sh` scaffolds a minimal config, generates a strong PSK, prints the
+**ATTACH INFO** block (MCP URL + credentials + a paste-ready MCP config
+snippet), and launches the runtime. Then jump to
+[Step 4: attach a session](#step-4-attach-an-llm-session).
+
+To see the attach block **without** launching a window (e.g. to wire up your MCP
+client first, or on a headless box):
+
+```bash
+scripts/quickstart.sh --print-attach-info
+```
+
+The rest of this doc is the same flow, step by step, explaining each piece.
+
+---
+
+## Prerequisites
+
+- Linux with a display server (X11 or Wayland) — you need to be able to open a
+  GPU window. Build deps and toolchain are in [`README.md`](../README.md)
+  (§1 Build). In short: `build-essential pkg-config protobuf-compiler`, the X/
+  Wayland `-dev` libs, and Rust 1.88 (pinned in `rust-toolchain.toml`).
+- An LLM client that speaks **MCP over HTTP** and lets you set a bearer header —
+  e.g. Claude Code or Codex with an MCP server entry.
+
+---
+
+## Step 1 — Build the runtime
+
+```bash
+cargo build --bin tze_hud --release
+# → target/release/tze_hud
+```
+
+`tze_hud` is the **canonical runtime binary** (not a demo). It starts the
+windowed compositor plus the gRPC and MCP listeners.
+
+---
+
+## Step 2 — Scaffold config + credentials
+
+You can let `quickstart.sh` do this, or do it by hand.
+
+**Automatic:**
+
+```bash
+scripts/quickstart.sh --print-attach-info
+```
+
+This writes two files in the current directory (both idempotent):
+
+- `tze_hud.toml` — the minimal valid config: `[runtime]` + one default
+  `[[tabs]]`. A text-stream portal renders into that **Main** tab using the
+  runtime's built-in zero-config placement, size, and design-token defaults —
+  no widget wiring is required for session projection.
+- `tze_hud.psk` — a freshly generated strong pre-shared key (`chmod 600`).
+
+**Manual equivalent** (if you prefer):
+
+```bash
+cat > tze_hud.toml <<'TOML'
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name        = "Main"
+default_tab = true
+TOML
+
+export TZE_HUD_PSK="$(openssl rand -hex 24)"
+```
+
+> **Why a config and a non-trivial PSK are mandatory:** canonical startup is
+> *fail-closed*. Launching with no readable config, or with the trivial default
+> PSK `tze-hud-key`, is a hard startup error — by design, so an unconfigured
+> runtime never binds a port. The quickstart script satisfies both for you.
+
+---
+
+## Step 3 — Launch
+
+```bash
+scripts/quickstart.sh --window-mode overlay
+```
+
+or equivalently, by hand:
+
+```bash
+export TZE_HUD_PSK="$(cat tze_hud.psk)"
+export TZE_HUD_MCP_RESIDENT_PRINCIPAL="$TZE_HUD_PSK"   # see the note below
+./target/release/tze_hud \
+  --config tze_hud.toml \
+  --window-mode overlay \
+  --mcp-port 9090 \
+  --grpc-port 50051
+```
+
+> Pass the PSK via the `TZE_HUD_PSK` **environment variable** (as above), not the
+> `--psk` CLI flag. On a multi-user host, argv is world-readable (`ps`,
+> `/proc/<pid>/cmdline`), so a CLI PSK leaks the bearer; the env var is visible
+> only to the process owner.
+
+A window opens. The MCP listener is on `http://127.0.0.1:9090/mcp` (loopback
+only by default — add `--bind-all-interfaces` to expose it on the LAN).
+
+> **The resident-principal rule (this is the one non-obvious bit).** The
+> `portal_projection_*` MCP tools are *Resident* tools. The runtime grants them
+> only to a caller whose bearer matches **both** the configured resident
+> principal **and** the PSK (each compared constant-time). So you must set
+> `TZE_HUD_MCP_RESIDENT_PRINCIPAL` equal to your PSK, and send that same PSK as
+> the MCP `Authorization: Bearer`. `quickstart.sh` exports it for you.
+
+---
+
+## Step 4 — Attach an LLM session
+
+Point your LLM client's MCP config at the runtime (substitute your PSK from
+`tze_hud.psk`):
+
+```json
+{
+  "mcpServers": {
+    "tze-hud-runtime": {
+      "type": "url",
+      "url": "http://127.0.0.1:9090/mcp",
+      "headers": { "Authorization": "Bearer <your PSK>" }
+    }
+  }
+}
+```
+
+Then, inside that session, opt into projection. If your client supports the
+bundled skill, just say **"project this session to the HUD"** — that loads the
+[`hud-projection`](../.claude/skills/hud-projection/SKILL.md) skill. Otherwise
+call the tools directly:
+
+1. `portal_projection_attach` — choose a stable `projection_id`, set
+   `provider_kind` (`claude` / `codex` / `opencode` / `other`) and a
+   `display_name`. **Store the returned `owner_token`** — no other response ever
+   returns it, and it is unrecoverable if lost.
+2. `portal_projection_publish` — publish transcript/output fragments; they render
+   in the portal on screen.
+3. `portal_projection_get_pending_input` / `portal_projection_acknowledge_input`
+   — poll operator-typed input from the HUD and acknowledge each item.
+4. `portal_projection_detach` — clean up when done.
+
+Full per-operation JSON examples:
+[`.claude/skills/hud-projection/references/operation-examples.md`](../.claude/skills/hud-projection/references/operation-examples.md).
+
+You now have a session whose live output is on the screen and that can read
+input typed at the HUD — the portal is your primary interface to it.
+
+---
+
+## Verify it works (no GUI needed)
+
+Confirm the MCP endpoint is reachable and authenticating before debugging the
+UI. A resident tool call should be *accepted* with your PSK and *rejected*
+without it:
+
+```bash
+# Reachable + authorized (expects a normal JSON-RPC result, not an auth error):
+curl -s -X POST http://127.0.0.1:9090/mcp \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $(cat tze_hud.psk)" \
+  -d '{"jsonrpc":"2.0","method":"tools/list","params":{},"id":1}' | head -c 400
+```
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `canonical startup requires a readable config file` | No config resolved. Run from a dir containing `tze_hud.toml`, or pass `--config <path>`. `quickstart.sh` scaffolds one. |
+| `refusing startup with default PSK value "tze-hud-key"` | Set a non-trivial PSK (`--psk` / `TZE_HUD_PSK`). `quickstart.sh` generates one. |
+| Nothing printed on stdout after launch | Structured logs are gated behind the `TZE_HUD_LOG` env filter. Run with `TZE_HUD_LOG=info` to see startup/bind logs. (`quickstart.sh` prints the attach block regardless.) |
+| Projection tool call rejected `CAPABILITY_REQUIRED` | `TZE_HUD_MCP_RESIDENT_PRINCIPAL` is not set equal to the PSK, or the bearer differs from the PSK. Make principal == bearer == PSK. |
+| `No active tab` on the autonomous test VM | Known runtime bug (hud-d5rcd) on the WARP-rendered VM: call MCP `create_tab {"name":"Main"}` once before portal work. Not needed on a normal GPU desktop where `[[tabs]]` materializes. |
+| Window won't open on a headless box | Expected — you need a real display server. Use overlay/fullscreen on a desktop, or the TigerVNC path in `README.md`. |
+
+---
+
+## Where to go next
+
+- **Skill internals & full contract:** [`hud-projection` SKILL](../.claude/skills/hud-projection/SKILL.md)
+- **One-shot zone/widget publishing** (no session lifecycle): the `th-hud-publish` skill
+- **Full config surface** (widgets, agents, profiles): [`app/tze_hud_app/config/production.toml`](../app/tze_hud_app/config/production.toml)
+- **All CLI flags / env vars:** `./target/release/tze_hud --help`
+- **Cross-machine / Windows deployment:** [`README.md`](../README.md)
