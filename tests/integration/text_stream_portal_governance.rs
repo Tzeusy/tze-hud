@@ -16,8 +16,8 @@ use std::sync::Arc;
 use tze_hud_runtime::{
     AttentionBudgetOutcome, AttentionBudgetTracker, ChromeState, ContentClassification,
     EnqueueResult, FreezeQueue, MutationTrafficClass, QueuedMutation, RedactionFrame,
-    RedactionStyle, TileRedactionState, ViewerClass, build_redaction_cmds, collect_diagnostic,
-    hit_regions_enabled, is_tile_redacted,
+    RedactionStyle, TileRedactionState, ViewerClass, build_redaction_cmds, classify_mutation_batch,
+    collect_diagnostic, hit_regions_enabled, is_tile_redacted,
 };
 use tze_hud_scene::{
     Capability, Clock, SceneGraph, SceneId, TestClock, ZONE_TILE_Z_MIN,
@@ -809,14 +809,35 @@ fn safe_mode_suspend_blocks_first_class_surface_mutations_until_resume() {
 
 #[test]
 fn freeze_path_governs_first_class_surface_via_generic_queue() {
-    // `SetPortalSurface` is Transactional (structural declare); it must ride the
-    // same generic freeze queue as any transactional batch and overflow into a
-    // generic backpressure signal — not a portal-specific one.
+    // Derive the traffic class through the REAL classifier rather than hardcoding
+    // it — a hardcoded `Transactional` label would let this test pass even if the
+    // classifier routed `set_portal_surface` as an evictable state-stream (which
+    // would silently drop a surface DECLARATION under freeze pressure). The
+    // classifier is the contract boundary; assert it, then feed its verdict into
+    // the queue.
+    let declare_class = classify_mutation_batch(&["set_portal_surface"]);
+    assert_eq!(
+        declare_class,
+        MutationTrafficClass::Transactional,
+        "SetPortalSurface (structural declare) must classify Transactional so it \
+         is never evicted under freeze pressure"
+    );
+    let patch_class = classify_mutation_batch(&["update_portal_surface_state"]);
+    assert_eq!(
+        patch_class,
+        MutationTrafficClass::StateStream,
+        "UpdatePortalSurfaceState (lifecycle/display patch) must classify \
+         StateStream so it stays on the coalescible path"
+    );
+
+    // `SetPortalSurface` is Transactional; it must ride the same generic freeze
+    // queue as any transactional batch and overflow into a generic backpressure
+    // signal — not a portal-specific one.
     let mut queue = FreezeQueue::new(1);
     let first = queue.enqueue(QueuedMutation {
         batch_id: b"set-portal-surface-1".to_vec(),
         original_batch_id: b"set-portal-surface-1".to_vec(),
-        traffic_class: MutationTrafficClass::Transactional,
+        traffic_class: declare_class,
         coalesce_key: None,
         submitted_at_wall_us: 1,
         payload: b"SetPortalSurface".to_vec(),
@@ -828,7 +849,7 @@ fn freeze_path_governs_first_class_surface_via_generic_queue() {
     let overflow = queue.enqueue(QueuedMutation {
         batch_id: b"set-portal-surface-2".to_vec(),
         original_batch_id: b"set-portal-surface-2".to_vec(),
-        traffic_class: MutationTrafficClass::Transactional,
+        traffic_class: declare_class,
         coalesce_key: None,
         submitted_at_wall_us: 2,
         payload: b"SetPortalSurface".to_vec(),
@@ -846,7 +867,7 @@ fn freeze_path_governs_first_class_surface_via_generic_queue() {
     let queued = coalescing.enqueue(QueuedMutation {
         batch_id: b"update-state-1".to_vec(),
         original_batch_id: b"update-state-1".to_vec(),
-        traffic_class: MutationTrafficClass::StateStream,
+        traffic_class: patch_class,
         coalesce_key: Some(key.clone()),
         submitted_at_wall_us: 3,
         payload: b"lifecycle=Blocked".to_vec(),
@@ -858,7 +879,7 @@ fn freeze_path_governs_first_class_surface_via_generic_queue() {
     let coalesced = coalescing.enqueue(QueuedMutation {
         batch_id: b"update-state-2".to_vec(),
         original_batch_id: b"update-state-2".to_vec(),
-        traffic_class: MutationTrafficClass::StateStream,
+        traffic_class: patch_class,
         coalesce_key: Some(key),
         submitted_at_wall_us: 4,
         payload: b"lifecycle=WaitingForInput".to_vec(),
