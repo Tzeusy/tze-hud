@@ -219,7 +219,13 @@ impl SceneGraph {
     // ─── Clock accessor ──────────────────────────────────────────────────
 
     /// Return the current time in milliseconds from the injected clock.
-    pub(crate) fn now_millis(&self) -> u64 {
+    ///
+    /// Public so callers that stamp lease lifecycle transitions
+    /// (`disconnect_lease`/`reconnect_lease`) use the SAME clock domain the
+    /// grace/TTL checks in `expire_lease`/`expire_leases` compare against — a
+    /// wall-clock value from a different source would make grace bounds
+    /// inconsistent.
+    pub fn now_millis(&self) -> u64 {
         self.clock.now_millis()
     }
 }
