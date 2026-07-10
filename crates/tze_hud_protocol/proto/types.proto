@@ -249,7 +249,37 @@ message MutationProto {
     SetPortalSurfaceMutation    set_portal_surface     = 14;
     UpdatePortalSurfaceStateMutation update_portal_surface_state = 15;
     SetTileUnreadCountMutation  set_tile_unread_count  = 16;
+    SetTileComposerInteractionMutation set_tile_composer_interaction = 17;
   }
+}
+
+// Set (or clear) the composer interaction hit region an interaction-enabled
+// portal exposes over its host tile (hud-iofav).
+//
+// This is a *coalescible StateStream* tile-update (client→server MutationBatch,
+// RFC 0005 §3.3 / §3.1; Four Message Classes "State-stream"), exactly like
+// SetTileLifecycleAccentMutation and SetTileUnreadCountMutation: it reflects the
+// portal's interaction-enabled state and is refreshed each portal drain, never
+// carried as a per-republish structural `AddNode` (which would flip an
+// otherwise-StateStream portal to Transactional and defeat latest-wins coalescing
+// on the HOTTEST path — a streaming transcript with an interactive composer,
+// hud-mzk74 / hud-iofav).
+//
+// The composer spec is stored as runtime overlay state keyed by `tile_id`
+// (mirroring the lifecycle accent and unread count). The runtime derives the
+// composer hit-region scene node from it and RE-ATTACHES that node under the tile
+// root after every `PublishToTile`/`SetTileRoot` content republish — which
+// replaces the whole node tree and would otherwise wipe a child hit-region node.
+// The hit region stays a real scene node so `SceneGraph::hit_test`, focus
+// acquisition, and the `ComposerDraftManager` all operate unchanged; the node is
+// synthesized server-side as a derived consequence of this overlay state, not as
+// an inbound `AddNode`, so the batch stays coalescible.
+//
+// Absent `composer` clears the interaction (interaction disabled) — the derived
+// hit-region node is detached, mirroring the accent's absent-color clear.
+message SetTileComposerInteractionMutation {
+  bytes tile_id = 1;                // 16-byte SceneId of the target tile
+  HitRegionNodeProto composer = 2;  // Composer hit-region spec; absent = clear (interaction disabled)
 }
 
 // Set (or clear) the ambient unread-output count a tile's jump-to-latest pill

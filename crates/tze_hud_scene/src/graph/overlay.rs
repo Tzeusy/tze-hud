@@ -140,6 +140,41 @@ pub struct RuntimeOverlayState {
     /// Ephemeral: skipped during serialization.
     #[serde(skip, default)]
     pub tile_lifecycle_accents: HashMap<SceneId, LifecycleAccent>,
+    /// Runtime-owned composer interaction hit-region specs per tile (hud-iofav).
+    ///
+    /// Set by the [`SceneMutation::SetTileComposerInteraction`] apply path (driven
+    /// by the coalescible StateStream `SetTileComposerInteraction` wire mutation).
+    /// The scene derives a [`crate::types::HitRegionNode`] child of the tile root
+    /// from this spec and RE-ATTACHES it after every `SetTileRoot`/`PublishToTile`
+    /// content republish — which replaces the whole node tree and would otherwise
+    /// wipe a child hit-region node.
+    ///
+    /// Lives here, keyed by tile id, rather than surviving only as a scene node so
+    /// that an interaction-enabled portal's per-render transcript republish never
+    /// has to re-send the composer as a per-republish `AddNode` (which flips the
+    /// batch Transactional and defeats StateStream coalescing on the hottest path —
+    /// a streaming transcript with an interactive composer, hud-mzk74 / hud-iofav).
+    /// The derived hit region stays a real scene node so `hit_test`, focus, and the
+    /// `ComposerDraftManager` operate unchanged — it is synthesized server-side as a
+    /// derived consequence of this overlay, not as an inbound `AddNode`.
+    ///
+    /// [`SceneMutation::SetTileComposerInteraction`]: crate::mutation::SceneMutation::SetTileComposerInteraction
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub tile_composer_interactions: HashMap<SceneId, HitRegionNode>,
+    /// The scene node id currently synthesized for each tile's composer interaction
+    /// (hud-iofav). Maps host tile id → the derived hit-region node's id.
+    ///
+    /// Written by the composer-interaction reattach path
+    /// ([`SceneGraph::ensure_tile_composer_node`]) so a stale derived node can be
+    /// detached before a fresh one is attached (on spec change or root replacement).
+    /// A mapped node that no longer exists in `nodes` (e.g. removed with the old
+    /// root subtree on republish) is treated as absent and rebuilt.
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub tile_composer_nodes: HashMap<SceneId, SceneId>,
     /// First-class text-stream portal surface descriptors, keyed by host tile id
     /// (RFC 0013 §7.2 promotion; hud-tc153).
     ///
@@ -467,6 +502,112 @@ impl SceneGraph {
     /// Get the lifecycle-affordance accent for a tile, if any.
     pub fn tile_lifecycle_accent(&self, tile_id: SceneId) -> Option<LifecycleAccent> {
         self.overlay.tile_lifecycle_accents.get(&tile_id).copied()
+    }
+
+    // ── Composer interaction (hud-iofav) ─────────────────────────────────────
+
+    /// Set (or replace) the composer interaction hit-region spec for a tile
+    /// (latest-wins; coalescible), then reconcile the derived scene node.
+    ///
+    /// The spec is stored as overlay state keyed by `tile_id`; the scene derives a
+    /// [`HitRegionNode`] child of the tile root from it and re-attaches that node
+    /// after every `SetTileRoot`/`PublishToTile` republish (see
+    /// [`ensure_tile_composer_node`](Self::ensure_tile_composer_node)). This keeps
+    /// an interaction-enabled portal's transcript republish coalescible: the
+    /// composer never rides a per-republish `AddNode` (which would flip the batch
+    /// Transactional, hud-mzk74 / hud-iofav).
+    ///
+    /// Bumps `scene.version` only when the stored spec actually changes, so a
+    /// redundant re-publish of the same composer keeps a steady-state portal idle
+    /// (mirroring [`set_tile_lifecycle_accent`](Self::set_tile_lifecycle_accent)).
+    pub fn set_tile_composer_interaction(
+        &mut self,
+        tile_id: SceneId,
+        region: HitRegionNode,
+    ) -> Result<(), ValidationError> {
+        if !self.tiles.contains_key(&tile_id) {
+            return Err(ValidationError::TileNotFound { id: tile_id });
+        }
+        let changed = self.overlay.tile_composer_interactions.get(&tile_id) != Some(&region);
+        if changed {
+            self.overlay
+                .tile_composer_interactions
+                .insert(tile_id, region);
+            // Force a rebuild so the new spec's bounds/flags take effect: the
+            // current derived node (if any) may have been attached from the prior
+            // spec earlier in this same batch (the `PublishToTile` reattach runs
+            // before this mutation).
+            self.detach_tile_composer_node(tile_id);
+        }
+        self.ensure_tile_composer_node(tile_id);
+        if changed {
+            self.version += 1;
+        }
+        Ok(())
+    }
+
+    /// Set the composer interaction with a full lease + capability gate (checked
+    /// path).
+    ///
+    /// Mirrors the checked tile-content mutations
+    /// ([`set_tile_root_checked`](Self::set_tile_root_checked),
+    /// [`set_tile_lifecycle_accent_checked`](Self::set_tile_lifecycle_accent_checked)):
+    /// namespace isolation, a live `require_active_lease`, and `ModifyOwnTiles`. The
+    /// unchecked [`set_tile_composer_interaction`](Self::set_tile_composer_interaction)
+    /// only checks tile existence, so the in-process portal render-batch path — which
+    /// bypasses the `apply_batch` Stage-1 lease check — could otherwise attach the
+    /// composer node and bump `scene.version` under a suspended/orphaned/expired
+    /// lease, escaping lease suspension (hud-a745w).
+    pub fn set_tile_composer_interaction_checked(
+        &mut self,
+        tile_id: SceneId,
+        region: HitRegionNode,
+        agent_namespace: &str,
+    ) -> Result<(), ValidationError> {
+        let lease_id = self.portal_tile_lease_checked(tile_id, agent_namespace)?;
+        self.require_active_lease(lease_id)?;
+        self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
+        self.set_tile_composer_interaction(tile_id, region)
+    }
+
+    /// Clear the composer interaction for a tile, detaching the derived hit-region
+    /// node (no-op if unset).
+    ///
+    /// Bumps `scene.version` only when a spec was actually present, so a
+    /// disable-transition removes the region on screen while a clear with nothing
+    /// stored stays idle (mirroring
+    /// [`clear_tile_lifecycle_accent`](Self::clear_tile_lifecycle_accent)).
+    pub fn clear_tile_composer_interaction(&mut self, tile_id: SceneId) {
+        if self
+            .overlay
+            .tile_composer_interactions
+            .remove(&tile_id)
+            .is_some()
+        {
+            self.detach_tile_composer_node(tile_id);
+            self.version += 1;
+        }
+    }
+
+    /// Clear the composer interaction with a full lease + capability gate (checked
+    /// path) — the clear-side counterpart to
+    /// [`set_tile_composer_interaction_checked`](Self::set_tile_composer_interaction_checked)
+    /// (hud-a745w).
+    pub fn clear_tile_composer_interaction_checked(
+        &mut self,
+        tile_id: SceneId,
+        agent_namespace: &str,
+    ) -> Result<(), ValidationError> {
+        let lease_id = self.portal_tile_lease_checked(tile_id, agent_namespace)?;
+        self.require_active_lease(lease_id)?;
+        self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
+        self.clear_tile_composer_interaction(tile_id);
+        Ok(())
+    }
+
+    /// Get the composer interaction hit-region spec for a tile, if any.
+    pub fn tile_composer_interaction(&self, tile_id: SceneId) -> Option<&HitRegionNode> {
+        self.overlay.tile_composer_interactions.get(&tile_id)
     }
 
     // ── Portal surface (RFC 0013 §7.2 promotion; hud-tc153) ──────────────────

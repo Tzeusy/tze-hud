@@ -451,8 +451,101 @@ impl SceneGraph {
         // untouched. See `reconcile_locked_subtree_to_tile_bounds`.
         self.reconcile_locked_subtree_to_tile_bounds(tile_id, node_id);
 
+        // Re-attach the composer interaction hit region as a derived consequence of
+        // the tile's stored composer-interaction overlay state (hud-iofav). The old
+        // root subtree removal above wiped any prior derived node, so an
+        // interaction-enabled portal's composer would vanish on this republish
+        // without this reattach. Deriving it here — rather than requiring the
+        // adapter to re-send a per-republish `AddNode` — is what keeps the batch
+        // coalescible StateStream on the hottest path (streaming transcript with an
+        // interactive composer, hud-mzk74 / hud-iofav).
+        self.ensure_tile_composer_node(tile_id);
+
         self.version += 1;
         Ok(())
+    }
+
+    /// Reconcile the tile's derived composer hit-region node to its stored
+    /// composer-interaction overlay spec (hud-iofav).
+    ///
+    /// Idempotent: if the tile has a composer spec and the current derived node is
+    /// still valid (exists and is a child of the current root), this is a no-op.
+    /// Otherwise a stale/missing derived node is detached and — when a spec and a
+    /// root are both present — a fresh hit-region node is synthesized and attached
+    /// under the root. Called after each root replacement
+    /// ([`set_tile_root_impl`](Self::set_tile_root_impl)) and by the
+    /// `SetTileComposerInteraction` apply path.
+    ///
+    /// The derived node is a real scene node so `hit_test`, focus acquisition, and
+    /// the `ComposerDraftManager` all operate unchanged.
+    pub(crate) fn ensure_tile_composer_node(&mut self, tile_id: SceneId) {
+        let Some(region) = self
+            .overlay
+            .tile_composer_interactions
+            .get(&tile_id)
+            .cloned()
+        else {
+            // No spec: make sure no stale derived node lingers.
+            self.detach_tile_composer_node(tile_id);
+            return;
+        };
+        let Some(root_id) = self.tiles.get(&tile_id).and_then(|t| t.root_node) else {
+            // No root yet: nothing to attach to. The node is (re)derived when the
+            // next `SetTileRoot`/`PublishToTile` installs a root.
+            self.detach_tile_composer_node(tile_id);
+            return;
+        };
+
+        // Fast path: the current derived node is still valid (present and parented
+        // by the current root) — leave it in place. This makes the second call in a
+        // render batch (the `SetTileComposerInteraction` mutation, after the
+        // `PublishToTile` reattach) a no-op when the spec did not change.
+        if let Some(&current) = self.overlay.tile_composer_nodes.get(&tile_id) {
+            let valid = self.nodes.contains_key(&current)
+                && self
+                    .nodes
+                    .get(&root_id)
+                    .is_some_and(|rn| rn.children.contains(&current));
+            if valid {
+                return;
+            }
+            self.detach_tile_composer_node(tile_id);
+        }
+
+        // Synthesize a fresh hit-region node from the spec and attach it under the
+        // current root.
+        let node_id = SceneId::new();
+        self.nodes.insert(
+            node_id,
+            Node {
+                id: node_id,
+                children: Vec::new(),
+                data: NodeData::HitRegion(region),
+            },
+        );
+        self.hit_region_states
+            .insert(node_id, HitRegionLocalState::new(node_id));
+        if let Some(root) = self.nodes.get_mut(&root_id) {
+            root.children.push(node_id);
+        }
+        self.overlay.tile_composer_nodes.insert(tile_id, node_id);
+    }
+
+    /// Detach and drop the tile's derived composer hit-region node, if any
+    /// (hud-iofav). Removes it from `nodes`, its parent's `children`, the
+    /// hit-region local-state map, and the tile→node mapping. Safe to call when no
+    /// derived node exists (or it was already removed with a prior root subtree).
+    pub(crate) fn detach_tile_composer_node(&mut self, tile_id: SceneId) {
+        let Some(node_id) = self.overlay.tile_composer_nodes.remove(&tile_id) else {
+            return;
+        };
+        self.nodes.remove(&node_id);
+        self.hit_region_states.remove(&node_id);
+        if let Some(root_id) = self.tiles.get(&tile_id).and_then(|t| t.root_node) {
+            if let Some(root) = self.nodes.get_mut(&root_id) {
+                root.children.retain(|c| *c != node_id);
+            }
+        }
     }
 
     pub fn add_node_to_tile(
