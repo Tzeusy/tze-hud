@@ -169,11 +169,11 @@ mod tests {
             (visual.composer_font_size_px - default.composer_font_size_px).abs() < eps,
             "composer_font_size_px mismatch"
         );
-        // Composer at-capacity color must have non-zero alpha (visible)
-        assert!(
-            visual.composer_at_capacity_color.a > 0.0,
-            "composer_at_capacity_color must have non-zero alpha"
-        );
+        // NOTE: the composer at-capacity color is no longer mirrored on
+        // PortalVisualTokens -- it is resolved + applied compositor-side
+        // (`portal.composer.at_capacity_color` -> `composer_draft_base_color`),
+        // and its non-zero-alpha default is asserted in tze_hud_config's
+        // portal_tokens tests (hud-9gyao).
     }
 
     /// Profile override propagates end-to-end through the canonical conversion chain.
