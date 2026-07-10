@@ -277,7 +277,8 @@ pub(super) fn render_startup_banner(
     }
     match mcp_addr {
         Some(addr) => lines.push(format!(
-            "   MCP    : http://{addr}/mcp   (auth: Authorization: Bearer <TZE_HUD_PSK>)"
+            "   MCP    : {}   (auth: Authorization: Bearer <TZE_HUD_PSK>)",
+            mcp_endpoint_url(addr)
         )),
         None => lines.push("   MCP    : disabled".to_string()),
     }
@@ -285,6 +286,157 @@ pub(super) fn render_startup_banner(
         "   attach : invoke the `hud-projection` skill in an LLM session, or run".to_string(),
     );
     lines.push("            scripts/quickstart.sh — see docs/QUICKSTART.md".to_string());
+    lines.push(RULE.to_string());
+    lines.join("\n")
+}
+
+/// The MCP HTTP endpoint URL for a bound/configured address.
+///
+/// Single source of truth for the MCP URL shape, shared by the startup banner
+/// and `--print-attach-info` (`render_attach_info`) so the two can never drift.
+/// This is a pure formatter: it reports `addr` verbatim (the banner deliberately
+/// advertises the genuine bound address, including `0.0.0.0` when all interfaces
+/// were bound). Callers that need a *connectable* client URL should pass an
+/// already-loopback-normalized address (see `connectable_addr`).
+pub(super) fn mcp_endpoint_url(addr: std::net::SocketAddr) -> String {
+    format!("http://{addr}/mcp")
+}
+
+/// Translate an all-interfaces bind address (`0.0.0.0` / `::`) into a
+/// connectable loopback address for a client-facing URL. An all-interfaces bind
+/// includes loopback, so `127.0.0.1` is always reachable; a literal `0.0.0.0`
+/// URL is not something a client can connect to. Non-wildcard addresses pass
+/// through unchanged.
+fn connectable_addr(addr: std::net::SocketAddr) -> std::net::SocketAddr {
+    if addr.ip().is_unspecified() {
+        std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            addr.port(),
+        )
+    } else {
+        addr
+    }
+}
+
+/// Render the human-readable **attach info** block printed by the native
+/// `--print-attach-info` flag (hud-b7c0m).
+///
+/// This is the single source of truth for the attach block: the MCP endpoint
+/// URL, the resident-principal == PSK rule, and a paste-ready MCP client config
+/// JSON snippet. It runs *without starting the runtime*, so it takes the
+/// configured (not yet bound) addresses that the runtime would use.
+///
+/// **Security invariant:** like `render_startup_banner`, this function takes
+/// *only* socket addresses and the config path — never the PSK or any other
+/// credential. The PSK is always a placeholder in the printed snippet, so the
+/// block is provably incapable of leaking a secret (see the unit tests).
+///
+/// A disabled service (`--mcp-port 0` / `--grpc-port 0`) is passed as `None` and
+/// rendered as `disabled`. When MCP is disabled there is nothing to attach to,
+/// so the JSON snippet is omitted with an explanatory line.
+pub fn render_attach_info(
+    mcp_addr: Option<std::net::SocketAddr>,
+    grpc_addr: Option<std::net::SocketAddr>,
+    config_path: Option<&str>,
+) -> String {
+    const RULE: &str =
+        "────────────────────────────────────────────────────────────────────────────";
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(RULE.to_string());
+    lines.push(" tze_hud — ATTACH INFO  (point your LLM session's MCP client here)".to_string());
+    lines.push(RULE.to_string());
+
+    let connectable_mcp = mcp_addr.map(connectable_addr);
+    match mcp_addr {
+        Some(addr) => {
+            lines.push(format!(
+                " MCP endpoint : {}",
+                mcp_endpoint_url(connectable_mcp.expect("mcp_addr is Some"))
+            ));
+            if addr.ip().is_unspecified() {
+                lines.push(format!(
+                    "                (bound all interfaces at {addr}; also reachable on this host's LAN IP)"
+                ));
+            }
+        }
+        None => lines.push(" MCP endpoint : disabled (--mcp-port 0)".to_string()),
+    }
+    match grpc_addr {
+        Some(addr) => lines.push(format!(" gRPC         : {addr}")),
+        None => lines.push(" gRPC         : disabled (--grpc-port 0)".to_string()),
+    }
+    match config_path {
+        Some(path) => lines.push(format!(" config       : {path}")),
+        None => lines.push(" config       : (none resolved — using flag/env defaults)".to_string()),
+    }
+
+    lines.push(String::new());
+    lines.push(
+        " Auth: every MCP request must send the pre-shared key (PSK) as a bearer token:"
+            .to_string(),
+    );
+    lines.push("     Authorization: Bearer <your PSK — the value of TZE_HUD_PSK>".to_string());
+
+    lines.push(String::new());
+    lines.push(" Resident projection (the portal_projection_* tools):".to_string());
+    lines.push(
+        "   The runtime grants the portal_projection_* tools only to a caller whose bearer"
+            .to_string(),
+    );
+    lines.push(
+        "   matches BOTH the configured resident principal AND the PSK. So set the runtime"
+            .to_string(),
+    );
+    lines.push(
+        "   env var TZE_HUD_MCP_RESIDENT_PRINCIPAL EQUAL to your PSK, and send that same PSK"
+            .to_string(),
+    );
+    lines.push(
+        "   as the MCP Authorization: Bearer. PSK auth stays mandatory; this only attaches"
+            .to_string(),
+    );
+    lines.push("   the resident_mcp capability.".to_string());
+    lines.push("   (This command never prints the PSK value itself.)".to_string());
+
+    lines.push(String::new());
+    match connectable_mcp {
+        Some(addr) => {
+            let url = mcp_endpoint_url(addr);
+            lines.push(
+                " Paste-ready MCP client config (e.g. .mcp.json / settings.json):".to_string(),
+            );
+            // PSK is a placeholder — never the real value.
+            for jline in [
+                "   {".to_string(),
+                "     \"mcpServers\": {".to_string(),
+                "       \"tze-hud-runtime\": {".to_string(),
+                "         \"type\": \"url\",".to_string(),
+                format!("         \"url\": \"{url}\","),
+                "         \"headers\": {".to_string(),
+                "           \"Authorization\": \"Bearer <PSK from TZE_HUD_MCP_RESIDENT_PRINCIPAL>\""
+                    .to_string(),
+                "         }".to_string(),
+                "       }".to_string(),
+                "     }".to_string(),
+                "   }".to_string(),
+            ] {
+                lines.push(jline);
+            }
+            lines.push(String::new());
+            lines.push(
+                " Then, in the LLM session, invoke the `hud-projection` skill and 'attach' —"
+                    .to_string(),
+            );
+            lines.push(" see docs/QUICKSTART.md for the full attach walkthrough.".to_string());
+        }
+        None => {
+            lines.push(
+                " MCP is disabled, so there is no endpoint to attach to. Re-run with a non-zero"
+                    .to_string(),
+            );
+            lines.push(" --mcp-port (default 9090) to expose the MCP client surface.".to_string());
+        }
+    }
     lines.push(RULE.to_string());
     lines.join("\n")
 }
@@ -327,6 +479,88 @@ mod tests {
         assert!(banner.contains("MCP    : disabled"));
         // Attach hint is always present so the runtime stays self-describing.
         assert!(banner.contains("hud-projection"));
+    }
+
+    /// The attach-info block must carry the discovery surface (MCP URL, the
+    /// resident-principal == PSK rule, and a paste-ready JSON snippet) and must
+    /// never contain a configured PSK value — the snippet always uses a
+    /// placeholder.
+    #[test]
+    fn attach_info_carries_discovery_surface_without_psk() {
+        let psk = "SUPER-SECRET-PSK-2f9c1a7e-do-not-leak";
+        let mcp: std::net::SocketAddr = "127.0.0.1:9090".parse().unwrap();
+        let grpc: std::net::SocketAddr = "127.0.0.1:50051".parse().unwrap();
+        let info = render_attach_info(Some(mcp), Some(grpc), Some("/etc/tze_hud/config.toml"));
+
+        assert!(
+            !info.contains(psk),
+            "attach info must not leak the PSK:\n{info}"
+        );
+        assert!(
+            info.contains("http://127.0.0.1:9090/mcp"),
+            "MCP endpoint URL missing:\n{info}"
+        );
+        assert!(
+            info.contains("127.0.0.1:50051"),
+            "gRPC addr missing:\n{info}"
+        );
+        assert!(
+            info.contains("/etc/tze_hud/config.toml"),
+            "config path missing:\n{info}"
+        );
+        assert!(
+            info.contains("TZE_HUD_MCP_RESIDENT_PRINCIPAL"),
+            "resident-principal rule missing:\n{info}"
+        );
+        assert!(
+            info.contains("Authorization: Bearer") || info.contains("\"Authorization\""),
+            "bearer auth guidance missing:\n{info}"
+        );
+        assert!(
+            info.contains("\"mcpServers\""),
+            "JSON snippet missing:\n{info}"
+        );
+        assert!(
+            info.contains("<PSK from TZE_HUD_MCP_RESIDENT_PRINCIPAL>"),
+            "JSON snippet must use a PSK placeholder:\n{info}"
+        );
+    }
+
+    /// An all-interfaces bind (`0.0.0.0`) is not a connectable client URL, so the
+    /// snippet substitutes loopback while the info block still discloses the
+    /// wildcard bind.
+    #[test]
+    fn attach_info_all_interfaces_uses_connectable_loopback_url() {
+        let mcp: std::net::SocketAddr = "0.0.0.0:9090".parse().unwrap();
+        let info = render_attach_info(Some(mcp), None, None);
+        assert!(
+            info.contains("http://127.0.0.1:9090/mcp"),
+            "wildcard bind must yield a loopback client URL:\n{info}"
+        );
+        assert!(
+            info.contains("all interfaces"),
+            "wildcard bind should be disclosed:\n{info}"
+        );
+        assert!(
+            !info.contains("http://0.0.0.0:9090/mcp"),
+            "must not print a non-connectable 0.0.0.0 client URL:\n{info}"
+        );
+    }
+
+    /// When MCP is disabled, the block says so and omits the (useless) JSON
+    /// snippet rather than advertising a bogus endpoint.
+    #[test]
+    fn attach_info_mcp_disabled_omits_snippet() {
+        let info = render_attach_info(None, None, None);
+        assert!(info.contains("MCP endpoint : disabled"), "info:\n{info}");
+        assert!(
+            !info.contains("\"mcpServers\""),
+            "disabled MCP must not emit a client snippet:\n{info}"
+        );
+        assert!(
+            info.contains("--mcp-port"),
+            "should hint how to enable MCP:\n{info}"
+        );
     }
 
     /// When `grpc_port == 0`, `start_network_services` must return `None` for
