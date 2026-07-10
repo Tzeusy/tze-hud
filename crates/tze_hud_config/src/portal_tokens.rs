@@ -672,8 +672,12 @@ mod defaults {
     // Spatial-rhythm + transcript-measure defaults.
     /// Content inset — matches the composer text margin the compositor uses today.
     pub const SPACING_CONTENT_INSET_PX: &str = "6";
-    /// Header strip height.
-    pub const SPACING_HEADER_HEIGHT_PX: &str = "28";
+    /// Header strip height. Matches the header/drag-band height the compositor
+    /// uses today (the declared surface `Header` part drives the draggable header
+    /// band via `SceneGraph::portal_header_band_anchors`, so this default MUST
+    /// equal `PORTAL_HEADER_DRAG_BAND_PX_DEFAULT` = 52 to keep the band unchanged;
+    /// hud-zn6yw). `portal.header.drag_band_px` remains the raw-tile-fallback knob.
+    pub const SPACING_HEADER_HEIGHT_PX: &str = "52";
     /// Inter-section vertical gap.
     pub const SPACING_SECTION_GAP_PX: &str = "8";
     /// Transcript measure cap — `0` = unbounded (wrap to full width, today's behavior).
