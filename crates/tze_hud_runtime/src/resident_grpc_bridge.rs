@@ -652,7 +652,7 @@ impl ResidentGrpcPortalBridge {
         let (message, batch_id) = {
             let adapter = self
                 .adapters
-                .get(projection_id)
+                .get_mut(projection_id)
                 .ok_or(ResidentGrpcBridgeError::MissingCreatedTile)?;
             let cmd = adapter
                 .render_portal_message(state, seq, ts)

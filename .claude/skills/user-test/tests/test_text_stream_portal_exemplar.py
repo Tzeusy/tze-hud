@@ -2269,5 +2269,93 @@ class CadencePresentAckTests(unittest.TestCase):
         )
 
 
+class FirstClassPortalSurfaceTests(unittest.TestCase):
+    """The exemplar drives the promoted portal through the first-class surface
+    API (SetPortalSurface + UpdatePortalSurfaceState) in addition to raw tiles
+    (hud-rpm9s)."""
+
+    def setUp(self) -> None:
+        import types_pb2
+
+        self.types_pb2 = types_pb2
+        # Reset the one-shot declaration guard so each test starts undeclared.
+        portal._PORTAL_SURFACE_DECLARED = False
+
+    def test_surface_declares_eight_distinct_parts_and_identity(self) -> None:
+        t = self.types_pb2
+        surface = portal.build_portal_surface_proto("Exemplar Portal")
+        kinds = [p.kind for p in surface.parts]
+        self.assertEqual(len(kinds), 8, "must declare all eight named parts")
+        self.assertEqual(len(set(kinds)), 8, "no duplicate part kind")
+        for expected in (
+            t.PORTAL_PART_KIND_FRAME,
+            t.PORTAL_PART_KIND_HEADER,
+            t.PORTAL_PART_KIND_COMPOSER,
+            t.PORTAL_PART_KIND_TRANSCRIPT,
+            t.PORTAL_PART_KIND_DIVIDER,
+            t.PORTAL_PART_KIND_COLLAPSED_CARD,
+            t.PORTAL_PART_KIND_CAPTURE_BACKSTOP,
+            t.PORTAL_PART_KIND_GESTURE_SHIELD,
+        ):
+            self.assertIn(expected, kinds)
+        self.assertEqual(surface.identity.session_id, portal.PORTAL_SURFACE_SESSION_ID)
+        self.assertEqual(surface.identity.display_name, "Exemplar Portal")
+        self.assertEqual(
+            surface.identity.peer_class, t.PORTAL_PEER_CLASS_RESIDENT_LLM
+        )
+        # Parts are derived (node empty); the raw tiles paint the pixels.
+        for part in surface.parts:
+            self.assertEqual(part.node, b"", "declared parts must be derived (node empty)")
+            self.assertGreaterEqual(part.bounds.width, 0.0)
+            self.assertGreaterEqual(part.bounds.height, 0.0)
+
+    def test_state_patch_leaves_unspecified_fields_unchanged(self) -> None:
+        t = self.types_pb2
+        m = portal.update_portal_surface_state_mutation(
+            b"\x00" * 16, display_state=t.PORTAL_DISPLAY_STATE_COLLAPSED
+        )
+        self.assertEqual(m.WhichOneof("mutation"), "update_portal_surface_state")
+        ups = m.update_portal_surface_state
+        # Unset lifecycle stays UNSPECIFIED = "leave unchanged" (coalescible).
+        self.assertEqual(ups.lifecycle, t.PORTAL_LIFECYCLE_STATE_UNSPECIFIED)
+        self.assertEqual(ups.display_state, t.PORTAL_DISPLAY_STATE_COLLAPSED)
+
+    def test_drive_declares_once_then_only_patches(self) -> None:
+        t = self.types_pb2
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.batches: list[list] = []
+
+            async def submit_mutation_batch(self, lease_id, mutations):
+                self.batches.append(list(mutations))
+
+        tiles = mock.Mock()
+        tiles.frame = b"\x01" * 16
+        client = FakeClient()
+
+        async def run() -> None:
+            # First drive with declare=True → SetPortalSurface + patch.
+            await portal.drive_portal_surface(
+                client, b"\x02" * 16, tiles, "Portal", declare=True
+            )
+            # Second drive with declare=True again → NO re-declaration, patch only.
+            await portal.drive_portal_surface(
+                client, b"\x02" * 16, tiles, "Portal", declare=True
+            )
+
+        asyncio.run(run())
+
+        self.assertEqual(len(client.batches), 2)
+        # First drive declares the surface ONLY — the descriptor carries full
+        # state, so no same-batch patch (avoids an in-batch ordering dependency;
+        # the wire applies a batch atomically).
+        first_kinds = [mm.WhichOneof("mutation") for mm in client.batches[0]]
+        self.assertEqual(first_kinds, ["set_portal_surface"])
+        # Second drive patches ONLY — surface declared exactly once.
+        second_kinds = [mm.WhichOneof("mutation") for mm in client.batches[1]]
+        self.assertEqual(second_kinds, ["update_portal_surface_state"])
+
+
 if __name__ == "__main__":
     unittest.main()

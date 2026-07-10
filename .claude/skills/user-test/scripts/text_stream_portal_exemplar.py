@@ -2662,6 +2662,27 @@ async def publish_portal(
             client, lease_id, tiles.minimized_icon, icon_root, icon_children, mutation_lock,
         )
 
+    # Drive the promoted portal through the first-class surface API (hud-rpm9s):
+    # declare the governed 8-part surface once (on tile setup), then patch its
+    # collapse/lifecycle state on every publish. Additive — the raw-tile assembly
+    # above stays the retained escape hatch (it still paints the pixels). Collapse
+    # state is read from the exemplar's existing `PORTAL_STATUS_STATE["minimized"]`
+    # so the six-axis profile-swap / window-mgmt phases reflect through the
+    # first-class surface too.
+    surface_display_state = (
+        types_pb2.PORTAL_DISPLAY_STATE_COLLAPSED
+        if PORTAL_STATUS_STATE.get("minimized")
+        else types_pb2.PORTAL_DISPLAY_STATE_EXPANDED
+    )
+    await drive_portal_surface(
+        client,
+        lease_id,
+        tiles,
+        title,
+        declare=include_tile_setup,
+        display_state=surface_display_state,
+    )
+
 
 async def create_portal_tiles(
     client: HudClient,
@@ -2730,6 +2751,174 @@ async def create_portal_tiles(
         tab_width=tab_width,
         tab_height=tab_height,
     )
+
+
+# ── First-class portal surface (RFC 0013 §7.2 promotion; hud-rpm9s) ───────────
+#
+# The exemplar has always assembled the portal from raw tiles (SolidColor /
+# TextMarkdown / HitRegion). Post-promotion it ALSO declares the governed
+# first-class `PortalSurface` (SetPortalSurface + UpdatePortalSurfaceState),
+# driving the promoted surface through the first-class API while the raw six-tile
+# assembly stays as the retained escape hatch (it still paints the pixels).
+#
+# Every declared part carries surface-local geometry (relative to the host
+# `frame` tile) and leaves `node` empty ("derived / not materialized"): the
+# parts span SEPARATE raw tiles (input_scroll/output_scroll/…), which the scene's
+# `set_portal_surface` node-ownership check would reject against the single host
+# tile, so — exactly like the resident cooperative adapter — the descriptor
+# governs and the raw tiles paint. The part→raw-tile cross-map matches the
+# `PortalPartKindProto` comments in types.proto.
+
+# Session id declared as the portal surface's stable identity (RFC 0013 §2.1).
+PORTAL_SURFACE_SESSION_ID = "text-stream-portal-exemplar"
+
+# One-shot guard so the structural (Transactional) `SetPortalSurface` declaration
+# rides exactly one batch; subsequent renders patch via the coalescible
+# `UpdatePortalSurfaceState`, mirroring the resident adapter's `surface_declared`.
+_PORTAL_SURFACE_DECLARED = False
+
+
+def _portal_part(
+    kind: int, x: float, y: float, w: float, h: float, node: bytes = b""
+) -> "types_pb2.PortalPartProto":
+    return types_pb2.PortalPartProto(
+        kind=kind,
+        bounds=types_pb2.Rect(x=float(x), y=float(y), width=float(w), height=float(h)),
+        node=node,
+    )
+
+
+def build_portal_surface_proto(
+    display_name: str,
+    *,
+    lifecycle: int = types_pb2.PORTAL_LIFECYCLE_STATE_ACTIVE,
+    display_state: int = types_pb2.PORTAL_DISPLAY_STATE_EXPANDED,
+    session_id: str = PORTAL_SURFACE_SESSION_ID,
+) -> "types_pb2.PortalSurfaceProto":
+    """Build the first-class 8-part `PortalSurfaceProto` for the two-pane layout.
+
+    Bounds are surface-local (relative to the host `frame` tile). `node` is left
+    empty for every part — the raw-tile assembly is the retained escape hatch
+    that paints the content; this descriptor is the governed surface.
+    """
+    input_rect, output_rect = portal_pane_rects()
+    pane_y = HEADER_H + DIVIDER_H
+    pane_h = PORTAL_H - pane_y - FOOTER_H - DIVIDER_H
+    input_pane_w, _output_pane_w = partition_pane_widths(PORTAL_W, INPUT_PANE_W)
+    divider_x = input_pane_w
+    parts = [
+        _portal_part(types_pb2.PORTAL_PART_KIND_FRAME, 0.0, 0.0, PORTAL_W, PORTAL_H),
+        _portal_part(types_pb2.PORTAL_PART_KIND_HEADER, 0.0, 0.0, PORTAL_W, HEADER_H),
+        _portal_part(
+            types_pb2.PORTAL_PART_KIND_COMPOSER,
+            input_rect.x,
+            input_rect.y,
+            input_rect.w,
+            input_rect.h,
+        ),
+        _portal_part(
+            types_pb2.PORTAL_PART_KIND_TRANSCRIPT,
+            output_rect.x,
+            output_rect.y,
+            output_rect.w,
+            output_rect.h,
+        ),
+        _portal_part(
+            types_pb2.PORTAL_PART_KIND_DIVIDER, divider_x, pane_y, PANE_DIVIDER_W, pane_h
+        ),
+        _portal_part(
+            types_pb2.PORTAL_PART_KIND_COLLAPSED_CARD,
+            0.0,
+            0.0,
+            MINIMIZED_ICON_SIZE,
+            MINIMIZED_ICON_SIZE,
+        ),
+        _portal_part(
+            types_pb2.PORTAL_PART_KIND_CAPTURE_BACKSTOP, 0.0, 0.0, PORTAL_W, PORTAL_H
+        ),
+        _portal_part(
+            types_pb2.PORTAL_PART_KIND_GESTURE_SHIELD, 0.0, 0.0, PORTAL_W, PORTAL_H
+        ),
+    ]
+    return types_pb2.PortalSurfaceProto(
+        identity=types_pb2.PortalIdentityProto(
+            session_id=session_id,
+            display_name=display_name,
+            peer_class=types_pb2.PORTAL_PEER_CLASS_RESIDENT_LLM,
+        ),
+        lifecycle=lifecycle,
+        display_state=display_state,
+        parts=parts,
+    )
+
+
+def set_portal_surface_mutation(
+    frame_tile_id: bytes, surface: "types_pb2.PortalSurfaceProto"
+) -> "types_pb2.MutationProto":
+    """Structural (Transactional) declaration of the first-class surface over the
+    host `frame` tile (requires the `modify_own_tiles` capability the exemplar
+    already holds)."""
+    return types_pb2.MutationProto(
+        set_portal_surface=types_pb2.SetPortalSurfaceMutation(
+            tile_id=frame_tile_id, surface=surface
+        )
+    )
+
+
+def update_portal_surface_state_mutation(
+    frame_tile_id: bytes,
+    *,
+    lifecycle: int = types_pb2.PORTAL_LIFECYCLE_STATE_UNSPECIFIED,
+    display_state: int = types_pb2.PORTAL_DISPLAY_STATE_UNSPECIFIED,
+) -> "types_pb2.MutationProto":
+    """Coalescible (StateStream) lifecycle/display patch. UNSPECIFIED leaves a
+    field unchanged, so a frequent collapse/lifecycle transition never re-sends
+    the whole surface."""
+    return types_pb2.MutationProto(
+        update_portal_surface_state=types_pb2.UpdatePortalSurfaceStateMutation(
+            tile_id=frame_tile_id, lifecycle=lifecycle, display_state=display_state
+        )
+    )
+
+
+async def drive_portal_surface(
+    client: HudClient,
+    lease_id: bytes,
+    tiles: "PortalTiles",
+    display_name: str,
+    *,
+    declare: bool,
+    display_state: int = types_pb2.PORTAL_DISPLAY_STATE_EXPANDED,
+    lifecycle: int = types_pb2.PORTAL_LIFECYCLE_STATE_ACTIVE,
+) -> None:
+    """Drive the promoted portal through the first-class surface API.
+
+    On the FIRST call (`declare=True` and not yet declared) send ONLY the one-time
+    structural `SetPortalSurface` — its descriptor already carries the full
+    lifecycle/display state, so no same-batch patch is needed (this avoids an
+    in-batch declare-then-patch ordering dependency; the wire session server
+    applies a batch atomically). On every SUBSEQUENT call send ONLY the
+    coalescible `UpdatePortalSurfaceState` reflecting the current collapse/lifecycle
+    state. Additive to the raw-tile publish — the tiles still paint the content.
+    """
+    global _PORTAL_SURFACE_DECLARED
+    if declare and not _PORTAL_SURFACE_DECLARED:
+        surface = build_portal_surface_proto(
+            display_name, lifecycle=lifecycle, display_state=display_state
+        )
+        _PORTAL_SURFACE_DECLARED = True
+        await client.submit_mutation_batch(
+            lease_id, [set_portal_surface_mutation(tiles.frame, surface)]
+        )
+    elif _PORTAL_SURFACE_DECLARED:
+        await client.submit_mutation_batch(
+            lease_id,
+            [
+                update_portal_surface_state_mutation(
+                    tiles.frame, lifecycle=lifecycle, display_state=display_state
+                )
+            ],
+        )
 
 
 def register_tile_scroll_mutation(
