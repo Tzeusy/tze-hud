@@ -76,16 +76,50 @@ impl SceneGraph {
     }
 
     /// `(anchor_tile_id, header_band_rect)` for every text-stream portal frame on
-    /// the scene — the top `band_h` strip of each portal frame's bounds.
+    /// the scene.
     ///
-    /// A "portal" is any lease group with at least one scrollable member (the
-    /// same gate `translate_portal_group_on_drag` uses); a single scrollable tile
-    /// qualifies as a degenerate one-member portal and gets the band too. The
-    /// band belongs to the frame/anchor tile ONLY, never the panes/backstop.
+    /// The band is resolved off the **first-class portal surface** whenever one is
+    /// declared for a tile: the declared `Header` part carries real surface-local
+    /// bounds (even when its backing `node` is empty), so hit-testing keys off the
+    /// surface descriptor rather than inferring a top strip from raw sibling tiles
+    /// (hud-m4xay F5 — finishing the promotion's renderer/interaction residual).
+    ///
+    /// For portals that have NOT declared a surface (the retained raw-tile escape
+    /// hatch), it falls back to the legacy heuristic: a "portal" is any lease group
+    /// with at least one scrollable member (the same gate
+    /// `translate_portal_group_on_drag` uses), a single scrollable tile qualifies
+    /// as a degenerate one-member portal, and the band is the top `band_h` strip of
+    /// the frame/anchor tile — the visible frame, never an equal-bounds passthrough
+    /// capture-backstop (hud-cpjqe). Anchors already covered by a declared surface
+    /// are not double-emitted.
     ///
     /// Used by the compositor to emit the header-band drag handle (hud-643dv).
     /// Returned sorted by anchor id so handle ordering is deterministic.
     pub fn portal_header_band_anchors(&self, band_h: f32) -> Vec<(SceneId, Rect)> {
+        let mut out: Vec<(SceneId, Rect)> = Vec::new();
+        let mut covered: std::collections::HashSet<SceneId> = std::collections::HashSet::new();
+
+        // Preferred source: the declared surface's `Header` part. Its bounds are
+        // surface-local, so convert to absolute via the host tile origin and clamp
+        // to the tile so a malformed part can never over-extend the band.
+        for (tile_id, surface) in self.overlay.portal_surfaces.iter() {
+            let Some(tile) = self.tiles.get(tile_id) else {
+                continue;
+            };
+            let Some(header) = surface
+                .parts
+                .iter()
+                .find(|p| p.kind == PortalPartKind::Header)
+            else {
+                continue;
+            };
+            if let Some(band) = header_band_rect(tile.bounds, header.bounds) {
+                out.push((*tile_id, band));
+                covered.insert(*tile_id);
+            }
+        }
+
+        // Fallback: raw-tile heuristic for portals without a declared surface.
         let mut anchors: std::collections::HashSet<SceneId> = std::collections::HashSet::new();
         for (id, _tile) in self.tiles.iter() {
             // Only scrollable surfaces seed a portal group.
@@ -95,21 +129,22 @@ impl SceneGraph {
             // Anchor on the VISIBLE frame, not an equal-bounds passthrough
             // capture-backstop (hud-cpjqe).
             if let Some(anchor) = self.portal_band_anchor_tile(*id) {
-                anchors.insert(anchor);
+                if !covered.contains(&anchor) {
+                    anchors.insert(anchor);
+                }
             }
         }
-        let mut out: Vec<(SceneId, Rect)> = anchors
-            .into_iter()
-            .filter_map(|anchor| {
-                let tile = self.tiles.get(&anchor)?;
+        for anchor in anchors {
+            if let Some(tile) = self.tiles.get(&anchor) {
                 // Clamp the band to the tile so a tiny frame never over-extends.
                 let h = band_h.min(tile.bounds.height).max(1.0);
-                Some((
+                out.push((
                     anchor,
                     Rect::new(tile.bounds.x, tile.bounds.y, tile.bounds.width, h),
-                ))
-            })
-            .collect();
+                ));
+            }
+        }
+
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
     }
@@ -507,4 +542,23 @@ impl SceneGraph {
             None => false,
         }
     }
+}
+
+/// Absolute header-band rect from a portal surface's `Header` part.
+///
+/// `part` bounds are surface-local (relative to the host `tile`); this translates
+/// them to absolute display coordinates and intersects with the tile so the band
+/// can never exceed the frame. Returns `None` for a degenerate (sub-pixel) band —
+/// keeping the drag handle off zero-area headers.
+fn header_band_rect(tile: Rect, part: Rect) -> Option<Rect> {
+    let x = tile.x + part.x;
+    let y = tile.y + part.y;
+    let max_w = (tile.x + tile.width - x).max(0.0);
+    let max_h = (tile.y + tile.height - y).max(0.0);
+    let w = part.width.min(max_w);
+    let h = part.height.min(max_h);
+    if w < 1.0 || h < 1.0 {
+        return None;
+    }
+    Some(Rect::new(x, y, w, h))
 }

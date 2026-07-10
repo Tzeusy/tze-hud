@@ -1381,7 +1381,8 @@ component_type = "hologram"
     }
 
     #[test]
-    fn all_six_v1_component_types_accepted() {
+    fn all_component_types_accepted() {
+        // Covers the six v1 types plus the promotion-era text-portal type.
         for ct in ComponentType::ALL {
             let type_name = ct.contract().name;
             let (_dir, path) = make_profile_dir(&format!(

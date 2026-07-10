@@ -47,14 +47,15 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use tze_hud_config::component_types::{ComponentType, ReadabilityTechnique};
 use tze_hud_config::policy_builder::{
     ProfileSelection, build_all_effective_policies, resolve_profile_selection,
 };
 use tze_hud_config::raw::RawConfig;
-use tze_hud_config::readability::{check_zone_readability, is_dev_mode};
+use tze_hud_config::readability::{ReadabilityViolation, check_zone_readability, is_dev_mode};
 use tze_hud_config::scan_profile_dirs;
-use tze_hud_config::tokens::{DesignTokenMap, resolve_tokens};
-use tze_hud_scene::types::{RenderingPolicy, ZoneRegistry};
+use tze_hud_config::tokens::{DesignTokenMap, parse_color_hex, resolve_tokens};
+use tze_hud_scene::types::{PortalPartKind, RenderingPolicy, ZoneRegistry};
 use tze_hud_widget::loader::LoadedBundle;
 
 use crate::widget_startup::init_widget_registry;
@@ -269,6 +270,12 @@ pub fn run_component_startup(
     let dev_mode = is_dev_mode(profile_name);
 
     for component_type in profile_selection.keys() {
+        // text-portal governs a multi-part portal SURFACE, not a zone, so it has
+        // no entry in `effective_policies`; its per-part readability is validated
+        // by `enforce_text_portal_readability` below, not by this zone loop.
+        if *component_type == ComponentType::TextPortal {
+            continue;
+        }
         let zone_name = component_type.contract().zone_type_name;
         let technique = component_type.contract().readability;
 
@@ -300,6 +307,17 @@ pub fn run_component_startup(
                 );
             }
         }
+    }
+
+    // ── Step 7b: Text-portal per-part readability enforcement ────────────────
+    // When a `text-portal` profile is active, validate each text-bearing part's
+    // effective RenderingPolicy against `OpaqueBackdrop`, exactly as the zone
+    // loop validates zones. text-portal governs a multi-part surface (not a
+    // zone), so enforcement iterates the part model and resolves each part's
+    // backdrop from the canonical tokens the spec binds it to (F4,
+    // component-shape-language/spec.md §Text-Portal Readability Enforcement).
+    if let Some(profile) = profile_selection.get(&ComponentType::TextPortal) {
+        enforce_text_portal_readability(&global_tokens, &profile.token_overrides, dev_mode);
     }
 
     tracing::info!("component_startup: step 7 — readability validation complete");
@@ -416,6 +434,116 @@ pub fn run_component_startup(
         widget_svg_assets,
         compositor_tokens,
     }
+}
+
+// ─── Text-portal readability enforcement ──────────────────────────────────────
+
+/// Validate each text-bearing `text-portal` part's effective `RenderingPolicy`
+/// against its required readability technique (F4).
+///
+/// Mirrors the zone readability loop in step 7, but for the multi-part portal
+/// surface: text-portal governs named parts rather than a zone, so this resolves
+/// each part's technique via [`ComponentType::text_portal_part_readability`] and
+/// builds the part's effective policy from the canonical tokens the spec binds
+/// the part's backdrop to — `color.backdrop.default` and `opacity.backdrop.opaque`
+/// (component-shape-language/spec.md §Text-Portal Part RenderingPolicy
+/// Consumption). Every text-bearing part shares those two backdrop tokens, so a
+/// translucent `opacity.backdrop.opaque` override fails readability on all of
+/// them (spec scenario: "translucent composer fails readability").
+///
+/// Geometry-only parts (`divider`, `capture-backstop`, `gesture-shield`) require
+/// `None` and are skipped. Violations are hard errors in production and WARN in
+/// dev mode, exactly as the zone path.
+///
+/// The effective backdrop is resolved profile-override → global token (global
+/// tokens already carry the canonical fallbacks), matching three-layer token
+/// resolution.
+fn enforce_text_portal_readability(
+    global_tokens: &DesignTokenMap,
+    profile_overrides: &DesignTokenMap,
+    dev_mode: bool,
+) -> Vec<(PortalPartKind, ReadabilityViolation)> {
+    let violations = text_portal_part_violations(global_tokens, profile_overrides);
+
+    for (part, violation) in &violations {
+        if dev_mode {
+            tracing::warn!(
+                component = "text-portal",
+                part = ?part,
+                violation = %violation,
+                "component_startup: step 7 — text-portal readability violation (dev mode, continuing)"
+            );
+        } else {
+            tracing::error!(
+                component = "text-portal",
+                part = ?part,
+                violation = %violation,
+                "component_startup: step 7 — PROFILE_READABILITY_VIOLATION: text-portal \
+                 part {part:?} does not meet its readability technique; check the active \
+                 text-portal profile's color.backdrop.default / opacity.backdrop.opaque overrides"
+            );
+        }
+    }
+
+    if violations.is_empty() {
+        tracing::debug!("component_startup: step 7 — text-portal readability OK for all parts");
+    }
+
+    violations
+}
+
+/// Pure per-part readability computation for the active `text-portal` profile.
+///
+/// Resolves each text-bearing part's effective backdrop from the canonical
+/// tokens the spec binds it to (`color.backdrop.default`,
+/// `opacity.backdrop.opaque`), profile-override → global token, and returns the
+/// `(part, violation)` pairs that fail `OpaqueBackdrop`. Geometry-only parts
+/// (technique `None`) never contribute. Split out from the logging wrapper so it
+/// is unit-testable.
+fn text_portal_part_violations(
+    global_tokens: &DesignTokenMap,
+    profile_overrides: &DesignTokenMap,
+) -> Vec<(PortalPartKind, ReadabilityViolation)> {
+    let resolve = |key: &str| -> Option<String> {
+        profile_overrides
+            .get(key)
+            .or_else(|| global_tokens.get(key))
+            .cloned()
+    };
+
+    // Per §Text-Portal Part RenderingPolicy Consumption, every text-bearing part
+    // takes `backdrop` ← color.backdrop.default and `backdrop_opacity` ←
+    // opacity.backdrop.opaque.
+    // `parse_color_hex` yields a config-module `Rgba`; `RenderingPolicy.backdrop`
+    // is a scene-module `Rgba` (distinct type), so convert component-wise.
+    let backdrop = resolve("color.backdrop.default")
+        .and_then(|s| parse_color_hex(&s))
+        .map(|c| tze_hud_scene::types::Rgba {
+            r: c.r,
+            g: c.g,
+            b: c.b,
+            a: c.a,
+        });
+    let backdrop_opacity =
+        resolve("opacity.backdrop.opaque").and_then(|s| s.trim().parse::<f32>().ok());
+
+    let part_policy = RenderingPolicy {
+        backdrop,
+        backdrop_opacity,
+        ..RenderingPolicy::default()
+    };
+
+    let mut violations = Vec::new();
+    for part in PortalPartKind::ALL {
+        let technique = ComponentType::text_portal_part_readability(part);
+        if technique == ReadabilityTechnique::None {
+            continue;
+        }
+        if let Err(violation) = check_zone_readability(&part_policy, technique) {
+            violations.push((part, violation));
+        }
+    }
+    violations
 }
 
 // ─── register_profile_widgets ─────────────────────────────────────────────────
@@ -1048,6 +1176,106 @@ name = "Third"
             Some(second_id),
             "the tab marked default_tab must be active, not the first declared"
         );
+    }
+
+    // ── Step 7b: Text-portal per-part readability enforcement (hud-m4xay F4) ──
+
+    fn canonical_tokens() -> DesignTokenMap {
+        resolve_tokens(&DesignTokenMap::new(), &DesignTokenMap::new())
+    }
+
+    /// WHEN a text-portal profile ships no overrides THEN the canonical
+    /// `opacity.backdrop.opaque` (0.9 >= 0.8) satisfies OpaqueBackdrop for every
+    /// text-bearing part — no violations.
+    #[test]
+    fn text_portal_default_tokens_pass_readability() {
+        let global = canonical_tokens();
+        let violations = text_portal_part_violations(&global, &DesignTokenMap::new());
+        assert!(
+            violations.is_empty(),
+            "canonical opacity.backdrop.opaque (0.9) should pass OpaqueBackdrop for all \
+             text-bearing parts, got violations: {violations:?}"
+        );
+    }
+
+    /// WHEN a text-portal profile overrides `opacity.backdrop.opaque` to 0.5 THEN
+    /// every text-bearing part fails OpaqueBackdrop (spec scenario: translucent
+    /// composer fails readability) and the geometry-only parts never do.
+    #[test]
+    fn text_portal_translucent_backdrop_fails_all_text_bearing_parts() {
+        let global = canonical_tokens();
+        let mut overrides = DesignTokenMap::new();
+        overrides.insert("opacity.backdrop.opaque".to_string(), "0.5".to_string());
+        let violations = text_portal_part_violations(&global, &overrides);
+
+        // Exactly the five text-bearing parts fail.
+        let failing: Vec<PortalPartKind> = violations.iter().map(|(p, _)| *p).collect();
+        assert_eq!(
+            failing.len(),
+            5,
+            "all five text-bearing parts must fail translucent backdrop, got {failing:?}"
+        );
+        for text_bearing in [
+            PortalPartKind::Frame,
+            PortalPartKind::Header,
+            PortalPartKind::Composer,
+            PortalPartKind::Transcript,
+            PortalPartKind::CollapsedCard,
+        ] {
+            assert!(
+                failing.contains(&text_bearing),
+                "{text_bearing:?} must be reported as a readability violation"
+            );
+        }
+        // Geometry-only parts are never validated.
+        for geometry_only in [
+            PortalPartKind::Divider,
+            PortalPartKind::CaptureBackstop,
+            PortalPartKind::GestureShield,
+        ] {
+            assert!(
+                !failing.contains(&geometry_only),
+                "{geometry_only:?} (geometry-only) must not be validated"
+            );
+        }
+
+        // The composer violation carries the spec's exact failing-check text.
+        let (_, composer_violation) = violations
+            .iter()
+            .find(|(p, _)| *p == PortalPartKind::Composer)
+            .expect("composer must have a violation");
+        let msg = composer_violation.failing_check.clone();
+        assert!(
+            msg.contains("backdrop_opacity must be >= 0.8") && msg.contains("0.5"),
+            "composer violation must state the threshold and actual value, got: {msg}"
+        );
+    }
+
+    /// WHEN the resolved backdrop color is absent THEN OpaqueBackdrop fails on the
+    /// text-bearing parts (backdrop must be Some).
+    #[test]
+    fn text_portal_missing_backdrop_color_fails() {
+        // A token map with an opaque opacity but NO backdrop color key at all.
+        let mut global = DesignTokenMap::new();
+        global.insert("opacity.backdrop.opaque".to_string(), "0.9".to_string());
+        let violations = text_portal_part_violations(&global, &DesignTokenMap::new());
+        assert_eq!(
+            violations.len(),
+            5,
+            "missing backdrop color must fail all five text-bearing parts, got {violations:?}"
+        );
+    }
+
+    /// The enforcement wrapper returns the same violations it logs (dev mode does
+    /// not suppress the returned set — only the log level differs).
+    #[test]
+    fn enforce_text_portal_readability_returns_violations_in_dev_mode() {
+        let global = canonical_tokens();
+        let mut overrides = DesignTokenMap::new();
+        overrides.insert("opacity.backdrop.opaque".to_string(), "0.4".to_string());
+        let violations =
+            enforce_text_portal_readability(&global, &overrides, /*dev_mode=*/ true);
+        assert_eq!(violations.len(), 5, "dev mode still reports the violations");
     }
 
     /// WHEN tabs are declared with no `default_tab` THEN all materialize and the

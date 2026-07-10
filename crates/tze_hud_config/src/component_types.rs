@@ -21,6 +21,8 @@
 //! | `"ambient-background"`| `"ambient_background"`|
 //! | `"alert-banner"`      | `"alert_banner"`     |
 
+use tze_hud_scene::types::PortalPartKind;
+
 // ─── ReadabilityTechnique ─────────────────────────────────────────────────────
 
 /// Readability technique required by a component type.
@@ -90,10 +92,18 @@ pub struct ComponentTypeContract {
 
 // ─── ComponentType ────────────────────────────────────────────────────────────
 
-/// The six v1 component types.
+/// The six v1 component types plus the promotion-era `text-portal` type.
 ///
 /// Each variant corresponds to a named visual-semantic role in the HUD.
 /// Use [`ComponentType::contract`] to retrieve the full static contract.
+///
+/// The first six variants are the v1 zone-governing component types. The
+/// seventh, [`ComponentType::TextPortal`], is a **promotion-era** type whose
+/// first-class surface exists only after the RFC 0013 §7.2 promotion gate
+/// passes; it governs a multi-part portal surface rather than a single zone
+/// type (see `component-shape-language/spec.md §Requirement: Text-Portal
+/// Component Type`). It is defined **in addition to** the six v1 types and does
+/// not alter them (hud-m4xay / reconciliation finding F4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ComponentType {
     /// Bottom-strip subtitle overlay, rendered via glyphon.
@@ -113,11 +123,32 @@ pub enum ComponentType {
 
     /// Corner-anchored picture-in-picture video surface.
     Pip,
+
+    /// Promotion-era text-stream portal surface (RFC 0013 §7.2). Governs a
+    /// first-class portal surface composed of named parts (frame, header,
+    /// composer, transcript, divider, collapsed-card, capture-backstop,
+    /// gesture-shield) rather than a single zone type. Readability is declared
+    /// **per part** (see [`ComponentType::text_portal_part_readability`]).
+    TextPortal,
 }
 
 impl ComponentType {
-    /// Returns the name of all six v1 component types in canonical order.
+    /// All defined component types in canonical order: the six v1 types followed
+    /// by the promotion-era `text-portal` type.
     pub const ALL: &'static [ComponentType] = &[
+        ComponentType::Subtitle,
+        ComponentType::Notification,
+        ComponentType::StatusBar,
+        ComponentType::AlertBanner,
+        ComponentType::AmbientBackground,
+        ComponentType::Pip,
+        ComponentType::TextPortal,
+    ];
+
+    /// The six v1 zone-governing component types, in canonical order. Excludes
+    /// the promotion-era [`ComponentType::TextPortal`], which governs a portal
+    /// surface rather than a v1 zone.
+    pub const V1: &'static [ComponentType] = &[
         ComponentType::Subtitle,
         ComponentType::Notification,
         ComponentType::StatusBar,
@@ -221,12 +252,67 @@ impl ComponentType {
                 required_tokens: &["color.border.default", "stroke.border.width"],
                 geometry_note: "corner-anchored, resizable within bounds; border tokens reserved for post-v1 border rendering",
             },
+
+            ComponentType::TextPortal => ComponentTypeContract {
+                name: "text-portal",
+                // text-portal governs a first-class portal SURFACE (a set of
+                // named parts), not a single zone type. This nominal name
+                // matches nothing in the zone registry, so the zone-oriented
+                // effective-policy builder (`build_all_effective_policies`)
+                // simply skips it; readability is enforced per-part instead
+                // (see `run_component_startup` step 7 and
+                // `text_portal_part_readability`).
+                zone_type_name: "text-portal",
+                // Surface-level default technique for text-bearing parts; the
+                // authoritative per-part mapping is `text_portal_part_readability`.
+                readability: ReadabilityTechnique::OpaqueBackdrop,
+                // Reuses existing canonical keys only — no new canonical key
+                // (component-shape-language/spec.md §Text-Portal Component Type).
+                required_tokens: &[
+                    "color.text.primary",
+                    "color.text.secondary",
+                    "color.backdrop.default",
+                    "color.border.default",
+                    "color.outline.default",
+                    "opacity.backdrop.opaque",
+                    "typography.heading.family",
+                    "typography.heading.size",
+                    "typography.heading.weight",
+                    "typography.body.family",
+                    "typography.body.size",
+                    "typography.body.weight",
+                    "spacing.padding.medium",
+                    "stroke.border.width",
+                    "stroke.outline.width",
+                ],
+                geometry_note: "content-layer, lease-governed, movable/resizable two-pane surface (transcript + composer) with a header band and a collapsed-card state; governed by the surface's own bounds/lease, not the component type",
+            },
+        }
+    }
+
+    /// Readability technique required for a given `text-portal` surface part.
+    ///
+    /// Per `component-shape-language/spec.md §Requirement: Text-Portal
+    /// Readability Enforcement`, the text-bearing parts (`frame`, `header`,
+    /// `composer`, `transcript`, `collapsed-card`) require `OpaqueBackdrop`
+    /// (`backdrop` set and `backdrop_opacity >= 0.8`), and the geometry-only
+    /// parts (`divider`, `capture-backstop`, `gesture-shield`) require `None`.
+    ///
+    /// The text-bearing / geometry-only split is the single source of truth
+    /// [`PortalPartKind::is_text_bearing`], so this mapping stays in lockstep
+    /// with the scene model.
+    pub fn text_portal_part_readability(part: PortalPartKind) -> ReadabilityTechnique {
+        if part.is_text_bearing() {
+            ReadabilityTechnique::OpaqueBackdrop
+        } else {
+            ReadabilityTechnique::None
         }
     }
 
     /// Parses a kebab-case component type name into a [`ComponentType`].
     ///
-    /// Returns `None` if the name is not a recognized v1 component type.
+    /// Recognizes the six v1 component types and the promotion-era
+    /// `text-portal` type. Returns `None` for any other name.
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "subtitle" => Some(ComponentType::Subtitle),
@@ -235,6 +321,7 @@ impl ComponentType {
             "alert-banner" => Some(ComponentType::AlertBanner),
             "ambient-background" => Some(ComponentType::AmbientBackground),
             "pip" => Some(ComponentType::Pip),
+            "text-portal" => Some(ComponentType::TextPortal),
             _ => None,
         }
     }
@@ -495,13 +582,13 @@ mod tests {
     // ── All six types ─────────────────────────────────────────────────────────
 
     #[test]
-    fn all_six_v1_component_types_defined() {
+    fn six_v1_component_types_defined() {
         assert_eq!(
-            ComponentType::ALL.len(),
+            ComponentType::V1.len(),
             6,
             "spec requires exactly 6 v1 component types"
         );
-        let names: Vec<&str> = ComponentType::ALL
+        let names: Vec<&str> = ComponentType::V1
             .iter()
             .map(|ct| ct.contract().name)
             .collect();
@@ -511,6 +598,107 @@ mod tests {
         assert!(names.contains(&"alert-banner"));
         assert!(names.contains(&"ambient-background"));
         assert!(names.contains(&"pip"));
+        // TextPortal is a promotion-era type, NOT a v1 zone-governing type.
+        assert!(
+            !names.contains(&"text-portal"),
+            "text-portal must not be one of the six v1 types"
+        );
+    }
+
+    #[test]
+    fn all_includes_six_v1_plus_text_portal() {
+        assert_eq!(
+            ComponentType::ALL.len(),
+            7,
+            "ALL is the six v1 types plus the promotion-era text-portal type"
+        );
+        let names: Vec<&str> = ComponentType::ALL
+            .iter()
+            .map(|ct| ct.contract().name)
+            .collect();
+        for v1 in ComponentType::V1 {
+            assert!(
+                names.contains(&v1.contract().name),
+                "ALL must contain v1 type {v1:?}"
+            );
+        }
+        assert!(
+            names.contains(&"text-portal"),
+            "ALL must contain the promotion-era text-portal type (reconciliation F4)"
+        );
+    }
+
+    // ── TextPortal (promotion-era) ────────────────────────────────────────────
+
+    #[test]
+    fn text_portal_contract_name() {
+        assert_eq!(ComponentType::TextPortal.contract().name, "text-portal");
+    }
+
+    #[test]
+    fn text_portal_from_name_round_trips() {
+        assert_eq!(
+            ComponentType::from_name("text-portal"),
+            Some(ComponentType::TextPortal)
+        );
+    }
+
+    /// Surface-level default technique is OpaqueBackdrop (spec §Text-Portal
+    /// Component Type: "surface-level default for text-bearing parts is
+    /// OpaqueBackdrop").
+    #[test]
+    fn text_portal_contract_readability_opaque_backdrop() {
+        assert_eq!(
+            ComponentType::TextPortal.contract().readability,
+            ReadabilityTechnique::OpaqueBackdrop
+        );
+    }
+
+    /// Per-part readability mirrors `PortalPartKind::is_text_bearing`:
+    /// text-bearing parts require OpaqueBackdrop; geometry-only parts require None.
+    #[test]
+    fn text_portal_part_readability_matches_spec_table() {
+        use tze_hud_scene::types::PortalPartKind;
+        // Text-bearing → OpaqueBackdrop.
+        for part in [
+            PortalPartKind::Frame,
+            PortalPartKind::Header,
+            PortalPartKind::Composer,
+            PortalPartKind::Transcript,
+            PortalPartKind::CollapsedCard,
+        ] {
+            assert_eq!(
+                ComponentType::text_portal_part_readability(part),
+                ReadabilityTechnique::OpaqueBackdrop,
+                "{part:?} is text-bearing and must require OpaqueBackdrop"
+            );
+        }
+        // Geometry-only → None.
+        for part in [
+            PortalPartKind::Divider,
+            PortalPartKind::CaptureBackstop,
+            PortalPartKind::GestureShield,
+        ] {
+            assert_eq!(
+                ComponentType::text_portal_part_readability(part),
+                ReadabilityTechnique::None,
+                "{part:?} is geometry-only and must require None"
+            );
+        }
+    }
+
+    /// The text-portal required-tokens list introduces no NEW canonical key: every
+    /// key must already be resolvable in the canonical token schema.
+    #[test]
+    fn text_portal_required_tokens_are_all_canonical() {
+        use crate::tokens::{DesignTokenMap, resolve_tokens};
+        let canonical = resolve_tokens(&DesignTokenMap::new(), &DesignTokenMap::new());
+        for key in ComponentType::TextPortal.contract().required_tokens {
+            assert!(
+                canonical.contains_key(*key),
+                "text-portal required token '{key}' must be a canonical key (no new key introduced)"
+            );
+        }
     }
 
     #[test]

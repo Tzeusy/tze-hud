@@ -4503,6 +4503,120 @@ fn portal_anchor_tile_picks_largest_area_member() {
     assert_eq!(scene.portal_anchor_tile(frame_id), Some(frame_id));
 }
 
+// ── hud-m4xay F5: drag band keys off the first-class surface Header part ──────
+
+/// Build a single-tile portal that has DECLARED a first-class portal surface with
+/// a `Header` part (empty backing node) + a `Transcript` part. Returns
+/// (scene, tile_id). Header local bounds are (0,0,width,header_h).
+fn portal_scene_with_declared_surface(header_h: f32) -> (SceneGraph, SceneId) {
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab = scene.create_tab("Main", 0).unwrap();
+    let lease = scene.grant_lease(
+        "portal",
+        60_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
+    let tile = scene
+        .create_tile(
+            tab,
+            "portal",
+            lease,
+            Rect::new(100.0, 100.0, 600.0, 400.0),
+            1,
+        )
+        .unwrap();
+    scene
+        .register_tile_scroll_config(tile, TileScrollConfig::vertical())
+        .unwrap();
+    let surface = PortalSurface {
+        identity: PortalIdentity {
+            session_id: "sess-portal".to_string(),
+            display_name: "Claude".to_string(),
+            peer_class: PortalPeerClass::ResidentLlm,
+        },
+        lifecycle: PortalLifecycleState::Active,
+        display_state: PortalDisplayState::Expanded,
+        // Parts carry surface-local bounds and EMPTY backing nodes — exactly what
+        // the resident adapter declares. The band must still key off the Header
+        // part's bounds without any materialized node.
+        parts: vec![
+            PortalPart {
+                kind: PortalPartKind::Frame,
+                bounds: Rect::new(0.0, 0.0, 600.0, 400.0),
+                node: None,
+            },
+            PortalPart {
+                kind: PortalPartKind::Header,
+                bounds: Rect::new(0.0, 0.0, 600.0, header_h),
+                node: None,
+            },
+            PortalPart {
+                kind: PortalPartKind::Transcript,
+                bounds: Rect::new(0.0, header_h, 600.0, 400.0 - header_h),
+                node: None,
+            },
+        ],
+    };
+    scene.set_portal_surface(tile, surface, "portal").unwrap();
+    (scene, tile)
+}
+
+/// WHEN a portal declares a surface with a `Header` part THEN the drag band keys
+/// off that part's bounds — NOT the top `band_h` strip heuristic.
+#[test]
+fn portal_header_band_anchors_keys_off_declared_header_part() {
+    // Header part height (40) deliberately differs from the band_h argument (52)
+    // so the assertion proves the band comes from the surface part, not the strip.
+    let (scene, tile) = portal_scene_with_declared_surface(40.0);
+    let anchors = scene.portal_header_band_anchors(52.0);
+    assert_eq!(anchors.len(), 1, "one portal → one header band");
+    assert_eq!(
+        anchors[0],
+        (tile, Rect::new(100.0, 100.0, 600.0, 40.0)),
+        "band must equal the declared Header part bounds (absolute), not the 52px strip"
+    );
+}
+
+/// A declared surface with NO `Header` part falls back to the raw-tile heuristic
+/// (top `band_h` strip), so surface declaration never regresses the escape hatch.
+#[test]
+fn portal_header_band_anchors_falls_back_without_header_part() {
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab = scene.create_tab("Main", 0).unwrap();
+    let lease = scene.grant_lease(
+        "portal",
+        60_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
+    let tile = scene
+        .create_tile(tab, "portal", lease, Rect::new(0.0, 0.0, 300.0, 200.0), 1)
+        .unwrap();
+    scene
+        .register_tile_scroll_config(tile, TileScrollConfig::vertical())
+        .unwrap();
+    // Surface with only a Transcript part (no Header).
+    let surface = PortalSurface {
+        identity: PortalIdentity {
+            session_id: "sess-portal".to_string(),
+            display_name: "Claude".to_string(),
+            peer_class: PortalPeerClass::ResidentLlm,
+        },
+        lifecycle: PortalLifecycleState::Active,
+        display_state: PortalDisplayState::Expanded,
+        parts: vec![PortalPart {
+            kind: PortalPartKind::Transcript,
+            bounds: Rect::new(0.0, 0.0, 300.0, 200.0),
+            node: None,
+        }],
+    };
+    scene.set_portal_surface(tile, surface, "portal").unwrap();
+    // No Header part → legacy top-strip heuristic (band_h = 52).
+    assert_eq!(
+        scene.portal_header_band_anchors(52.0),
+        vec![(tile, Rect::new(0.0, 0.0, 300.0, 52.0))]
+    );
+}
+
 // ── hud-ovjxu.1: viewer-local resize font-scale multiplier ───────────────────
 
 // ── hud-cpjqe: live top-band drag flakiness diagnosis ────────────────────────
