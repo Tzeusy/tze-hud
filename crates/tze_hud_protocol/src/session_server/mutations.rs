@@ -430,6 +430,62 @@ fn convert_proto_mutations(
                     }
                 }
             }
+            Some(crate::proto::mutation_proto::Mutation::SetPortalSurface(sps)) => {
+                match bytes_to_scene_id(&sps.tile_id) {
+                    Ok(tile_id) => {
+                        if let Some(ref surface_proto) = sps.surface {
+                            match convert::proto_portal_surface_to_scene(surface_proto) {
+                                Ok(surface) => {
+                                    scene_mutations
+                                        .push(SceneMutation::SetPortalSurface { tile_id, surface });
+                                    // No `pending_touch_ids`: the portal surface is
+                                    // runtime overlay state, not a published element
+                                    // (mirrors SetTileLifecycleAccent). The present-gate
+                                    // redraw is armed by the version bump in
+                                    // `set_portal_surface` (overlay.rs).
+                                }
+                                Err(reason) => {
+                                    tracing::warn!(
+                                        "SetPortalSurface{log_suffix}: invalid surface \
+                                         ({reason}); mutation skipped"
+                                    );
+                                }
+                            }
+                        } else {
+                            tracing::warn!(
+                                "SetPortalSurface{log_suffix}: missing surface; mutation skipped"
+                            );
+                        }
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = sps.tile_id.len(),
+                            "SetPortalSurface{log_suffix}: invalid tile_id length (expected 16 \
+                             bytes); mutation skipped — SDK bug or wire corruption"
+                        );
+                    }
+                }
+            }
+            Some(crate::proto::mutation_proto::Mutation::UpdatePortalSurfaceState(ups)) => {
+                match bytes_to_scene_id(&ups.tile_id) {
+                    Ok(tile_id) => {
+                        scene_mutations.push(SceneMutation::UpdatePortalSurfaceState {
+                            tile_id,
+                            lifecycle: convert::proto_portal_lifecycle_to_scene(ups.lifecycle),
+                            display_state: convert::proto_portal_display_state_to_scene(
+                                ups.display_state,
+                            ),
+                        });
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = ups.tile_id.len(),
+                            "UpdatePortalSurfaceState{log_suffix}: invalid tile_id length \
+                             (expected 16 bytes); mutation skipped — SDK bug or wire corruption"
+                        );
+                    }
+                }
+            }
             None => {}
         }
     }

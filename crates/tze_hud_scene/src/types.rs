@@ -273,6 +273,247 @@ pub struct LifecycleAccent {
     pub width_px: f32,
 }
 
+// ─── Portal surface (RFC 0013 §7.2 promotion) ────────────────────────────────
+//
+// First-class text-stream portal surface schema. RFC 0013 §7.2 authorizes, once
+// the promotion evidence gate passes (hud-qfyfg, PASSED 2026-07-05), promotion of
+// the Phase-0 raw-tile pilot to "a first-class runtime portal surface or node
+// type". These types are the scene-model half of that promotion: a governed
+// descriptor that groups the portal's named parts, identity, and lifecycle/
+// display state into one coalescible object instead of an ad-hoc six-tile
+// assembly.
+//
+// The part set and its cross-map to the Phase-0 raw tiles is defined by the
+// `text-portal` component type (component-shape-language delta, hud-2ey2w). This
+// schema carries no transcript history and adds no transport: a portal surface is
+// declared over an existing lease-governed tile via the Transactional
+// `SetPortalSurface` mutation and its lifecycle/display state is patched via the
+// coalescible StateStream `UpdatePortalSurfaceState` mutation. Per-part layout,
+// styling, and rendering are owned by the renderer promotion beads (hud-s4lrw);
+// this type deliberately holds only the declarative surface contract.
+
+/// Peer class of the party on the far side of a portal's text stream
+/// (RFC 0013 §2.1 "optional peer class"). Advisory metadata only — the runtime's
+/// governance does not branch on it; it exists for identity presentation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PortalPeerClass {
+    /// Unspecified / unknown peer class.
+    #[default]
+    Unspecified,
+    /// A resident LLM session driving the portal.
+    ResidentLlm,
+    /// A human operator monitoring/replying into the portal.
+    Operator,
+    /// A human peer in a chat-style collaboration.
+    HumanPeer,
+    /// A local adapter bridging an external text environment.
+    Adapter,
+}
+
+/// Portal lifecycle state (RFC 0013 §3.2 / §6.2). Drives the coalescible
+/// left-edge [`LifecycleAccent`] the compositor already paints; carried on the
+/// surface descriptor so the promoted surface owns its own lifecycle rather than
+/// inferring it from tile state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PortalLifecycleState {
+    /// Unspecified / not yet reported.
+    #[default]
+    Unspecified,
+    /// Live and streaming.
+    Active,
+    /// Awaiting a viewer reply.
+    WaitingForInput,
+    /// Blocked (e.g. backpressured or gated).
+    Blocked,
+    /// Degraded but still present.
+    Degraded,
+    /// Owning session disconnected; in the orphan grace window.
+    Detached,
+}
+
+/// Collapsed vs. expanded portal presentation (RFC 0013 §3.2).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PortalDisplayState {
+    /// Unspecified / not yet reported.
+    #[default]
+    Unspecified,
+    /// Collapsed summary card (identity + status + unread affordance).
+    Collapsed,
+    /// Expanded transcript-focused surface with reply affordance.
+    Expanded,
+}
+
+/// One of the eight named parts of the first-class portal surface, per the
+/// `text-portal` component-shape-language part model (hud-2ey2w). Each variant
+/// cross-maps to the Phase-0 raw-tile assembly so promotion preserves — rather
+/// than redefines — the proven layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PortalPartKind {
+    /// Surface backdrop, outer border, and footer/status chrome (Phase-0 `frame`).
+    Frame,
+    /// Title + subtitle band; also the move/drag handle (header band of `frame`).
+    Header,
+    /// Bounded draft text, caret, and selection (Phase-0 `input_scroll`).
+    Composer,
+    /// Markdown-rendered transcript window (Phase-0 `output_scroll`).
+    Transcript,
+    /// Vertical pane split and resize handle (frame-internal `divider`).
+    Divider,
+    /// Collapsed/minimized representation (Phase-0 `minimized_icon`).
+    CollapsedCard,
+    /// Full-bounds input/redaction backstop beneath the surface (Phase-0 `capture_backstop`).
+    CaptureBackstop,
+    /// Transient move/resize gesture capture; hosts the scroll indicator (Phase-0 `drag_shield`).
+    GestureShield,
+}
+
+impl PortalPartKind {
+    /// All eight portal parts, in canonical (declaration) order.
+    pub const ALL: [PortalPartKind; 8] = [
+        PortalPartKind::Frame,
+        PortalPartKind::Header,
+        PortalPartKind::Composer,
+        PortalPartKind::Transcript,
+        PortalPartKind::Divider,
+        PortalPartKind::CollapsedCard,
+        PortalPartKind::CaptureBackstop,
+        PortalPartKind::GestureShield,
+    ];
+
+    /// Whether this part carries text (and therefore participates in
+    /// `text-portal` readability enforcement). Geometry-only parts
+    /// (`Divider`, `CaptureBackstop`, `GestureShield`) return `false`.
+    pub fn is_text_bearing(self) -> bool {
+        matches!(
+            self,
+            PortalPartKind::Frame // footer/status text
+                | PortalPartKind::Header
+                | PortalPartKind::Composer
+                | PortalPartKind::Transcript
+                | PortalPartKind::CollapsedCard
+        )
+    }
+}
+
+/// A single named part of a [`PortalSurface`].
+///
+/// Carries the part's kind, its surface-local geometry, and an optional
+/// reference to the scene node that backs its content — "one scene node per
+/// part" (the renderer promotion, hud-s4lrw). `node` is `None` for parts whose
+/// appearance is purely derived (e.g. a geometry-only `Divider`) or not yet
+/// materialized. The referenced node is an ordinary visual node
+/// (`TextMarkdown`/`SolidColor`/`HitRegion`/`StaticImage`) within the surface's
+/// host tile, so the Phase-0 raw-tile assembly is expressible verbatim: point
+/// each part at its existing raw-tile content node.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PortalPart {
+    /// Which named part this is.
+    pub kind: PortalPartKind,
+    /// Surface-local geometry (origin + extent relative to the host tile).
+    pub bounds: Rect,
+    /// Scene node backing this part's content, if materialized.
+    pub node: Option<SceneId>,
+}
+
+/// Stable identity / status metadata for a portal surface (RFC 0013 §2.1).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PortalIdentity {
+    /// Stable adapter-assigned session id (max [`PORTAL_SESSION_ID_MAX_BYTES`]).
+    pub session_id: String,
+    /// Human-readable display name (max [`PORTAL_DISPLAY_NAME_MAX_BYTES`]).
+    pub display_name: String,
+    /// Optional peer class of the far side of the stream.
+    pub peer_class: PortalPeerClass,
+}
+
+/// A first-class text-stream portal surface (RFC 0013 §7.2 promotion).
+///
+/// Groups the [eight named parts](PortalPartKind) under one governed,
+/// coalescible descriptor together with the portal's [identity](PortalIdentity)
+/// and [lifecycle](PortalLifecycleState)/[display](PortalDisplayState) state,
+/// replacing the ad-hoc six-tile raw assembly of the Phase-0 pilot.
+///
+/// Stored as runtime overlay state keyed by the host **tile id** (mirroring
+/// [`LifecycleAccent`]), so it survives `SetTileRoot`/`PublishToTile` transcript
+/// republishes that replace the tile's node tree. The surface is **content-layer
+/// and lease-governed** exactly as the raw-tile pilot is (RFC 0013 §6); this
+/// schema grants no capability beyond what the §7.2 promotion already permits and
+/// materializes **no transcript history** — parts reference the existing
+/// bounded-viewport nodes.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PortalSurface {
+    /// Identity / status metadata.
+    pub identity: PortalIdentity,
+    /// Current lifecycle state.
+    pub lifecycle: PortalLifecycleState,
+    /// Current collapsed/expanded display state.
+    pub display_state: PortalDisplayState,
+    /// The surface's named parts (at most [`PORTAL_MAX_PARTS`], one per kind).
+    pub parts: Vec<PortalPart>,
+}
+
+/// Maximum number of parts on a portal surface — one per [`PortalPartKind`].
+pub const PORTAL_MAX_PARTS: usize = 8;
+/// Maximum UTF-8 byte length of [`PortalIdentity::session_id`].
+pub const PORTAL_SESSION_ID_MAX_BYTES: usize = 256;
+/// Maximum UTF-8 byte length of [`PortalIdentity::display_name`].
+pub const PORTAL_DISPLAY_NAME_MAX_BYTES: usize = 128;
+
+impl PortalSurface {
+    /// Validate the structural invariants of a portal surface descriptor:
+    /// - at most [`PORTAL_MAX_PARTS`] parts,
+    /// - no duplicate part kind,
+    /// - identity strings within their byte budgets,
+    /// - all part `bounds` finite and non-negative in extent.
+    ///
+    /// Returns a human-readable reason on the first violation. This is a pure
+    /// structural check; tile ownership / node reachability are enforced by the
+    /// graph apply path.
+    pub fn validate_structure(&self) -> Result<(), String> {
+        if self.identity.session_id.len() > PORTAL_SESSION_ID_MAX_BYTES {
+            return Err(format!(
+                "session_id exceeds {PORTAL_SESSION_ID_MAX_BYTES} bytes (got {})",
+                self.identity.session_id.len()
+            ));
+        }
+        if self.identity.display_name.len() > PORTAL_DISPLAY_NAME_MAX_BYTES {
+            return Err(format!(
+                "display_name exceeds {PORTAL_DISPLAY_NAME_MAX_BYTES} bytes (got {})",
+                self.identity.display_name.len()
+            ));
+        }
+        if self.parts.len() > PORTAL_MAX_PARTS {
+            return Err(format!(
+                "portal surface has {} parts, exceeds max {PORTAL_MAX_PARTS}",
+                self.parts.len()
+            ));
+        }
+        let mut seen = 0u16;
+        for part in &self.parts {
+            let bit = 1u16 << (part.kind as u16);
+            if seen & bit != 0 {
+                return Err(format!("duplicate portal part kind {:?}", part.kind));
+            }
+            seen |= bit;
+            let b = part.bounds;
+            if !(b.x.is_finite() && b.y.is_finite() && b.width.is_finite() && b.height.is_finite())
+            {
+                return Err(format!("part {:?} has non-finite bounds", part.kind));
+            }
+            // Negative width/height are invalid for visual layout and can cause
+            // rendering anomalies in the compositor; reject them defensively,
+            // mirroring the non-negative extent expected of tile/node bounds.
+            if b.width < 0.0 || b.height < 0.0 {
+                return Err(format!(
+                    "part {:?} has negative bounds extent (width {}, height {})",
+                    part.kind, b.width, b.height
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 // ─── Enums ──────────────────────────────────────────────────────────────────
 
 /// How image content is fitted within the node's bounds.
@@ -3225,6 +3466,141 @@ impl Default for ZoneRegistry {
 mod tests {
     use super::*;
     use std::mem::size_of;
+
+    // ── Portal surface structural validation (RFC 0013 §7.2; hud-tc153) ──────
+
+    fn portal_part(kind: PortalPartKind) -> PortalPart {
+        PortalPart {
+            kind,
+            bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+            node: None,
+        }
+    }
+
+    #[test]
+    fn portal_surface_validate_accepts_all_eight_parts() {
+        let surface = PortalSurface {
+            parts: PortalPartKind::ALL
+                .iter()
+                .copied()
+                .map(portal_part)
+                .collect(),
+            ..Default::default()
+        };
+        assert_eq!(surface.parts.len(), PORTAL_MAX_PARTS);
+        assert!(surface.validate_structure().is_ok());
+    }
+
+    #[test]
+    fn portal_surface_validate_rejects_duplicate_kind() {
+        let surface = PortalSurface {
+            parts: vec![
+                portal_part(PortalPartKind::Transcript),
+                portal_part(PortalPartKind::Transcript),
+            ],
+            ..Default::default()
+        };
+        assert!(
+            surface
+                .validate_structure()
+                .unwrap_err()
+                .contains("duplicate")
+        );
+    }
+
+    #[test]
+    fn portal_surface_validate_rejects_oversized_identity() {
+        let surface = PortalSurface {
+            identity: PortalIdentity {
+                session_id: "x".repeat(PORTAL_SESSION_ID_MAX_BYTES + 1),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(
+            surface
+                .validate_structure()
+                .unwrap_err()
+                .contains("session_id")
+        );
+
+        let surface = PortalSurface {
+            identity: PortalIdentity {
+                display_name: "y".repeat(PORTAL_DISPLAY_NAME_MAX_BYTES + 1),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(
+            surface
+                .validate_structure()
+                .unwrap_err()
+                .contains("display_name")
+        );
+    }
+
+    #[test]
+    fn portal_surface_validate_rejects_non_finite_bounds() {
+        let surface = PortalSurface {
+            parts: vec![PortalPart {
+                kind: PortalPartKind::Frame,
+                bounds: Rect::new(f32::NAN, 0.0, 10.0, 10.0),
+                node: None,
+            }],
+            ..Default::default()
+        };
+        assert!(
+            surface
+                .validate_structure()
+                .unwrap_err()
+                .contains("non-finite")
+        );
+    }
+
+    #[test]
+    fn portal_surface_validate_rejects_negative_extent_bounds() {
+        for bounds in [
+            Rect::new(0.0, 0.0, -10.0, 10.0),
+            Rect::new(0.0, 0.0, 10.0, -10.0),
+        ] {
+            let surface = PortalSurface {
+                parts: vec![PortalPart {
+                    kind: PortalPartKind::Frame,
+                    bounds,
+                    node: None,
+                }],
+                ..Default::default()
+            };
+            assert!(
+                surface
+                    .validate_structure()
+                    .unwrap_err()
+                    .contains("negative bounds extent"),
+                "negative-extent bounds {bounds:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn portal_part_kind_text_bearing_classification() {
+        // Geometry-only parts are NOT text-bearing (readability technique None).
+        for k in [
+            PortalPartKind::Divider,
+            PortalPartKind::CaptureBackstop,
+            PortalPartKind::GestureShield,
+        ] {
+            assert!(!k.is_text_bearing(), "{k:?} must be geometry-only");
+        }
+        for k in [
+            PortalPartKind::Frame,
+            PortalPartKind::Header,
+            PortalPartKind::Composer,
+            PortalPartKind::Transcript,
+            PortalPartKind::CollapsedCard,
+        ] {
+            assert!(k.is_text_bearing(), "{k:?} must be text-bearing");
+        }
+    }
 
     // ── SceneId size invariant ────────────────────────────────────────────────
 
