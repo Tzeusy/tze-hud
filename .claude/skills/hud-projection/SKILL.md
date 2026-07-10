@@ -1,7 +1,7 @@
 ---
 name: hud-projection
-description: Use when an already-running Codex, Claude, opencode, or other LLM session should project itself onto the HUD, show its output or status on screen, attach to a text-stream portal, publish live transcript, poll HUD-originated operator input, acknowledge input, detach, or clean up. Trigger phrases — "project this session to the HUD", "attach this agent to HUD", "show this LLM session in a text-stream portal", "check HUD input". Do not use for terminal capture, PTY attachment, tmux scraping, process hosting, or direct runtime v1 MCP zone publishing; for one-shot zone publishing use th-hud-publish instead.
-compatibility: Requires the tze_hud windowed runtime running with MCP enabled (mcp_port > 0). The FULL operation contract is wired end-to-end in-process: all seven ops — `attach`, `publish_output`, `publish_status`, `get_pending_input`, `acknowledge_input`, `detach`, `cleanup` — are served by the runtime MCP server's `portal_projection_*` tools (`crates/tze_hud_mcp/src/server.rs` ~643-683), which forward over `portal_op_tx` to the windowed drain loop and the in-process ProjectionAuthority. These are Resident tools (`resident_mcp`); an external LLM session reaches them by presenting the resident principal — set `TZE_HUD_MCP_RESIDENT_PRINCIPAL` equal to the runtime PSK and send that value as the MCP bearer (the runtime constant-time-matches bearer==principal==PSK and mints `resident_mcp`; hud-nu65o). Published output renders on screen for BOTH portal adapter families — the exemplar gRPC adapter and the in-process cooperative driver (the cooperative render path landed in PR #959). The stale "partial / CAPABILITY_REQUIRED / no MCP method yet" framing is obsolete: hud-bq0gl.1 (production ingress) and hud-bq0gl.3 (input-return loop) are closed.
+description: Use when an already-running LLM session (Codex, Claude, opencode, or other) should project itself onto the HUD — attach to a text-stream portal, publish live transcript/status, poll and acknowledge HUD-originated operator input, detach, or clean up. Trigger phrases — "project this session to the HUD", "attach this agent to HUD", "show this LLM session in a text-stream portal", "check HUD input". Not for terminal/PTY/tmux capture, process hosting, or one-shot zone publishing (use th-hud-publish for that).
+compatibility: Requires the tze_hud windowed runtime running with MCP enabled (mcp_port > 0). All seven ops — `attach`, `publish_output`, `publish_status`, `get_pending_input`, `acknowledge_input`, `detach`, `cleanup` — are served in-process by the runtime MCP server's `portal_projection_*` tools, which forward to the ProjectionAuthority. They are Resident tools: reach them as the resident principal by setting `TZE_HUD_MCP_RESIDENT_PRINCIPAL` equal to the PSK and sending the PSK as the MCP bearer.
 metadata:
   owner: tze
   authors:
@@ -19,7 +19,7 @@ Hard boundaries:
 - This is cooperative opt-in. The current session intentionally calls projection operations.
 - This is not PTY, tmux, shell, stdin/stdout, or terminal byte-stream capture.
 - The `ProjectionAuthority` runs **in-process** inside the tze_hud runtime (not as an external daemon). It owns projection state outside the LLM token context: HUD connection metadata, advisory portal lease identity, bounded transcript/window state, pending HUD input, acknowledgement state, lifecycle state, unread state, privacy classification, and reconnect bookkeeping.
-- The projection MCP surface is a facade into the runtime's in-process authority, not the runtime v1 MCP zone publishing bridge. **The full facade is wired in-process**: all seven `portal_projection_*` tools are served by the runtime MCP server (`crates/tze_hud_mcp/src/server.rs` ~643-683) and forward to the in-process authority over `portal_op_tx`. They are classified Resident tools, so the runtime rejects them with `CAPABILITY_REQUIRED` unless the caller holds `resident_mcp` (`crates/tze_hud_mcp/src/server.rs` ~218-232, ~321-352). An external session obtains `resident_mcp` by authenticating as the **resident principal**: the runtime mints the capability only when the MCP bearer matches BOTH the configured `TZE_HUD_MCP_RESIDENT_PRINCIPAL` AND the PSK, each compared constant-time (so it can never silently grant `resident_mcp` to every authenticated caller). Set `TZE_HUD_MCP_RESIDENT_PRINCIPAL` equal to the PSK and send the PSK as the bearer. The portal-projection tools are a projection facade distinct from the runtime's zone/widget publishing tools — do not confuse them with `th-hud-publish`.
+- The `portal_projection_*` tools are a projection facade into that in-process authority — distinct from the runtime's zone/widget publishing tools (`th-hud-publish`). They are Resident tools; reach them as the resident principal (see `references/mcp-facade.md` for the auth wiring and code paths).
 
 ## Choosing A Target Runtime
 
@@ -106,64 +106,31 @@ Read `references/operation-examples.md` for compact JSON examples of every opera
 6. **Detach on normal exit.** Call `detach` with a bounded reason when the session is done projecting.
 7. **Cleanup stale state when appropriate.** Use owner cleanup with `owner_token`; operator cleanup uses a separate daemon authority and must not expose private projection content.
 
-## Production Ingress (Wired — full contract, reachable via the resident principal)
+**Token-efficient use** (this is meant to be viable as a primary session interface):
+- `publish_output` **appends** — send only the new fragment each turn, never the whole transcript. The authority retains transcript history outside your token context.
+- Use `coalesce_key` for streaming/progress lines so repeated publishes collapse in place instead of piling up.
+- To await a reply, prefer one `get_pending_input` with `wait_ms` (long-poll) over a busy-poll loop; keep `max_items`/`max_bytes` small.
 
-The full operation contract is wired end-to-end **inside** the runtime. When the
-windowed runtime runs with MCP enabled (`mcp_port > 0`), the runtime MCP server
-exposes one tool per operation (`portal_projection_<op>`), each forwarding into
-the in-process `ProjectionAuthority` over `portal_op_tx`. All are Resident tools,
-reachable by a caller that holds `resident_mcp`:
+## Production Ingress (Wired)
 
-| Operation | MCP tool | Reachable by external session | Code path |
-|---|---|---|---|
-| `attach` | `portal_projection_attach` | yes — as the resident principal | `crates/tze_hud_mcp/src/server.rs` ~643-647 |
-| `publish_output` | `portal_projection_publish` | yes — as the resident principal | `crates/tze_hud_mcp/src/server.rs` ~648-652 |
-| `publish_status` | `portal_projection_publish_status` | yes — as the resident principal | `crates/tze_hud_mcp/src/server.rs` ~653-660 |
-| `get_pending_input` | `portal_projection_get_pending_input` | yes — as the resident principal | `crates/tze_hud_mcp/src/server.rs` ~661-668 |
-| `acknowledge_input` | `portal_projection_acknowledge_input` | yes — as the resident principal | `crates/tze_hud_mcp/src/server.rs` ~669-676 |
-| `detach` | `portal_projection_detach` | yes — as the resident principal | `crates/tze_hud_mcp/src/server.rs` ~677-681 |
-| `cleanup` | `portal_projection_cleanup` | yes — as the resident principal (operator cleanup also accepted) | `crates/tze_hud_mcp/src/server.rs` ~682-683 |
-
-How the path is wired:
-
-1. **Op channel.** The runtime creates `portal_op_tx` whenever `mcp_port > 0` and
-   hands it to the MCP server; the matching `portal_op_rx` is drained every frame
-   by the windowed event loop (`drain_portal_ops` →
-   `InProcessPortalDriver::dispatch_portal_op` → the per-frame `drain`), so a
-   *resident* op reaches the live scene.
-2. **Resident capability.** The tools are classified Resident (`classify_tool`,
-   `crates/tze_hud_mcp/src/server.rs` ~218-232) and rejected with
-   `CAPABILITY_REQUIRED` unless `ctx.has_resident_mcp()`. The single auditable
-   place that mints `resident_mcp` (`caller_context`, ~321-352) grants it only
-   when the request bearer matches BOTH the configured resident principal AND the
-   PSK, each compared constant-time (`with_resident_principal`, ~187;
-   `has_resident_mcp`, ~110). This is `hud-nu65o` — it can never silently grant
-   `resident_mcp` to every authenticated caller.
-3. **Runtime wiring.** The runtime passes the principal through from config:
-   `McpConfig::with_psk(..).with_resident_principal(config.resident_principal)`
-   (`crates/tze_hud_runtime/src/mcp.rs` ~111), surfaced operationally via the
-   `TZE_HUD_MCP_RESIDENT_PRINCIPAL` env var (~71-73). Tests
-   `mcp_http_resident_principal_reaches_resident_tool` and
-   `mcp_http_no_resident_principal_still_gates_resident_tool`
-   (`crates/tze_hud_runtime/src/mcp.rs` ~576, ~612) prove an external HTTP MCP
-   caller reaches a Resident tool with the principal and is still gated without it.
-
-To reach the facade as an external session: configure the runtime with
-`TZE_HUD_MCP_RESIDENT_PRINCIPAL` set equal to the PSK, then send the PSK as your
-MCP bearer. Published `attach`/`publish_output` content renders on screen for
-both portal adapter families (the exemplar gRPC adapter and the in-process
-cooperative driver; the cooperative render landed in PR #959).
+The full contract is wired in-process. When the runtime runs with MCP enabled
+(`mcp_port > 0`), each operation maps to one Resident tool; call it as the
+resident principal (bearer == PSK == `TZE_HUD_MCP_RESIDENT_PRINCIPAL`). Every op
+maps to `portal_projection_<op>`, except `publish_output` →
+`portal_projection_publish`. `cleanup` also accepts operator authority.
+Published `attach`/`publish_output` content renders for both adapter families
+(exemplar gRPC and the in-process cooperative driver).
 
 The stdio component harness
-(`crates/tze_hud_projection/src/bin/projection_authority.rs`) remains useful for
-local protocol testing and audit-record inspection, but it runs the authority in
-an isolated process with **no** connection to the live runtime — its output never
-reaches the screen. Use the MCP facade above for real on-screen projection.
+(`crates/tze_hud_projection/src/bin/projection_authority.rs`) is for local
+protocol testing and audit-record inspection only — it runs the authority in an
+isolated process with **no** connection to the live runtime, so its output never
+reaches the screen. Use the MCP facade for real on-screen projection.
 
-The JSON payloads in `references/operation-examples.md` are the per-operation
-contract. `settings.template.json` shows the expected configuration shape.
-
-See `references/mcp-facade.md` for facade requirements, boundary rules, and a configuration template.
+References:
+- `references/operation-examples.md` — per-operation JSON payloads (the contract).
+- `references/mcp-facade.md` — facade requirements, boundary rules, auth wiring, code paths, and the config template.
+- `settings.template.json` — expected configuration shape.
 
 ## Safety Notes
 
