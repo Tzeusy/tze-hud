@@ -89,6 +89,13 @@ pub struct McpServerConfig {
 ///   tool calls through this channel to the winit event-loop thread where the
 ///   `InProcessPortalDriver` lives.
 ///
+/// # Returns
+///
+/// On success, returns `(join_handle, local_addr)` where `local_addr` is the
+/// *actually bound* socket address (resolves an ephemeral `:0` port to the real
+/// one). Callers use `local_addr` for user-facing discovery (e.g. the startup
+/// banner) so the reported address reflects a listener that is genuinely up.
+///
 /// # Errors
 ///
 /// Returns an error if `TcpListener::bind` fails (e.g., address in use).
@@ -98,7 +105,7 @@ pub async fn start_mcp_http_server(
     shutdown: ShutdownToken,
     paste_inject_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     portal_op_tx: Option<tokio::sync::mpsc::UnboundedSender<tze_hud_mcp::portal_op::PortalOp>>,
-) -> std::io::Result<tokio::task::JoinHandle<()>> {
+) -> std::io::Result<(tokio::task::JoinHandle<()>, SocketAddr)> {
     let listener = TcpListener::bind(config.bind_addr).await?;
     let local_addr = listener.local_addr()?;
 
@@ -122,7 +129,7 @@ pub async fn start_mcp_http_server(
         run_accept_loop(listener, server, shutdown, local_addr).await;
     });
 
-    Ok(handle)
+    Ok((handle, local_addr))
 }
 
 /// Internal accept loop — runs until the shutdown token is triggered or the
@@ -338,9 +345,10 @@ mod tests {
         let config = make_config(0, "test-psk");
         let shutdown = ShutdownToken::new();
 
-        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None, None)
-            .await
-            .expect("bind should succeed");
+        let (handle, _mcp_addr) =
+            start_mcp_http_server(scene, config, shutdown.clone(), None, None)
+                .await
+                .expect("bind should succeed");
 
         // Give the task a moment to start its accept loop.
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -367,9 +375,10 @@ mod tests {
         };
         let shutdown = ShutdownToken::new();
 
-        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None, None)
-            .await
-            .expect("bind");
+        let (handle, _mcp_addr) =
+            start_mcp_http_server(scene, config, shutdown.clone(), None, None)
+                .await
+                .expect("bind");
 
         // Give the task time to enter accept loop.
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -407,9 +416,10 @@ mod tests {
         };
         let shutdown = ShutdownToken::new();
 
-        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None, None)
-            .await
-            .expect("bind");
+        let (handle, _mcp_addr) =
+            start_mcp_http_server(scene, config, shutdown.clone(), None, None)
+                .await
+                .expect("bind");
 
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
@@ -442,9 +452,10 @@ mod tests {
         };
         let shutdown = ShutdownToken::new();
 
-        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None, None)
-            .await
-            .expect("bind");
+        let (handle, _mcp_addr) =
+            start_mcp_http_server(scene, config, shutdown.clone(), None, None)
+                .await
+                .expect("bind");
 
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
@@ -510,9 +521,10 @@ mod tests {
         };
         let shutdown = ShutdownToken::new();
 
-        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None, None)
-            .await
-            .expect("bind");
+        let (handle, _mcp_addr) =
+            start_mcp_http_server(scene, config, shutdown.clone(), None, None)
+                .await
+                .expect("bind");
 
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
@@ -546,9 +558,10 @@ mod tests {
         };
         let shutdown = ShutdownToken::new();
 
-        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None, None)
-            .await
-            .expect("bind");
+        let (handle, _mcp_addr) =
+            start_mcp_http_server(scene, config, shutdown.clone(), None, None)
+                .await
+                .expect("bind");
 
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
@@ -585,9 +598,10 @@ mod tests {
             resident_principal: Some("resident-psk".to_string()),
         };
         let shutdown = ShutdownToken::new();
-        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None, None)
-            .await
-            .expect("bind");
+        let (handle, _mcp_addr) =
+            start_mcp_http_server(scene, config, shutdown.clone(), None, None)
+                .await
+                .expect("bind");
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         let body =
@@ -620,9 +634,10 @@ mod tests {
             resident_principal: None,
         };
         let shutdown = ShutdownToken::new();
-        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None, None)
-            .await
-            .expect("bind");
+        let (handle, _mcp_addr) =
+            start_mcp_http_server(scene, config, shutdown.clone(), None, None)
+                .await
+                .expect("bind");
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         let body = r#"{"jsonrpc":"2.0","method":"create_tab","params":{"name":"X"},"id":81}"#;
@@ -650,9 +665,10 @@ mod tests {
             resident_principal: Some("resident-psk".to_string()),
         };
         let shutdown = ShutdownToken::new();
-        let handle = start_mcp_http_server(scene, config, shutdown.clone(), None, None)
-            .await
-            .expect("bind");
+        let (handle, _mcp_addr) =
+            start_mcp_http_server(scene, config, shutdown.clone(), None, None)
+                .await
+                .expect("bind");
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         let body = r#"{"jsonrpc":"2.0","method":"list_zones","params":{},"id":82}"#;

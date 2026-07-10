@@ -207,7 +207,7 @@ use self::lifecycle::{
     begin_os_mouse_capture, detect_monitor_size, drain_pending_input_latency, end_os_mouse_capture,
     focus_window_for_text_input, read_windows_clipboard_text, seed_windowed_benchmark_scene,
 };
-use self::network::{build_runtime_context, start_network_services};
+use self::network::{build_runtime_context, render_startup_banner, start_network_services};
 use self::portal::build_portal_projection_driver;
 
 // ─── WindowedRuntime ─────────────────────────────────────────────────────────
@@ -1987,6 +1987,9 @@ impl WindowedRuntime {
         // immediately while the receiver lived on in `WindowedRuntimeState`,
         // making the first `drain_portal_ops` tick observe `Disconnected` and
         // log a misleading "MCP portal tools will no longer function" warning.
+        // Bound MCP address for the startup banner (hud-ylwqc). Set only when the
+        // MCP listener actually binds, so the banner never advertises a dead port.
+        let mut mcp_bound_addr: Option<std::net::SocketAddr> = None;
         let (mut portal_op_tx_opt, mut portal_op_rx_opt): (
             Option<tokio::sync::mpsc::UnboundedSender<tze_hud_mcp::portal_op::PortalOp>>,
             Option<tokio::sync::mpsc::UnboundedReceiver<tze_hud_mcp::portal_op::PortalOp>>,
@@ -2059,8 +2062,9 @@ impl WindowedRuntime {
                     Some(paste_inject_tx),
                     portal_op_tx_opt.take(),
                 )) {
-                    Ok(handle) => {
+                    Ok((handle, local_addr)) => {
                         network_handles.push(handle);
+                        mcp_bound_addr = Some(local_addr);
                         tracing::info!(
                             mcp_port = cfg.mcp_port,
                             "MCP HTTP server started on network runtime"
@@ -2078,6 +2082,29 @@ impl WindowedRuntime {
         } else {
             tracing::info!("MCP HTTP server disabled (mcp_port = 0)");
         }
+
+        // ── Non-secret startup banner (hud-ylwqc) ──────────────────────────────
+        // Print a minimal, self-describing banner to stdout *unconditionally*.
+        // The runtime's tracing subscriber is gated on `TZE_HUD_LOG`, so with it
+        // unset the process is otherwise silent and a fresh operator cannot tell
+        // where it is listening or how to attach. `println!` (not `tracing`) is
+        // deliberate for exactly that reason. The banner carries only bound
+        // addresses and an attach hint — never the PSK or any credential (the
+        // helper cannot access secrets; see `render_startup_banner`).
+        //
+        // gRPC serves the requested `grpc_port` on the same bind host selected
+        // above; reconstruct it here for display (the MCP addr is the genuine
+        // bound `local_addr`). A `grpc_port` of 0 disables gRPC → `None`.
+        let grpc_banner_addr: Option<std::net::SocketAddr> = if cfg.grpc_port != 0 {
+            let grpc_host = self::config::select_grpc_bind_host(bind_all);
+            format!("{grpc_host}:{}", cfg.grpc_port).parse().ok()
+        } else {
+            None
+        };
+        println!(
+            "{}",
+            render_startup_banner(grpc_banner_addr, mcp_bound_addr)
+        );
 
         // ── Safe-mode keyboard exit bridge ─────────────────────────────────────
         // Create an mpsc channel so the sync winit event-loop thread can signal

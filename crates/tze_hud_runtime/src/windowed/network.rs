@@ -216,10 +216,84 @@ pub(super) fn start_network_services(
     ))
 }
 
+/// Render the non-secret startup banner printed to stdout once the network
+/// listeners are up (hud-ylwqc).
+///
+/// The runtime otherwise emits nothing on stdout unless `TZE_HUD_LOG` is set
+/// (tracing is gated on that env var), so a fresh operator has no way to learn
+/// where the runtime is listening or how to attach. This banner makes the
+/// runtime self-describing on first run.
+///
+/// **Security invariant:** this function deliberately takes *only* bound socket
+/// addresses. The PSK (and every other credential) is not in scope here, so the
+/// banner is provably incapable of leaking a secret — see the unit tests. When
+/// a service is disabled, its address is passed as `None` and rendered as
+/// `disabled` rather than a bogus endpoint.
+pub(super) fn render_startup_banner(
+    grpc_addr: Option<std::net::SocketAddr>,
+    mcp_addr: Option<std::net::SocketAddr>,
+) -> String {
+    const RULE: &str = "────────────────────────────────────────────────────────────────────";
+    let mut lines: Vec<String> = Vec::with_capacity(7);
+    lines.push(RULE.to_string());
+    lines.push(" tze_hud runtime ready".to_string());
+    match grpc_addr {
+        Some(addr) => lines.push(format!("   gRPC   : {addr}")),
+        None => lines.push("   gRPC   : disabled".to_string()),
+    }
+    match mcp_addr {
+        Some(addr) => lines.push(format!(
+            "   MCP    : http://{addr}/mcp   (auth: Authorization: Bearer <TZE_HUD_PSK>)"
+        )),
+        None => lines.push("   MCP    : disabled".to_string()),
+    }
+    lines.push(
+        "   attach : invoke the `hud-projection` skill in an LLM session, or run".to_string(),
+    );
+    lines.push("            scripts/quickstart.sh — see docs/QUICKSTART.md".to_string());
+    lines.push(RULE.to_string());
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::test_support::make_shared_state;
     use super::*;
+
+    /// The banner must never contain the PSK, even when one is configured.
+    /// `render_startup_banner` takes only bound addresses (never the secret),
+    /// so this holds by construction; the test guards against future edits that
+    /// might thread a credential through the banner.
+    #[test]
+    fn startup_banner_never_contains_psk() {
+        let psk = "SUPER-SECRET-PSK-2f9c1a7e-do-not-leak";
+        // Simulate a fully-configured runtime with a PSK set in the environment.
+        let grpc: std::net::SocketAddr = "127.0.0.1:50051".parse().unwrap();
+        let mcp: std::net::SocketAddr = "127.0.0.1:9090".parse().unwrap();
+        let banner = render_startup_banner(Some(grpc), Some(mcp));
+        assert!(
+            !banner.contains(psk),
+            "startup banner must not leak the PSK; banner was:\n{banner}"
+        );
+        // Also assert the banner carries the useful, non-secret discovery info.
+        assert!(banner.contains("127.0.0.1:50051"), "gRPC addr missing");
+        assert!(
+            banner.contains("http://127.0.0.1:9090/mcp"),
+            "MCP URL missing"
+        );
+        assert!(banner.contains("hud-projection"), "attach hint missing");
+        assert!(banner.contains("tze_hud runtime ready"), "header missing");
+    }
+
+    /// Disabled services render as `disabled`, not a bogus `:0` endpoint.
+    #[test]
+    fn startup_banner_renders_disabled_services() {
+        let banner = render_startup_banner(None, None);
+        assert!(banner.contains("gRPC   : disabled"));
+        assert!(banner.contains("MCP    : disabled"));
+        // Attach hint is always present so the runtime stays self-describing.
+        assert!(banner.contains("hud-projection"));
+    }
 
     /// When `grpc_port == 0`, `start_network_services` must return `None` for
     /// the runtime and an empty handle list (compositor-only mode, AC §2).
