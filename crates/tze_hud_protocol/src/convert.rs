@@ -1594,7 +1594,14 @@ pub fn apply_portal_render_batch_to_scene(
                 // co-travelling mutation here is idempotent — but keeping the arm
                 // means the render batch stays fully self-describing, and it is
                 // exactly this mutation a bridged portal relies on over the wire.
-                scene.set_tile_unread_count(tile_id, stuc.count as usize);
+                // Checked path (matching the SetTileLifecycleAccent arm above): a
+                // suspended/orphaned/expired or `ModifyOwnTiles`-revoked lease must
+                // not mutate the overlay or bump `scene.version` (hud-a745w).
+                if let Err(e) =
+                    scene.set_tile_unread_count_checked(tile_id, stuc.count as usize, namespace)
+                {
+                    tracing::warn!(?e, "portal in-process apply: SetTileUnreadCount failed");
+                }
             }
             Some(Mutation::AddNode(an)) => {
                 // parent_id is big-endian RFC 4122 bytes (render_batch uses the

@@ -796,15 +796,54 @@ impl SceneGraph {
     /// Record a tile's ambient unread-output count (the aggregate
     /// `ProjectedPortalState::unread_output_count`).
     ///
-    /// Called by the portal projection driver each drain. `count = 0` clears the
-    /// badge; the driver passes `0` for both a genuine empty count and a redacted
-    /// (`None`) count so no unread badge renders in either case.
+    /// Called by the portal projection driver each drain, and by the wire apply
+    /// paths for a bridged portal (hud-hwk2m). `count = 0` clears the badge; the
+    /// producer passes `0` for both a genuine empty count and a redacted (`None`)
+    /// count so no unread badge renders in either case.
+    ///
+    /// Bumps `scene.version` only when the stored count actually changes, so a
+    /// count-only update (no co-travelling content mutation) still re-arms the
+    /// #943 idle present-gate and the badge repaints — mirroring
+    /// [`set_tile_lifecycle_accent`](Self::set_tile_lifecycle_accent). A redundant
+    /// re-write of the same count leaves the version untouched, keeping a
+    /// steady-state portal idle.
     ///
     /// No-op if the tile does not exist.
     pub fn set_tile_unread_count(&mut self, tile_id: SceneId, count: usize) {
-        if self.tiles.contains_key(&tile_id) {
-            self.overlay.tile_unread_counts.insert(tile_id, count);
+        if !self.tiles.contains_key(&tile_id) {
+            return;
         }
+        if self.overlay.tile_unread_counts.get(&tile_id) != Some(&count) {
+            self.overlay.tile_unread_counts.insert(tile_id, count);
+            self.version += 1;
+        }
+    }
+
+    /// Set the unread-output count with a full lease + capability gate (checked
+    /// path), mirroring
+    /// [`set_tile_lifecycle_accent_checked`](Self::set_tile_lifecycle_accent_checked):
+    /// namespace isolation, a live `require_active_lease`, and `ModifyOwnTiles`.
+    ///
+    /// The unchecked [`set_tile_unread_count`](Self::set_tile_unread_count) only
+    /// checks tile existence, so the wire apply paths that bypass the `apply_batch`
+    /// Stage-1 lease check (`apply_portal_render_batch_to_scene`, and the
+    /// session-server batch that reaches `apply_single_mutation`) could otherwise
+    /// mutate the badge overlay under a `ModifyOwnTiles`-revoked, safe-mode-
+    /// suspended, orphaned, or expired lease — escaping tile-modification authority
+    /// exactly like the accent overlay did before hud-a745w. `require_active_lease`
+    /// accepts only `Active`, so the lease-grace degraded repaint (which reconnects
+    /// the driver lease to `Active` before rendering, hud-i429x) still applies.
+    pub fn set_tile_unread_count_checked(
+        &mut self,
+        tile_id: SceneId,
+        count: usize,
+        agent_namespace: &str,
+    ) -> Result<(), ValidationError> {
+        let lease_id = self.portal_tile_lease_checked(tile_id, agent_namespace)?;
+        self.require_active_lease(lease_id)?;
+        self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
+        self.set_tile_unread_count(tile_id, count);
+        Ok(())
     }
 
     /// Return a tile's ambient unread-output count (`0` when unset/cleared).

@@ -1004,23 +1004,13 @@ impl SceneGraph {
             }
             // ── Ambient unread-output count (jump-to-latest badge) ────────
             SceneMutation::SetTileUnreadCount { tile_id, count } => {
-                // Namespace isolation, mirroring the sibling `SetScrollOffset`
-                // inline check: only the tile's owning agent may set its badge
-                // count. `apply_batch` Stage 1 already rejects a non-Active lease
-                // via the tile_id lease lookup above; this closes the same
-                // cross-namespace escape the checked content arms do.
-                let tile = self
-                    .tiles
-                    .get(tile_id)
-                    .ok_or(ValidationError::TileNotFound { id: *tile_id })?;
-                if tile.namespace != namespace {
-                    return Err(ValidationError::NamespaceMismatch {
-                        tile_id: *tile_id,
-                        tile_namespace: tile.namespace.clone(),
-                        agent_namespace: namespace.to_string(),
-                    });
-                }
-                self.set_tile_unread_count(*tile_id, *count);
+                // Checked path enforces namespace isolation + live lease +
+                // `ModifyOwnTiles`, matching the sibling `SetTileLifecycleAccent`
+                // and portal-surface arms (hud-a745w). A same-namespace session
+                // whose `ModifyOwnTiles` was revoked (lease still Active) must not
+                // keep mutating tile UI state — `apply_batch` Stage 1 only checks
+                // lease liveness, not the capability.
+                self.set_tile_unread_count_checked(*tile_id, *count, namespace)?;
                 Ok(vec![])
             }
             // ── Portal surface (RFC 0013 §7.2 promotion) ─────────────────
@@ -1132,7 +1122,10 @@ mod tests {
             "no badge before any count is set"
         );
 
-        // Set the badge count.
+        // Set the badge count. A count CHANGE must bump `scene.version` so a
+        // count-only update re-arms the idle present-gate and the badge repaints
+        // (mirrors SetTileLifecycleAccent).
+        let version_before = scene.version;
         assert!(
             scene
                 .apply_batch(&make_batch_with_lease(
@@ -1146,6 +1139,27 @@ mod tests {
             scene.tile_unread_count(tile_id),
             5,
             "the wire mutation must land on the compositor-read overlay"
+        );
+        assert!(
+            scene.version > version_before,
+            "a count change must bump scene.version so a count-only update repaints"
+        );
+
+        // A redundant re-write of the SAME count must NOT bump the version — a
+        // steady-state portal stays idle.
+        let version_steady = scene.version;
+        assert!(
+            scene
+                .apply_batch(&make_batch_with_lease(
+                    "agent",
+                    lease_id,
+                    vec![SceneMutation::SetTileUnreadCount { tile_id, count: 5 }],
+                ))
+                .applied
+        );
+        assert_eq!(
+            scene.version, version_steady,
+            "re-writing the same count must not bump scene.version"
         );
 
         // Count 0 clears the badge.
@@ -1188,6 +1202,29 @@ mod tests {
             scene.tile_unread_count(tile_id),
             3,
             "a rejected cross-namespace write must not change the count"
+        );
+
+        // Revoking `ModifyOwnTiles` (lease still Active, same namespace) must
+        // reject the badge write with `CapabilityMissing` — parity with the
+        // checked lifecycle-accent / portal-surface paths (hud-a745w). A
+        // capability-revoked session must not keep mutating tile UI state.
+        scene
+            .revoke_capability(lease_id, &Capability::ModifyOwnTiles)
+            .expect("revoke ModifyOwnTiles");
+        assert!(
+            !scene
+                .apply_batch(&make_batch_with_lease(
+                    "agent",
+                    lease_id,
+                    vec![SceneMutation::SetTileUnreadCount { tile_id, count: 7 }],
+                ))
+                .applied,
+            "a ModifyOwnTiles-revoked session must not set the badge count"
+        );
+        assert_eq!(
+            scene.tile_unread_count(tile_id),
+            3,
+            "a capability-rejected write must not change the count"
         );
     }
 
