@@ -4771,3 +4771,165 @@ fn tile_font_scale_cleared_on_tile_removal() {
         "removing a tile must drop its viewer font scale"
     );
 }
+
+// ─── Lifecycle-accent lease gate (hud-a745w) ─────────────────────────────────
+//
+// The in-process portal render-batch path (`apply_portal_render_batch_to_scene`)
+// bypasses the `apply_batch` Stage-1 lease check, so it must reach the accent
+// overlay through the *checked* variants. These prove the checked variants gate
+// the mutation on lease state exactly like the sibling `set_tile_root_checked`
+// content paint: a suspended/orphaned lease is rejected (and `scene.version` is
+// NOT bumped, so the #943 present-gate does not re-arm), while an Active lease —
+// including the degraded-grace state after a within-grace reconnect — still
+// applies.
+
+/// Build a scene with an active `ModifyOwnTiles` lease and one tile owned by it.
+fn scene_with_accented_tile() -> (SceneGraph, TestClock, SceneId, SceneId) {
+    let (mut scene, clock) = scene_with_test_clock();
+    let tab_id = scene.create_tab("Main", 0).unwrap();
+    let lease_id = scene.grant_lease(
+        "agent",
+        60_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "agent",
+            lease_id,
+            Rect::new(0.0, 0.0, 200.0, 120.0),
+            1,
+        )
+        .unwrap();
+    (scene, clock, lease_id, tile_id)
+}
+
+fn sample_accent() -> LifecycleAccent {
+    LifecycleAccent {
+        color: Rgba::new(0.2, 0.6, 0.9, 1.0),
+        width_px: 4.0,
+    }
+}
+
+#[test]
+fn test_lifecycle_accent_checked_applies_under_active_lease() {
+    let (mut scene, _clock, _lease_id, tile_id) = scene_with_accented_tile();
+    let version_before = scene.version;
+
+    scene
+        .set_tile_lifecycle_accent_checked(tile_id, sample_accent(), "agent")
+        .expect("active lease + ModifyOwnTiles must apply the accent");
+
+    assert_eq!(scene.tile_lifecycle_accent(tile_id), Some(sample_accent()));
+    assert_eq!(
+        scene.version,
+        version_before + 1,
+        "an applied accent must bump scene.version to re-arm the present-gate"
+    );
+}
+
+#[test]
+fn test_lifecycle_accent_checked_rejected_under_suspended_lease() {
+    let (mut scene, clock, lease_id, tile_id) = scene_with_accented_tile();
+
+    // Enter safe mode: suspend the lease.
+    scene.suspend_lease(&lease_id, clock.now_millis()).unwrap();
+    assert!(!scene.leases[&lease_id].is_mutations_allowed());
+
+    let version_before = scene.version;
+    let err = scene
+        .set_tile_lifecycle_accent_checked(tile_id, sample_accent(), "agent")
+        .expect_err("a suspended lease must reject the accent mutation");
+    assert!(
+        matches!(err, ValidationError::InvalidField { ref field, .. } if field == "lease_state"),
+        "expected a lease_state rejection, got {err:?}"
+    );
+
+    assert_eq!(
+        scene.tile_lifecycle_accent(tile_id),
+        None,
+        "the accent must not be stored under a suspended lease"
+    );
+    assert_eq!(
+        scene.version, version_before,
+        "a rejected accent must NOT bump scene.version (no present-gate re-arm \
+         escaping lease suspension)"
+    );
+}
+
+#[test]
+fn test_lifecycle_accent_clear_checked_rejected_under_suspended_lease() {
+    let (mut scene, clock, lease_id, tile_id) = scene_with_accented_tile();
+
+    // Pre-seed an accent while Active, then suspend.
+    scene
+        .set_tile_lifecycle_accent_checked(tile_id, sample_accent(), "agent")
+        .unwrap();
+    scene.suspend_lease(&lease_id, clock.now_millis()).unwrap();
+
+    let version_before = scene.version;
+    let err = scene
+        .clear_tile_lifecycle_accent_checked(tile_id, "agent")
+        .expect_err("a suspended lease must reject clearing the accent");
+    assert!(
+        matches!(err, ValidationError::InvalidField { ref field, .. } if field == "lease_state"),
+        "expected a lease_state rejection, got {err:?}"
+    );
+    assert_eq!(
+        scene.tile_lifecycle_accent(tile_id),
+        Some(sample_accent()),
+        "the accent must survive a rejected clear under a suspended lease"
+    );
+    assert_eq!(
+        scene.version, version_before,
+        "a rejected clear must NOT bump scene.version"
+    );
+}
+
+#[test]
+fn test_lifecycle_accent_checked_rejected_while_orphaned_then_applies_after_grace_reconnect() {
+    let (mut scene, clock, lease_id, tile_id) = scene_with_accented_tile();
+
+    // Ungraceful drop: the driver lease is orphaned while grace runs.
+    clock.advance(1_000);
+    scene
+        .disconnect_lease(&lease_id, clock.now_millis())
+        .unwrap();
+    assert_eq!(scene.leases[&lease_id].state, LeaseState::Orphaned);
+
+    // While orphaned (no resume yet), the accent — like the sibling content paint
+    // — must be rejected: an orphaned lease is not a mutation-permitting state.
+    let version_before = scene.version;
+    let err = scene
+        .set_tile_lifecycle_accent_checked(tile_id, sample_accent(), "agent")
+        .expect_err("an orphaned lease must reject the accent mutation");
+    assert!(
+        matches!(err, ValidationError::InvalidField { ref field, .. } if field == "lease_state"),
+        "expected a lease_state rejection, got {err:?}"
+    );
+    assert_eq!(scene.tile_lifecycle_accent(tile_id), None);
+    assert_eq!(scene.version, version_before);
+
+    // Owner returns within grace: the lease-grace path reconnects the lease to
+    // Active (mirrors `reconnect_lease_grace_on_resume`) BEFORE the degraded
+    // repaint renders. The accent must now apply — the gate rejects only genuinely
+    // inactive leases, not the reconnected degraded-grace state.
+    clock.advance(5_000);
+    scene
+        .reconnect_lease(&lease_id, clock.now_millis())
+        .unwrap();
+    assert_eq!(scene.leases[&lease_id].state, LeaseState::Active);
+
+    // Capture the version after the lease transitions (which themselves bump it)
+    // so we isolate the accent mutation's own +1.
+    let version_before_apply = scene.version;
+    scene
+        .set_tile_lifecycle_accent_checked(tile_id, sample_accent(), "agent")
+        .expect("a reconnected (degraded-grace) Active lease must apply the accent");
+    assert_eq!(scene.tile_lifecycle_accent(tile_id), Some(sample_accent()));
+    assert_eq!(
+        scene.version,
+        version_before_apply + 1,
+        "the degraded-grace repaint accent must apply after reconnect"
+    );
+}

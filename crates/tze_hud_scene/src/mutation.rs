@@ -976,20 +976,15 @@ impl SceneGraph {
             }
             // ── Lifecycle affordance accent ──────────────────────────────
             SceneMutation::SetTileLifecycleAccent { tile_id, accent } => {
-                let tile = self
-                    .tiles
-                    .get(tile_id)
-                    .ok_or(ValidationError::TileNotFound { id: *tile_id })?;
-                if tile.namespace != namespace {
-                    return Err(ValidationError::NamespaceMismatch {
-                        tile_id: *tile_id,
-                        tile_namespace: tile.namespace.clone(),
-                        agent_namespace: namespace.to_string(),
-                    });
-                }
+                // Checked variants enforce namespace isolation + live
+                // lease/`ModifyOwnTiles` capability, matching the sibling content
+                // mutations above (`SetTileRoot`, `UpdateTileInputMode`). `apply_batch`
+                // Stage-1 already rejects a non-Active lease here, but routing through
+                // the checked path keeps this arm defense-in-depth consistent and
+                // closes the accent-overlay lease-suspension escape (hud-a745w).
                 match accent {
-                    Some(a) => self.set_tile_lifecycle_accent(*tile_id, *a)?,
-                    None => self.clear_tile_lifecycle_accent(*tile_id),
+                    Some(a) => self.set_tile_lifecycle_accent_checked(*tile_id, *a, namespace)?,
+                    None => self.clear_tile_lifecycle_accent_checked(*tile_id, namespace)?,
                 }
                 Ok(vec![])
             }
