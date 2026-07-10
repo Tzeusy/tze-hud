@@ -3,8 +3,8 @@ use std::ops::ControlFlow;
 use std::time::Instant;
 
 use tze_hud_input::{
-    AgentDispatch, AgentDispatchKind, HotkeyResizeDir, KeyboardModifiers, PortalFocusTarget,
-    RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent, ShellReservedShortcut,
+    AgentDispatch, AgentDispatchKind, HotkeyResizeAxis, HotkeyResizeDir, KeyboardModifiers,
+    PortalFocusTarget, RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent, ShellReservedShortcut,
 };
 
 use super::WinitApp;
@@ -105,6 +105,39 @@ fn portal_resize_key_code(raw_key_code: &str, raw_key: &str) -> String {
         raw_key.to_string()
     } else {
         raw_key_code.to_string()
+    }
+}
+
+/// Resolve a directional whole-portal resize chord (Ctrl+Shift+Arrow, hud-csrmf).
+///
+/// Returns the `(direction, axis)` pair for the arrow chords, or `None` for any
+/// other key or modifier combination:
+///
+/// | Chord | Result |
+/// |-------|--------|
+/// | Ctrl+Shift+ArrowRight | grow width |
+/// | Ctrl+Shift+ArrowLeft | shrink width |
+/// | Ctrl+Shift+ArrowDown | grow height |
+/// | Ctrl+Shift+ArrowUp | shrink height |
+///
+/// Both Ctrl and Shift are required; Alt / Meta must NOT be held (an OS window-
+/// management chord, never a portal resize). The physical `key_code` is used so
+/// the chord is layout-independent. Growing width toward the right / height
+/// toward the bottom matches the top-left anchoring of the pointer and
+/// Ctrl+`+`/`-` resize paths.
+fn directional_portal_resize(
+    key_code: &str,
+    modifiers: &KeyboardModifiers,
+) -> Option<(HotkeyResizeDir, HotkeyResizeAxis)> {
+    if !modifiers.ctrl || !modifiers.shift || modifiers.alt || modifiers.meta {
+        return None;
+    }
+    match key_code {
+        "ArrowRight" => Some((HotkeyResizeDir::Grow, HotkeyResizeAxis::Width)),
+        "ArrowLeft" => Some((HotkeyResizeDir::Shrink, HotkeyResizeAxis::Width)),
+        "ArrowDown" => Some((HotkeyResizeDir::Grow, HotkeyResizeAxis::Height)),
+        "ArrowUp" => Some((HotkeyResizeDir::Shrink, HotkeyResizeAxis::Height)),
+        _ => None,
     }
 }
 
@@ -449,7 +482,7 @@ impl WinitApp {
             if let Some(dir) = HotkeyResizeDir::from_key(&raw.key, raw.modifiers.ctrl)
                 .or_else(|| HotkeyResizeDir::from_key_code(&raw.key_code, raw.modifiers.ctrl))
             {
-                if self.apply_portal_resize_hotkey(tab_id, dir) {
+                if self.apply_portal_resize_hotkey(tab_id, dir, HotkeyResizeAxis::Both) {
                     // Remember this chord so its matching `KeyUp` is swallowed by
                     // the key-up fallback instead of resizing a second time
                     // (hud-v4k1h: live Windows can deliver key-up-only streams, so
@@ -465,6 +498,35 @@ impl WinitApp {
                     );
                     return;
                 }
+            }
+            // ── Priority 4b: Directional whole-portal resize (Ctrl+Shift+Arrow) ─
+            //
+            // A per-axis whole-portal resize affordance (hud-csrmf): Ctrl+Shift+
+            // Left/Right steps WIDTH, Up/Down steps HEIGHT. It takes the same
+            // viewer-geometry-lock as the pointer-drag and Ctrl+`+`/`-` paths, so
+            // a width step reflows the transcript and drives the dynamic hud-rpmwt
+            // reconcile-on-republish path WITHOUT pointer injection — the axis the
+            // autopilot live-verify needs on a multi-monitor console where the
+            // 22px pointer resize handle is unreachable.
+            //
+            // Gated on `!is_composer_active()` so it never steals the composer's
+            // Ctrl+Shift+Arrow word/line-selection while the viewer is typing; a
+            // keyboard viewer (or the autopilot) reaches it by focusing a
+            // non-composer surface of the portal (click transcript / Tab to a
+            // control), matching the click-to-focus and Tab focus semantics.
+            else if !self.state.input_processor.is_composer_active()
+                && let Some((dir, axis)) = directional_portal_resize(&raw.key_code, &raw.modifiers)
+                && self.apply_portal_resize_hotkey(tab_id, dir, axis)
+            {
+                self.state
+                    .consumed_portal_resize_keydowns
+                    .insert(portal_resize_key_code(&raw.key_code, &raw.key));
+                tracing::debug!(
+                    key_code = %str_preview(&raw.key_code),
+                    ?axis,
+                    "portal resize: Ctrl+Shift+Arrow directional hotkey consumed (resize applied)"
+                );
+                return;
             }
         }
 
@@ -1051,12 +1113,27 @@ impl WinitApp {
         }
         if let Some(dir) = HotkeyResizeDir::from_key(&raw.key, raw.modifiers.ctrl)
             .or_else(|| HotkeyResizeDir::from_key_code(&raw.key_code, raw.modifiers.ctrl))
-            && self.apply_portal_resize_hotkey(tab_id, dir)
+            && self.apply_portal_resize_hotkey(tab_id, dir, HotkeyResizeAxis::Both)
         {
             tracing::debug!(
                 key = %str_preview(&raw.key),
                 key_code = %str_preview(&raw.key_code),
                 "portal resize: Ctrl KeyUp fallback consumed (resize applied)"
+            );
+            return;
+        }
+        // Directional Ctrl+Shift+Arrow whole-portal resize: same KeyUp fallback as
+        // the Ctrl+`+`/`-` chord (hud-csrmf), so a SendInput-driven release-only
+        // stream still resizes. Gated on `!is_composer_active()` to mirror the
+        // key-down intercept (never steal composer word/line-select).
+        if !self.state.input_processor.is_composer_active()
+            && let Some((dir, axis)) = directional_portal_resize(&raw.key_code, &raw.modifiers)
+            && self.apply_portal_resize_hotkey(tab_id, dir, axis)
+        {
+            tracing::debug!(
+                key_code = %str_preview(&raw.key_code),
+                ?axis,
+                "portal resize: Ctrl+Shift+Arrow directional KeyUp fallback consumed (resize applied)"
             );
             return;
         }
