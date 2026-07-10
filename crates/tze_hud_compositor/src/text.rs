@@ -3010,11 +3010,8 @@ mod tests {
     #[test]
     fn portal_part_clip_rect_no_part_clamps_to_tile() {
         // Content overflows the tile on the right and bottom.
-        let clip = portal_part_clip_rect(
-            (10.0, 10.0, 400.0, 400.0),
-            (0.0, 0.0, 100.0, 100.0),
-            None,
-        );
+        let clip =
+            portal_part_clip_rect((10.0, 10.0, 400.0, 400.0), (0.0, 0.0, 100.0, 100.0), None);
         // Right/bottom are clamped to the tile edge (x=100, y=100).
         assert_eq!(clip, (10.0, 10.0, 90.0, 90.0));
     }
@@ -3027,8 +3024,8 @@ mod tests {
         // Transcript node laid out over the whole tile, but its part band is the
         // top 60px only.
         let clip = portal_part_clip_rect(
-            (0.0, 0.0, 100.0, 100.0), // content spans the tile
-            (0.0, 0.0, 100.0, 100.0), // tile
+            (0.0, 0.0, 100.0, 100.0),      // content spans the tile
+            (0.0, 0.0, 100.0, 100.0),      // tile
             Some((0.0, 0.0, 100.0, 60.0)), // transcript band (absolute)
         );
         assert_eq!(clip, (0.0, 0.0, 100.0, 60.0));
