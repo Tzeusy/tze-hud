@@ -22,12 +22,12 @@
 
 use tze_hud_config::{
     PORTAL_TOKEN_COLLAPSED_BACKGROUND, PORTAL_TOKEN_COLLAPSED_FONT_SIZE,
-    PORTAL_TOKEN_COLLAPSED_TEXT_COLOR, PORTAL_TOKEN_COMPOSER_AT_CAPACITY_COLOR,
-    PORTAL_TOKEN_COMPOSER_BACKGROUND, PORTAL_TOKEN_COMPOSER_FONT_SIZE,
-    PORTAL_TOKEN_COMPOSER_TEXT_COLOR, PORTAL_TOKEN_TIMESTAMP_COLOR,
-    PORTAL_TOKEN_TIMESTAMP_GRANULARITY, PORTAL_TOKEN_TRANSCRIPT_BACKGROUND,
-    PORTAL_TOKEN_TRANSCRIPT_FONT_SIZE, PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR,
-    PORTAL_TOKEN_TRANSITION_IN_MS, PORTAL_TOKEN_TRANSITION_OUT_MS, resolve_portal_tokens,
+    PORTAL_TOKEN_COLLAPSED_TEXT_COLOR, PORTAL_TOKEN_COMPOSER_BACKGROUND,
+    PORTAL_TOKEN_COMPOSER_FONT_SIZE, PORTAL_TOKEN_COMPOSER_TEXT_COLOR,
+    PORTAL_TOKEN_TIMESTAMP_COLOR, PORTAL_TOKEN_TIMESTAMP_GRANULARITY,
+    PORTAL_TOKEN_TRANSCRIPT_BACKGROUND, PORTAL_TOKEN_TRANSCRIPT_FONT_SIZE,
+    PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR, PORTAL_TOKEN_TRANSITION_IN_MS,
+    PORTAL_TOKEN_TRANSITION_OUT_MS, resolve_portal_tokens,
 };
 use tze_hud_projection::{
     AttachRequest, ContentClassification, HudConnectionMetadata, OperationEnvelope, OutputKind,
@@ -784,10 +784,6 @@ fn composer_tokens_propagate_through_canonical_conversion() {
         PORTAL_TOKEN_COMPOSER_FONT_SIZE.to_string(),
         "18".to_string(),
     );
-    overrides.insert(
-        PORTAL_TOKEN_COMPOSER_AT_CAPACITY_COLOR.to_string(),
-        "#00FFFF".to_string(), // cyan
-    );
 
     let resolved = tze_hud_config::tokens::resolve_tokens(&empty, &overrides);
     let part_tokens = resolve_portal_tokens(&resolved);
@@ -833,20 +829,9 @@ fn composer_tokens_propagate_through_canonical_conversion() {
         (vt.composer_font_size_px - 18.0).abs() < 1e-3,
         "composer_font_size_px must be 18.0"
     );
-
-    // composer_at_capacity_color must be cyan (r=0, g=1, b=1)
-    assert!(
-        vt.composer_at_capacity_color.r.abs() < 1e-2,
-        "composer_at_capacity_color.r must be 0.0 (cyan)"
-    );
-    assert!(
-        (vt.composer_at_capacity_color.g - 1.0).abs() < 1e-2,
-        "composer_at_capacity_color.g must be 1.0 (cyan)"
-    );
-    assert!(
-        (vt.composer_at_capacity_color.b - 1.0).abs() < 1e-2,
-        "composer_at_capacity_color.b must be 1.0 (cyan)"
-    );
+    // NOTE: the composer at-capacity color is no longer mirrored on
+    // PortalVisualTokens (hud-9gyao); it is resolved + applied compositor-side
+    // (portal.composer.at_capacity_color -> composer_draft_base_color).
 }
 
 /// Verifies the §4.1 local-first draft contract at the projection layer: after
@@ -999,117 +984,6 @@ fn portal_node_proto_includes_draft_text_and_caret_after_notification() {
         caret_render(mid_display),
         "hello▌ world",
         "caret must render between 'hello' and ' world' at byte offset 5"
-    );
-}
-
-/// Verifies that the at-capacity indicator appears in the NodeProto when the
-/// composer draft is at its byte cap.
-///
-/// Checks both the text-visible `[!]` prefix in the content string and the
-/// `color_runs` sentinel carrying `composer_at_capacity_color` from the token set.
-/// Together these prove the at-capacity visual is fully token-driven (§6.1, §4.1).
-#[test]
-fn portal_node_proto_at_capacity_indicator_uses_composer_token() {
-    use std::collections::HashMap;
-    use tze_hud_projection::AdapterDraftNotification;
-
-    let empty: HashMap<String, String> = HashMap::new();
-
-    // Override at-capacity color to a distinctive value (pure blue)
-    let mut overrides = HashMap::new();
-    overrides.insert(
-        PORTAL_TOKEN_COMPOSER_AT_CAPACITY_COLOR.to_string(),
-        "#0000FF".to_string(), // pure blue sentinel
-    );
-    let resolved = tze_hud_config::tokens::resolve_tokens(&empty, &overrides);
-    let part_tokens = resolve_portal_tokens(&resolved);
-    let visual_tokens = portal_visual_tokens_from_part_tokens(&part_tokens);
-
-    // Verify the token propagated to PortalVisualTokens
-    assert!(
-        visual_tokens.composer_at_capacity_color.b > 0.9,
-        "at_capacity_color blue channel must be high (pure blue sentinel)"
-    );
-    assert!(
-        visual_tokens.composer_at_capacity_color.r < 0.1,
-        "at_capacity_color red channel must be ~0 (pure blue sentinel)"
-    );
-
-    let mut authority = tze_hud_projection::ProjectionAuthority::default();
-    let permit_all = tze_hud_projection::ProjectedPortalPolicy::permit_all();
-    let expanded_state = build_expanded_state(&mut authority, "proj-at-cap", &permit_all);
-
-    let fake_tile_id: Vec<u8> = vec![0xAC; 16];
-    let mut adapter = ResidentGrpcPortalAdapter::with_tokens(
-        ResidentGrpcPortalConfig::new(vec![0u8; 16]),
-        visual_tokens,
-    );
-    adapter.record_created_tile(fake_tile_id);
-
-    // Deliver an at-capacity draft notification
-    let at_cap_notification = AdapterDraftNotification {
-        text: "x".repeat(50), // some text at cap
-        cursor: 50,
-        selection_anchor: 50,
-        at_capacity: true,
-        sequence: 1,
-    };
-    adapter.apply_draft_notification(&at_cap_notification);
-
-    // Render and extract the published NodeProto
-    let cmd = adapter
-        .render_portal_message(&expanded_state, 1, 0)
-        .expect("at-capacity render must succeed");
-    let (text_md_content, color_runs) = extract_text_markdown_with_runs(cmd);
-
-    // Text-visible indicator: content must contain "[!]"
-    assert!(
-        text_md_content.contains("[!]"),
-        "at-capacity content must contain text-visible '[!]' prefix; got:\n{text_md_content}"
-    );
-
-    // Token-driven color run: some color_run must carry the injected pure-blue
-    // at-capacity sentinel. We identify it BY COLOR rather than by position: the
-    // published `color_runs` also carry unrelated ambient sentinels (e.g. the
-    // lifecycle-affordance run added in hud-9v3t6, which for this Active state is
-    // the teal `#4FA88A` — high green), all sharing the zero-length `[0..0]` span.
-    // Matching the composer color proves the token propagated end-to-end (override
-    // → resolve_tokens → PortalVisualTokens → adapter → rendered sentinel): had it
-    // NOT propagated, this run would carry the default copper `#B87333`, not blue.
-    let is_at_capacity_blue = |run: &tze_hud_protocol::proto::TextColorRunProto| {
-        run.color
-            .as_ref()
-            .is_some_and(|c| c.b > 0.9 && c.r < 0.1 && c.g < 0.1)
-    };
-    let blue_runs = color_runs.iter().filter(|r| is_at_capacity_blue(r)).count();
-    assert_eq!(
-        blue_runs,
-        1,
-        "at-capacity NodeProto must carry exactly one color_run with the injected \
-         pure-blue token sentinel; got {blue_runs} among {total} run(s): {color_runs:?}",
-        total = color_runs.len()
-    );
-
-    // ── Verify that a non-at-capacity draft produces no composer color_run ──
-    // (Ambient runs like the lifecycle sentinel may still be present — this only
-    // asserts the composer's at-capacity blue run is gone.)
-    let normal_notification = AdapterDraftNotification {
-        text: "normal text".to_string(),
-        cursor: 11,
-        selection_anchor: 11,
-        at_capacity: false,
-        sequence: 2,
-    };
-    adapter.apply_draft_notification(&normal_notification);
-
-    let cmd_normal = adapter
-        .render_portal_message(&expanded_state, 2, 0)
-        .expect("normal render must succeed");
-    let (_, runs_normal) = extract_text_markdown_with_runs(cmd_normal);
-    assert!(
-        !runs_normal.iter().any(is_at_capacity_blue),
-        "non-at-capacity draft must not emit the composer at-capacity color_run; \
-         got: {runs_normal:?}"
     );
 }
 

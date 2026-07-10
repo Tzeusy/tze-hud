@@ -341,7 +341,7 @@ const MAX_PORTAL_MARKDOWN_BYTES: usize = 16_384;
 /// |------|--------|
 /// | transcript body | `transcript_background`, `transcript_text_color`, `transcript_font_size_px` |
 /// | collapsed card | `collapsed_background`, `collapsed_text_color`, `collapsed_font_size_px` |
-/// | composer region | `composer_background`, `composer_text_color`, `composer_font_size_px`, `composer_at_capacity_color` |
+/// | composer region | `composer_background`, `composer_text_color`, `composer_font_size_px` |
 ///
 /// Frame, header, divider, and transition fields are omitted because
 /// `TextMarkdownNodeProto` has no slots for them. They are wired in
@@ -351,11 +351,10 @@ const MAX_PORTAL_MARKDOWN_BYTES: usize = 16_384;
 ///
 /// When a draft is active, `portal_node` renders the draft text with an inline
 /// `▌` caret marker at the cursor byte offset. When `at_capacity == true`, the
-/// composer line receives a text-visible `[!] ` prefix. The
-/// `composer_at_capacity_color` token is carried in the `color_runs` field of
-/// the `TextMarkdownNodeProto` as a zero-length Phase-1 sentinel (bytes `[0..0]`)
-/// for machine-readable detection; it does **not** apply a visible color to the
-/// text in Phase-1 (precise per-line coloring is deferred to hud-9gyao).
+/// composer line receives a text-visible `[!] ` prefix, and the compositor
+/// colors the draft glyphs themselves from `portal.composer.at_capacity_color`
+/// (`composer_draft_base_color`, hud-9gyao) -- a precise, bounded per-line
+/// treatment, never a color run on this cached transcript node.
 /// This is entirely local — the compositor reads from the adapter's draft
 /// display state without any remote roundtrip.
 #[derive(Clone, Debug, PartialEq)]
@@ -475,10 +474,10 @@ pub struct PortalVisualTokens {
     pub composer_background: proto::Rgba,
     pub composer_text_color: proto::Rgba,
     pub composer_font_size_px: f32,
-    /// Color applied to the composer line when the draft is at its byte cap.
-    /// Renders as a distinct visual signal ("limit reached") without alarming.
-    /// Source token: `portal.composer.at_capacity_color`.
-    pub composer_at_capacity_color: proto::Rgba,
+    // NOTE: the composer at-capacity color is NOT mirrored here. It is resolved
+    // and applied entirely on the compositor side (`portal.composer.at_capacity_color`
+    // -> `composer_draft_base_color`), which paints the draft glyphs directly; the
+    // adapter never needs it for the markdown node (hud-9gyao).
 }
 
 impl Default for PortalVisualTokens {
@@ -1462,12 +1461,19 @@ impl ResidentGrpcPortalAdapter {
                     font_size_px,
                     color: Some(text_color),
                     background: Some(background_color),
-                    // color_runs carry the composer at-capacity indicator, the
-                    // disconnect/stale marker color, and the lifecycle-affordance
-                    // accent when active. Each is a zero-length sentinel run
-                    // carrying the token color so the visual token drives the
-                    // display without any literal color in the render path
+                    // color_runs carry the disconnect/stale marker color and the
+                    // lifecycle-affordance accent when active. Each is a zero-length
+                    // sentinel run carrying the token color so the visual token drives
+                    // the display without any literal color in the render path
                     // (§2/§6.1: token-resolved, never hardcoded).
+                    //
+                    // The composer at-capacity indicator is NOT here: its precise,
+                    // bounded per-line color is painted directly on the composer draft
+                    // by the compositor overlay (`composer_draft_base_color`), which is
+                    // the real draft surface — never a zero-length sentinel on this
+                    // cached transcript node (hud-9gyao). The text-visible
+                    // `composer: [!] at capacity` status line (see `composer_line`)
+                    // remains the machine/human-readable at-capacity signal here.
                     color_runs: {
                         let mut runs =
                             stale_marker_color_runs(state, self.visual_tokens.stale_marker_color);
@@ -1475,11 +1481,6 @@ impl ResidentGrpcPortalAdapter {
                         // published lifecycle_state (active/attached/attention/inactive).
                         // Redaction-gated via state.lifecycle_state being None.
                         runs.extend(lifecycle_marker_color_runs(state, &self.visual_tokens));
-                        runs.extend(composer_color_runs(
-                            state,
-                            self.composer_display.as_ref(),
-                            self.visual_tokens.composer_at_capacity_color,
-                        ));
                         // Ambient unread-output-count indicator (hud-meqet). Absent
                         // when there is nothing unread or the count is redacted.
                         runs.extend(unread_indicator_color_runs(
@@ -1864,8 +1865,10 @@ fn composer_feedback_line(feedback: &PortalInputFeedback) -> String {
 /// - active draft → `composer: composing` (the draft itself is in the bottom
 ///   strip). When the draft is at capacity the line becomes
 ///   `composer: [!] at capacity`, keeping the at-capacity state text-visible for
-///   environments without color runs; `composer_color_runs` still emits the
-///   token-driven at-capacity color independently.
+///   environments that do not inspect color. The at-capacity HUE is painted
+///   directly on the draft glyphs by the compositor overlay
+///   (`composer_draft_base_color`, hud-9gyao), not carried as a color run on
+///   this markdown node.
 ///
 /// The promotion-era structured composer node (a dedicated footer input box with
 /// its own bounds) will let the echo, chrome, and status share one geometry and
@@ -1883,73 +1886,18 @@ fn composer_line(
 
     if display.at_capacity {
         // Text-visible at-capacity marker WITHOUT the draft text (the bottom
-        // strip owns the draft). The color_runs path applies the token-driven
-        // color independently.
+        // strip owns the draft). The at-capacity hue is painted on the draft
+        // glyphs by the compositor overlay (`composer_draft_base_color`).
         "composer: [!] at capacity".to_string()
     } else {
         "composer: composing".to_string()
     }
 }
 
-/// Build `TextColorRunProto` entries for the at-capacity composer indicator.
-///
-/// When the draft is at capacity and the portal is in expanded mode, emits a
-/// single `TextColorRunProto` covering bytes `[0..0]` (a zero-length sentinel)
-/// carrying `composer_at_capacity_color`. This is the token-driven color path
-/// (§6.1): no literal colors in the render code.
-///
-/// When the draft is not at capacity or the presentation is not expanded,
-/// returns an empty vec.
-///
-/// # Phase-1 scope note
-///
-/// In the Phase-1 raw-tile pilot, `color_runs` affect the full content of the
-/// single `TextMarkdownNodeProto`. An accurate per-line color run requires
-/// knowing the byte offset of the composer line in the rendered content. That
-/// calculation is fragile in the raw-tile single-node model and would couple
-/// `portal_node` to the exact output of `portal_markdown`. For Phase-1, the
-/// at-capacity indicator is therefore expressed as a zero-length sentinel run
-/// at byte 0 carrying the token color rather than a precise line-level run.
-/// Callers can check that `color_runs` is non-empty and inspect the color to
-/// detect the at-capacity state. The text-visible `[!]` prefix in
-/// `composer_line` additionally signals the state for environments where
-/// color runs are not inspected.
-///
-/// The zero-length run (`start_byte == end_byte == 0`) has no pixel coverage;
-/// `from_text_markdown_node` treats it as a pure sentinel and does **not**
-/// suppress Markdown stripping for it (only non-empty runs require that).
-///
-/// Promotion-era structured multi-node layout (one node per surface part) will
-/// allow a precise, isolated composer-region color run without this limitation.
-fn composer_color_runs(
-    state: &ProjectedPortalState,
-    composer_display: Option<&ComposerDisplayState>,
-    at_capacity_color: proto::Rgba,
-) -> Vec<proto::TextColorRunProto> {
-    if state.presentation != ProjectedPortalPresentation::Expanded {
-        return Vec::new();
-    }
-    let Some(display) = composer_display else {
-        return Vec::new();
-    };
-    if !display.at_capacity {
-        return Vec::new();
-    }
-    // Zero-length sentinel run carrying the token-derived at-capacity color.
-    // start_byte == end_byte == 0 → no pixel coloring by the compositor;
-    // presence of this run + its color value is the machine-readable signal.
-    vec![proto::TextColorRunProto {
-        start_byte: 0,
-        end_byte: 0,
-        color: Some(at_capacity_color),
-    }]
-}
-
 /// Build a `TextColorRunProto` for the disconnect/stale marker.
 ///
 /// When the portal is connection-degraded, emits a single zero-length sentinel
-/// run (`[0..0]`) carrying `stale_marker_color`. This mirrors the Phase-1
-/// at-capacity sentinel mechanism (`composer_color_runs`): the run has no pixel
+/// run (`[0..0]`) carrying `stale_marker_color`: the run has no pixel
 /// coverage; its presence + color is the machine-readable signal that the
 /// token-driven stale marker is active. Precise per-line coloring is deferred to
 /// the promotion-era structured layout. Returns an empty vec when not degraded.
@@ -1986,7 +1934,7 @@ fn unread_indicator_line(unread_output_count: Option<usize>) -> Option<String> {
 
 /// Build a `TextColorRunProto` for the ambient unread-output-count indicator.
 ///
-/// Mirrors `stale_marker_color_runs`/`composer_color_runs`: a zero-length
+/// Mirrors `stale_marker_color_runs`: a zero-length
 /// sentinel run (`[0..0]`) carrying the token-resolved `unread_indicator_color`
 /// so the token drives the signal without any literal color in the render path
 /// (§6.1). Empty when there is nothing unread or the count is redacted —
@@ -2256,8 +2204,8 @@ fn lifecycle_accent_color(
 /// When the viewer is permitted to see lifecycle state (`state.lifecycle_state`
 /// is `Some` — the authority sets it to `None` under redaction), emits a single
 /// zero-length sentinel run (`[0..0]`) carrying the token-resolved accent for the
-/// current lifecycle group. This mirrors the Phase-1 `stale_marker_color_runs` /
-/// `composer_color_runs` mechanism: the run has no pixel coverage (a non-empty
+/// current lifecycle group. This mirrors the Phase-1 `stale_marker_color_runs`
+/// mechanism: the run has no pixel coverage (a non-empty
 /// run would suppress Markdown stripping for the whole single-node portal); its
 /// presence + color is the machine-readable, token-driven signal that the viewer
 /// affordance is active, while the text-visible `status:` line carries the exact
@@ -2416,7 +2364,7 @@ fn activity_cue_color_runs(
 ///
 /// Precise per-glyph coloring of the tail cursor requires the byte offset of the
 /// appended glyph in the single-node content, which is fragile in the raw-tile
-/// model (see `composer_color_runs`). For Phase-1 the cursor is a zero-length
+/// model (see `stale_marker_color_runs`). For Phase-1 the cursor is a zero-length
 /// sentinel at byte 0 carrying the token color; the text-visible glyph marks the
 /// tail position. Promotion-era structured multi-node layout will position the
 /// cursor precisely.
@@ -2452,7 +2400,7 @@ fn streaming_cursor_color_runs(
 /// ## Phase-1 scope note
 ///
 /// Per-glyph coloring of each stamp requires its byte offset in the single-node
-/// content, which is fragile in the raw-tile model (see `composer_color_runs`).
+/// content, which is fragile in the raw-tile model (see `stale_marker_color_runs`).
 /// For Phase-1 the timestamp color is a zero-length sentinel at byte 0 carrying
 /// the token color; the text-visible `HH:MM` prefix marks each stamp. Promotion-
 /// era structured multi-node layout will color the stamp spans precisely.
@@ -2781,12 +2729,6 @@ pub fn portal_visual_tokens_from_part_tokens(
             a: part.composer_text_color.a,
         },
         composer_font_size_px: part.composer_font_size_px,
-        composer_at_capacity_color: proto::Rgba {
-            r: part.composer_at_capacity_color.r,
-            g: part.composer_at_capacity_color.g,
-            b: part.composer_at_capacity_color.b,
-            a: part.composer_at_capacity_color.a,
-        },
     }
 }
 
@@ -4805,6 +4747,54 @@ mod tests {
         assert!(
             markdown.contains("[!]"),
             "at-capacity must remain text-visible on the status line: {markdown}"
+        );
+    }
+
+    /// hud-9gyao: the composer at-capacity state no longer rides a zero-length
+    /// color-run sentinel on the transcript markdown node. Building `portal_node`
+    /// at capacity vs below capacity must yield IDENTICAL `color_runs` (the
+    /// at-capacity hue is painted on the draft glyphs by the compositor --
+    /// `composer_draft_base_color` -- not carried here), and the node must carry
+    /// only zero-length sentinels so the cached-markdown fast path is preserved
+    /// (#947 / `markdown_node_has_pixel_runs`).
+    #[test]
+    fn composer_at_capacity_adds_no_color_run_to_markdown_node() {
+        fn markdown_color_runs(node: &proto::NodeProto) -> Vec<proto::TextColorRunProto> {
+            match node.data.as_ref().expect("node must carry data") {
+                proto::node_proto::Data::TextMarkdown(tm) => tm.color_runs.clone(),
+                other => panic!("expected a TextMarkdown node, got {other:?}"),
+            }
+        }
+
+        let state = make_expanded_interaction_state("portal-composer-cap-run");
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+
+        let mut below_adapter = ResidentGrpcPortalAdapter::new(config.clone());
+        below_adapter.composer_display = Some(ComposerDisplayState {
+            text: "hi".to_string(),
+            cursor: 2,
+            at_capacity: false,
+            sequence: 1,
+        });
+        let below_runs = markdown_color_runs(&below_adapter.portal_node(&state, vec![0u8; 16], 0));
+
+        let mut cap_adapter = ResidentGrpcPortalAdapter::new(config);
+        cap_adapter.composer_display = Some(ComposerDisplayState {
+            text: "hi".to_string(),
+            cursor: 2,
+            at_capacity: true,
+            sequence: 2,
+        });
+        let cap_runs = markdown_color_runs(&cap_adapter.portal_node(&state, vec![0u8; 16], 0));
+
+        assert_eq!(
+            below_runs, cap_runs,
+            "at-capacity must not add a composer color run to the transcript node"
+        );
+        assert!(
+            cap_runs.iter().all(|r| r.start_byte >= r.end_byte),
+            "markdown node must carry only zero-length sentinels (no pixel runs) so \
+             the cached-markdown path is preserved: {cap_runs:?}"
         );
     }
 

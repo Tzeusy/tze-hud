@@ -298,6 +298,52 @@ pub(super) fn viewer_echo_display_text(entry: &ViewerEchoEntry) -> String {
     }
 }
 
+/// Resolve the sRGB-u8 base color for the composer draft line.
+///
+/// The base color fills every draft glyph not covered by a more specific styled
+/// run (caret / selection), so it is effectively the per-line color of the draft
+/// text:
+/// - a placeholder hint -> the dimmed `portal.composer.placeholder_color`;
+/// - a live draft **at capacity** -> the token-driven
+///   `portal.composer.at_capacity_color` (hud-9gyao). This is the precise,
+///   bounded, per-line at-capacity treatment that replaced the Phase-1
+///   zero-length color-run sentinel: the whole draft line takes the at-capacity
+///   hue the instant the byte cap is hit, reinforced by the 2px left-edge accent
+///   in [`Compositor::render_composer_overlay`];
+/// - a normal live draft -> `portal.composer.text_color`.
+///
+/// All three resolve from design tokens -- no literal color in the render path
+/// (section 6.1). Placeholder wins over at-capacity: a placeholder only shows for
+/// an EMPTY draft, which can never be at capacity, but resolving it first keeps
+/// the dimmed hint from ever flipping to the at-capacity hue.
+pub(super) fn composer_draft_base_color(
+    tokens: &ComposerOverlayTokens,
+    at_capacity: bool,
+    is_placeholder: bool,
+) -> [u8; 4] {
+    // Convert linear-sRGB floats -> sRGB u8 for TextItem (matches rgba_to_srgb_u8
+    // in text.rs: RGB channels go through the sRGB transfer curve; alpha is linear).
+    let to_srgb_u8 = |v: f32| (linear_to_srgb(v.clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
+    let to_alpha_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    if is_placeholder {
+        tokens.placeholder_color
+    } else if at_capacity {
+        [
+            to_srgb_u8(tokens.at_capacity_r),
+            to_srgb_u8(tokens.at_capacity_g),
+            to_srgb_u8(tokens.at_capacity_b),
+            to_alpha_u8(tokens.at_capacity_a),
+        ]
+    } else {
+        [
+            to_srgb_u8(tokens.text_r),
+            to_srgb_u8(tokens.text_g),
+            to_srgb_u8(tokens.text_b),
+            to_alpha_u8(tokens.text_a),
+        ]
+    }
+}
+
 impl Compositor {
     // ─── Drag-boost helpers ───────────────────────────────────────────────────
 
@@ -1178,22 +1224,12 @@ impl Compositor {
         // which wraps instead of sliding horizontally.
         let scroll_offset = layout.h_scroll_px;
 
-        // Convert linear-sRGB floats → sRGB u8 for TextItem (matches rgba_to_srgb_u8
-        // in text.rs: RGB channels go through the sRGB transfer curve; alpha is linear).
-        let to_srgb_u8 = |v: f32| (linear_to_srgb(v.clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
-        let to_alpha_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-        // Placeholder text uses the dimmed placeholder token color; live draft text
-        // uses the composer text color (hud-evk0j).
-        let text_color = if placeholder.is_some() {
-            tokens.placeholder_color
-        } else {
-            [
-                to_srgb_u8(tokens.text_r),
-                to_srgb_u8(tokens.text_g),
-                to_srgb_u8(tokens.text_b),
-                to_alpha_u8(tokens.text_a),
-            ]
-        };
+        // Placeholder text uses the dimmed placeholder token color; a live draft AT
+        // CAPACITY uses the token-driven at-capacity color so the whole draft line
+        // reads in the at-capacity hue the instant the byte cap is hit; a normal live
+        // draft uses the composer text color. The caret / selection styled runs below
+        // still override their own sub-ranges (hud-9gyao, hud-evk0j).
+        let text_color = composer_draft_base_color(tokens, cs.at_capacity, placeholder.is_some());
 
         let bw = (region.width - text_margin * 2.0).max(1.0);
         let line_height = (tokens.font_size_px
@@ -2440,5 +2476,72 @@ mod lifecycle_accent_tests {
             width_px: 4.0,
         };
         assert!(Compositor::lifecycle_accent_bar_geom(rect(100.0, 50.0), some, 0.0).is_none());
+    }
+}
+
+#[cfg(test)]
+mod composer_draft_color_tests {
+    use super::composer_draft_base_color;
+    use crate::renderer::token_colors::{linear_to_srgb, resolve_composer_overlay_tokens};
+    use std::collections::HashMap;
+
+    /// Expected sRGB-u8 rendering of a linear-sRGB token channel, matching the
+    /// conversion `composer_draft_base_color` applies (kept independent of the
+    /// implementation so the test would catch a broken conversion).
+    fn to_srgb_u8(v: f32) -> u8 {
+        (linear_to_srgb(v.clamp(0.0, 1.0)) * 255.0 + 0.5) as u8
+    }
+    fn to_alpha_u8(v: f32) -> u8 {
+        (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+    }
+
+    /// hud-9gyao: an at-capacity live draft takes the token-driven at-capacity
+    /// color as its per-line base color -- a real, bounded coloring of the draft
+    /// glyphs, replacing the Phase-1 zero-length color-run sentinel. Below
+    /// capacity the draft uses the composer text color. Both resolve from design
+    /// tokens, never a literal in the render path.
+    #[test]
+    fn at_capacity_draft_uses_token_at_capacity_color() {
+        let tokens = resolve_composer_overlay_tokens(&HashMap::new());
+
+        let below = composer_draft_base_color(&tokens, false, false);
+        let at_cap = composer_draft_base_color(&tokens, true, false);
+
+        assert_eq!(
+            below,
+            [
+                to_srgb_u8(tokens.text_r),
+                to_srgb_u8(tokens.text_g),
+                to_srgb_u8(tokens.text_b),
+                to_alpha_u8(tokens.text_a),
+            ],
+            "a below-capacity draft must render in the composer text color"
+        );
+        assert_eq!(
+            at_cap,
+            [
+                to_srgb_u8(tokens.at_capacity_r),
+                to_srgb_u8(tokens.at_capacity_g),
+                to_srgb_u8(tokens.at_capacity_b),
+                to_alpha_u8(tokens.at_capacity_a),
+            ],
+            "an at-capacity draft must render in portal.composer.at_capacity_color"
+        );
+        assert_ne!(
+            below, at_cap,
+            "at capacity must change the draft color so the byte cap is visible"
+        );
+    }
+
+    /// The empty-draft placeholder hint wins over the at-capacity color: a
+    /// placeholder only shows for an empty draft (never at capacity).
+    #[test]
+    fn placeholder_color_wins_over_at_capacity() {
+        let tokens = resolve_composer_overlay_tokens(&HashMap::new());
+        assert_eq!(
+            composer_draft_base_color(&tokens, true, true),
+            tokens.placeholder_color,
+            "a placeholder hint must always render in the placeholder color"
+        );
     }
 }
