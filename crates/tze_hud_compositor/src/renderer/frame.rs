@@ -511,6 +511,24 @@ impl Compositor {
         // the same offset we just drew with (hud-3lynp). build_frame_vertices
         // advanced the smoothers above; this records their displayed state.
         // No-op clear in headless/snap mode.
+        //
+        // Deliberately published here, AFTER the smoothers advanced and BEFORE
+        // present (hud-96f3h). The override is read from the *live* scene by the
+        // async input path (`SceneGraph::hit_test` → `effective_tile_scroll_offset_local`;
+        // `HitTestSnapshot` does NOT carry the offset), so between frames it must
+        // equal the offset currently on screen. For a presented frame that holds:
+        // this frame's offset is on screen for the whole inter-frame interval, so
+        // recording it post-advance keeps the override aligned. On a *skipped*
+        // present (double `acquire_frame()` failure on resize/device-loss, or a
+        // contained submit/present panic) the override briefly leads the on-screen
+        // pixels by one frame until the next frame re-publishes — a sub-perceptual,
+        // self-correcting skew, strictly better than the pre-#942 baseline.
+        // Publishing only for actually-presented frames would require re-writing
+        // the override AFTER present confirms; but present runs lock-free and never
+        // touches the scene (the hud-uyhpn lock split, which collapsed the lock
+        // hold to this build phase to stop drag-input starvation), so that would
+        // reintroduce a post-present scene-lock re-acquire. Not worth it for this
+        // precision case — the skew is transient and self-heals (hud-96f3h).
         self.publish_displayed_scroll_offsets(scene);
 
         let drag_handles = self.collect_drag_handle_entries(scene, sw, sh);
