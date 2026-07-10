@@ -380,6 +380,204 @@ fn take_snapshot_includes_display_area() {
     assert!(snapshot.verify_checksum());
 }
 
+/// Build a scene with one tile owned by `namespace` whose root is a solid-color
+/// node, returning `(scene, tile_id, root_id)`. Mirrors `portal_scene_with_tile`
+/// in mutation.rs but drives the direct graph API.
+fn portal_snapshot_scene(namespace: &str) -> (SceneGraph, SceneId, SceneId) {
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab_id = scene.create_tab("Main", 0).unwrap();
+    let lease_id = scene.grant_lease(
+        namespace,
+        60_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            namespace,
+            lease_id,
+            Rect::new(10.0, 10.0, 400.0, 300.0),
+            1,
+        )
+        .unwrap();
+    let root = Node {
+        id: SceneId::new(),
+        children: vec![],
+        data: NodeData::SolidColor(SolidColorNode {
+            color: Rgba::new(0.0, 0.0, 0.0, 1.0),
+            bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+            radius: None,
+        }),
+    };
+    let root_id = root.id;
+    scene.set_tile_root(tile_id, root).unwrap();
+    (scene, tile_id, root_id)
+}
+
+fn portal_surface_pointing_at(node: SceneId) -> PortalSurface {
+    PortalSurface {
+        identity: PortalIdentity {
+            session_id: "sess-1".to_string(),
+            display_name: "Claude".to_string(),
+            peer_class: PortalPeerClass::ResidentLlm,
+        },
+        lifecycle: PortalLifecycleState::Active,
+        display_state: PortalDisplayState::Expanded,
+        parts: vec![PortalPart {
+            kind: PortalPartKind::Transcript,
+            bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+            node: Some(node),
+        }],
+    }
+}
+
+/// A reconnecting session must recover its declared portal surface from the
+/// snapshot rather than re-declaring blindly (hud-ruynm reconnect parity).
+#[test]
+fn snapshot_carries_previously_declared_portal_surface() {
+    let (mut scene, tile_id, root_id) = portal_snapshot_scene("agent");
+    let surface = portal_surface_pointing_at(root_id);
+    scene
+        .set_portal_surface(tile_id, surface.clone(), "agent")
+        .unwrap();
+
+    let snapshot = scene.take_snapshot(1_000, 2_000);
+    assert_eq!(
+        snapshot.portal_surfaces.get(&tile_id),
+        Some(&surface),
+        "the declared portal surface must appear in the snapshot for reconnect parity"
+    );
+    assert!(snapshot.verify_checksum());
+}
+
+/// Snapshot round-trips a portal surface whose part-node ref was nulled by
+/// `revalidate_portal_surface_part_nodes` after a transcript republish — the
+/// snapshot serializes `node = null` faithfully and never fabricates a ref.
+#[test]
+fn snapshot_portal_surface_with_nulled_part_node_round_trips() {
+    let (mut scene, tile_id, root_id) = portal_snapshot_scene("agent");
+    scene
+        .set_portal_surface(tile_id, portal_surface_pointing_at(root_id), "agent")
+        .unwrap();
+
+    // Republish the tile root: the old subtree (root_id) is removed, so the
+    // Transcript part's node ref is revalidated back to None.
+    let new_root = Node {
+        id: SceneId::new(),
+        children: vec![],
+        data: NodeData::SolidColor(SolidColorNode {
+            color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+            bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+            radius: None,
+        }),
+    };
+    scene.set_tile_root(tile_id, new_root).unwrap();
+
+    let snapshot = scene.take_snapshot(1_000, 2_000);
+    let part = &snapshot.portal_surfaces.get(&tile_id).unwrap().parts[0];
+    assert_eq!(
+        part.node, None,
+        "a part node nulled by revalidation must serialize as None, not a stale/fabricated ref"
+    );
+
+    // JSON round-trip preserves the nulled ref and the checksum stays valid.
+    let json = snapshot.to_json().unwrap();
+    let restored = SceneGraphSnapshot::from_json(&json).unwrap();
+    assert_eq!(restored.portal_surfaces, snapshot.portal_surfaces);
+    assert_eq!(
+        restored.portal_surfaces.get(&tile_id).unwrap().parts[0].node,
+        None
+    );
+    assert!(restored.verify_checksum());
+}
+
+/// Portal surfaces are keyed by host tile id, so a session filtering the snapshot
+/// to the tiles it owns keeps exactly its own surfaces and none from another
+/// namespace (visibility parity with `tiles`).
+#[test]
+fn snapshot_portal_surfaces_are_tile_keyed_for_namespace_visibility() {
+    // Namespace A: tile + surface.
+    let (mut scene, tile_a, root_a) = portal_snapshot_scene("agent-a");
+    scene
+        .set_portal_surface(tile_a, portal_surface_pointing_at(root_a), "agent-a")
+        .unwrap();
+
+    // Namespace B: a second tile (on the same tab) + its own surface.
+    let tab_id = scene.active_tab.unwrap();
+    let lease_b = scene.grant_lease(
+        "agent-b",
+        60_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
+    let tile_b = scene
+        .create_tile(
+            tab_id,
+            "agent-b",
+            lease_b,
+            Rect::new(500.0, 10.0, 400.0, 300.0),
+            2,
+        )
+        .unwrap();
+    let root_b = Node {
+        id: SceneId::new(),
+        children: vec![],
+        data: NodeData::SolidColor(SolidColorNode {
+            color: Rgba::new(0.0, 0.0, 1.0, 1.0),
+            bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+            radius: None,
+        }),
+    };
+    let root_b_id = root_b.id;
+    scene.set_tile_root(tile_b, root_b).unwrap();
+    scene
+        .set_portal_surface(tile_b, portal_surface_pointing_at(root_b_id), "agent-b")
+        .unwrap();
+
+    let snapshot = scene.take_snapshot(1_000, 2_000);
+    assert_eq!(snapshot.portal_surfaces.len(), 2);
+
+    // A session scoped to namespace A keeps only the tiles (and thus surfaces)
+    // it owns; namespace B's surface is invisible after filtering.
+    let visible_to_a: std::collections::BTreeMap<_, _> = snapshot
+        .portal_surfaces
+        .iter()
+        .filter(|(tile_id, _)| {
+            snapshot
+                .tiles
+                .get(tile_id)
+                .is_some_and(|t| t.namespace == "agent-a")
+        })
+        .collect();
+    assert_eq!(visible_to_a.len(), 1);
+    assert!(visible_to_a.contains_key(&tile_a));
+    assert!(!visible_to_a.contains_key(&tile_b));
+}
+
+/// A snapshot with no portal surfaces must omit the `portal_surfaces` key from
+/// its canonical JSON, so its checksum is byte-identical to a pre-field snapshot.
+/// This preserves `verify_checksum()` for older surface-less snapshots produced
+/// before this field existed (hud-ruynm backward-compat; guards the P2 raised on
+/// PR #1098 where an unconditionally-serialized empty map broke old checksums).
+#[test]
+fn snapshot_without_portal_surfaces_omits_field_and_verifies_like_old_format() {
+    let (scene, _tile_id, _root_id) = portal_snapshot_scene("agent");
+    let snapshot = scene.take_snapshot(1_000, 2_000);
+    assert!(snapshot.portal_surfaces.is_empty());
+
+    let json = snapshot.to_json().unwrap();
+    assert!(
+        !json.contains("portal_surfaces"),
+        "an empty portal_surfaces map must be omitted from canonical JSON so the \
+         checksum matches a pre-field snapshot; got: {json}"
+    );
+
+    // Deserializing that surface-less JSON (as an older client/tool would) still
+    // reproduces a valid checksum — no spurious `\"portal_surfaces\":{}` sneaks in.
+    let restored = SceneGraphSnapshot::from_json(&json).unwrap();
+    assert!(restored.portal_surfaces.is_empty());
+    assert!(restored.verify_checksum());
+}
+
 #[test]
 fn test_lease_expiry() {
     let (mut scene, clock) = scene_with_test_clock();

@@ -150,10 +150,11 @@ pub struct RuntimeOverlayState {
     /// transcript republishes that replace the tile's node tree — the same
     /// coalescing rationale as [`tile_lifecycle_accents`](Self::tile_lifecycle_accents).
     ///
-    /// The descriptor is adapter-driven metadata (like the lifecycle accent) and
-    /// is re-declared by the owning session after reconnect; it is not yet part of
-    /// [`SceneSnapshot`](crate::graph::snapshot) — snapshot/reconnect parity is a
-    /// tracked follow-up.
+    /// The descriptor is adapter-driven metadata (like the lifecycle accent). It is
+    /// `#[serde(skip)]` here, but is included in the full scene snapshot as
+    /// [`SceneGraphSnapshot::portal_surfaces`](crate::types::SceneGraphSnapshot::portal_surfaces)
+    /// so a reconnecting session recovers its declared surfaces from the snapshot
+    /// rather than re-declaring blindly (hud-ruynm reconnect parity).
     ///
     /// [`SceneMutation::SetPortalSurface`]: crate::mutation::SceneMutation::SetPortalSurface
     /// [`SceneMutation::UpdatePortalSurfaceState`]: crate::mutation::SceneMutation::UpdatePortalSurfaceState
