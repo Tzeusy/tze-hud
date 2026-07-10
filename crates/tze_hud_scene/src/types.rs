@@ -3055,6 +3055,26 @@ pub struct SceneGraphSnapshot {
     /// All nodes, keyed by SceneId (BTreeMap for deterministic iteration order).
     pub nodes: std::collections::BTreeMap<SceneId, Node>,
 
+    /// First-class text-stream portal surface descriptors, keyed by host tile id
+    /// (BTreeMap for deterministic iteration order; RFC 0013 §7.2, hud-tc153).
+    ///
+    /// These are runtime overlay state (`RuntimeOverlayState::portal_surfaces`,
+    /// `#[serde(skip)]`) rather than scene nodes, so they are otherwise invisible
+    /// to the serialized graph. Including them here lets a reconnecting resident
+    /// session recover its declared surfaces from the snapshot instead of
+    /// re-declaring blindly (hud-ruynm reconnect parity).
+    ///
+    /// Visibility mirrors [`tiles`](Self::tiles): a surface is keyed by its host
+    /// tile id, so a session filtering the snapshot to the tiles it owns keeps
+    /// exactly the surfaces on those tiles and no others. A `PortalPart.node` that
+    /// was nulled by [`revalidate_portal_surface_part_nodes`] after a transcript
+    /// republish is serialized as `null` faithfully — the snapshot never fabricates
+    /// a node reference.
+    ///
+    /// [`revalidate_portal_surface_part_nodes`]: crate::graph::SceneGraph::revalidate_portal_surface_part_nodes
+    #[serde(default)]
+    pub portal_surfaces: std::collections::BTreeMap<SceneId, PortalSurface>,
+
     /// Zone registry snapshot: types, instances, active publications.
     /// Does NOT include effective_geometry (post-v1, spec line 360).
     pub zone_registry: SceneGraphZoneRegistry,

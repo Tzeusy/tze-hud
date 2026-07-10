@@ -47,6 +47,21 @@ impl SceneGraph {
         let nodes: std::collections::BTreeMap<SceneId, Node> =
             self.nodes.iter().map(|(k, v)| (*k, v.clone())).collect();
 
+        // Portal surfaces: keyed by host tile SceneId (BTreeMap — deterministic).
+        //
+        // Overlay state (RuntimeOverlayState::portal_surfaces, #[serde(skip)]) that
+        // must be recoverable on reconnect (hud-ruynm). Cloned verbatim: a part
+        // whose backing node was nulled by revalidate_portal_surface_part_nodes is
+        // serialized with node = None, never fabricated. Visibility mirrors `tiles`
+        // — each surface is keyed by its host tile, so a namespace-filtered view of
+        // the snapshot keeps exactly the surfaces on the tiles it retains.
+        let portal_surfaces: std::collections::BTreeMap<SceneId, PortalSurface> = self
+            .overlay
+            .portal_surfaces
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+
         // Zone registry: BTreeMap for both zone_types and active_publications.
         let zone_types: std::collections::BTreeMap<String, ZoneDefinition> = self
             .zone_registry
@@ -138,6 +153,7 @@ impl SceneGraph {
             tabs,
             tiles,
             nodes,
+            portal_surfaces,
             zone_registry,
             widget_registry,
             active_tab: self.active_tab,

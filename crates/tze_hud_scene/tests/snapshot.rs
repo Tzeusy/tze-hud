@@ -546,6 +546,7 @@ fn snapshot_does_not_expose_incremental_diff() {
         tabs: std::collections::BTreeMap::new(),
         tiles: std::collections::BTreeMap::new(),
         nodes: std::collections::BTreeMap::new(),
+        portal_surfaces: std::collections::BTreeMap::new(),
         zone_registry: SceneGraphZoneRegistry {
             zone_types: std::collections::BTreeMap::new(),
             zone_instances: vec![],
