@@ -293,6 +293,19 @@ impl SceneGraph {
         self.leases.get(lease_id).is_some_and(|l| l.is_active())
     }
 
+    /// Whether a lease is present AND in the `Orphaned` state (disconnected,
+    /// inside its grace window). Returns `false` for an unknown lease or any
+    /// other state.
+    ///
+    /// The portal driver uses this to distinguish "owner dropped, grace running"
+    /// (reconnect within grace resumes the SAME surface) from a terminal
+    /// Expired/Revoked lease (post-grace: a fresh portal under a new lease).
+    pub fn lease_is_orphaned(&self, lease_id: &SceneId) -> bool {
+        self.leases
+            .get(lease_id)
+            .is_some_and(|l| l.state == LeaseState::Orphaned)
+    }
+
     pub fn renew_lease(
         &mut self,
         lease_id: SceneId,
@@ -421,77 +434,116 @@ impl SceneGraph {
     /// Like `expire_leases` but with a configurable max suspension time.
     pub fn expire_leases_with_max_suspend(&mut self, max_suspend_ms: u64) -> Vec<LeaseExpiry> {
         let now = self.clock.now_millis();
-        let mut expiries = Vec::new();
 
         // Collect leases that need cleanup
         let to_process: Vec<(SceneId, LeaseState)> = self
             .leases
             .values()
-            .filter_map(|l| {
-                // TTL-expired active/orphaned leases
-                if (l.state == LeaseState::Active || l.state == LeaseState::Orphaned)
-                    && l.is_expired(now)
-                {
-                    return Some((l.id, LeaseState::Expired));
-                }
-                // Grace-period-expired orphaned leases
-                if l.state == LeaseState::Orphaned && l.check_grace_expired(now) {
-                    return Some((l.id, LeaseState::Expired));
-                }
-                // Suspension-timeout leases
-                if l.state == LeaseState::Suspended
-                    && l.check_suspension_expired(now, max_suspend_ms)
-                {
-                    return Some((l.id, LeaseState::Revoked));
-                }
-                None
-            })
+            .filter_map(|l| Self::lease_terminal_state(l, now, max_suspend_ms).map(|s| (l.id, s)))
             .collect();
 
+        let mut expiries = Vec::with_capacity(to_process.len());
         for (id, terminal_state) in to_process {
-            // Collect the namespace before mutating so we can clear zone pubs.
-            let namespace = self.leases.get(&id).map(|l| l.namespace.clone());
-
-            // Collect tile IDs that will be removed
-            let removed_tiles: Vec<SceneId> = self
-                .tiles
-                .values()
-                .filter(|t| t.lease_id == id)
-                .map(|t| t.id)
-                .collect();
-            // Leave sync groups before removing tiles to avoid dangling member entries.
-            for tile_id in &removed_tiles {
-                let _ = self.leave_sync_group(*tile_id);
-            }
-            for tile_id in &removed_tiles {
-                self.remove_tile_and_nodes(*tile_id);
-            }
-            if let Some(lease) = self.leases.get_mut(&id) {
-                lease.state = terminal_state;
-            }
-
-            // Spec §Requirement: Lease Revocation Clears Zone Publications
-            // (lines 235–242): When a lease is REVOKED or EXPIRED, all zone
-            // publications made under that lease MUST be immediately cleared.
-            // Widget publications are also cleared on lease expiry/revocation.
-            if terminal_state.is_terminal() {
-                if let Some(ns) = namespace {
-                    self.clear_zone_publications_for_namespace(&ns);
-                    self.clear_widget_publications_for_namespace(&ns);
-                }
-            }
-
-            expiries.push(LeaseExpiry {
-                lease_id: id,
-                terminal_state,
-                removed_tiles,
-            });
+            expiries.push(self.reap_lease(id, terminal_state));
         }
 
         if !expiries.is_empty() {
             self.version += 1;
         }
         expiries
+    }
+
+    /// Reap a **single** lease if — and only if — it is already past its TTL,
+    /// grace period, or suspension timeout, returning the `LeaseExpiry` (with the
+    /// removed tiles) or `None` if the lease is unknown or not yet due.
+    ///
+    /// This is the scoped counterpart to [`Self::expire_leases`]: it applies the
+    /// identical orphan/grace/TTL predicate and the identical tile-removal and
+    /// zone/widget-publication cleanup, but touches exactly the named lease. The
+    /// portal driver uses it to bound the degraded window of an ungracefully
+    /// dropped cooperative portal (grace expiry removes its surface) WITHOUT
+    /// turning on a global lease sweep for every other subsystem's leases — the
+    /// gRPC control plane relies on `renew_lease`, not on nothing ever calling
+    /// `expire_leases`, so a global sweep here would change behaviour well beyond
+    /// portals. Bumps the scene version when it reaps so the removal repaints.
+    pub fn expire_lease(&mut self, lease_id: &SceneId) -> Option<LeaseExpiry> {
+        let now = self.clock.now_millis();
+        let terminal_state = self
+            .leases
+            .get(lease_id)
+            .and_then(|l| Self::lease_terminal_state(l, now, Self::DEFAULT_MAX_SUSPENSION_MS))?;
+        let expiry = self.reap_lease(*lease_id, terminal_state);
+        self.version += 1;
+        Some(expiry)
+    }
+
+    /// The terminal state a lease is due for at `now`, or `None` if it is not yet
+    /// expired. Shared by [`Self::expire_leases_with_max_suspend`] (whole-scene
+    /// sweep) and [`Self::expire_lease`] (single lease) so both apply the exact
+    /// same TTL / grace / suspension predicate.
+    fn lease_terminal_state(lease: &Lease, now: u64, max_suspend_ms: u64) -> Option<LeaseState> {
+        // TTL-expired active/orphaned leases
+        if (lease.state == LeaseState::Active || lease.state == LeaseState::Orphaned)
+            && lease.is_expired(now)
+        {
+            return Some(LeaseState::Expired);
+        }
+        // Grace-period-expired orphaned leases
+        if lease.state == LeaseState::Orphaned && lease.check_grace_expired(now) {
+            return Some(LeaseState::Expired);
+        }
+        // Suspension-timeout leases
+        if lease.state == LeaseState::Suspended
+            && lease.check_suspension_expired(now, max_suspend_ms)
+        {
+            return Some(LeaseState::Revoked);
+        }
+        None
+    }
+
+    /// Drive a single lease to `terminal_state`: remove its tiles, clear its zone
+    /// and widget publications, and record the terminal state in place. Does NOT
+    /// bump `self.version` — the caller batches that so a multi-lease sweep bumps
+    /// once. Shared reap body for [`Self::expire_leases_with_max_suspend`] and
+    /// [`Self::expire_lease`].
+    fn reap_lease(&mut self, id: SceneId, terminal_state: LeaseState) -> LeaseExpiry {
+        // Collect the namespace before mutating so we can clear zone pubs.
+        let namespace = self.leases.get(&id).map(|l| l.namespace.clone());
+
+        // Collect tile IDs that will be removed
+        let removed_tiles: Vec<SceneId> = self
+            .tiles
+            .values()
+            .filter(|t| t.lease_id == id)
+            .map(|t| t.id)
+            .collect();
+        // Leave sync groups before removing tiles to avoid dangling member entries.
+        for tile_id in &removed_tiles {
+            let _ = self.leave_sync_group(*tile_id);
+        }
+        for tile_id in &removed_tiles {
+            self.remove_tile_and_nodes(*tile_id);
+        }
+        if let Some(lease) = self.leases.get_mut(&id) {
+            lease.state = terminal_state;
+        }
+
+        // Spec §Requirement: Lease Revocation Clears Zone Publications
+        // (lines 235–242): When a lease is REVOKED or EXPIRED, all zone
+        // publications made under that lease MUST be immediately cleared.
+        // Widget publications are also cleared on lease expiry/revocation.
+        if terminal_state.is_terminal() {
+            if let Some(ns) = namespace {
+                self.clear_zone_publications_for_namespace(&ns);
+                self.clear_widget_publications_for_namespace(&ns);
+            }
+        }
+
+        LeaseExpiry {
+            lease_id: id,
+            terminal_state,
+            removed_tiles,
+        }
     }
 
     /// Remove all zone publications from a given agent namespace.

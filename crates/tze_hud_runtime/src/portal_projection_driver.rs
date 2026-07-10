@@ -512,6 +512,15 @@ impl InProcessPortalDriveState {
         }
     }
 
+    /// Remove a projection whose surface has ALREADY been removed from the scene
+    /// (e.g. reaped by lease-grace expiry). Unlike [`Self::detach`], this does
+    /// NOT queue a tile removal — the tile is already gone, so queuing one would
+    /// only produce a spurious "failed to remove" warning on the next drain.
+    fn forget(&mut self, projection_id: &str) {
+        self.projection_transports.remove(projection_id);
+        self.entries.remove(projection_id);
+    }
+
     fn apply_token_map(&mut self, overrides: DesignTokenMap) {
         self.token_overrides = overrides;
         let tokens = self.resolve_visual_tokens();
@@ -2329,6 +2338,14 @@ impl InProcessPortalDriver {
             }
         }
 
+        // Lease-grace reaper (hud-i429x): bound an ungracefully-dropped portal's
+        // degraded window by the lease grace and remove its surface on grace
+        // expiry via the existing scene orphan path. Runs after the render passes
+        // so a same-drain reconnect (op loop cleared `hud_disconnected`) is
+        // observed as live here. Cheap map scans; reaping bumps the scene version
+        // so the removal repaints even on an idle frame.
+        self.sweep_lease_grace(scene);
+
         // Portal health snapshot — emitted at debug level after each drain cycle
         // (hud-bq0gl.14).  Carries:
         //   • per-cycle update/deferral counts
@@ -2391,6 +2408,119 @@ impl InProcessPortalDriver {
         );
         self.lease_id = Some(new_lease);
         Some(new_lease)
+    }
+
+    /// Bound an ungracefully-dropped cooperative portal's degraded window by the
+    /// lease grace, and remove its surface when grace expires (hud-i429x;
+    /// openspec `portal-disconnect-resume-ux` §3.2 "staleness bounded by lease
+    /// grace; grace expiry removes the surface").
+    ///
+    /// This is the production wiring §3.2 lacked. `mark_hud_disconnected`
+    /// (hud-5i16d) opened the degraded window and dimmed the transcript, but
+    /// nothing orphaned the scene lease or ran the reaper — so a dropped portal
+    /// dimmed yet was NEVER grace-removed: an unbounded stale window. `expire_leases`
+    /// / `disconnect_lease` had zero production callers before this.
+    ///
+    /// Runs every drain. `about_to_wait` fires every event-loop iteration under
+    /// `ControlFlow::Poll`, so a dropped portal on an otherwise-idle screen still
+    /// reaps after grace with NO separate timer/wake source — the same idle-safety
+    /// property the zone content-TTL sweep relies on (hud-vfwb1). The steps are
+    /// cheap map scans, all no-ops on the common all-live path.
+    ///
+    /// Three steps over the shared driver lease:
+    ///
+    /// 1. ORPHAN — once EVERY attached projection under the shared lease is latched
+    ///    disconnected (`hud_disconnected`), orphan the still-Active lease so the
+    ///    grace clock starts (`disconnect_lease` also badges the owned tiles; the
+    ///    transcript already carries the `connection_degraded` dim). Gated on
+    ///    all-disconnected, not any: the whole-channel drop
+    ///    (`mark_all_projections_disconnected`) is the only production trigger
+    ///    today, and orphaning a shared lease while one projection is still live
+    ///    would wrongly badge it.
+    /// 2. RECONNECT — if an owner re-attached within grace (some entry is live
+    ///    again) while the lease is still Orphaned, reconnect it so
+    ///    `ensure_driver_lease` reuses the now-Active lease and the SAME surface
+    ///    resumes, and the grace clock stops (resume-within-grace, hud-xlx1r). The
+    ///    re-attach/publish op already cleared `hud_disconnected` and repainted the
+    ///    tile via the op loop; this clears the scene badge and restores mutability.
+    /// 3. REAP — expire the driver lease iff it is Orphaned and its grace has
+    ///    elapsed, then drop every drive entry whose tile was removed and
+    ///    `expire_projection` it in the authority so no further `ProjectedPortalState`
+    ///    is produced (stale content can never be re-materialised). Gated on
+    ///    Orphaned so a continuously-live portal is never reaped on the lease's long
+    ///    resident TTL. `expire_lease` bumps the scene version, so the removal
+    ///    repaints even on an idle frame.
+    fn sweep_lease_grace(&mut self, scene: &mut SceneGraph) {
+        let Some(lease_id) = self.lease_id else {
+            return;
+        };
+        // Stamp lifecycle transitions with the scene's own clock so the grace
+        // bound checked by `expire_lease` is in the same domain.
+        let now_ms = scene.now_millis();
+
+        // 1. ORPHAN: every live projection dropped → start grace on the lease.
+        let all_disconnected = !self.drive.entries.is_empty()
+            && self.drive.entries.values().all(|e| e.hud_disconnected);
+        if all_disconnected && scene.lease_is_active(&lease_id) {
+            match scene.disconnect_lease(&lease_id, now_ms) {
+                Ok(()) => tracing::info!(
+                    "portal: driver lease orphaned on ungraceful drop — \
+                     degraded window now bounded by lease grace"
+                ),
+                Err(error) => tracing::warn!(
+                    ?error,
+                    "portal: failed to orphan driver lease on ungraceful drop"
+                ),
+            }
+        }
+
+        // 2. RECONNECT: owner returned within grace → resume the same surface.
+        let any_live = self.drive.entries.values().any(|e| !e.hud_disconnected);
+        if any_live && scene.lease_is_orphaned(&lease_id) {
+            match scene.reconnect_lease(&lease_id, now_ms) {
+                Ok(()) => tracing::info!(
+                    "portal: driver lease reconnected within grace — resuming the same surface"
+                ),
+                Err(error) => tracing::warn!(
+                    ?error,
+                    "portal: failed to reconnect driver lease within grace"
+                ),
+            }
+        }
+
+        // 3. REAP: grace elapsed → remove the surface via the orphan path.
+        // Gate on Orphaned so an Active lease is never reaped on its 24h resident
+        // TTL — only the disconnect/grace path removes a portal here.
+        if !scene.lease_is_orphaned(&lease_id) {
+            return;
+        }
+        let Some(expiry) = scene.expire_lease(&lease_id) else {
+            return;
+        };
+        let removed: std::collections::HashSet<SceneId> =
+            expiry.removed_tiles.iter().copied().collect();
+        let reaped: Vec<String> = self
+            .drive
+            .entries
+            .iter()
+            .filter(|(_, e)| e.tile_scene_id.is_some_and(|t| removed.contains(&t)))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for proj_id in reaped {
+            self.authority.expire_projection(&proj_id);
+            if self.effective_transport(&proj_id) == PortalTransport::ResidentGrpcBridge {
+                if let Some(tx) = &self.resident_grpc_bridge_tx {
+                    let _ = tx.try_send(BridgeMessage::Detach {
+                        projection_id: proj_id.clone(),
+                    });
+                }
+            }
+            self.drive.forget(&proj_id);
+            tracing::info!(
+                proj_id = %proj_id,
+                "portal: surface removed on lease-grace expiry — projection expired, no further state"
+            );
+        }
     }
 
     fn drain_pending_tile_removals(&mut self, scene: &mut SceneGraph) {
@@ -7201,6 +7331,300 @@ mod tests {
             tm.content.matches(SECOND).count(),
             1,
             "the post-reconnect append appears exactly once"
+        );
+    }
+
+    /// hud-i429x (openspec portal-disconnect-resume-ux §3.2): the PRODUCTION
+    /// path — `mark_all_projections_disconnected` (the whole-channel ungraceful
+    /// drop trigger, hud-5i16d) followed by the per-frame `drain` sweep — bounds
+    /// the degraded window by the lease grace and removes the surface on grace
+    /// expiry, after which the projection yields NO further `ProjectedPortalState`.
+    ///
+    /// The sibling `disconnected_portal_surface_removed_on_grace_expiry_yields_no_further_state`
+    /// invokes the scene/authority steps directly; THIS test proves the reaper is
+    /// actually wired into `drain` — an ungraceful drop on an idle portal reaps
+    /// itself with no manual `disconnect_lease`/`expire_leases` calls and no
+    /// further owner traffic.
+    #[test]
+    fn production_ungraceful_drop_reaps_surface_on_grace_expiry_via_drain_sweep() {
+        use std::sync::Arc;
+        use tze_hud_projection::HudConnectionMetadata;
+        use tze_hud_scene::TestClock;
+
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
+            drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
+        };
+
+        let projection_id = "proj-prod-grace";
+        let token = attach_and_get_token(&mut driver, projection_id);
+        driver.attach_projection(projection_id, Vec::new());
+        driver
+            .authority_mut()
+            .record_hud_connection(
+                projection_id,
+                HudConnectionMetadata {
+                    connection_id: "connection-1".to_string(),
+                    authenticated_session_id: "runtime-session-1".to_string(),
+                    granted_capabilities: vec!["create_tiles".to_string()],
+                    connected_at_wall_us: 20,
+                    last_reconnect_wall_us: 20,
+                },
+            )
+            .unwrap();
+        publish(
+            &mut driver,
+            projection_id,
+            &token,
+            "committed before drop",
+            100,
+        );
+
+        let clock = TestClock::new(1_000);
+        let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, Arc::new(clock.clone()));
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        // Live: first drain materialises the tile under a fresh driver lease.
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+        let lease = driver
+            .lease_id
+            .expect("driver holds a lease after create drain");
+        assert_eq!(scene.tile_count(), 1, "portal surface is live");
+        assert!(
+            scene.lease_is_active(&lease),
+            "driver lease is active while live"
+        );
+
+        // PRODUCTION TRIGGER: the MCP portal_op channel closed ungracefully.
+        driver.mark_all_projections_disconnected();
+
+        // Next drain: the sweep orphans the lease (grace opens) and the forced
+        // repaint dims the transcript. The surface is retained — degraded, not gone.
+        let version_before_orphan = scene.version;
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 300);
+        assert_eq!(
+            scene.tile_count(),
+            1,
+            "surface retained during grace (degraded, not removed)"
+        );
+        assert!(
+            scene.lease_is_orphaned(&lease),
+            "sweep orphaned the driver lease — grace clock is now running"
+        );
+        assert!(
+            scene.version > version_before_orphan,
+            "orphan + degraded repaint bump the scene version so the dim paints"
+        );
+        assert!(
+            driver
+                .authority_mut()
+                .projected_portal_state(projection_id, &ProjectedPortalPolicy::permit_all())
+                .expect("degraded state materialises within grace")
+                .connection_degraded,
+            "the portal is degraded while within the grace window"
+        );
+
+        // Advance past grace, then drain: the sweep reaps the surface.
+        clock.advance(SceneGraph::DEFAULT_GRACE_PERIOD_MS + 1_000);
+        let version_before_reap = scene.version;
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 400);
+        assert_eq!(
+            scene.tile_count(),
+            0,
+            "grace expiry removes the governed surface"
+        );
+        assert!(
+            scene.version > version_before_reap,
+            "reaping bumps the scene version so the removal paints even on an idle frame"
+        );
+        assert!(
+            !scene.lease_is_active(&lease),
+            "the reaped lease is no longer active"
+        );
+        assert!(
+            !driver.drive.entries.contains_key(projection_id),
+            "the reaped projection's drive entry is dropped"
+        );
+        assert!(
+            driver
+                .authority_mut()
+                .projected_portal_state(projection_id, &ProjectedPortalPolicy::permit_all())
+                .is_none(),
+            "a grace-reaped portal produces no further ProjectedPortalState"
+        );
+
+        // A further drain revives nothing.
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 500);
+        assert_eq!(
+            scene.tile_count(),
+            0,
+            "draining after reap does not revive the surface"
+        );
+    }
+
+    /// hud-i429x + hud-xlx1r: the production sweep must NOT break resume — an
+    /// ungraceful drop followed by owner re-attach WITHIN grace resumes the SAME
+    /// surface (the sweep reconnects the orphaned lease) rather than reaping or
+    /// starting a fresh portal.
+    #[test]
+    fn production_reattach_within_grace_resumes_same_surface_via_drain_sweep() {
+        use std::sync::Arc;
+        use tze_hud_projection::HudConnectionMetadata;
+        use tze_hud_scene::TestClock;
+
+        const FIRST: &str = "ALPHA-before-drop";
+
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
+            drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
+        };
+
+        let projection_id = "proj-prod-resume";
+
+        // Attach + first publish via the REAL op path so the owner token lives in
+        // the same wall-clock domain the op path validates against — a later owner
+        // publish then authenticates instead of tripping token-expiry. (The grace
+        // clock is a SEPARATE scene `TestClock`, advanced deterministically below.)
+        let (attach_tx, mut attach_rx) =
+            tokio::sync::oneshot::channel::<Result<String, PortalOpRejection>>();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: projection_id.to_string(),
+            display_name: "Test proj-prod-resume".to_string(),
+            idempotency_key: None,
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
+            reply: attach_tx,
+        });
+        let token = attach_rx
+            .try_recv()
+            .expect("attach reply delivered synchronously")
+            .expect("attach accepted");
+        // Record a live HUD connection so a later ungraceful drop derives
+        // `connection_degraded` (mirrors an owner that had a live connection).
+        driver
+            .authority_mut()
+            .record_hud_connection(
+                projection_id,
+                HudConnectionMetadata {
+                    connection_id: "connection-1".to_string(),
+                    authenticated_session_id: "runtime-session-1".to_string(),
+                    granted_capabilities: vec!["create_tiles".to_string()],
+                    connected_at_wall_us: now_wall_us(),
+                    last_reconnect_wall_us: now_wall_us(),
+                },
+            )
+            .unwrap();
+        let (pub_tx, mut pub_rx) = tokio::sync::oneshot::channel::<Result<(), PortalOpRejection>>();
+        driver.dispatch_portal_op(PortalOp::PublishOutput {
+            projection_id: projection_id.to_string(),
+            owner_token: token.clone(),
+            output_text: FIRST.to_string(),
+            logical_unit_id: Some("unit-1".to_string()),
+            output_kind: None,
+            content_classification: None,
+            coalesce_key: None,
+            expects_reply: None,
+            reply: pub_tx,
+        });
+        pub_rx
+            .try_recv()
+            .expect("publish reply delivered synchronously")
+            .expect("first owner publish accepted");
+
+        let clock = TestClock::new(1_000);
+        let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, Arc::new(clock.clone()));
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), now_wall_us());
+        let lease = driver.lease_id.expect("driver holds a lease");
+        let tile = driver
+            .drive
+            .entries
+            .get(projection_id)
+            .expect("drive entry exists")
+            .tile_scene_id
+            .expect("create drain made a portal tile");
+
+        // Ungraceful drop → next drain orphans the lease.
+        driver.mark_all_projections_disconnected();
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), now_wall_us());
+        assert!(
+            scene.lease_is_orphaned(&lease),
+            "lease orphaned by the drop sweep"
+        );
+
+        // Owner publishes again WITHIN grace. A successful owner PublishOutput op
+        // is the production reconnect signal: `dispatch_portal_op` →
+        // `clear_projection_disconnect_at` clears `hud_disconnected` and records
+        // the connection SYNCHRONOUSLY at dispatch (independent of the later
+        // content due-cycle).
+        clock.advance(5_000);
+        let (pub_tx2, mut pub_rx2) =
+            tokio::sync::oneshot::channel::<Result<(), PortalOpRejection>>();
+        driver.dispatch_portal_op(PortalOp::PublishOutput {
+            projection_id: projection_id.to_string(),
+            owner_token: token.clone(),
+            output_text: "BETA-after-resume".to_string(),
+            logical_unit_id: Some("unit-resume".to_string()),
+            output_kind: None,
+            content_classification: None,
+            coalesce_key: None,
+            expects_reply: None,
+            reply: pub_tx2,
+        });
+        pub_rx2
+            .try_recv()
+            .expect("publish reply delivered synchronously")
+            .expect("owner publish within grace must be accepted");
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), now_wall_us());
+
+        // Same surface, lease active again, degraded cleared — no reap, no reset.
+        let resumed_tile = driver
+            .drive
+            .entries
+            .get(projection_id)
+            .expect("drive entry persists across reconnect")
+            .tile_scene_id
+            .expect("resumed portal still has its tile");
+        assert_eq!(resumed_tile, tile, "resume reuses the original surface");
+        assert_eq!(
+            scene.tile_count(),
+            1,
+            "exactly one live portal tile after resume"
+        );
+        assert!(
+            scene.lease_is_active(&lease),
+            "the sweep reconnected the orphaned lease within grace"
+        );
+        assert!(
+            !driver
+                .authority_mut()
+                .projected_portal_state(projection_id, &ProjectedPortalPolicy::permit_all())
+                .expect("resumed state materialises")
+                .connection_degraded,
+            "reconnect within grace clears the degraded treatment"
         );
     }
 }

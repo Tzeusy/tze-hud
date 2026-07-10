@@ -2687,6 +2687,78 @@ fn resource_freed_on_lease_expiry() {
     );
 }
 
+/// hud-i429x: `expire_lease` reaps ONLY the named lease when its grace has
+/// elapsed, leaving a sibling lease and its tiles untouched — the scoped
+/// counterpart to the whole-scene `expire_leases` sweep. It returns `None` for a
+/// lease that is not yet due, and bumps the scene version on reap.
+#[test]
+fn expire_lease_scoped_reaps_only_the_named_grace_expired_lease() {
+    use crate::clock::TestClock;
+    let clock = Arc::new(TestClock::new(1_000));
+    let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
+    let tab_id = scene.create_tab("Main", 0).unwrap();
+
+    // Two long-TTL leases, each with a tile, so neither expires on TTL.
+    let lease_a = scene.grant_lease("agent-a", 86_400_000, vec![Capability::CreateTiles]);
+    let tile_a = scene
+        .create_tile(
+            tab_id,
+            "agent-a",
+            lease_a,
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            1,
+        )
+        .unwrap();
+    let lease_b = scene.grant_lease("agent-b", 86_400_000, vec![Capability::CreateTiles]);
+    let tile_b = scene
+        .create_tile(
+            tab_id,
+            "agent-b",
+            lease_b,
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            1,
+        )
+        .unwrap();
+    assert_eq!(scene.tile_count(), 2);
+
+    // Orphan only lease A; advance past its grace.
+    scene
+        .disconnect_lease(&lease_a, clock.now_millis())
+        .unwrap();
+    clock.advance(SceneGraph::DEFAULT_GRACE_PERIOD_MS + 1);
+
+    // Lease B is not orphaned and not TTL-due → scoped expiry is a no-op.
+    assert!(
+        scene.expire_lease(&lease_b).is_none(),
+        "expire_lease must not reap a lease that is not yet due"
+    );
+    assert_eq!(scene.tile_count(), 2, "no-op expiry removes nothing");
+
+    // Lease A is orphaned + grace-expired → scoped expiry reaps exactly it.
+    let version_before = scene.version;
+    let expiry = scene
+        .expire_lease(&lease_a)
+        .expect("grace-expired lease A is reaped");
+    assert_eq!(expiry.lease_id, lease_a);
+    assert!(
+        expiry.removed_tiles.contains(&tile_a),
+        "A's tile is removed"
+    );
+    assert!(
+        scene.version > version_before,
+        "reaping bumps the scene version"
+    );
+    assert_eq!(scene.tile_count(), 1, "only A's surface is gone");
+    assert!(
+        scene.tiles.contains_key(&tile_b),
+        "sibling lease B's tile survives"
+    );
+    assert!(
+        scene.lease_is_active(&lease_b),
+        "sibling lease B stays active"
+    );
+}
+
 /// SetTileRoot replacement: old resource loses a ref, new resource gains one.
 #[test]
 fn resource_refs_updated_on_set_tile_root_replacement() {
