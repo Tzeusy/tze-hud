@@ -726,6 +726,51 @@ fn attach_materializes_content_layer_projected_portal_and_reuses_idempotently() 
 }
 
 #[test]
+fn attach_hud_target_hint_is_persisted_and_surfaced_in_projected_portal_state() {
+    let mut authority = ProjectionAuthority::default();
+    let mut request = attach_request("projection-a", "req-a");
+    request.hud_target = Some("wall-display".to_string());
+    assert!(authority.handle_attach(request, "caller-a", 10).accepted);
+
+    let state = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("attach creates portal state");
+    assert_eq!(
+        state.hud_target.as_deref(),
+        Some("wall-display"),
+        "hud_target attach hint must be persisted and surfaced, not silently dropped"
+    );
+
+    // Redaction gates hud_target identically to sibling identity hints.
+    let redacted = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::default())
+        .expect("redacted portal still materializes");
+    assert!(
+        redacted.hud_target.is_none(),
+        "hud_target must be withheld from viewers who cannot see attach identity"
+    );
+}
+
+#[test]
+fn attach_without_hud_target_defaults_to_none() {
+    let mut authority = ProjectionAuthority::default();
+    // attach_request sets hud_target: None (the default, no routing hint).
+    assert!(
+        authority
+            .handle_attach(attach_request("projection-a", "req-a"), "caller-a", 10)
+            .accepted
+    );
+
+    let state = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("attach creates portal state");
+    assert!(
+        state.hud_target.is_none(),
+        "absent hud_target must default to None, not a spurious value"
+    );
+}
+
+#[test]
 fn successful_attach_issues_high_entropy_token_and_stores_only_verifier() {
     let mut authority = ProjectionAuthority::default();
     let response = authority.handle_attach(attach_request("projection-a", "req-a"), "caller-a", 10);
@@ -1190,6 +1235,7 @@ fn collapsed_redacted_projection_preserves_geometry_and_suppresses_private_affor
     assert!(state.provider_kind.is_none());
     assert!(state.display_name.is_none());
     assert!(state.workspace_hint.is_none());
+    assert!(state.hud_target.is_none());
     assert!(state.lifecycle_state.is_none());
     assert!(state.visible_transcript.is_empty());
     assert_eq!(state.unread_output_count, None);
