@@ -858,8 +858,11 @@ message RuntimeTelemetryFrame {
 message SceneSnapshot {
   // Full scene topology as canonical compact JSON (SceneGraphSnapshot struct).
   // Includes: sequence, snapshot_wall_us, snapshot_mono_us, tabs, tiles,
-  // nodes, portal_surfaces, zone_registry, widget_registry, active_tab,
-  // display_area, checksum.
+  // nodes, zone_registry, widget_registry, active_tab, display_area, checksum;
+  // plus portal_surfaces, present ONLY when non-empty (omitted for surface-less
+  // snapshots so the checksum bytes stay identical to pre-field snapshots).
+  // A client MUST treat a missing portal_surfaces key as an empty map, not as a
+  // malformed snapshot.
   string snapshot_json  = 1;
 
   // Sequence number at snapshot time (RFC 0001 §3.5).
