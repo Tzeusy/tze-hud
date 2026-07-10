@@ -207,6 +207,7 @@ use self::lifecycle::{
     begin_os_mouse_capture, detect_monitor_size, drain_pending_input_latency, end_os_mouse_capture,
     focus_window_for_text_input, read_windows_clipboard_text, seed_windowed_benchmark_scene,
 };
+pub use self::network::render_attach_info;
 use self::network::{build_runtime_context, render_startup_banner, start_network_services};
 use self::portal::build_portal_projection_driver;
 

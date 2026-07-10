@@ -38,6 +38,17 @@ client first, or on a headless box):
 scripts/quickstart.sh --print-attach-info
 ```
 
+The binary also has this built in — no shell required, so it works on Windows
+too. Once you have a `tze_hud` binary, ask it directly and it prints the same
+attach block (MCP URL + resident-principal rule + paste-ready MCP config) and
+exits **without** starting the runtime:
+
+```bash
+./target/release/tze_hud --print-attach-info
+# honours --config / --mcp-port / --grpc-port / --bind-all-interfaces so the
+# printed info matches the runtime it describes; never prints the PSK value.
+```
+
 The rest of this doc is the same flow, step by step, explaining each piece.
 
 ---

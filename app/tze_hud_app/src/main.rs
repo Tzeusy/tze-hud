@@ -32,6 +32,7 @@
 //! | `--resident-grpc-agent-id <id>` | `TZE_HUD_RESIDENT_GRPC_AGENT_ID` | `resident-grpc-portal` | Agent identity for the resident session. Implies `--resident-grpc-portal`. |
 //! | `--resident-grpc-lease-ttl <ms>` | `TZE_HUD_RESIDENT_GRPC_LEASE_TTL_MS` | `60000` | Requested lease TTL in milliseconds. Implies `--resident-grpc-portal`. |
 //! | `--resident-grpc-psk <key>` | `TZE_HUD_RESIDENT_GRPC_PSK` | — | Explicit PSK for the target runtime (omit to reuse the runtime PSK). Implies `--resident-grpc-portal`. |
+//! | `--print-attach-info` | —                    | —            | Print the MCP attach-info block (endpoint URL, resident-principal==PSK rule, paste-ready MCP client config) and exit 0 without starting the runtime. Never prints the PSK. |
 //! | `--help`            | —                      | —            | Print this help and exit.                |
 //! | `--version`         | —                      | —            | Print version and exit.                  |
 //!
@@ -148,6 +149,12 @@ OPTIONS:
                            Explicit PSK for the target runtime; omit to reuse the runtime PSK
                            (implies --resident-grpc-portal)
                            (env: TZE_HUD_RESIDENT_GRPC_PSK)
+    --print-attach-info    Print the MCP attach-info block (endpoint URL, the
+                           resident-principal == PSK rule, and a paste-ready MCP
+                           client config snippet) and exit 0 WITHOUT starting the
+                           runtime. Honours --config / --mcp-port / --grpc-port /
+                           --bind-all-interfaces so the printed info matches the
+                           runtime it describes. Never prints the PSK value.
     --help                 Print this help and exit
     --version              Print version and exit
 
@@ -228,6 +235,10 @@ struct StartupOptions {
     resident_grpc_lease_ttl_ms: u64,
     /// Explicit PSK for the target runtime.  `None` → reuse the runtime PSK.
     resident_grpc_psk: Option<String>,
+    /// When true, print the MCP attach-info block (endpoint URL, the
+    /// resident-principal == PSK rule, and a paste-ready MCP client config
+    /// snippet) and exit 0 *without* starting the runtime (hud-b7c0m).
+    print_attach_info: bool,
 }
 
 impl Default for StartupOptions {
@@ -257,6 +268,7 @@ impl Default for StartupOptions {
             resident_grpc_lease_ttl_ms:
                 tze_hud_runtime::windowed::DEFAULT_RESIDENT_GRPC_LEASE_TTL_MS,
             resident_grpc_psk: None,
+            print_attach_info: false,
         }
     }
 }
@@ -420,6 +432,12 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
             "--version" | "-V" => {
                 print_version();
                 std::process::exit(0);
+            }
+            "--print-attach-info" => {
+                // Handled after parsing completes (main), so all attach-relevant
+                // flags (--config, --mcp-port, --grpc-port, --bind-all-interfaces)
+                // are already applied. Does not start the runtime.
+                opts.print_attach_info = true;
             }
             "--config" => {
                 i += 1;
@@ -639,6 +657,75 @@ fn parse_window_mode(s: &str) -> Result<WindowMode, String> {
     }
 }
 
+/// On Windows, reattach the process's standard handles to the launching
+/// terminal's console (hud-b7c0m; Codex P2 on PR #1112).
+///
+/// This binary is a GUI-subsystem app (`#![windows_subsystem = "windows"]`), so a
+/// launch from PowerShell/cmd gives the process *no* console and `print!` output
+/// is silently discarded unless the caller redirected the standard handles.
+/// `AttachConsole(ATTACH_PARENT_PROCESS)` binds the standard handles to the
+/// parent's console, but only when a handle is not already set — so an explicit
+/// redirect (`tze_hud --print-attach-info > info.txt`) is preserved. It is a
+/// harmless no-op when there is no parent console (e.g. a double-click launch,
+/// which has no terminal to show the block on anyway).
+#[cfg(windows)]
+fn attach_parent_console() {
+    // (DWORD)-1 — attach to the console of the parent process.
+    const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn AttachConsole(dw_process_id: u32) -> i32;
+    }
+    // Safety: FFI call into kernel32 with a constant argument; it touches no
+    // memory we own and is defined to no-op / fail cleanly when the process
+    // already has (or has no) console.
+    unsafe {
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+/// Non-Windows platforms already run the fast path on a normal console; nothing
+/// to attach.
+#[cfg(not(windows))]
+#[inline]
+fn attach_parent_console() {}
+
+/// Compute the attach-info block for the current startup options (hud-b7c0m).
+///
+/// Resolves the same config the runtime would use (honouring `--config`) for the
+/// informational `config:` line, and derives the MCP/gRPC endpoint addresses from
+/// the resolved ports and bind mode so the printed info matches the runtime it
+/// describes. Rendering is delegated to
+/// `tze_hud_runtime::windowed::render_attach_info` — the single source of truth
+/// for the attach block, shared with the startup banner so the two never drift.
+///
+/// The returned block never contains the PSK: only ports/addresses and the
+/// config path are passed down, and the JSON snippet uses a PSK placeholder.
+fn render_attach_info_block(opts: &StartupOptions) -> String {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    // Same bind-host selection the runtime uses: loopback unless the operator
+    // opted into all-interfaces exposure (hud-1aswu.1).
+    let host: IpAddr = if opts.bind_all_interfaces {
+        Ipv4Addr::UNSPECIFIED.into()
+    } else {
+        Ipv4Addr::LOCALHOST.into()
+    };
+    let mcp_addr = (opts.mcp_port != 0).then(|| SocketAddr::new(host, opts.mcp_port));
+    let grpc_addr = (opts.grpc_port != 0).then(|| SocketAddr::new(host, opts.grpc_port));
+
+    // Resolve the config path the runtime would load (honours --config, env, and
+    // platform defaults) purely for the informational line. Attach-info never
+    // requires a readable/valid config — a resolution failure is simply reported
+    // as "none resolved" rather than fail-closed as in canonical startup.
+    let config_path = resolve_config_path(opts.config_path.as_deref()).ok();
+
+    let mut block =
+        tze_hud_runtime::windowed::render_attach_info(mcp_addr, grpc_addr, config_path.as_deref());
+    block.push('\n');
+    block
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialise structured logging. JSON if TZE_HUD_LOG_JSON=1.
     let log_json = std::env::var("TZE_HUD_LOG_JSON").as_deref() == Ok("1");
@@ -664,6 +751,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("error: {e}");
         std::process::exit(1);
     });
+
+    // ── Attach-info fast path (hud-b7c0m) ─────────────────────────────────────
+    // Print the MCP attach-info block and exit *before* acquiring the GPU lock,
+    // resolving/validating a config, or starting the runtime. This is an
+    // onboarding aid that works on any platform without a shell, so it must not
+    // fail-closed on a missing/invalid config the way canonical startup does.
+    if opts.print_attach_info {
+        // On Windows this is a GUI-subsystem binary with no console by default,
+        // so bind stdout to the launching terminal before printing, else the
+        // block is invisible (Codex P2, PR #1112). No-op elsewhere.
+        attach_parent_console();
+        print!("{}", render_attach_info_block(&opts));
+        // `process::exit` skips destructors, so flush the buffered block first.
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        std::process::exit(0);
+    }
 
     // ── GPU lock (Windows scheduling policy, hud-940e4) ───────────────────────
     // Acquire the interactive GPU lock before claiming the GPU adapter.
@@ -1120,6 +1224,74 @@ mod tests {
         let args: Vec<String> = vec!["--psk".to_string(), "my-secret-key".to_string()];
         let opts = parse_options(&args).unwrap();
         assert_eq!(opts.psk, "my-secret-key");
+    }
+
+    #[test]
+    fn parse_options_print_attach_info_flag() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        clear_parse_options_env();
+        let args: Vec<String> = vec!["--print-attach-info".to_string()];
+        let opts = parse_options(&args).unwrap();
+        assert!(
+            opts.print_attach_info,
+            "--print-attach-info must set the flag"
+        );
+    }
+
+    #[test]
+    fn render_attach_info_block_has_sections_and_hides_psk() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        clear_parse_options_env();
+        // Explicit (nonexistent) config path keeps resolution deterministic and
+        // independent of env/cwd — attach-info never requires a readable config.
+        let opts = StartupOptions {
+            config_path: Some("/nonexistent/tze_hud.toml".to_string()),
+            mcp_port: 9090,
+            grpc_port: 50051,
+            psk: "SUPER-SECRET-PSK-9f2c-do-not-leak".to_string(),
+            ..StartupOptions::default()
+        };
+        let block = render_attach_info_block(&opts);
+        assert!(
+            !block.contains(&opts.psk),
+            "attach-info block must not leak the configured PSK:\n{block}"
+        );
+        assert!(
+            block.contains("http://127.0.0.1:9090/mcp"),
+            "MCP endpoint URL missing:\n{block}"
+        );
+        assert!(
+            block.contains("127.0.0.1:50051"),
+            "gRPC addr missing:\n{block}"
+        );
+        assert!(
+            block.contains("TZE_HUD_MCP_RESIDENT_PRINCIPAL"),
+            "resident-principal rule missing:\n{block}"
+        );
+        assert!(
+            block.contains("\"mcpServers\""),
+            "paste-ready MCP client config missing:\n{block}"
+        );
+    }
+
+    #[test]
+    fn render_attach_info_block_disabled_mcp_omits_snippet() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        clear_parse_options_env();
+        let opts = StartupOptions {
+            config_path: Some("/nonexistent/tze_hud.toml".to_string()),
+            mcp_port: 0,
+            ..StartupOptions::default()
+        };
+        let block = render_attach_info_block(&opts);
+        assert!(
+            block.contains("MCP endpoint : disabled"),
+            "disabled MCP must be reported:\n{block}"
+        );
+        assert!(
+            !block.contains("\"mcpServers\""),
+            "disabled MCP must not emit a client snippet:\n{block}"
+        );
     }
 
     #[test]
