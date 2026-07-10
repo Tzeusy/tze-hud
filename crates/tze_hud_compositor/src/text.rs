@@ -1857,6 +1857,55 @@ pub fn markdown_node_has_pixel_runs(node: &TextMarkdownNode) -> bool {
     node.color_runs.iter().any(|r| r.start_byte < r.end_byte)
 }
 
+/// An axis-aligned box as `(x, y, width, height)` in absolute physical pixels.
+///
+/// Used by [`portal_part_clip_rect`] purely as a lightweight geometry tuple so
+/// the per-part clip math is a free function testable without a GPU.
+pub type ClipBox = (f32, f32, f32, f32);
+
+/// Intersect two [`ClipBox`]es in the same coordinate space.
+///
+/// Returns the overlapping box. Width/height are clamped at `0.0` (never
+/// negative) when the boxes are disjoint, so the result is always a valid —
+/// possibly empty — rectangle.
+fn intersect_clip_box(a: ClipBox, b: ClipBox) -> ClipBox {
+    let left = a.0.max(b.0);
+    let top = a.1.max(b.1);
+    let right = (a.0 + a.2).min(b.0 + b.2);
+    let bottom = (a.1 + a.3).min(b.1 + b.3);
+    (left, top, (right - left).max(0.0), (bottom - top).max(0.0))
+}
+
+/// Compute the glyph clip rectangle for a portal part's drawn content.
+///
+/// The rendered content box (`content`) is clamped to the owning tile box
+/// (`tile`) and — when the node is a *declared portal part* — additionally to
+/// that part's region (`part`). Every argument is an absolute-physical-pixel
+/// [`ClipBox`]; `part` must already be offset into the same absolute space as
+/// `content`/`tile` (i.e. `tile_origin + part.bounds`).
+///
+/// `part` is `None` for the legacy single-node portal (and any non-portal
+/// markdown surface): then only the tile box constrains the clip, reproducing
+/// the pre-promotion behavior byte-for-byte. When `Some`, the part region is the
+/// per-part containment envelope that keeps one part's content (e.g. an
+/// overlong transcript) from painting over a sibling part's region (e.g. the
+/// composer strip) — the render-side meaning of "one scene node per part"
+/// (hud-s4lrw). The part region is a *clip* envelope only; it deliberately does
+/// **not** alter the wrap/truncation measure (`bounds_width`), so the
+/// shaped-buffer and truncation caches stay keyed exactly as before (PR #1007
+/// perf invariant).
+///
+/// Each returned dimension is floored at `1.0` so a fully-collapsed
+/// intersection still yields a valid (degenerate) scissor rect rather than a
+/// zero or negative extent.
+pub fn portal_part_clip_rect(content: ClipBox, tile: ClipBox, part: Option<ClipBox>) -> ClipBox {
+    let mut clip = intersect_clip_box(content, tile);
+    if let Some(part) = part {
+        clip = intersect_clip_box(clip, part);
+    }
+    (clip.0, clip.1, clip.2.max(1.0), clip.3.max(1.0))
+}
+
 impl TextItem {
     /// Build a `TextItem` from a `TextMarkdownNode` and its tile-relative position.
     ///
@@ -2951,6 +3000,76 @@ fn linear_to_srgb_u8(linear: f32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── portal_part_clip_rect (hud-s4lrw) ──────────────────────────────────
+    // Pure CPU geometry: the per-part clip envelope for multi-node portals.
+
+    /// With no declared part, the clip is exactly the content∩tile intersection
+    /// and matches the pre-promotion single-node behavior (content clamped to
+    /// the tile box).
+    #[test]
+    fn portal_part_clip_rect_no_part_clamps_to_tile() {
+        // Content overflows the tile on the right and bottom.
+        let clip =
+            portal_part_clip_rect((10.0, 10.0, 400.0, 400.0), (0.0, 0.0, 100.0, 100.0), None);
+        // Right/bottom are clamped to the tile edge (x=100, y=100).
+        assert_eq!(clip, (10.0, 10.0, 90.0, 90.0));
+    }
+
+    /// A declared part region narrows the clip below the tile box — an overlong
+    /// transcript node is contained to its part band and cannot paint over the
+    /// composer strip beneath it.
+    #[test]
+    fn portal_part_clip_rect_part_contains_content() {
+        // Transcript node laid out over the whole tile, but its part band is the
+        // top 60px only.
+        let clip = portal_part_clip_rect(
+            (0.0, 0.0, 100.0, 100.0),      // content spans the tile
+            (0.0, 0.0, 100.0, 100.0),      // tile
+            Some((0.0, 0.0, 100.0, 60.0)), // transcript band (absolute)
+        );
+        assert_eq!(clip, (0.0, 0.0, 100.0, 60.0));
+    }
+
+    /// The part envelope never *widens* the clip past the tile: a part region
+    /// larger than the tile is still bounded by the tile box.
+    #[test]
+    fn portal_part_clip_rect_part_cannot_exceed_tile() {
+        let clip = portal_part_clip_rect(
+            (0.0, 0.0, 100.0, 100.0),
+            (0.0, 0.0, 80.0, 80.0),
+            Some((0.0, 0.0, 200.0, 200.0)),
+        );
+        assert_eq!(clip, (0.0, 0.0, 80.0, 80.0));
+    }
+
+    /// A disjoint part (content laid out outside its declared region) collapses
+    /// to the 1.0-floored degenerate rect rather than a zero/negative extent.
+    #[test]
+    fn portal_part_clip_rect_disjoint_floors_to_unit() {
+        let clip = portal_part_clip_rect(
+            (0.0, 0.0, 40.0, 40.0),
+            (0.0, 0.0, 100.0, 100.0),
+            Some((60.0, 60.0, 40.0, 40.0)), // no overlap with content
+        );
+        // Width/height floored at 1.0 (never zero/negative).
+        assert!(clip.2 >= 1.0 && clip.3 >= 1.0, "got {clip:?}");
+    }
+
+    /// The part envelope is a clip only; it is applied in absolute space after
+    /// the tile origin offset, so a part band on a translated tile clips at the
+    /// translated location.
+    #[test]
+    fn portal_part_clip_rect_absolute_part_offset() {
+        // Tile at (200,100); transcript band is the tile's top 50px → absolute
+        // (200,100,300,50).
+        let clip = portal_part_clip_rect(
+            (200.0, 100.0, 300.0, 400.0), // content
+            (200.0, 100.0, 300.0, 400.0), // tile
+            Some((200.0, 100.0, 300.0, 50.0)),
+        );
+        assert_eq!(clip, (200.0, 100.0, 300.0, 50.0));
+    }
 
     /// hud-n0x4u repro (pure CPU): a single unbroken token far wider than the box
     /// must fall back to glyph-level (break-anywhere) wrapping so every visual line

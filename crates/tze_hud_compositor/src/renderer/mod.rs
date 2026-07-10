@@ -1599,6 +1599,10 @@ impl Compositor {
                 0.0
             };
             if let Some(root_id) = tile.root_node {
+                // Per-part portal-surface consumption (hud-s4lrw): mirror the
+                // render path so the primed truncation keys (measure + viewport)
+                // match. `None` → legacy tile-level behavior.
+                let part_index = portal_part_index(scene, tile.id);
                 collect_ellipsis_text_items_from_node(
                     root_id,
                     scene,
@@ -1611,6 +1615,8 @@ impl Compositor {
                     md_tokens,
                     font_clamp,
                     transcript_measure_px,
+                    part_index,
+                    None,
                     &mut live_items,
                 );
             }

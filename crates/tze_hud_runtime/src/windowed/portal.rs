@@ -722,6 +722,40 @@ fn scale_tile_node_tree(
     }
 }
 
+/// Scale a tile's first-class [`PortalSurface`] part bounds in lock-step with a
+/// whole-portal resize (hud-s4lrw).
+///
+/// `PortalPart::bounds` is tile-local surface geometry — the per-part clip band
+/// the compositor uses to keep one part's content (e.g. an overlong transcript)
+/// from painting over a sibling part's region. When the viewer resizes the
+/// portal, [`scale_tile_node_tree`] re-flows the part *nodes* to the new pane;
+/// the surface descriptor's declared part bounds must scale by the same per-axis
+/// ratio or the render-side clip band drifts off the content and the per-part
+/// overflow invariant no longer holds at the new geometry.
+///
+/// Part bounds are tile-local (origin relative to the tile top-left), so — like
+/// the node tree — they scale by the raw ratio; a whole-portal *drag* leaves
+/// them untouched (only `tile.bounds` moves). No-op when the tile carries no
+/// surface. Mutates the public `overlay.portal_surfaces` state directly (no
+/// lease/capability gate): this is viewer-driven geometry authority, the same
+/// path that writes `tile.bounds` above.
+fn scale_portal_surface_parts(
+    scene: &mut tze_hud_scene::graph::SceneGraph,
+    tile_id: tze_hud_scene::SceneId,
+    r_w: f32,
+    r_h: f32,
+) {
+    let Some(surface) = scene.overlay.portal_surfaces.get_mut(&tile_id) else {
+        return;
+    };
+    for part in &mut surface.parts {
+        part.bounds.x *= r_w;
+        part.bounds.y *= r_h;
+        part.bounds.width *= r_w;
+        part.bounds.height *= r_h;
+    }
+}
+
 /// Apply a resolved whole-portal resize to the scene: write each member's scaled
 /// bounds, bump the scene version once if any geometry changed, and build the
 /// per-member geometry snapshots to broadcast.
@@ -809,6 +843,11 @@ fn commit_portal_group_resize(
             };
             if node_r_w != 1.0 || node_r_h != 1.0 {
                 scale_tile_node_tree(scene, tile_id, node_r_w, node_r_h);
+                // Keep any first-class portal-surface part bounds in lock-step
+                // with the re-flowed node tree so the compositor's per-part clip
+                // band stays aligned at the new geometry (hud-s4lrw). No-op for
+                // legacy raw-tile portals with no surface descriptor.
+                scale_portal_surface_parts(scene, tile_id, node_r_w, node_r_h);
             }
         }
         // The viewer now owns this member's geometry: take authority so an
@@ -5630,6 +5669,117 @@ mod tests {
             sequence: 1,
         };
         commit_portal_group_resize(scene, &group, old_rect, snapshot);
+    }
+
+    /// hud-s4lrw unit: `scale_portal_surface_parts` scales every part's
+    /// tile-local bounds by the per-axis ratio, and is a no-op when the tile has
+    /// no first-class surface.
+    #[test]
+    fn scale_portal_surface_parts_scales_tile_local_bounds() {
+        use tze_hud_scene::types::{PortalPart, PortalPartKind, PortalSurface, Rect};
+
+        let mut scene = tze_hud_scene::graph::SceneGraph::new(800.0, 600.0);
+        let tab = scene.create_tab("t", 0).unwrap();
+        let lease = scene.grant_lease("ns", 120_000, vec![]);
+        let tile = scene
+            .create_tile(tab, "ns", lease, Rect::new(0.0, 0.0, 300.0, 200.0), 1)
+            .unwrap();
+
+        // No-op before any surface is declared.
+        scale_portal_surface_parts(&mut scene, tile, 2.0, 0.5);
+        assert!(!scene.overlay.portal_surfaces.contains_key(&tile));
+
+        scene.overlay.portal_surfaces.insert(
+            tile,
+            PortalSurface {
+                parts: vec![
+                    PortalPart {
+                        kind: PortalPartKind::Transcript,
+                        bounds: Rect::new(10.0, 20.0, 100.0, 40.0),
+                        node: Some(tze_hud_scene::SceneId::new()),
+                    },
+                    PortalPart {
+                        kind: PortalPartKind::Composer,
+                        bounds: Rect::new(0.0, 150.0, 300.0, 50.0),
+                        node: Some(tze_hud_scene::SceneId::new()),
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+
+        scale_portal_surface_parts(&mut scene, tile, 2.0, 0.5);
+        let parts = &scene.overlay.portal_surfaces.get(&tile).unwrap().parts;
+        // Transcript part: x,w ×2.0 ; y,h ×0.5.
+        assert_eq!(parts[0].bounds.x, 20.0);
+        assert_eq!(parts[0].bounds.y, 10.0);
+        assert_eq!(parts[0].bounds.width, 200.0);
+        assert_eq!(parts[0].bounds.height, 20.0);
+        // Composer part scales the same way.
+        assert_eq!(parts[1].bounds.y, 75.0);
+        assert_eq!(parts[1].bounds.width, 600.0);
+        assert_eq!(parts[1].bounds.height, 25.0);
+    }
+
+    /// hud-s4lrw integration: a whole-portal resize scales the host tile's
+    /// first-class `PortalSurface` part bounds in lock-step with the re-flowed
+    /// node tree, so the compositor's per-part clip band stays aligned at the new
+    /// geometry ("overflow invariants hold at all geometries").
+    #[test]
+    fn whole_portal_resize_scales_surface_part_bounds() {
+        use tze_hud_scene::types::{PortalPart, PortalPartKind, PortalSurface, Rect};
+
+        let (mut scene, _tab, frame_id, transcript_id, _composer_id, _shield, _fm) =
+            multi_surface_portal_scene();
+
+        // Attach a first-class surface to the transcript (host) tile.
+        let part_node = tze_hud_scene::SceneId::new();
+        scene.overlay.portal_surfaces.insert(
+            transcript_id,
+            PortalSurface {
+                parts: vec![PortalPart {
+                    kind: PortalPartKind::Transcript,
+                    bounds: Rect::new(10.0, 20.0, 100.0, 40.0),
+                    node: Some(part_node),
+                }],
+                ..Default::default()
+            },
+        );
+
+        let old_tile = scene.tiles.get(&transcript_id).unwrap().bounds;
+        let old_frame = scene.tiles.get(&frame_id).unwrap().bounds;
+        // Grow the whole portal (anisotropic to exercise both axes).
+        resize_group_to(
+            &mut scene,
+            frame_id,
+            tze_hud_input::PortalRect {
+                x: old_frame.x,
+                y: old_frame.y,
+                width: old_frame.width * 1.4,
+                height: old_frame.height * 1.2,
+            },
+        );
+        let new_tile = scene.tiles.get(&transcript_id).unwrap().bounds;
+        let r_w = new_tile.width / old_tile.width;
+        let r_h = new_tile.height / old_tile.height;
+        assert!(r_w > 1.0 && r_h > 1.0, "resize must grow the host tile");
+
+        let part = &scene
+            .overlay
+            .portal_surfaces
+            .get(&transcript_id)
+            .unwrap()
+            .parts[0];
+        assert!((part.bounds.x - 10.0 * r_w).abs() < 0.5, "x scaled by r_w");
+        assert!((part.bounds.y - 20.0 * r_h).abs() < 0.5, "y scaled by r_h");
+        assert!(
+            (part.bounds.width - 100.0 * r_w).abs() < 0.5,
+            "width scaled by r_w"
+        );
+        assert!(
+            (part.bounds.height - 40.0 * r_h).abs() < 0.5,
+            "height scaled by r_h"
+        );
     }
 
     /// hud-rpmwt core: after a whole-portal resize the transcript/composer text
