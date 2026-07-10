@@ -41,7 +41,7 @@ The `text-portal` component type defines the visual-semantic identity of the fir
 - **Required tokens** (all drawn from the existing Canonical Token Schema — this delta introduces NO new canonical token key): `color.text.primary`, `color.text.secondary`, `color.backdrop.default`, `color.border.default`, `color.outline.default`, `opacity.backdrop.opaque`, `typography.heading.family`, `typography.heading.size`, `typography.heading.weight`, `typography.body.family`, `typography.body.size`, `typography.body.weight`, `spacing.padding.medium`, `stroke.border.width`, `stroke.outline.width`.
 - **Geometry expectation (informational):** a content-layer, lease-governed, movable and resizable two-pane surface (transcript pane + composer pane) with a header band and a collapsed-card state; corner/edge resize affordances and a pane divider. Geometry is governed by the portal surface's own bounds/lease, not validated against the component type.
 
-Portal-specific canonical token keys (e.g. a dedicated portal namespace and collapsed/expanded transition-duration keys) are deliberately deferred to the follow-up canonicalization change (`hud-8691s`, Promotion P2). This delta reuses existing canonical keys verbatim and changes none of them.
+This `text-portal` contract's required-tokens list reuses existing canonical keys verbatim and introduces no new canonical key. Portal-specific token **canonicalization** was subsequently delivered by the follow-up change (`hud-8691s`, Promotion P2), which shipped a profile-scoped `portal.*` token namespace of 59 keys (`crates/tze_hud_config/src/portal_tokens.rs` — the `PORTAL_TOKEN_*` consts and their `PORTAL_TOKEN_DEFAULT_STRINGS` defaults), resolved via profile-scoped overrides with canonical-token fallbacks. The required-tokens list above intentionally stays on the pre-existing canonical keys so the promotion-era styling contract is expressible independently of the `portal.*` namespace.
 Scope: post-v1
 
 #### Scenario: text-portal declares its governed surface and required tokens
@@ -54,9 +54,10 @@ Scope: post-v1
 - **THEN** the six v1 component types (`subtitle`, `notification`, `status-bar`, `alert-banner`, `ambient-background`, `pip`) MUST remain defined exactly as before
 - **AND** `text-portal` MUST be recognized only after its RFC 0013 §7.2 promotion gate passes
 
-#### Scenario: portal token canonicalization deferred to P2
-- **WHEN** an author looks for a portal-namespaced canonical token key (e.g. a dedicated `portal.*` namespace) in this delta
-- **THEN** no such key MUST be present — the text-portal required tokens MUST reference only pre-existing canonical keys, and portal-specific canonicalization MUST be left to the P2 follow-up change
+#### Scenario: portal token canonicalization delivered by P2
+- **WHEN** an author asks whether this delta introduces a portal-namespaced canonical token key (e.g. a `portal.*` namespace)
+- **THEN** this delta MUST introduce no new canonical key — the `text-portal` required-tokens list references only pre-existing canonical keys
+- **AND** portal-specific canonicalization was delivered by the P2 follow-up change `hud-8691s`, which shipped a 59-key profile-scoped `portal.*` token namespace (`crates/tze_hud_config/src/portal_tokens.rs`), resolved via profile-scoped overrides with canonical-token fallbacks
 
 ---
 
