@@ -134,7 +134,7 @@ fn demo_plan_emits_three_redacted_surface_routes_without_owner_tokens() {
     );
     assert_eq!(
         demo["portal_routes"][0]["materialization"],
-        "resident_raw_tile"
+        "first_class_surface_raw_tile"
     );
     assert!(
         demo["lifecycle_checks"]
