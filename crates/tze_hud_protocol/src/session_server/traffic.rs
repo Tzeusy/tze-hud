@@ -148,6 +148,14 @@ pub(super) fn classify_inbound_batch(batch: &MutationBatch) -> TrafficClass {
                 // which is what flipped lifecycle-visible portals off the
                 // coalescible path when the accent was a per-republish AddNode.
                 Mutation::SetTileLifecycleAccent(_) => {}
+                // Declaring/replacing the first-class portal surface is structural
+                // (identity + parts) — Transactional (RFC 0013 §7.2 promotion).
+                Mutation::SetPortalSurface(_) => return TrafficClass::Transactional,
+                // Patching portal lifecycle/display state is a coalescible content
+                // update — StateStream, exactly like the lifecycle accent above. It
+                // must NOT mark the batch Transactional so steady-state portals stay
+                // on the coalescible path (hud-mzk74).
+                Mutation::UpdatePortalSurfaceState(_) => {}
             }
         }
     }

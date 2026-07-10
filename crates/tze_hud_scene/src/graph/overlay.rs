@@ -140,6 +140,27 @@ pub struct RuntimeOverlayState {
     /// Ephemeral: skipped during serialization.
     #[serde(skip, default)]
     pub tile_lifecycle_accents: HashMap<SceneId, LifecycleAccent>,
+    /// First-class text-stream portal surface descriptors, keyed by host tile id
+    /// (RFC 0013 §7.2 promotion; hud-tc153).
+    ///
+    /// Declared by the Transactional [`SceneMutation::SetPortalSurface`] apply
+    /// path and patched by the coalescible StateStream
+    /// [`SceneMutation::UpdatePortalSurfaceState`] path. Lives here, keyed by tile
+    /// id, rather than as a scene node so it survives `SetTileRoot`/`PublishToTile`
+    /// transcript republishes that replace the tile's node tree — the same
+    /// coalescing rationale as [`tile_lifecycle_accents`](Self::tile_lifecycle_accents).
+    ///
+    /// The descriptor is adapter-driven metadata (like the lifecycle accent) and
+    /// is re-declared by the owning session after reconnect; it is not yet part of
+    /// [`SceneSnapshot`](crate::graph::snapshot) — snapshot/reconnect parity is a
+    /// tracked follow-up.
+    ///
+    /// [`SceneMutation::SetPortalSurface`]: crate::mutation::SceneMutation::SetPortalSurface
+    /// [`SceneMutation::UpdatePortalSurfaceState`]: crate::mutation::SceneMutation::UpdatePortalSurfaceState
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub portal_surfaces: HashMap<SceneId, PortalSurface>,
     /// Tile IDs removed since the last runtime drain.
     ///
     /// Populated by [`SceneGraph::remove_tile_and_nodes`] on every tile
@@ -397,6 +418,117 @@ impl SceneGraph {
     /// Get the lifecycle-affordance accent for a tile, if any.
     pub fn tile_lifecycle_accent(&self, tile_id: SceneId) -> Option<LifecycleAccent> {
         self.overlay.tile_lifecycle_accents.get(&tile_id).copied()
+    }
+
+    // ── Portal surface (RFC 0013 §7.2 promotion; hud-tc153) ──────────────────
+
+    /// Declare or replace the first-class portal surface descriptor over a tile.
+    ///
+    /// Validates the surface's structural invariants
+    /// ([`PortalSurface::validate_structure`]) and that every part's referenced
+    /// backing node exists and belongs to `tile_id`, so a portal surface cannot
+    /// reference another agent's nodes. Bumps `scene.version` only when the stored
+    /// descriptor actually changes, keeping a steady-state portal idle.
+    pub fn set_portal_surface(
+        &mut self,
+        tile_id: SceneId,
+        surface: PortalSurface,
+    ) -> Result<(), ValidationError> {
+        if !self.tiles.contains_key(&tile_id) {
+            return Err(ValidationError::TileNotFound { id: tile_id });
+        }
+        if let Err(reason) = surface.validate_structure() {
+            return Err(ValidationError::InvalidPortalSurface { tile_id, reason });
+        }
+        // Every materialized part node must exist within this tile's node tree.
+        for part in &surface.parts {
+            if let Some(node_id) = part.node {
+                if !self.node_belongs_to_tile(node_id, tile_id) {
+                    return Err(ValidationError::InvalidPortalSurface {
+                        tile_id,
+                        reason: format!(
+                            "part {:?} references node {node_id} not reachable from tile {tile_id}",
+                            part.kind
+                        ),
+                    });
+                }
+            }
+        }
+        if self.overlay.portal_surfaces.get(&tile_id) != Some(&surface) {
+            self.overlay.portal_surfaces.insert(tile_id, surface);
+            self.version += 1;
+        }
+        Ok(())
+    }
+
+    /// Patch the lifecycle and/or display state of an existing portal surface.
+    ///
+    /// This is the coalescible StateStream update path: a `None` field is left
+    /// unchanged. Errors if no portal surface has been declared on `tile_id`.
+    /// Bumps `scene.version` only when a field actually changes.
+    pub fn update_portal_surface_state(
+        &mut self,
+        tile_id: SceneId,
+        lifecycle: Option<PortalLifecycleState>,
+        display_state: Option<PortalDisplayState>,
+    ) -> Result<(), ValidationError> {
+        let surface = self.overlay.portal_surfaces.get_mut(&tile_id).ok_or(
+            ValidationError::PortalSurfaceNotFound { tile_id },
+        )?;
+        let mut changed = false;
+        if let Some(next) = lifecycle {
+            if surface.lifecycle != next {
+                surface.lifecycle = next;
+                changed = true;
+            }
+        }
+        if let Some(next) = display_state {
+            if surface.display_state != next {
+                surface.display_state = next;
+                changed = true;
+            }
+        }
+        if changed {
+            self.version += 1;
+        }
+        Ok(())
+    }
+
+    /// Clear the portal surface descriptor for a tile (no-op if unset).
+    pub fn clear_portal_surface(&mut self, tile_id: SceneId) {
+        if self.overlay.portal_surfaces.remove(&tile_id).is_some() {
+            self.version += 1;
+        }
+    }
+
+    /// Get the portal surface descriptor for a tile, if any.
+    pub fn portal_surface(&self, tile_id: SceneId) -> Option<&PortalSurface> {
+        self.overlay.portal_surfaces.get(&tile_id)
+    }
+
+    /// Whether `node_id` exists and is reachable from `tile_id`'s root node tree.
+    fn node_belongs_to_tile(&self, node_id: SceneId, tile_id: SceneId) -> bool {
+        let Some(tile) = self.tiles.get(&tile_id) else {
+            return false;
+        };
+        let Some(root) = tile.root_node else {
+            return false;
+        };
+        // The node itself must exist in the graph.
+        if !self.nodes.contains_key(&node_id) {
+            return false;
+        }
+        // Walk the tree from the root looking for node_id.
+        let mut stack = vec![root];
+        while let Some(cur) = stack.pop() {
+            if cur == node_id {
+                return true;
+            }
+            if let Some(n) = self.nodes.get(&cur) {
+                stack.extend(n.children.iter().copied());
+            }
+        }
+        false
     }
 
     /// Set the tile-local scroll offset used by runtime local feedback.

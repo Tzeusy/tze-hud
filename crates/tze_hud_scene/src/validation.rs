@@ -28,6 +28,12 @@ pub enum ValidationError {
     #[error("node not found: {id}")]
     NodeNotFound { id: SceneId },
 
+    #[error("invalid portal surface for tile {tile_id}: {reason}")]
+    InvalidPortalSurface { tile_id: SceneId, reason: String },
+
+    #[error("portal surface not found for tile: {tile_id}")]
+    PortalSurfaceNotFound { tile_id: SceneId },
+
     #[error("lease not found: {id}")]
     LeaseNotFound { id: SceneId },
 
@@ -232,6 +238,8 @@ pub enum ValidationErrorCode {
     TabNotFound,
     TileNotFound,
     NodeNotFound,
+    InvalidPortalSurface,
+    PortalSurfaceNotFound,
 
     // Zone / zone-related
     ZoneNotFound,
@@ -280,6 +288,8 @@ impl ValidationErrorCode {
             ValidationError::TabNotFound { .. } => Self::TabNotFound,
             ValidationError::TileNotFound { .. } => Self::TileNotFound,
             ValidationError::NodeNotFound { .. } => Self::NodeNotFound,
+            ValidationError::InvalidPortalSurface { .. } => Self::InvalidPortalSurface,
+            ValidationError::PortalSurfaceNotFound { .. } => Self::PortalSurfaceNotFound,
             ValidationError::DuplicateDisplayOrder { .. } => Self::DuplicateDisplayOrder,
             ValidationError::DuplicateId { .. } => Self::DuplicateId,
             // BoundsOutOfRange covers two cases:
@@ -423,6 +433,14 @@ fn build_context_and_hint(
         ValidationError::NodeNotFound { id } => (
             json!({ "field": "node_id", "value": id.to_string(), "constraint": "node must exist" }),
             None,
+        ),
+        ValidationError::InvalidPortalSurface { tile_id, reason } => (
+            json!({ "field": "portal_surface", "value": tile_id.to_string(), "constraint": reason }),
+            None,
+        ),
+        ValidationError::PortalSurfaceNotFound { tile_id } => (
+            json!({ "field": "tile_id", "value": tile_id.to_string(), "constraint": "a portal surface must be declared (SetPortalSurface) before it can be updated" }),
+            Some(json!({ "action": "set_portal_surface", "tile_id": tile_id.to_string() })),
         ),
         ValidationError::DuplicateId { id } => (
             json!({ "field": "id", "value": id.to_string(), "constraint": "id must be unique in the scene graph" }),

@@ -275,6 +275,30 @@ pub enum SceneMutation {
         tile_id: SceneId,
         accent: Option<LifecycleAccent>,
     },
+    // ── Portal surface (RFC 0013 §7.2 promotion; hud-tc153) ───────────────
+    /// Declare or replace the first-class portal surface descriptor over a tile.
+    ///
+    /// Transactional (RFC 0005 §3.1): establishes the promoted surface — its
+    /// identity, lifecycle/display state, and the eight named parts — as one
+    /// governed object in place of the ad-hoc six-tile raw assembly. The
+    /// descriptor is stored as runtime overlay state keyed by `tile_id` so it
+    /// survives transcript republishes (`SetTileRoot`/`PublishToTile`). Requires
+    /// `modify_own_tiles`; each materialized part node must belong to `tile_id`.
+    SetPortalSurface {
+        tile_id: SceneId,
+        surface: PortalSurface,
+    },
+    /// Patch the lifecycle and/or display state of an existing portal surface.
+    ///
+    /// Coalescible StateStream tile-update (RFC 0005 §3.3): a `None` field is
+    /// left unchanged; the surface's parts and identity are untouched, so a
+    /// frequent lifecycle/collapse transition never re-sends the whole surface
+    /// (mirrors the `SetTileLifecycleAccent` coalescing rationale, hud-mzk74).
+    UpdatePortalSurfaceState {
+        tile_id: SceneId,
+        lifecycle: Option<PortalLifecycleState>,
+        display_state: Option<PortalDisplayState>,
+    },
 }
 
 impl SceneMutation {
@@ -307,6 +331,8 @@ impl SceneMutation {
             SceneMutation::RegisterTileScroll { .. } => "RegisterTileScroll",
             SceneMutation::SetScrollOffset { .. } => "SetScrollOffset",
             SceneMutation::SetTileLifecycleAccent { .. } => "SetTileLifecycleAccent",
+            SceneMutation::SetPortalSurface { .. } => "SetPortalSurface",
+            SceneMutation::UpdatePortalSurfaceState { .. } => "UpdatePortalSurfaceState",
         }
     }
 }
@@ -607,7 +633,9 @@ impl SceneGraph {
             | SceneMutation::LeaveSyncGroup { tile_id }
             | SceneMutation::RegisterTileScroll { tile_id, .. }
             | SceneMutation::SetScrollOffset { tile_id, .. }
-            | SceneMutation::SetTileLifecycleAccent { tile_id, .. } => {
+            | SceneMutation::SetTileLifecycleAccent { tile_id, .. }
+            | SceneMutation::SetPortalSurface { tile_id, .. }
+            | SceneMutation::UpdatePortalSurfaceState { tile_id, .. } => {
                 tiles.get(tile_id).map(|t| t.lease_id)
             }
             // Tab mutations, zone mutations, sync group mutations other than
@@ -963,6 +991,41 @@ impl SceneGraph {
                     Some(a) => self.set_tile_lifecycle_accent(*tile_id, *a)?,
                     None => self.clear_tile_lifecycle_accent(*tile_id),
                 }
+                Ok(vec![])
+            }
+            // ── Portal surface (RFC 0013 §7.2 promotion) ─────────────────
+            SceneMutation::SetPortalSurface { tile_id, surface } => {
+                let tile = self
+                    .tiles
+                    .get(tile_id)
+                    .ok_or(ValidationError::TileNotFound { id: *tile_id })?;
+                if tile.namespace != namespace {
+                    return Err(ValidationError::NamespaceMismatch {
+                        tile_id: *tile_id,
+                        tile_namespace: tile.namespace.clone(),
+                        agent_namespace: namespace.to_string(),
+                    });
+                }
+                self.set_portal_surface(*tile_id, surface.clone())?;
+                Ok(vec![])
+            }
+            SceneMutation::UpdatePortalSurfaceState {
+                tile_id,
+                lifecycle,
+                display_state,
+            } => {
+                let tile = self
+                    .tiles
+                    .get(tile_id)
+                    .ok_or(ValidationError::TileNotFound { id: *tile_id })?;
+                if tile.namespace != namespace {
+                    return Err(ValidationError::NamespaceMismatch {
+                        tile_id: *tile_id,
+                        tile_namespace: tile.namespace.clone(),
+                        agent_namespace: namespace.to_string(),
+                    });
+                }
+                self.update_portal_surface_state(*tile_id, *lifecycle, *display_state)?;
                 Ok(vec![])
             }
         }

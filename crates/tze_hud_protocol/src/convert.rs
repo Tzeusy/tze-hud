@@ -1621,6 +1621,240 @@ fn scene_id_from_be_bytes(bytes: &[u8]) -> Option<SceneId> {
     Some(SceneId::from_uuid(uuid::Uuid::from_bytes(arr)))
 }
 
+// ─── Portal surface conversions (RFC 0013 §7.2 promotion; hud-tc153) ──────────
+
+/// Decode a `PortalPeerClassProto` i32 to the scene [`PortalPeerClass`].
+/// Unknown/unspecified wire values map to [`PortalPeerClass::Unspecified`].
+pub fn proto_portal_peer_class_to_scene(v: i32) -> PortalPeerClass {
+    match proto::PortalPeerClassProto::try_from(v) {
+        Ok(proto::PortalPeerClassProto::PortalPeerClassResidentLlm) => PortalPeerClass::ResidentLlm,
+        Ok(proto::PortalPeerClassProto::PortalPeerClassOperator) => PortalPeerClass::Operator,
+        Ok(proto::PortalPeerClassProto::PortalPeerClassHumanPeer) => PortalPeerClass::HumanPeer,
+        Ok(proto::PortalPeerClassProto::PortalPeerClassAdapter) => PortalPeerClass::Adapter,
+        _ => PortalPeerClass::Unspecified,
+    }
+}
+
+/// Encode a scene [`PortalPeerClass`] to its `PortalPeerClassProto` i32.
+pub fn scene_portal_peer_class_to_proto(p: PortalPeerClass) -> i32 {
+    let e = match p {
+        PortalPeerClass::Unspecified => proto::PortalPeerClassProto::PortalPeerClassUnspecified,
+        PortalPeerClass::ResidentLlm => proto::PortalPeerClassProto::PortalPeerClassResidentLlm,
+        PortalPeerClass::Operator => proto::PortalPeerClassProto::PortalPeerClassOperator,
+        PortalPeerClass::HumanPeer => proto::PortalPeerClassProto::PortalPeerClassHumanPeer,
+        PortalPeerClass::Adapter => proto::PortalPeerClassProto::PortalPeerClassAdapter,
+    };
+    e as i32
+}
+
+/// Decode a `PortalLifecycleStateProto` i32 to the scene enum (total; unknown /
+/// unspecified map to [`PortalLifecycleState::Unspecified`]).
+pub fn proto_portal_lifecycle_enum_to_scene(v: i32) -> PortalLifecycleState {
+    match proto::PortalLifecycleStateProto::try_from(v) {
+        Ok(proto::PortalLifecycleStateProto::PortalLifecycleStateActive) => {
+            PortalLifecycleState::Active
+        }
+        Ok(proto::PortalLifecycleStateProto::PortalLifecycleStateWaitingForInput) => {
+            PortalLifecycleState::WaitingForInput
+        }
+        Ok(proto::PortalLifecycleStateProto::PortalLifecycleStateBlocked) => {
+            PortalLifecycleState::Blocked
+        }
+        Ok(proto::PortalLifecycleStateProto::PortalLifecycleStateDegraded) => {
+            PortalLifecycleState::Degraded
+        }
+        Ok(proto::PortalLifecycleStateProto::PortalLifecycleStateDetached) => {
+            PortalLifecycleState::Detached
+        }
+        _ => PortalLifecycleState::Unspecified,
+    }
+}
+
+/// Decode a `PortalLifecycleStateProto` i32 as a coalescible **patch**: an
+/// UNSPECIFIED wire value means "leave unchanged" and maps to `None`.
+pub fn proto_portal_lifecycle_to_scene(v: i32) -> Option<PortalLifecycleState> {
+    match proto_portal_lifecycle_enum_to_scene(v) {
+        PortalLifecycleState::Unspecified => None,
+        other => Some(other),
+    }
+}
+
+/// Encode a scene [`PortalLifecycleState`] to its proto i32.
+pub fn scene_portal_lifecycle_to_proto(s: PortalLifecycleState) -> i32 {
+    let e = match s {
+        PortalLifecycleState::Unspecified => {
+            proto::PortalLifecycleStateProto::PortalLifecycleStateUnspecified
+        }
+        PortalLifecycleState::Active => proto::PortalLifecycleStateProto::PortalLifecycleStateActive,
+        PortalLifecycleState::WaitingForInput => {
+            proto::PortalLifecycleStateProto::PortalLifecycleStateWaitingForInput
+        }
+        PortalLifecycleState::Blocked => {
+            proto::PortalLifecycleStateProto::PortalLifecycleStateBlocked
+        }
+        PortalLifecycleState::Degraded => {
+            proto::PortalLifecycleStateProto::PortalLifecycleStateDegraded
+        }
+        PortalLifecycleState::Detached => {
+            proto::PortalLifecycleStateProto::PortalLifecycleStateDetached
+        }
+    };
+    e as i32
+}
+
+/// Decode a `PortalDisplayStateProto` i32 to the scene enum (total; unknown /
+/// unspecified map to [`PortalDisplayState::Unspecified`]).
+pub fn proto_portal_display_state_enum_to_scene(v: i32) -> PortalDisplayState {
+    match proto::PortalDisplayStateProto::try_from(v) {
+        Ok(proto::PortalDisplayStateProto::PortalDisplayStateCollapsed) => {
+            PortalDisplayState::Collapsed
+        }
+        Ok(proto::PortalDisplayStateProto::PortalDisplayStateExpanded) => {
+            PortalDisplayState::Expanded
+        }
+        _ => PortalDisplayState::Unspecified,
+    }
+}
+
+/// Decode a `PortalDisplayStateProto` i32 as a coalescible **patch**: an
+/// UNSPECIFIED wire value means "leave unchanged" and maps to `None`.
+pub fn proto_portal_display_state_to_scene(v: i32) -> Option<PortalDisplayState> {
+    match proto_portal_display_state_enum_to_scene(v) {
+        PortalDisplayState::Unspecified => None,
+        other => Some(other),
+    }
+}
+
+/// Encode a scene [`PortalDisplayState`] to its proto i32.
+pub fn scene_portal_display_state_to_proto(s: PortalDisplayState) -> i32 {
+    let e = match s {
+        PortalDisplayState::Unspecified => {
+            proto::PortalDisplayStateProto::PortalDisplayStateUnspecified
+        }
+        PortalDisplayState::Collapsed => proto::PortalDisplayStateProto::PortalDisplayStateCollapsed,
+        PortalDisplayState::Expanded => proto::PortalDisplayStateProto::PortalDisplayStateExpanded,
+    };
+    e as i32
+}
+
+/// Decode a `PortalPartKindProto` i32 to the scene [`PortalPartKind`].
+/// UNSPECIFIED / unknown values return `None` (a part with no valid kind is
+/// dropped by the caller).
+pub fn proto_portal_part_kind_to_scene(v: i32) -> Option<PortalPartKind> {
+    match proto::PortalPartKindProto::try_from(v) {
+        Ok(proto::PortalPartKindProto::PortalPartKindFrame) => Some(PortalPartKind::Frame),
+        Ok(proto::PortalPartKindProto::PortalPartKindHeader) => Some(PortalPartKind::Header),
+        Ok(proto::PortalPartKindProto::PortalPartKindComposer) => Some(PortalPartKind::Composer),
+        Ok(proto::PortalPartKindProto::PortalPartKindTranscript) => Some(PortalPartKind::Transcript),
+        Ok(proto::PortalPartKindProto::PortalPartKindDivider) => Some(PortalPartKind::Divider),
+        Ok(proto::PortalPartKindProto::PortalPartKindCollapsedCard) => {
+            Some(PortalPartKind::CollapsedCard)
+        }
+        Ok(proto::PortalPartKindProto::PortalPartKindCaptureBackstop) => {
+            Some(PortalPartKind::CaptureBackstop)
+        }
+        Ok(proto::PortalPartKindProto::PortalPartKindGestureShield) => {
+            Some(PortalPartKind::GestureShield)
+        }
+        _ => None,
+    }
+}
+
+/// Encode a scene [`PortalPartKind`] to its `PortalPartKindProto` i32.
+pub fn scene_portal_part_kind_to_proto(k: PortalPartKind) -> i32 {
+    let e = match k {
+        PortalPartKind::Frame => proto::PortalPartKindProto::PortalPartKindFrame,
+        PortalPartKind::Header => proto::PortalPartKindProto::PortalPartKindHeader,
+        PortalPartKind::Composer => proto::PortalPartKindProto::PortalPartKindComposer,
+        PortalPartKind::Transcript => proto::PortalPartKindProto::PortalPartKindTranscript,
+        PortalPartKind::Divider => proto::PortalPartKindProto::PortalPartKindDivider,
+        PortalPartKind::CollapsedCard => proto::PortalPartKindProto::PortalPartKindCollapsedCard,
+        PortalPartKind::CaptureBackstop => proto::PortalPartKindProto::PortalPartKindCaptureBackstop,
+        PortalPartKind::GestureShield => proto::PortalPartKindProto::PortalPartKindGestureShield,
+    };
+    e as i32
+}
+
+/// Convert a `PortalSurfaceProto` to a scene [`PortalSurface`].
+///
+/// Node references (`PortalPartProto.node`) are decoded as 16-byte big-endian
+/// UUIDs, matching the session server's node/tile addressing (`bytes_to_scene_id`)
+/// so a part resolves against the tile's node tree the same way `UpdateNodeContent`
+/// does. A part whose `kind` is UNSPECIFIED/unknown, or whose non-empty `node`
+/// is not 16 bytes, is rejected. The resulting surface must pass
+/// [`PortalSurface::validate_structure`].
+pub fn proto_portal_surface_to_scene(p: &proto::PortalSurfaceProto) -> Result<PortalSurface, String> {
+    let identity = p
+        .identity
+        .as_ref()
+        .map(|i| PortalIdentity {
+            session_id: i.session_id.clone(),
+            display_name: i.display_name.clone(),
+            peer_class: proto_portal_peer_class_to_scene(i.peer_class),
+        })
+        .unwrap_or_default();
+
+    let mut parts = Vec::with_capacity(p.parts.len());
+    for part in &p.parts {
+        let Some(kind) = proto_portal_part_kind_to_scene(part.kind) else {
+            return Err(format!("part has unspecified/unknown kind (wire value {})", part.kind));
+        };
+        let bounds = part
+            .bounds
+            .as_ref()
+            .map(proto_rect_to_scene)
+            .unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
+        let node = if part.node.is_empty() {
+            None
+        } else {
+            Some(
+                scene_id_from_be_bytes(&part.node)
+                    .ok_or_else(|| format!("part {kind:?} has invalid node id length"))?,
+            )
+        };
+        parts.push(PortalPart { kind, bounds, node });
+    }
+
+    let surface = PortalSurface {
+        identity,
+        lifecycle: proto_portal_lifecycle_enum_to_scene(p.lifecycle),
+        display_state: proto_portal_display_state_enum_to_scene(p.display_state),
+        parts,
+    };
+    surface.validate_structure()?;
+    Ok(surface)
+}
+
+/// Convert a scene [`PortalSurface`] to its `PortalSurfaceProto` wire form.
+pub fn scene_portal_surface_to_proto(s: &PortalSurface) -> proto::PortalSurfaceProto {
+    proto::PortalSurfaceProto {
+        identity: Some(proto::PortalIdentityProto {
+            session_id: s.identity.session_id.clone(),
+            display_name: s.identity.display_name.clone(),
+            peer_class: scene_portal_peer_class_to_proto(s.identity.peer_class),
+        }),
+        lifecycle: scene_portal_lifecycle_to_proto(s.lifecycle),
+        display_state: scene_portal_display_state_to_proto(s.display_state),
+        parts: s
+            .parts
+            .iter()
+            .map(|part| proto::PortalPartProto {
+                kind: scene_portal_part_kind_to_proto(part.kind),
+                bounds: Some(proto::Rect {
+                    x: part.bounds.x,
+                    y: part.bounds.y,
+                    width: part.bounds.width,
+                    height: part.bounds.height,
+                }),
+                node: part
+                    .node
+                    .map(|id| id.as_uuid().as_bytes().to_vec())
+                    .unwrap_or_default(),
+            })
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
