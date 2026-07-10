@@ -5812,6 +5812,161 @@ mod tests {
         );
     }
 
+    /// hud-rpmwt live-repro core: after a whole-portal resize, an ADAPTER
+    /// content republish must NOT snap the transcript back to its stale
+    /// attach-time wrap width. The resize scales `tile.bounds` + the node tree
+    /// and takes viewer geometry authority (hud-lyqun). But a republish replaces
+    /// the whole node tree via `set_tile_root`, and the compositor wraps
+    /// `TextMarkdownNode` text to `node.bounds.width` and clips to `tile.bounds`.
+    /// An adapter that republishes its stale (config-width) node bounds would
+    /// re-home the transcript to the old column — the fresh repro: text rendered
+    /// at the stale ~1720px wrap, overflowing the resized frame UNCLIPPED. The
+    /// node-bounds-authority fix reconciles the republished root to the tile's
+    /// viewer-defined bounds. Assert both the node width AND the draw-item wrap
+    /// width re-resolve to the resized pane (and never exceed it — the clip
+    /// contract) at the same `TextItem` seam the sibling reflow test uses.
+    #[test]
+    fn adapter_republish_after_resize_keeps_transcript_wrapped_to_resized_pane() {
+        use tze_hud_compositor::TextItem;
+        use tze_hud_scene::SceneId;
+        use tze_hud_scene::types::{
+            FontFamily, Node, NodeData, Rect, Rgba, TextAlign, TextMarkdownNode, TextOverflow,
+        };
+
+        let (mut scene, _tab_id, frame_id, transcript_id, _composer_id, _shield_id, _fm) =
+            multi_surface_portal_scene();
+
+        // The adapter's attach-time node geometry: tile-local, filling the
+        // transcript pane at its ORIGINAL (config) size (180 x 280 fixture).
+        let attach_bounds = Rect::new(0.0, 0.0, 180.0, 280.0);
+        let make_node = |bounds: Rect| {
+            let id = SceneId::new();
+            (
+                id,
+                Node {
+                    id,
+                    children: vec![],
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "the quick brown fox jumps over the lazy dog again and again"
+                            .to_owned(),
+                        bounds,
+                        font_size_px: 14.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+                        background: None,
+                        alignment: TextAlign::Start,
+                        overflow: TextOverflow::Clip,
+                        color_runs: Box::default(),
+                    }),
+                },
+            )
+        };
+
+        // Initial attach: publish the transcript node at the attach-time width.
+        let (first_id, first_node) = make_node(attach_bounds);
+        scene.set_tile_root(transcript_id, first_node).unwrap();
+        let _ = first_id;
+
+        // Whole-portal SHRINK: 400→260 wide frame. The transcript tile shrinks
+        // with it, the resize scales the node tree, and the tile takes viewer
+        // geometry authority (lock).
+        resize_group_to(
+            &mut scene,
+            frame_id,
+            tze_hud_input::PortalRect {
+                x: 100.0,
+                y: 100.0,
+                width: 260.0,
+                height: 260.0,
+            },
+        );
+        let transcript_after = scene.tiles.get(&transcript_id).unwrap().bounds;
+        assert!(
+            transcript_after.width < 180.0,
+            "precondition: the transcript pane must have shrunk below the \
+             attach-time node width (got {})",
+            transcript_after.width
+        );
+        assert!(
+            scene.is_viewer_geometry_locked(transcript_id),
+            "precondition: a whole-portal resize must take viewer geometry authority"
+        );
+
+        // ── ADAPTER REPUBLISH with STALE attach-time bounds ──────────────────
+        // Simulate the exemplar re-publishing its content at the config width
+        // (the live failure mode): a fresh node tree carrying the wide
+        // attach-time bounds, which would otherwise re-home the transcript to the
+        // stale column and overflow the resized pane unclipped.
+        let (_second_id, second_node) = make_node(attach_bounds);
+        scene.set_tile_root(transcript_id, second_node).unwrap();
+
+        let node_width_after = match &scene
+            .nodes
+            .get(&scene.tiles.get(&transcript_id).unwrap().root_node.unwrap())
+            .unwrap()
+            .data
+        {
+            NodeData::TextMarkdown(tm) => tm.bounds.width,
+            other => panic!("expected TextMarkdown, got {other:?}"),
+        };
+
+        // 1) The republished node's width was reconciled to the resized pane, NOT
+        //    left at the stale attach-time width.
+        assert!(
+            (node_width_after - transcript_after.width).abs() < 1e-2,
+            "republished transcript node width must track the resized pane: \
+             expected ~{}, got {node_width_after} (stale attach width was 180)",
+            transcript_after.width
+        );
+        assert!(
+            node_width_after < 180.0,
+            "republished node must not keep the stale attach-time wrap width"
+        );
+
+        // 2) The draw-item wrap column (the seam the compositor shapes against)
+        //    stays within the resized pane — no wrap-to-stale-width, and the clip
+        //    can never be exceeded because the node no longer overflows the tile.
+        let layout_width_after = {
+            let NodeData::TextMarkdown(tm) = &scene
+                .nodes
+                .get(&scene.tiles.get(&transcript_id).unwrap().root_node.unwrap())
+                .unwrap()
+                .data
+            else {
+                unreachable!()
+            };
+            TextItem::from_text_markdown_node(tm, 0.0, 0.0).bounds_width
+        };
+        assert!(
+            layout_width_after <= transcript_after.width + 1e-3,
+            "wrap width {layout_width_after} must not exceed the resized pane \
+             width {} (stale-wide layout would overflow the frame unclipped)",
+            transcript_after.width
+        );
+
+        // 3) Scoping guard: once the viewer releases geometry authority, a
+        //    republish is NOT reconciled — the adapter regains node-bounds
+        //    control, proving the fix is gated on the lock and cannot distort
+        //    ordinary (non-viewer-resized) tiles.
+        scene.unlock_viewer_geometry(transcript_id);
+        let (_third_id, third_node) = make_node(attach_bounds);
+        scene.set_tile_root(transcript_id, third_node).unwrap();
+        let node_width_unlocked = match &scene
+            .nodes
+            .get(&scene.tiles.get(&transcript_id).unwrap().root_node.unwrap())
+            .unwrap()
+            .data
+        {
+            NodeData::TextMarkdown(tm) => tm.bounds.width,
+            other => panic!("expected TextMarkdown, got {other:?}"),
+        };
+        assert!(
+            (node_width_unlocked - 180.0).abs() < 1e-2,
+            "an unlocked tile must apply the adapter's published bounds verbatim \
+             (got {node_width_unlocked}, want 180)"
+        );
+    }
+
     /// hud-lyqun core: dragging one constituent surface of a text-stream portal
     /// must translate the WHOLE portal by the same delta — every member moves
     /// together preserving relative layout, the far-corner drag shield stays

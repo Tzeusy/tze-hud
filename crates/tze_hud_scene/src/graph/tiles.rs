@@ -443,6 +443,14 @@ impl SceneGraph {
         // (hud-tc153 review P2).
         self.revalidate_portal_surface_part_nodes(tile_id);
 
+        // Node-bounds authority after a viewer whole-portal resize (hud-rpmwt):
+        // if the viewer has taken geometry authority over this tile, reconcile the
+        // just-published node tree to the tile's resized bounds so an adapter's
+        // stale-wide content cannot re-home the transcript back to its attach-time
+        // wrap width. Scoped to viewer-locked tiles, so ordinary agent tiles are
+        // untouched. See `reconcile_locked_root_to_tile_bounds`.
+        self.reconcile_locked_root_to_tile_bounds(tile_id);
+
         self.version += 1;
         Ok(())
     }
