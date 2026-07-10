@@ -3,7 +3,7 @@
 Issue: `hud-ok1y0`
 OpenSpec source: `openspec/changes/windows-first-performant-runtime/tasks.md` section 5
 Latest attempt: 2026-05-10T02:47:24Z to 2026-05-10T03:34:43Z
-Reference host: `TzeHouse` (`windows-host.example`, tailnet `100.87.181.125`)
+Reference host: `TzeHouse` (`windows-host.example`, tailnet `198.51.100.1`)
 
 ## Verdict
 

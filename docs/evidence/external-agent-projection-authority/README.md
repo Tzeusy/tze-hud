@@ -62,7 +62,7 @@ Historical blocker evidence: direct harness run
 before SSH, MCP, or gRPC could run. The bounded watch
 `live-replay-blocked-watch-20260511T070511Z.txt` shows a 3-poll window where
 the watcher exited `20` after Windows remained offline in Tailscale and
-`100.87.181.125` timed out/no reply before SSH, MCP, or gRPC could run.
+`198.51.100.1` timed out/no reply before SSH, MCP, or gRPC could run.
 The longer reachability watch in `live-replay-blocked-watch-20260511T025838Z.txt`
 shows a 10-poll window where Windows stayed offline in Tailscale and ports
 `22`, `50051`, and `9090` stayed `closed_or_timeout`.

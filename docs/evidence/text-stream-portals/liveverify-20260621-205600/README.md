@@ -25,11 +25,18 @@ tools/list introspection matches the real long-poll param.
 Three full-screen captures of the overlay, driven via the in-process MCP `portal_projection_*`
 tools on a live `liveverify-5p1` projection:
 
+> **Images removed 2026-07-11 (privacy):** `lv-1-baseline.png`, `lv-2-degraded.png`, and
+> `lv-3-resume.png` were full-screen desktop captures that incidentally exposed the operator's
+> environment (taskbar, desktop-icon inventory, and an editor window whose title bar carried a
+> real tailnet hostname). They are deleted from the working tree; the phase descriptions below
+> stand as the textual record. Git history retains the pre-removal blobs (history rewrite is out
+> of scope). See [hud-ryawj].
+
 | Phase | File | What it shows |
 |-------|------|---------------|
-| Baseline | `lv-1-baseline.png` | Portal expanded, state `active ● active`, committed units A/B/C, composer ready. |
-| Degraded | `lv-2-degraded.png` | After `publish_status lifecycle_state=hud_unavailable`: header shows `● hudunavailable` + status line "upstream link lost"; committed transcript preserved. |
-| Resume | `lv-3-resume.png` | After `publish_status active` + a continuation publish: state back to `● active`, units A/B/C **persist** and new unit D appears — resume continuity with no loss and no duplication. |
+| Baseline | `lv-1-baseline.png` _(removed)_ | Portal expanded, state `active ● active`, committed units A/B/C, composer ready. |
+| Degraded | `lv-2-degraded.png` _(removed)_ | After `publish_status lifecycle_state=hud_unavailable`: header shows `● hudunavailable` + status line "upstream link lost"; committed transcript preserved. |
+| Resume | `lv-3-resume.png` _(removed)_ | After `publish_status active` + a continuation publish: state back to `● active`, units A/B/C **persist** and new unit D appears — resume continuity with no loss and no duplication. |
 
 ### Fidelity note (read before citing)
 

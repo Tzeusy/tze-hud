@@ -69,7 +69,7 @@ jobs:
   # ── D18 real-decode validation ───────────────────────────────────────────────
   real-decode-windows:
     name: Real-decode (${{ github.event.inputs.decode_target || 'smoke' }}) — D18 RTX 3080
-    # Self-hosted Windows runner on tzehouse-windows (parrot-hen.ts.net).
+    # Self-hosted Windows runner on tzehouse-windows (windows-host.example).
     # Labels: [self-hosted, windows, gpu]
     # GStreamer 1.24.12 MSVC SDK is pre-installed — no per-run download needed.
     # See docs/ci/windows-d18-runner-setup.md for provisioning.

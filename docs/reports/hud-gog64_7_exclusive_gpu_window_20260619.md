@@ -1,7 +1,7 @@
 # hud-gog64.7 Exclusive GPU Window Validation
 
 Date: 2026-06-19
-Host: TzeHouse (`tzehouse-windows.parrot-hen.ts.net`)
+Host: TzeHouse (`windows-host.example`)
 Worker branch: `agent/hud-gog64.7`
 
 ## Result
@@ -23,8 +23,8 @@ docs/reports/artifacts/hud-gog64.7-exclusive-gpu-window-20260619T111955Z/
 
 Preconditions checked before interruption:
 
-- Tailscale ping to `tzehouse-windows.parrot-hen.ts.net` succeeded.
-- Non-interactive SSH as `tzeus` with `~/.ssh/ecdsa_home` succeeded.
+- Tailscale ping to `windows-host.example` succeeded.
+- Non-interactive SSH as `admin-user` with `~/.ssh/hud-ssh-key` succeeded.
 - Production HUD was listening on `50051/9090` as PID `38228`.
 - The GPU lock belonged to the production HUD PID.
 - Alternate gRPC port `50052` was free.

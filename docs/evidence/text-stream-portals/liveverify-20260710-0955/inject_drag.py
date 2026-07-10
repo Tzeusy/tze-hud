@@ -16,9 +16,9 @@ sys.path.insert(0, os.path.abspath(SCRIPTS))
 
 from text_stream_portal_exemplar import run_windows_diagnostic_input  # noqa: E402
 
-HOST = "tzehouse-windows.parrot-hen.ts.net"
-USER = "tzeus"
-KEY = os.path.expanduser("~/.ssh/ecdsa_home")
+HOST = "windows-host.example"
+USER = "admin-user"
+KEY = os.path.expanduser("~/.ssh/hud-ssh-key")
 
 
 async def main() -> None:

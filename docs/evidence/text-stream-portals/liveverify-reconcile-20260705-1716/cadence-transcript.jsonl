@@ -2,15 +2,15 @@
   "schema_version": 2,
   "reference_hardware": {
     "tag": "TzeHouse",
-    "hostname": "tzehouse-windows.parrot-hen.ts.net",
+    "hostname": "windows-host.example",
     "collected_hostname": "Tzeusy",
-    "target_host": "tzehouse-windows.parrot-hen.ts.net",
+    "target_host": "windows-host.example",
     "gpu": "NVIDIA GeForce RTX 3080",
     "gpu_driver": "32.0.15.9636",
     "os": "Linux 5.15.0-185-generic",
     "is_reference": true
   },
-  "target": "tzehouse-windows.parrot-hen.ts.net:50051",
+  "target": "windows-host.example:50051",
   "doc": "docs/reports/exemplar-manual-review-checklist.md",
   "phases": "cadence",
   "scene_width": 3840.0,
@@ -28,7 +28,7 @@
       "title": "Text Stream Portal live scenario",
       "action": "connect and open resident session",
       "expected_visual": "operator follows JSON step transcript",
-      "target": "tzehouse-windows.parrot-hen.ts.net:50051",
+      "target": "windows-host.example:50051",
       "doc": "docs/reports/exemplar-manual-review-checklist.md",
       "phases": "cadence"
     },

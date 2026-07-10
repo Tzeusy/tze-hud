@@ -1,7 +1,7 @@
 # Reconcile pass — text-stream portal live beads (tzehouse, 2026-07-05 ~17:16)
 
 Follows the owner's live sign-off pass (liveverify-signoff-20260705-105700).
-Rig: tzehouse-windows.parrot-hen.ts.net, build 9aa4da04 (owner's, #1075 grey-fix + #1074 composer-fix), overlay, real RTX 3080.
+Rig: windows-host.example, build 9aa4da04 (owner's, #1075 grey-fix + #1074 composer-fix), overlay, real RTX 3080.
 Driver: text_stream_portal_exemplar.py, reference-tagged (TzeHouse / RTX 3080).
 
 ## hud-sonj6 (cadence 5.5-5.7)

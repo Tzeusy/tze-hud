@@ -4,7 +4,7 @@
 //!
 //! ## Background
 //!
-//! The tzehouse-windows box (`parrot-hen.ts.net`, RTX 3080) is dual-use:
+//! The tzehouse-windows box (`windows-host.example`, RTX 3080) is dual-use:
 //! - **Interactive `/user-test` sessions** — wgpu compositor running `tze_hud.exe`
 //! - **Nightly real-decode CI** — GStreamer D3D11/NVDEC decoders
 //!

@@ -28,7 +28,7 @@
       {
         "command": "timeout 12 tailscale ping -c 1 windows-host.example",
         "result": "fail",
-        "summary": "ping 100.87.181.125 timed out; no reply"
+        "summary": "ping 198.51.100.1 timed out; no reply"
       },
       {
         "command": "timeout 12 ssh -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -i ~/.ssh/hud-ssh-key admin-user@windows-host.example \"whoami\"",

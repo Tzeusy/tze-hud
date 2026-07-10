@@ -28,8 +28,8 @@ Reachability evidence is recorded in:
 
 Key observations:
 
-- `windows-host.example` resolved to `100.87.181.125`.
-- Local Tailscale source route was `100.99.218.4` via `tailscale0`.
+- `windows-host.example` resolved to `198.51.100.1`.
+- Local Tailscale source route was `198.51.100.3` via `tailscale0`.
 - `tailscale status` listed `tzehouse-windows` as a Windows node, but
   `tailscale ping --timeout=5s` timed out.
 - SSH to both validation users timed out even with explicit non-interactive

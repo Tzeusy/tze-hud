@@ -3,7 +3,7 @@
 Issue: `hud-6imos`
 Attempted at: 2026-05-09T17:19:45Z
 Local report date: 2026-05-10 Asia/Singapore (UTC+08:00)
-Reference host: `TzeHouse` (`windows-host.example`, tailnet `100.87.181.125`)
+Reference host: `TzeHouse` (`windows-host.example`, tailnet `198.51.100.1`)
 
 ## Verdict
 
@@ -31,9 +31,9 @@ published to.
 
 | Check | Result |
 |---|---|
-| DNS | `windows-host.example` resolves to `100.87.181.125` |
+| DNS | `windows-host.example` resolves to `198.51.100.1` |
 | Tailscale status | Node present as `TzeHouse`, Windows, `Online: false`, `LastSeen: 2026-05-09T16:05:09.1Z` |
-| Tailscale ping | timed out against `100.87.181.125` |
+| Tailscale ping | timed out against `198.51.100.1` |
 | ICMP ping | 3 transmitted, 0 received |
 | TCP 22 | timed out |
 | TCP 50051 | timed out |
@@ -43,7 +43,7 @@ published to.
 
 ## Local Recovery Assessment
 
-The adjacent `tzehouse-synology.parrot-hen.ts.net` node is reachable on SSH port
+The adjacent `proxmox-host.example` node is reachable on SSH port
 22, which indicates the local tailnet path is generally working. However, this
 worker does not have key access to that host as `hud-user`, `admin-user`, `tze`,
 `admin-usery`, or `admin`, and the repository docs do not define a Wake-on-LAN or

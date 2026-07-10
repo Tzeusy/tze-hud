@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Resolve — and self-heal — the autonomous HUD testhost (hud-windows VM,
-# vmid 110 on sentinel Proxmox). The canonical entry point for any local
+# vmid 110 on the Proxmox host). The canonical entry point for any local
 # noninteractive session that needs a live GPU-projection surface: user-test
 # deploys, hud-projection portal attaches, th-hud-publish zone publishes.
 #
@@ -19,7 +19,9 @@
 # Diagnostics go to stderr; only export lines (or the IP) go to stdout.
 set -euo pipefail
 
-SENTINEL="root@sentinel.parrot-hen.ts.net"
+# Proxmox host that fronts the VM. Provide the real value via SENTINEL_HOST env
+# (never hardcode it here — this is a public repo; see AGENTS.md scrub convention).
+SENTINEL="${SENTINEL_HOST:-root@proxmox-host.example}"
 VMID=110
 HUD_SSH_KEY="${HUD_SSH_KEY:-$HOME/.ssh/hud-ssh-key}"
 HOMELAB_ENV="${HOMELAB_ENV:-$HOME/gt/homelab/mayor/rig/.env}"
@@ -57,7 +59,7 @@ for _ in $(seq 1 36); do
   sleep 10
 done
 if [ -z "$ip" ]; then
-  echo "hud_vm_env: ERROR — no guest-agent IP after 6 min; check 'qm status $VMID' on sentinel" >&2
+  echo "hud_vm_env: ERROR — no guest-agent IP after 6 min; check 'qm status $VMID' on the Proxmox host" >&2
   exit 1
 fi
 

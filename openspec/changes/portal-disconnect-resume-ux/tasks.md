@@ -71,7 +71,7 @@ Wave-2 of epic `hud-wse80` (sub-epic `hud-3jxfr`) supplies the trigger wiring; t
 - [x] 6.4 Task 5.1 live evidence — DONE 2026-06-21: live Windows disconnect→resume capture
   landed at `docs/evidence/text-stream-portals/liveverify-20260621-205600/` (reference HUD
   `tzehouse-windows`, current-main binary). The earlier reference-hardware/credentials gap was
-  cleared (SSH as `tzeus@tzehouse-windows`, deploy via user-test portal-hud-deploy). The
+  cleared (SSH as `admin-user@tzehouse-windows`, deploy via user-test portal-hud-deploy). The
   on-device **resize** hotkey re-verify (`hud-v4k1h`) still needs a human at the display — the
   current binary with the resize fix is now deployed and running, so the keyboard/visual check
   can be done directly.

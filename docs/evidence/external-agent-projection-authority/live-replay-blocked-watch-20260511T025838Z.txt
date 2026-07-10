@@ -32,7 +32,7 @@ Observed result:
 - Exit code: 10
 - Every poll reported the Windows peer as Online=false.
 - Every poll reported LastSeen=2026-05-11T01:00:51.1Z.
-- Every tailscale ping to windows-host.example / 100.87.181.125 timed out or returned no reply.
+- Every tailscale ping to windows-host.example / 198.51.100.1 timed out or returned no reply.
 - Every TCP probe for ports 22, 50051, and 9090 returned closed_or_timeout.
 - The adjacent tzehouse-synology peer remained Online=true in Tailscale, but the recovery runbook does not define a safe Synology-mediated wake path.
 

@@ -3,7 +3,7 @@
   "issue": "hud-ok1y0",
   "recorded_at_utc": "2026-05-09T17:11:02Z",
   "reference_host": "windows-host.example",
-  "resolved_tailnet_ip": "100.87.181.125",
+  "resolved_tailnet_ip": "198.51.100.1",
   "purpose": "Pre-soak safety and availability gate for the Windows-first release closeout.",
   "constraints": [
     "Do not interfere with PR #641 diagnostic-input repair.",
@@ -40,7 +40,7 @@
       "command": "nc -vz -w 5 windows-host.example 22; nc -vz -w 5 windows-host.example 50051; nc -vz -w 5 windows-host.example 9090",
       "exit_code": 1,
       "stdout": "",
-      "stderr": "nc: connect to windows-host.example (100.87.181.125) port 22 (tcp) timed out: Operation now in progress\nnc: connect to windows-host.example (100.87.181.125) port 50051 (tcp) timed out: Operation now in progress\nnc: connect to windows-host.example (100.87.181.125) port 9090 (tcp) timed out: Operation now in progress"
+      "stderr": "nc: connect to windows-host.example (198.51.100.1) port 22 (tcp) timed out: Operation now in progress\nnc: connect to windows-host.example (198.51.100.1) port 50051 (tcp) timed out: Operation now in progress\nnc: connect to windows-host.example (198.51.100.1) port 9090 (tcp) timed out: Operation now in progress"
     }
   ],
   "verdict": {

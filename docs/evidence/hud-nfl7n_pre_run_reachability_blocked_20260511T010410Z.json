@@ -7,7 +7,7 @@
   "ended_at_utc": "2026-05-11T01:04:10Z",
   "reference_host": {
     "dns_name": "windows-host.example",
-    "tailscale_ip": "100.87.181.125"
+    "tailscale_ip": "198.51.100.1"
   },
   "runtime_context": {
     "worktree_path": "/home/tze/gt/tze_hud/mayor/rig/.worktrees/parallel-agents/hud-nfl7n",
@@ -38,7 +38,7 @@
         "Online": false,
         "LastSeen": "2026-05-11T01:00:00.1Z",
         "TailscaleIPs": [
-          "100.87.181.125",
+          "198.51.100.1",
           "fd7a:115c:a1e0:ab12:4843:cd96:6257:b57d"
         ]
       }
@@ -47,7 +47,7 @@
       "name": "tailscale_ping",
       "command": "timeout 12 tailscale ping -c 1 windows-host.example",
       "exit_code": 1,
-      "stdout": "ping \"100.87.181.125\" timed out\nno reply"
+      "stdout": "ping \"198.51.100.1\" timed out\nno reply"
     },
     {
       "name": "ssh_admin-user",
