@@ -1961,6 +1961,7 @@ impl WindowedRuntime {
             element_repositioned_tx,
             input_event_tx,
             frame_presented_tx,
+            grpc_bound_addr,
         ) = start_network_services(
             cfg.grpc_port,
             &cfg.psk,
@@ -2092,19 +2093,10 @@ impl WindowedRuntime {
         // addresses and an attach hint — never the PSK or any credential (the
         // helper cannot access secrets; see `render_startup_banner`).
         //
-        // gRPC serves the requested `grpc_port` on the same bind host selected
-        // above; reconstruct it here for display (the MCP addr is the genuine
-        // bound `local_addr`). A `grpc_port` of 0 disables gRPC → `None`.
-        let grpc_banner_addr: Option<std::net::SocketAddr> = if cfg.grpc_port != 0 {
-            let grpc_host = self::config::select_grpc_bind_host(bind_all);
-            format!("{grpc_host}:{}", cfg.grpc_port).parse().ok()
-        } else {
-            None
-        };
-        println!(
-            "{}",
-            render_startup_banner(grpc_banner_addr, mcp_bound_addr)
-        );
+        // Both `grpc_bound_addr` and `mcp_bound_addr` are genuine bound
+        // `local_addr`s (`None` when the service is disabled), so the banner
+        // never advertises an endpoint that did not actually come up.
+        println!("{}", render_startup_banner(grpc_bound_addr, mcp_bound_addr));
 
         // ── Safe-mode keyboard exit bridge ─────────────────────────────────────
         // Create an mpsc channel so the sync winit event-loop thread can signal
