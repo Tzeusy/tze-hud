@@ -27,6 +27,24 @@ Key properties:
 
 ---
 
+# Quickstart — portal as your primary LLM interface
+
+New here and just want an LLM session projecting onto your own screen? Start with
+**[`docs/QUICKSTART.md`](docs/QUICKSTART.md)** (<10 minutes). One command from the
+repo root:
+
+```bash
+cargo build --bin tze_hud --release
+scripts/quickstart.sh --window-mode overlay   # scaffolds config + PSK, prints ATTACH INFO, launches
+```
+
+`scripts/quickstart.sh --print-attach-info` prints the MCP endpoint, credentials,
+and a paste-ready MCP client config **without** opening a window (useful for
+wiring up your Claude/Codex MCP client first, or on a headless box). The rest of
+this README is the deeper build/test/deploy reference.
+
+---
+
 # Build/Test/Run Commands
 
 The rest of this README is command-first and focused on four workflows:
