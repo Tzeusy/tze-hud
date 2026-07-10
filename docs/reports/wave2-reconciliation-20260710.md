@@ -170,14 +170,30 @@ gates as pre-Wave-2 surfaces; they add no portal-specific bypass or escape hatch
   applies identically on the degraded frame. Locked by
   `stale_to_live_transition_respects_redaction_every_frame`
   (`crates/tze_hud_projection/src/tests/mod.rs:4186`).
-- **Safe-mode — HELD.** Safe mode suspends all leases
-  (`crates/tze_hud_runtime/src/shell/safe_mode.rs:337`); every portal repaint
-  (normal and forced) goes through `set_tile_root_checked`
-  (`crates/tze_hud_protocol/src/convert.rs:1524`) which enforces
-  `require_active_lease` → `is_mutations_allowed()` = `Active` only
-  (`crates/tze_hud_scene/src/graph/tabs.rs:314`, `types.rs:1682-1684`). The forced
-  repaint adds no new mutation entry point, so it inherits the gate. Input is
-  additionally force-disabled under safe mode (`authority.rs:1724`).
+- **Safe-mode — HELD for transcript content; ONE NARROW GAP on the content-free
+  lifecycle-accent overlay (NEW, FU-3).** Safe mode suspends all leases
+  (`crates/tze_hud_runtime/src/shell/safe_mode.rs:337`). The forced degraded
+  repaint applies its batch via `apply_portal_render_batch_to_scene`
+  (`portal_projection_driver.rs:2166-2173` → `crates/tze_hud_protocol/src/convert.rs:1506`),
+  whose four mutation branches are **not** uniformly lease-gated:
+  `PublishToTile` → `set_tile_root_checked` (`convert.rs:1524`) and
+  `UpdateTileInputMode` → `update_tile_input_mode` (`crates/tze_hud_scene/src/graph/tiles.rs:273-275`)
+  both enforce `require_active_lease` (→ `is_mutations_allowed()` = `Active` only,
+  `tabs.rs:314`, `types.rs:1682-1684`), and `AddNode` → `add_node_to_tile_checked`
+  is checked — so the **transcript content is provably blocked** under safe mode
+  ("content not painted", `convert.rs:1527`). **But** `SetTileLifecycleAccent` →
+  `set_tile_lifecycle_accent` (`convert.rs:1547-1566`) checks only tile existence,
+  **not** the lease (`crates/tze_hud_scene/src/graph/overlay.rs:388-401`), and the
+  adapter batch **always emits** an accent (`resident_grpc.rs:1080`, "always
+  emitted, hud-m48i0"). So a Wave-2 forced degraded repaint can still mutate the
+  content-free lifecycle-accent overlay and bump `scene.version` (re-arming the
+  present-gate) while safe mode has suspended the lease. This is a **content-free**
+  ambient color (no transcript/identity leak) and the accent path is pre-existing,
+  but the hud-h3mvo forced repaint is the new trigger that exercises it against a
+  suspended lease — so "portal updates suspend under safe mode like other
+  content-layer surfaces" does not fully hold for the accent overlay. Filed as
+  FU-3. (Input is additionally force-disabled under safe mode, `authority.rs:1724`.)
+  Credit: raised by the Codex PR reviewer and verified here.
 - **Freeze — HELD.** The projection crate has no portal-specific freeze signal
   (grep-clean); governance freeze queues session-plane mutations only
   (`crates/tze_hud_runtime/src/shell/freeze.rs:8-9`), and the portal driver is not
@@ -205,8 +221,12 @@ gates as pre-Wave-2 surfaces; they add no portal-specific bypass or escape hatch
   correctly leaves §3.2 unchecked**. Filed as follow-up FU-2 (the keystone reliability
   remainder).
 
-**Verdict:** governance held. The one soft spot (grace reaper unwired) is a
-pre-existing dormant-trigger gap, not a governance bypass.
+**Verdict:** governance substantially held — redaction and freeze are solid, and
+safe mode blocks all transcript-content and input mutations. Two soft spots, both
+narrow and neither a content/privacy leak: (i) the grace reaper is unwired in
+production (FU-2, pre-existing dormant trigger); (ii) the content-free
+lifecycle-accent overlay escapes safe-mode lease suspension via the one
+un-lease-gated mutation branch (FU-3, exercised by the Wave-2 forced repaint).
 
 ---
 
@@ -288,6 +308,18 @@ tracked as dedicated beads) are proposed as follow-ups:
   production call site, so an ungraceful-dropped portal dims but is never
   grace-removed → unbounded stale window; openspec §3.2 holds only headlessly.
   hud-5i16d wired `mark_hud_disconnected` but not the scene-orphan → expire path.
+- **FU-3 (bug, P3):** Lease-gate the lifecycle-accent overlay mutation so it obeys
+  safe-mode / lease suspension like the other content-layer mutations.
+  `SceneGraph::set_tile_lifecycle_accent` (`crates/tze_hud_scene/src/graph/overlay.rs:388-401`)
+  checks only tile existence, not `require_active_lease`, while the sibling batch
+  branches (`set_tile_root_checked`, `update_tile_input_mode`, `add_node_to_tile_checked`)
+  all do. The adapter always emits an accent (`resident_grpc.rs:1080`), so the
+  Wave-2 forced degraded repaint (`portal_projection_driver.rs:2166-2173`) can mutate
+  the content-free accent overlay + bump `scene.version` under a safe-mode-suspended
+  lease. Content-free (no privacy leak) and the accent path is pre-existing, but it
+  breaks the "portal updates suspend under safe mode" invariant for the accent.
+  Raised by the Codex PR reviewer, verified. discovered-from hud-uctcp / hud-5i16d /
+  hud-h3mvo.
 
 `hud-0yrix` trim: the Wave-2 items now genuinely DONE and removable from the
 catalog are — `disconnect-treatment-never-triggered-in-runtime` (§2, hud-5i16d/#973),
@@ -303,9 +335,10 @@ edit is a beads mutation, deferred to the coordinator per the worker contract.
 
 - **hud-3jxfr (Wave-2 epic):** closable. All 6 implementation children are merged
   and verified LIVE/WIRED; hud-jgf41 is polish (blocked on promotion, not a
-  correctness gap) and does not block the epic. FU-1/FU-2 are follow-ups, not epic
-  blockers (the failure-UX is visible; FU-2 is the pre-existing grace-reaper
-  remainder).
+  correctness gap) and does not block the epic. FU-1/FU-2/FU-3 are follow-ups, not
+  epic blockers (the failure-UX is visible; FU-2 is the pre-existing grace-reaper
+  remainder; FU-3 is a content-free accent-overlay lease-gate gap on a pre-existing
+  path).
 - **`portal-disconnect-resume-ux` OpenSpec change:** keep OPEN. Its own §6.2(a)
   gate (the hud-jgf41 badge) plus FU-2 (openspec §3.2 production grace-removal) are the
   remaining items before archive. The spec delta itself is sound and unchanged.
