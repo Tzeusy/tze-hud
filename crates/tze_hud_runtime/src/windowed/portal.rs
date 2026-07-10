@@ -1,7 +1,6 @@
 use tze_hud_input::{
     DragEventOutcome, InputProcessor, PointerEvent, PointerEventKind, PortalRect,
-    PortalResizeState, PortalWindowTokens, ResizeBounds, ResizeEdge, ResizeOutcome,
-    apply_hotkey_resize, hit_affordance,
+    PortalResizeState, PortalWindowTokens, ResizeBounds, ResizeEdge, ResizeOutcome, hit_affordance,
 };
 use tze_hud_scene::HitResult;
 use tze_hud_scene::types::{DragHandleElementKind, TileScrollConfig, ZoneInteractionKind};
@@ -1691,10 +1690,21 @@ impl WinitApp {
     /// tile) so the caller knows to stop propagating the key event.
     /// Returns `false` when no focused portal tile was found (the key must not
     /// be consumed and should fall through to the normal dispatch path).
+    ///
+    /// `axis` selects which axis/axes the step grows/shrinks:
+    /// [`HotkeyResizeAxis::Both`](tze_hud_input::HotkeyResizeAxis::Both) for the
+    /// symmetric Ctrl+`+`/`-` chord, or
+    /// [`Width`](tze_hud_input::HotkeyResizeAxis::Width) /
+    /// [`Height`](tze_hud_input::HotkeyResizeAxis::Height) for the directional
+    /// Ctrl+Shift+Arrow chord (hud-csrmf). A width step reflows the transcript
+    /// text (it changes the wrap column) and takes the viewer-geometry-lock, so
+    /// it drives the dynamic hud-rpmwt reconcile-on-republish path without pointer
+    /// injection.
     pub(super) fn apply_portal_resize_hotkey(
         &mut self,
         tab_id: tze_hud_scene::SceneId,
         dir: tze_hud_input::HotkeyResizeDir,
+        axis: tze_hud_input::HotkeyResizeAxis,
     ) -> bool {
         // Resolve the focused tile from the focus manager.
         let focused_tile_id = match self.state.focus_manager.current_owner(tab_id).tile_id() {
@@ -1781,9 +1791,10 @@ impl WinitApp {
             .or_insert_with(|| PortalResizeState::new(group.portal_id_hash));
 
         // Apply the hotkey resize to the whole-portal rect (O(1) on the hot path).
-        let outcome = apply_hotkey_resize(
+        let outcome = tze_hud_input::apply_hotkey_resize_axis(
             true, // portal is focused (checked above)
             dir,
+            axis,
             old_rect,
             &bounds,
             resize_state,
@@ -5278,7 +5289,11 @@ mod tests {
         let transcript_before = read(&app, transcript_id);
         let shield_before = read(&app, shield_id);
 
-        let consumed = app.apply_portal_resize_hotkey(tab_id, HotkeyResizeDir::Grow);
+        let consumed = app.apply_portal_resize_hotkey(
+            tab_id,
+            HotkeyResizeDir::Grow,
+            tze_hud_input::HotkeyResizeAxis::Both,
+        );
         assert!(
             consumed,
             "Ctrl resize hotkey must be consumed for a focused portal surface"
@@ -5334,6 +5349,387 @@ mod tests {
         assert_eq!(
             shield_after, shield_before,
             "the far-corner drag shield must not scale/move with a portal resize"
+        );
+    }
+
+    // ── Directional (Ctrl+Shift+Arrow) whole-portal WIDTH resize (hud-csrmf) ──
+
+    /// Attach a tile-filling `TextMarkdown` root node to `tile_id` at
+    /// `local_bounds`, so a node-tree scale (the compositor's wrap-width source)
+    /// is observable after a resize. Returns the node id.
+    fn attach_text_node(
+        scene: &mut tze_hud_scene::graph::SceneGraph,
+        tile_id: tze_hud_scene::SceneId,
+        local_bounds: tze_hud_scene::Rect,
+    ) -> tze_hud_scene::SceneId {
+        use tze_hud_scene::types::{
+            FontFamily, Node, NodeData, Rgba, TextAlign, TextMarkdownNode, TextOverflow,
+        };
+        let id = tze_hud_scene::SceneId::new();
+        scene
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id,
+                    children: vec![],
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "the quick brown fox jumps over the lazy dog".to_owned(),
+                        bounds: local_bounds,
+                        font_size_px: 14.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+                        background: None,
+                        alignment: TextAlign::Start,
+                        overflow: TextOverflow::Clip,
+                        color_runs: Box::default(),
+                    }),
+                },
+            )
+            .unwrap();
+        id
+    }
+
+    fn node_width(app: &WinitApp, node_id: tze_hud_scene::SceneId) -> f32 {
+        use tze_hud_scene::types::NodeData;
+        let shared = app.state.shared_state.try_lock().unwrap();
+        let scene = shared.scene.try_lock().unwrap();
+        match &scene.nodes.get(&node_id).unwrap().data {
+            NodeData::TextMarkdown(tm) => tm.bounds.width,
+            other => panic!("expected TextMarkdown, got {other:?}"),
+        }
+    }
+
+    /// (a) Ctrl+Shift+ArrowRight width resize scales the whole-portal tile bounds
+    /// AND the node tree along WIDTH ONLY, takes viewer geometry authority over
+    /// every member, and leaves height untouched. Width is the text-wrap axis, so
+    /// this is exactly what drives the dynamic hud-rpmwt re-wrap without pointer
+    /// injection.
+    #[test]
+    fn ctrl_shift_arrow_width_resize_scales_whole_portal_and_locks() {
+        use tze_hud_input::{HotkeyResizeAxis, HotkeyResizeDir, InputProcessor};
+
+        let (mut scene, tab_id, frame_id, transcript_id, composer_id, _shield_id, fm) =
+            multi_surface_portal_scene();
+        // Transcript pane is 180×280 (tile-local node fills it).
+        let node_id = attach_text_node(
+            &mut scene,
+            transcript_id,
+            tze_hud_scene::Rect::new(0.0, 0.0, 180.0, 280.0),
+        );
+        let (mut app, _rx) = make_windowed_keyboard_test_app(scene, fm, InputProcessor::new());
+
+        let read = |app: &WinitApp, id: tze_hud_scene::SceneId| {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let scene = shared.scene.try_lock().unwrap();
+            scene.tiles.get(&id).unwrap().bounds
+        };
+
+        let frame_before = read(&app, frame_id);
+        let transcript_before = read(&app, transcript_id);
+        let node_w_before = node_width(&app, node_id);
+
+        let consumed =
+            app.apply_portal_resize_hotkey(tab_id, HotkeyResizeDir::Grow, HotkeyResizeAxis::Width);
+        assert!(
+            consumed,
+            "width hotkey must be consumed for a focused portal"
+        );
+
+        let frame_after = read(&app, frame_id);
+        let transcript_after = read(&app, transcript_id);
+        let node_w_after = node_width(&app, node_id);
+
+        // Frame grew in WIDTH only, top-left anchored.
+        assert!(
+            frame_after.width > frame_before.width,
+            "frame width must grow"
+        );
+        assert_eq!(
+            frame_after.height, frame_before.height,
+            "width-axis resize must not change the frame height"
+        );
+        assert_eq!(
+            (frame_after.x, frame_after.y),
+            (frame_before.x, frame_before.y),
+            "grow must stay anchored at the frame top-left"
+        );
+
+        // Transcript pane scaled width, kept height.
+        assert!(
+            transcript_after.width > transcript_before.width,
+            "transcript pane width must scale with the whole portal"
+        );
+        assert_eq!(
+            transcript_after.height, transcript_before.height,
+            "transcript pane height must not change on a width-axis resize"
+        );
+
+        // Node tree scaled by the same WIDTH ratio → the compositor's wrap column
+        // tracks the resized pane.
+        assert!(
+            node_w_after > node_w_before,
+            "the tile's text node width must scale with the pane (wrap-column authority)"
+        );
+
+        // Viewer geometry authority taken over every member so a republish cannot
+        // stomp them back (hud-lyqun) — the precondition the reconcile fix needs.
+        for id in [frame_id, transcript_id, composer_id] {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let scene = shared.scene.try_lock().unwrap();
+            assert!(
+                scene.is_viewer_geometry_locked(id),
+                "every portal member must be viewer-geometry-locked after a width resize"
+            );
+        }
+    }
+
+    /// (b) After a Ctrl+Shift+ArrowLeft width shrink, an adapter content republish
+    /// with STALE attach-time node bounds must be reconciled to the narrower pane
+    /// — the exact hud-rpmwt reconcile-on-republish path, now reached via the
+    /// keyboard width chord instead of a pointer drag.
+    #[test]
+    fn ctrl_shift_arrow_width_resize_then_republish_reconciles_to_narrower_pane() {
+        use tze_hud_input::{HotkeyResizeAxis, HotkeyResizeDir, InputProcessor};
+
+        let (mut scene, tab_id, _frame_id, transcript_id, _composer_id, _shield_id, fm) =
+            multi_surface_portal_scene();
+        let attach = tze_hud_scene::Rect::new(0.0, 0.0, 180.0, 280.0);
+        let _first = attach_text_node(&mut scene, transcript_id, attach);
+        let (mut app, _rx) = make_windowed_keyboard_test_app(scene, fm, InputProcessor::new());
+
+        // Width SHRINK: one 32px step narrows the 400px frame → the 180px
+        // transcript pane drops below its attach-time node width.
+        assert!(
+            app.apply_portal_resize_hotkey(
+                tab_id,
+                HotkeyResizeDir::Shrink,
+                HotkeyResizeAxis::Width
+            ),
+            "width shrink hotkey must be consumed"
+        );
+
+        let transcript_after = {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let scene = shared.scene.try_lock().unwrap();
+            scene.tiles.get(&transcript_id).unwrap().bounds
+        };
+        assert!(
+            transcript_after.width < 180.0,
+            "precondition: the transcript pane must have shrunk below the attach width (got {})",
+            transcript_after.width
+        );
+
+        // Adapter republishes its stale (wide) attach-time node tree. The tile is
+        // viewer-geometry-locked, so `set_tile_root` reconciles the republished
+        // root to the resized pane instead of re-homing it to the stale column.
+        let second = {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let mut scene = shared.scene.try_lock().unwrap();
+            attach_text_node(&mut scene, transcript_id, attach)
+        };
+        let republished_w = node_width(&app, second);
+        assert!(
+            (republished_w - transcript_after.width).abs() < 1e-2,
+            "republished node width must be reconciled to the resized pane: expected ~{}, got {}",
+            transcript_after.width,
+            republished_w
+        );
+        assert!(
+            republished_w < 180.0,
+            "republished node must not keep the stale attach-time wrap width"
+        );
+    }
+
+    /// (c) With no focused portal the width chord is a no-op: not consumed, no
+    /// bounds change, and no resize state is created.
+    #[test]
+    fn ctrl_shift_arrow_width_resize_noop_when_unfocused() {
+        use tze_hud_input::{FocusManager, HotkeyResizeAxis, HotkeyResizeDir, InputProcessor};
+
+        let (scene, tab_id, frame_id, _transcript_id, _composer_id, _shield_id, _fm) =
+            multi_surface_portal_scene();
+        // Fresh FocusManager with the tab but NO focus owner.
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+        let (mut app, _rx) = make_windowed_keyboard_test_app(scene, fm, InputProcessor::new());
+
+        let before = {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let scene = shared.scene.try_lock().unwrap();
+            scene.tiles.get(&frame_id).unwrap().bounds
+        };
+
+        let consumed =
+            app.apply_portal_resize_hotkey(tab_id, HotkeyResizeDir::Grow, HotkeyResizeAxis::Width);
+        assert!(
+            !consumed,
+            "width chord must not be consumed without a focused portal"
+        );
+
+        let after = {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let scene = shared.scene.try_lock().unwrap();
+            scene.tiles.get(&frame_id).unwrap().bounds
+        };
+        assert_eq!(
+            after, before,
+            "unfocused width chord must not change any bounds"
+        );
+        assert!(
+            app.state.portal_resize_states.is_empty(),
+            "unfocused width chord must not create resize state"
+        );
+    }
+
+    /// (d) A width grow is clamped so the portal never leaves the display: after
+    /// many steps the right edge stays within the display bound.
+    #[test]
+    fn ctrl_shift_arrow_width_resize_clamps_at_display_edge() {
+        use tze_hud_input::{HotkeyResizeAxis, HotkeyResizeDir, InputProcessor};
+
+        let (scene, tab_id, frame_id, _transcript_id, _composer_id, _shield_id, fm) =
+            multi_surface_portal_scene();
+        let (mut app, _rx) = make_windowed_keyboard_test_app(scene, fm, InputProcessor::new());
+        let display_w = app.state.config.window.width as f32;
+
+        // Grow far past the display bound; each step clamps.
+        for _ in 0..200 {
+            app.apply_portal_resize_hotkey(tab_id, HotkeyResizeDir::Grow, HotkeyResizeAxis::Width);
+        }
+
+        let frame = {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let scene = shared.scene.try_lock().unwrap();
+            scene.tiles.get(&frame_id).unwrap().bounds
+        };
+        assert!(
+            frame.x + frame.width <= display_w + 1e-3,
+            "width grow must clamp the right edge to the display bound (x={} w={} display_w={})",
+            frame.x,
+            frame.width,
+            display_w
+        );
+    }
+
+    /// (e) Dispatch wiring: Ctrl+Shift+ArrowRight resizes the width of a portal
+    /// focused on a NON-composer surface, and is NOT stolen from the composer's
+    /// word-selection while the composer is active.
+    #[test]
+    fn ctrl_shift_arrow_dispatch_respects_composer_focus() {
+        use tze_hud_input::{FocusManager, InputProcessor, KeyboardModifiers};
+        use tze_hud_scene::types::{HitRegionNode, TileScrollConfig};
+        use tze_hud_scene::{Capability, Node, NodeData, Rect, SceneGraph, SceneId};
+
+        // Single-tile portal with a focusable NON-composer control node.
+        let build = |accepts_composer_input: bool| {
+            let mut scene = SceneGraph::new(1920.0, 1080.0);
+            let tab_id = scene.create_tab("Main", 0).unwrap();
+            let lease_id = scene.grant_lease(
+                "portal-agent",
+                60_000,
+                vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+            );
+            let tile_id = scene
+                .create_tile(
+                    tab_id,
+                    "portal-agent",
+                    lease_id,
+                    Rect::new(100.0, 100.0, 400.0, 300.0),
+                    1,
+                )
+                .unwrap();
+            scene
+                .register_tile_scroll_config(tile_id, TileScrollConfig::vertical())
+                .unwrap();
+            let node_id = SceneId::new();
+            scene
+                .set_tile_root(
+                    tile_id,
+                    Node {
+                        id: node_id,
+                        children: vec![],
+                        data: NodeData::HitRegion(HitRegionNode {
+                            bounds: Rect::new(0.0, 0.0, 400.0, 60.0),
+                            interaction_id: "portal-surface".to_string(),
+                            accepts_focus: true,
+                            accepts_pointer: true,
+                            accepts_composer_input,
+                            ..Default::default()
+                        }),
+                    },
+                )
+                .unwrap();
+
+            let mut processor = InputProcessor::new();
+            let mut focus_manager = FocusManager::new();
+            focus_manager.add_tab(tab_id);
+            // Focus the node via a pointer down (click-to-focus).
+            processor.process_with_focus(
+                &tze_hud_input::PointerEvent {
+                    x: 110.0,
+                    y: 110.0,
+                    kind: tze_hud_input::PointerEventKind::Down,
+                    device_id: 1,
+                    timestamp: None,
+                },
+                &mut scene,
+                &mut focus_manager,
+                tab_id,
+            );
+            (
+                tab_id,
+                tile_id,
+                make_windowed_keyboard_test_app(scene, focus_manager, processor),
+            )
+        };
+
+        let dispatch_ctrl_shift_arrow = |app: &mut WinitApp, tab_id, key_code: &str| {
+            app.dispatch_key_down_event_inner(
+                &RawKeyDownEvent {
+                    key_code: key_code.to_string(),
+                    key: key_code.to_string(),
+                    modifiers: KeyboardModifiers {
+                        ctrl: true,
+                        shift: true,
+                        ..KeyboardModifiers::NONE
+                    },
+                    repeat: false,
+                    timestamp_mono_us: tze_hud_scene::MonoUs(1),
+                },
+                Some(tab_id),
+            );
+        };
+        let width = |app: &WinitApp, tile_id| {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let scene = shared.scene.try_lock().unwrap();
+            scene.tiles.get(&tile_id).unwrap().bounds.width
+        };
+
+        // Composer INACTIVE (non-composer surface focused): the chord resizes.
+        let (tab_id, tile_id, (mut app, _rx)) = build(false);
+        assert!(
+            !app.state.input_processor.is_composer_active(),
+            "precondition: composer must be inactive for the non-composer surface"
+        );
+        let w0 = width(&app, tile_id);
+        dispatch_ctrl_shift_arrow(&mut app, tab_id, "ArrowRight");
+        assert!(
+            width(&app, tile_id) > w0,
+            "Ctrl+Shift+ArrowRight must grow width when the composer is inactive"
+        );
+
+        // Composer ACTIVE: the chord is NOT taken for resize (word-select wins).
+        let (tab_id2, tile_id2, (mut app2, _rx2)) = build(true);
+        assert!(
+            app2.state.input_processor.is_composer_active(),
+            "precondition: composer must be active for the composer surface"
+        );
+        let w0b = width(&app2, tile_id2);
+        dispatch_ctrl_shift_arrow(&mut app2, tab_id2, "ArrowRight");
+        assert_eq!(
+            width(&app2, tile_id2),
+            w0b,
+            "Ctrl+Shift+ArrowRight must NOT resize while the composer is active (word-select preserved)"
         );
     }
 
@@ -5398,7 +5794,11 @@ mod tests {
         }
 
         assert!(
-            app.apply_portal_resize_hotkey(tab_id, HotkeyResizeDir::Grow),
+            app.apply_portal_resize_hotkey(
+                tab_id,
+                HotkeyResizeDir::Grow,
+                tze_hud_input::HotkeyResizeAxis::Both
+            ),
             "hotkey must be consumed for a focused portal surface"
         );
 
@@ -5511,7 +5911,11 @@ mod tests {
         };
         let frame_before = read(&app, frame_id);
 
-        let consumed = app.apply_portal_resize_hotkey(tab_id, HotkeyResizeDir::Grow);
+        let consumed = app.apply_portal_resize_hotkey(
+            tab_id,
+            HotkeyResizeDir::Grow,
+            tze_hud_input::HotkeyResizeAxis::Both,
+        );
         assert!(
             !consumed,
             "resize hotkey must not be consumed when the focused surface is not a portal"

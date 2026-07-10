@@ -131,10 +131,11 @@ pub use keyboard::{
     RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent,
 };
 pub use portal_resize::{
-    CursorIconTracker, DeviceResizeState, GeometrySnapshot, GestureAuthorityError, HotkeyResizeDir,
-    HotkeyResizeOutcome, PortalCursor, PortalRect, PortalResizeState, PortalWindowTokens,
-    ResizeBounds, ResizeEdge, ResizeOutcome, ResizePhase, ShellReservedShortcut,
-    apply_hotkey_resize, hit_affordance, portal_hover_cursor,
+    CursorIconTracker, DeviceResizeState, GeometrySnapshot, GestureAuthorityError,
+    HotkeyResizeAxis, HotkeyResizeDir, HotkeyResizeOutcome, PortalCursor, PortalRect,
+    PortalResizeState, PortalWindowTokens, ResizeBounds, ResizeEdge, ResizeOutcome, ResizePhase,
+    ShellReservedShortcut, apply_hotkey_resize, apply_hotkey_resize_axis, hit_affordance,
+    portal_hover_cursor,
 };
 pub use scroll_indicator::{
     ScrollIndicatorGeometry, ScrollIndicatorTokens, compute_scroll_indicator,

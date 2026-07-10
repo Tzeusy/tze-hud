@@ -886,23 +886,73 @@ impl HotkeyResizeDir {
     }
 }
 
-/// Apply a focus-scoped hotkey resize step to the current rect.
+/// Which axis (or axes) a hotkey resize step grows/shrinks.
+///
+/// The symmetric Ctrl+`+`/`-` chord resizes [`Both`](Self::Both) axes at once
+/// (§6b.2). The directional Ctrl+Shift+Arrow chord (hud-csrmf) resizes a single
+/// axis so a keyboard viewer — and the autopilot live-verify harness — can drive
+/// a **width-only** whole-portal resize without pointer injection. Width is the
+/// text-wrap axis the compositor reads from `TextMarkdownNode::bounds.width`, so
+/// a width step is exactly what exercises the dynamic re-wrap / reconcile path
+/// (hud-rpmwt) on a multi-monitor console where the 22px pointer resize handle is
+/// not injector-reachable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum HotkeyResizeAxis {
+    /// Grow/shrink both width and height by the same step (symmetric — the
+    /// Ctrl+`+`/`-` chord).
+    #[default]
+    Both,
+    /// Grow/shrink width only; height is left unchanged (Ctrl+Shift+Left/Right).
+    Width,
+    /// Grow/shrink height only; width is left unchanged (Ctrl+Shift+Up/Down).
+    Height,
+}
+
+/// Apply a focus-scoped **symmetric** hotkey resize step to the current rect.
+///
+/// Convenience wrapper over [`apply_hotkey_resize_axis`] with
+/// [`HotkeyResizeAxis::Both`] — the Ctrl+`+`/`-` chord (§6b.2). See that function
+/// for the full argument and anchoring contract.
+pub fn apply_hotkey_resize(
+    focused: bool,
+    dir: HotkeyResizeDir,
+    current_rect: PortalRect,
+    bounds: &ResizeBounds,
+    state: &mut PortalResizeState,
+) -> HotkeyResizeOutcome {
+    apply_hotkey_resize_axis(
+        focused,
+        dir,
+        HotkeyResizeAxis::Both,
+        current_rect,
+        bounds,
+        state,
+    )
+}
+
+/// Apply a focus-scoped hotkey resize step to the current rect along `axis`.
 ///
 /// # Arguments
 ///
 /// * `focused` — true if the portal holds keyboard focus. If false, the
 ///   hotkey is NOT consumed and `HotkeyResizeOutcome::NotFocused` is returned.
 /// * `dir` — grow or shrink direction.
+/// * `axis` — which axis/axes to step ([`HotkeyResizeAxis::Both`] for the
+///   symmetric Ctrl+`+`/`-` chord; [`Width`](HotkeyResizeAxis::Width) /
+///   [`Height`](HotkeyResizeAxis::Height) for the directional Ctrl+Shift+Arrow
+///   chord, hud-csrmf).
 /// * `current_rect` — portal bounds before the step.
 /// * `bounds` — clamping bounds (tokens, max size, display size).
 /// * `state` — portal resize state (for sequence counter).
 ///
-/// Grows/shrinks both width and height symmetrically by `resize_step_px`
-/// (centred on the existing rect, so the centre stays roughly fixed).
-/// The result is clamped by `clamped()` to satisfy the overflow contract.
-pub fn apply_hotkey_resize(
+/// Grows/shrinks the selected axis by `resize_step_px`. The result is clamped by
+/// `clamped()` to satisfy the overflow contract. Axes not selected by `axis` keep
+/// their current extent (still passed through `clamped()`, which is a no-op for
+/// an already-legible extent).
+pub fn apply_hotkey_resize_axis(
     focused: bool,
     dir: HotkeyResizeDir,
+    axis: HotkeyResizeAxis,
     current_rect: PortalRect,
     bounds: &ResizeBounds,
     state: &mut PortalResizeState,
@@ -921,8 +971,19 @@ pub fn apply_hotkey_resize(
     let max_w = bounds.max_width_px.max(min_w);
     let min_h = bounds.tokens.min_height_px;
     let max_h = bounds.max_height_px.max(min_h);
-    let new_w = (current_rect.width + delta).clamp(min_w, max_w);
-    let new_h = (current_rect.height + delta).clamp(min_h, max_h);
+    // Step only the axis/axes selected by `axis`; the other keeps its extent.
+    let w_delta = if matches!(axis, HotkeyResizeAxis::Both | HotkeyResizeAxis::Width) {
+        delta
+    } else {
+        0.0
+    };
+    let h_delta = if matches!(axis, HotkeyResizeAxis::Both | HotkeyResizeAxis::Height) {
+        delta
+    } else {
+        0.0
+    };
+    let new_w = (current_rect.width + w_delta).clamp(min_w, max_w);
+    let new_h = (current_rect.height + h_delta).clamp(min_h, max_h);
 
     // Anchor the TOP-LEFT corner: the origin stays put and only width/height
     // change, so grow/shrink extends toward the bottom-right (hud-v4k1h
@@ -1481,6 +1542,227 @@ mod tests {
             snap.rect.height >= bounds.tokens.min_height_px,
             "shrink at minimum must clamp to min_height (no clipped glyphs)"
         );
+    }
+
+    // ─── Directional (axis-specific) hotkey resize (hud-csrmf) ────────────
+
+    #[test]
+    fn hotkey_width_axis_changes_width_only() {
+        let bounds = default_bounds(); // step = 32px
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
+        let mut state = PortalResizeState::new(0xdeadbeef);
+
+        let result = apply_hotkey_resize_axis(
+            true,
+            HotkeyResizeDir::Grow,
+            HotkeyResizeAxis::Width,
+            rect,
+            &bounds,
+            &mut state,
+        );
+        let snap = match result {
+            HotkeyResizeOutcome::Applied { snapshot } => snapshot,
+            _ => panic!("expected Applied"),
+        };
+        assert!(
+            snap.rect.width > rect.width,
+            "width-axis grow must increase width"
+        );
+        assert_eq!(
+            snap.rect.height, rect.height,
+            "width-axis grow must leave height unchanged (the re-wrap axis is width only)"
+        );
+        // Top-left anchored: origin stays put.
+        assert_eq!(
+            snap.rect.x, rect.x,
+            "width grow keeps the left edge anchored"
+        );
+        assert_eq!(
+            snap.rect.y, rect.y,
+            "width grow keeps the top edge anchored"
+        );
+        assert!(
+            !snap.gesture_active,
+            "hotkey resize must never set gesture_active"
+        );
+    }
+
+    #[test]
+    fn hotkey_height_axis_changes_height_only() {
+        let bounds = default_bounds();
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
+        let mut state = PortalResizeState::new(0xdeadbeef);
+
+        let result = apply_hotkey_resize_axis(
+            true,
+            HotkeyResizeDir::Shrink,
+            HotkeyResizeAxis::Height,
+            rect,
+            &bounds,
+            &mut state,
+        );
+        let snap = match result {
+            HotkeyResizeOutcome::Applied { snapshot } => snapshot,
+            _ => panic!("expected Applied"),
+        };
+        assert_eq!(
+            snap.rect.width, rect.width,
+            "height-axis shrink must leave width unchanged"
+        );
+        assert!(
+            snap.rect.height < rect.height,
+            "height-axis shrink must decrease height"
+        );
+        assert_eq!(
+            snap.rect.x, rect.x,
+            "height shrink keeps the left edge anchored"
+        );
+        assert_eq!(
+            snap.rect.y, rect.y,
+            "height shrink keeps the top edge anchored"
+        );
+    }
+
+    #[test]
+    fn hotkey_width_axis_not_consumed_when_unfocused() {
+        let bounds = default_bounds();
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
+        let mut state = PortalResizeState::new(0xdeadbeef);
+
+        let result = apply_hotkey_resize_axis(
+            false,
+            HotkeyResizeDir::Grow,
+            HotkeyResizeAxis::Width,
+            rect,
+            &bounds,
+            &mut state,
+        );
+        assert_eq!(
+            result,
+            HotkeyResizeOutcome::NotFocused,
+            "directional hotkey must not be consumed by an unfocused portal"
+        );
+    }
+
+    #[test]
+    fn hotkey_width_axis_clamped_to_min_at_boundary() {
+        let bounds = default_bounds(); // min=240x160, step=32
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: bounds.tokens.min_width_px,
+            height: 300.0,
+        };
+        let mut state = PortalResizeState::new(0xdeadbeef);
+
+        let result = apply_hotkey_resize_axis(
+            true,
+            HotkeyResizeDir::Shrink,
+            HotkeyResizeAxis::Width,
+            rect,
+            &bounds,
+            &mut state,
+        );
+        let snap = match result {
+            HotkeyResizeOutcome::Applied { snapshot } => snapshot,
+            _ => panic!("expected Applied"),
+        };
+        assert!(
+            snap.rect.width >= bounds.tokens.min_width_px,
+            "width shrink at minimum must clamp to min_width (no clipped glyphs)"
+        );
+        assert_eq!(
+            snap.rect.height, rect.height,
+            "width-axis shrink must not touch height even at the width min boundary"
+        );
+    }
+
+    #[test]
+    fn hotkey_width_axis_clamped_to_display_edge() {
+        // A display-bounded max: grow past the on-screen limit must clamp width
+        // and keep the portal on-screen (top-left anchored).
+        let tokens = default_tokens();
+        let bounds = ResizeBounds {
+            tokens,
+            max_width_px: 100_000.0, // lease budget effectively unbounded
+            max_height_px: 100_000.0,
+            display_w: 800.0,
+            display_h: 600.0,
+        };
+        let rect = PortalRect {
+            x: 700.0, // right edge already near the 800px display width
+            y: 100.0,
+            width: 90.0,
+            height: 300.0,
+        };
+        let mut state = PortalResizeState::new(0xdeadbeef);
+
+        let result = apply_hotkey_resize_axis(
+            true,
+            HotkeyResizeDir::Grow,
+            HotkeyResizeAxis::Width,
+            rect,
+            &bounds,
+            &mut state,
+        );
+        let snap = match result {
+            HotkeyResizeOutcome::Applied { snapshot } => snapshot,
+            _ => panic!("expected Applied"),
+        };
+        assert!(
+            snap.rect.x + snap.rect.width <= bounds.display_w + f32::EPSILON,
+            "width grow must clamp the right edge to the display bound (got x={} w={})",
+            snap.rect.x,
+            snap.rect.width
+        );
+    }
+
+    #[test]
+    fn hotkey_default_axis_is_symmetric() {
+        // The `apply_hotkey_resize` wrapper and `HotkeyResizeAxis::Both` agree:
+        // both grow width AND height (the Ctrl+`+`/`-` chord).
+        let bounds = default_bounds();
+        let rect = PortalRect {
+            x: 100.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+        };
+        let mut a = PortalResizeState::new(0x1);
+        let mut b = PortalResizeState::new(0x1);
+        let via_wrapper = apply_hotkey_resize(true, HotkeyResizeDir::Grow, rect, &bounds, &mut a);
+        let via_axis = apply_hotkey_resize_axis(
+            true,
+            HotkeyResizeDir::Grow,
+            HotkeyResizeAxis::Both,
+            rect,
+            &bounds,
+            &mut b,
+        );
+        let (wa, wb) = match (via_wrapper, via_axis) {
+            (
+                HotkeyResizeOutcome::Applied { snapshot: sa },
+                HotkeyResizeOutcome::Applied { snapshot: sb },
+            ) => (sa.rect, sb.rect),
+            _ => panic!("expected Applied"),
+        };
+        assert_eq!(wa, wb, "wrapper must equal HotkeyResizeAxis::Both");
+        assert!(wa.width > rect.width && wa.height > rect.height);
     }
 
     #[test]
