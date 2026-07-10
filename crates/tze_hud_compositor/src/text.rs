@@ -1857,6 +1857,38 @@ pub fn markdown_node_has_pixel_runs(node: &TextMarkdownNode) -> bool {
     node.color_runs.iter().any(|r| r.start_byte < r.end_byte)
 }
 
+/// Token-resolved accent for an active transcript-tail streaming cursor, if this
+/// node carries the streaming-cursor tail marker (hud-zlq2v).
+///
+/// The projection adapter (`streaming_cursor_color_runs` in
+/// `tze_hud_projection::resident_grpc`) signals an active tail cursor with a
+/// single **zero-length** color run pinned at the very end of `content`
+/// (`start_byte == end_byte == content.len()`), carrying the
+/// `portal.streaming_cursor.color` token. Because it is zero-length it is a pure
+/// sentinel — [`markdown_node_has_pixel_runs`] stays `false`, so the node keeps
+/// the cached/styled markdown fast path (no lossy raw-content regression, #947).
+///
+/// The content-end position is what distinguishes this marker from every other
+/// portal sentinel (stale / lifecycle / unread / timestamp), which all sit at
+/// byte 0. The renderer uses the returned accent to recolor the trailing cursor
+/// glyph precisely on the LAID-OUT text (see `apply_tail_streaming_cursor`),
+/// which is the promotion-era replacement for the old byte-0 sentinel that
+/// painted nothing.
+///
+/// Returns `None` when the content is empty or no tail marker is present (the
+/// cue has quiesced — kbm80 behavior preserved).
+pub fn markdown_node_tail_cursor_color(node: &TextMarkdownNode) -> Option<[u8; 4]> {
+    let end = node.content.len() as u32;
+    if end == 0 {
+        return None;
+    }
+    node.color_runs
+        .iter()
+        .rev()
+        .find(|r| r.start_byte == end && r.end_byte == end)
+        .map(|r| rgba_to_srgb_u8(r.color))
+}
+
 /// An axis-aligned box as `(x, y, width, height)` in absolute physical pixels.
 ///
 /// Used by [`portal_part_clip_rect`] purely as a lightweight geometry tuple so

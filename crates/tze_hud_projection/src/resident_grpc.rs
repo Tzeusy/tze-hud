@@ -82,8 +82,12 @@ const PORTAL_ACTIVITY_MARKER_LINE: &str = "⋯ writing";
 
 /// Transcript-tail streaming cursor glyph appended to the latest agent turn while
 /// content is actively appending. A slim left half-block reads as a live-writing
-/// caret at the tail; the token-resolved `streaming_cursor_color` accent rides
-/// alongside via `streaming_cursor_color_runs`. Ambient, not alarming.
+/// caret at the tail. The token-resolved `streaming_cursor_color` accent rides
+/// alongside via `streaming_cursor_color_runs` as a content-end tail marker; the
+/// compositor recolors THIS glyph precisely at its layout-measured tail
+/// (`markdown_node_tail_cursor_color` / `apply_tail_streaming_cursor`, hud-zlq2v).
+/// The `▍` here and the compositor's `STREAMING_CURSOR_GLYPH` char must stay in
+/// sync. Ambient, not alarming.
 const PORTAL_STREAMING_CURSOR_GLYPH: &str = " ▍";
 
 /// Layout height (px) of the header band declared as the first-class surface's
@@ -1444,6 +1448,17 @@ impl ResidentGrpcPortalAdapter {
             text_color = self.visual_tokens.transcript_dim_text_color;
             background_color = self.visual_tokens.transcript_dim_background;
         }
+        let content = portal_markdown_with(
+            state,
+            self.composer_display.as_ref(),
+            now_wall_us,
+            self.visual_tokens.timestamp_granularity,
+        );
+        // Byte length of the assembled content: the streaming-cursor tail marker
+        // is pinned here (`[content_len..content_len]`) so the compositor can
+        // distinguish it from the byte-0 sentinels and recolor the trailing
+        // cursor glyph precisely (hud-zlq2v).
+        let content_len = content.len();
         proto::NodeProto {
             // Explicit root ID (little-endian UUID bytes per RFC 0001 §4.1) so
             // render_batch can reference it as AddNodeMutation.parent_id in the
@@ -1451,12 +1466,7 @@ impl ResidentGrpcPortalAdapter {
             id: root_id_le,
             data: Some(proto::node_proto::Data::TextMarkdown(
                 proto::TextMarkdownNodeProto {
-                    content: portal_markdown_with(
-                        state,
-                        self.composer_display.as_ref(),
-                        now_wall_us,
-                        self.visual_tokens.timestamp_granularity,
-                    ),
+                    content,
                     bounds: Some(bounds),
                     font_size_px,
                     color: Some(text_color),
@@ -1538,6 +1548,7 @@ impl ResidentGrpcPortalAdapter {
                             state,
                             self.visual_tokens.streaming_cursor_color,
                             now_wall_us,
+                            content_len,
                         ));
                         // Ambient viewer-turn delivery-acknowledgement cue
                         // (hud-g1ena.1, §Viewer Turn Delivery Acknowledgement). The
@@ -2354,29 +2365,42 @@ fn activity_cue_color_runs(
 /// streaming cursor (hud-g1ena.5, §Agent Activity and Streaming Cue).
 ///
 /// The mirror of `activity_cue_color_runs` for the tail cursor: a zero-length
-/// sentinel run (`[0..0]`) carrying the token-resolved `streaming_cursor_color`,
-/// gated by the same [`agent_activity_active`] predicate that appends the
+/// sentinel run carrying the token-resolved `streaming_cursor_color`, gated by
+/// the same [`agent_activity_active`] predicate that appends the
 /// `PORTAL_STREAMING_CURSOR_GLYPH` to the transcript body. Kept a distinct run
 /// (and token) from the header cue so a profile can style the tail cursor apart,
 /// while both quiesce together when appends stop.
 ///
-/// ## Phase-1 scope note
+/// ## Tail marker (promotion-era, hud-zlq2v)
 ///
-/// Precise per-glyph coloring of the tail cursor requires the byte offset of the
-/// appended glyph in the single-node content, which is fragile in the raw-tile
-/// model (see `stale_marker_color_runs`). For Phase-1 the cursor is a zero-length
-/// sentinel at byte 0 carrying the token color; the text-visible glyph marks the
-/// tail position. Promotion-era structured multi-node layout will position the
-/// cursor precisely.
+/// The run is pinned at the very END of the content (`[content_len..content_len]`),
+/// NOT at byte 0. It stays zero-length — a pure sentinel that keeps the node on
+/// the compositor's cached-markdown fast path (`markdown_node_has_pixel_runs`
+/// remains false, so no lossy raw-content regression, #947) and leaves the
+/// coalescing class of a streaming publish unchanged (no node/mutation added).
+/// The content-end position is what distinguishes it from every byte-0 sentinel
+/// (stale / lifecycle / unread / timestamp): the compositor reads it via
+/// `markdown_node_tail_cursor_color` and recolors the trailing
+/// `PORTAL_STREAMING_CURSOR_GLYPH` in this token accent at the precise,
+/// layout-measured tail of the latest agent turn. This supersedes the old byte-0
+/// sentinel, which the cached path discarded — the cursor never took its accent.
 fn streaming_cursor_color_runs(
     state: &ProjectedPortalState,
     streaming_cursor_color: proto::Rgba,
     now_wall_us: u64,
+    content_len: usize,
 ) -> Vec<proto::TextColorRunProto> {
     if agent_activity_active(state, now_wall_us) {
+        // Pin the marker at content end so it is unambiguous among the byte-0
+        // sentinels. `u32::try_from` guards the wire field width; on the
+        // (unreachable, MAX_PORTAL_MARKDOWN_BYTES-bounded) overflow, drop the
+        // marker rather than emit a wrong offset.
+        let Ok(end) = u32::try_from(content_len) else {
+            return Vec::new();
+        };
         vec![proto::TextColorRunProto {
-            start_byte: 0,
-            end_byte: 0,
+            start_byte: end,
+            end_byte: end,
             color: Some(streaming_cursor_color),
         }]
     } else {
@@ -2388,8 +2412,9 @@ fn streaming_cursor_color_runs(
 /// timestamps (portal-chat-grade-affordances §Ambient Per-Turn Timestamps,
 /// hud-g1ena.4).
 ///
-/// Mirrors the other Phase-1 sentinels (`unread_divider_color_runs`,
-/// `streaming_cursor_color_runs`): a single zero-length run (`[0..0]`) carrying
+/// Mirrors the other Phase-1 byte-0 sentinels (e.g. `unread_divider_color_runs`;
+/// NOT `streaming_cursor_color_runs`, which pins its marker at content end):
+/// a single zero-length run (`[0..0]`) carrying
 /// the token-resolved `timestamp_color` so the SECONDARY presentation hue is
 /// token-driven, never a literal in the render path (§6.1). Emitted exactly when
 /// at least one stamp is rendered by [`visible_transcript_markdown_with`] — an
@@ -4326,21 +4351,28 @@ mod tests {
             "active append must render the tail streaming cursor glyph: {fresh_md}"
         );
         let header_runs = activity_cue_color_runs(&state, activity_color, now_fresh);
-        let cursor_runs = streaming_cursor_color_runs(&state, cursor_color, now_fresh);
+        let cursor_runs =
+            streaming_cursor_color_runs(&state, cursor_color, now_fresh, fresh_md.len());
         assert_eq!(header_runs.len(), 1, "one activity header sentinel run");
         assert_eq!(cursor_runs.len(), 1, "one streaming cursor sentinel run");
-        for (run, expected) in [
-            (&header_runs[0], activity_color),
-            (&cursor_runs[0], cursor_color),
-        ] {
-            assert_eq!(
-                run.color.unwrap(),
-                expected,
-                "run carries token color, never a literal"
-            );
-            assert_eq!(run.start_byte, 0, "sentinel run is zero-length");
-            assert_eq!(run.end_byte, 0, "sentinel run is zero-length");
-        }
+        // Both carry the token color, never a literal.
+        assert_eq!(header_runs[0].color.unwrap(), activity_color);
+        assert_eq!(cursor_runs[0].color.unwrap(), cursor_color);
+        // The header cue is a byte-0 sentinel; the streaming cursor is pinned at
+        // content END (hud-zlq2v) so the compositor can tell it apart and recolor
+        // the trailing glyph. Both stay zero-length (cached-path safe).
+        assert_eq!(header_runs[0].start_byte, 0, "header sentinel at byte 0");
+        assert_eq!(header_runs[0].end_byte, 0, "header sentinel is zero-length");
+        assert_eq!(
+            cursor_runs[0].start_byte as usize,
+            fresh_md.len(),
+            "cursor marker pinned at content end"
+        );
+        assert_eq!(
+            cursor_runs[0].end_byte as usize,
+            fresh_md.len(),
+            "cursor marker is zero-length"
+        );
 
         // Quiesced: the same tail is now stale relative to `now`.
         assert!(!agent_activity_active(&state, now_quiesced));
@@ -4354,7 +4386,64 @@ mod tests {
             "cursor must quiesce once appends stop: {quiesced_md}"
         );
         assert!(activity_cue_color_runs(&state, activity_color, now_quiesced).is_empty());
-        assert!(streaming_cursor_color_runs(&state, cursor_color, now_quiesced).is_empty());
+        assert!(
+            streaming_cursor_color_runs(&state, cursor_color, now_quiesced, quiesced_md.len())
+                .is_empty()
+        );
+    }
+
+    /// hud-zlq2v: on the assembled portal node, the streaming-cursor glyph sits at
+    /// the exact tail of the latest agent turn (measured against the turn text,
+    /// multibyte-safe), and its token-colored marker is pinned at the very END of
+    /// the node content (`[content.len()..content.len()]`) — the unambiguous,
+    /// cached-path-safe signal the compositor reads to recolor the glyph. This is
+    /// the promotion-era replacement for the byte-0 sentinel.
+    #[test]
+    fn streaming_cursor_marker_pins_to_node_content_end_at_latest_turn_tail() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let cursor_color = adapter.visual_tokens().streaming_cursor_color;
+
+        let appended_at = 1_000_000;
+        let now_fresh = appended_at + 500_000; // within the quiesce window
+
+        // A latest agent turn whose text ends with a multibyte grapheme — proves
+        // the tail is not split and the content-end marker lands on a boundary.
+        let tail_text = "streaming 世界";
+        let mut state = make_expanded_interaction_state("portal-cursor-tail");
+        state.visible_transcript = vec![TranscriptUnit {
+            appended_at_wall_us: appended_at,
+            ..transcript_unit_text(1, OutputKind::Assistant, tail_text)
+        }];
+
+        let node = adapter.portal_node(&state, vec![0u8; 16], now_fresh);
+        let tm = match node.data.expect("node data") {
+            proto::node_proto::Data::TextMarkdown(tm) => tm,
+            other => panic!("expected TextMarkdown node, got {other:?}"),
+        };
+
+        // The cursor glyph is at the exact tail of the latest turn's text.
+        let expected_tail = format!("{tail_text}{PORTAL_STREAMING_CURSOR_GLYPH}");
+        assert!(
+            tm.content.contains(&expected_tail),
+            "cursor glyph must sit at the latest turn's exact tail: {:?}",
+            tm.content
+        );
+
+        // Exactly one content-end zero-length marker carrying the token color; no
+        // OTHER cursor sentinel elsewhere.
+        let end = tm.content.len() as u32;
+        let cursor_markers: Vec<_> = tm
+            .color_runs
+            .iter()
+            .filter(|r| r.color == Some(cursor_color))
+            .collect();
+        assert_eq!(cursor_markers.len(), 1, "one streaming-cursor marker");
+        assert_eq!(cursor_markers[0].start_byte, end, "pinned at content end");
+        assert_eq!(cursor_markers[0].end_byte, end, "zero-length (cached-safe)");
+        // content.len() is a valid UTF-8 boundary (whole-string length), so the
+        // marker never splits the multibyte tail.
+        assert!(tm.content.is_char_boundary(end as usize));
     }
 
     /// hud-kbm80: `agent_activity_clear_deadline_us` is the time-independent
@@ -4436,7 +4525,7 @@ mod tests {
                 "{case}: no header run"
             );
             assert!(
-                streaming_cursor_color_runs(state, cursor_color, now).is_empty(),
+                streaming_cursor_color_runs(state, cursor_color, now, md.len()).is_empty(),
                 "{case}: no cursor run"
             );
         };
