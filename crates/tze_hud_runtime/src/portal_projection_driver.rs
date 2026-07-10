@@ -1585,6 +1585,13 @@ impl InProcessPortalDriver {
     ) {
         self.drain_pending_tile_removals(scene);
 
+        // Resume-side of the lease-grace lifecycle (hud-i429x): if an owner
+        // returned within grace, reconnect the orphaned driver lease BEFORE the
+        // render due-loop below, so a resumed publish paints under an Active lease
+        // (`set_tile_root_checked` → `require_active_lease`) instead of being
+        // rejected and dropped. The orphan + reap half runs at the end of drain.
+        self.reconnect_lease_grace_on_resume(scene);
+
         let policy = ProjectedPortalPolicy::permit_all();
         // Local counters for this drain cycle — emitted as a tracing event after
         // the loop for portal health observability (hud-bq0gl.14).
@@ -2410,6 +2417,48 @@ impl InProcessPortalDriver {
         Some(new_lease)
     }
 
+    /// Reconnect the orphaned driver lease when an owner returns within grace —
+    /// run at the TOP of `drain_inner`, BEFORE the render due-loop (hud-i429x).
+    ///
+    /// Ordering is load-bearing: a resume publish is rendered by the due-loop via
+    /// `set_tile_root_checked`, which calls `require_active_lease`. If the lease
+    /// were still Orphaned at render time, that first resumed batch would be
+    /// rejected and its coalesced update lost (the content would not paint until a
+    /// later publish). So the lease must be Active before the due-loop runs. The
+    /// re-attach/publish op already cleared `hud_disconnected` at op-dispatch time
+    /// (`clear_projection_disconnect_at`, which runs in `dispatch_portal_op` before
+    /// this drain), so a live entry here means an owner returned; reconnecting the
+    /// lease restores mutability, clears the scene disconnection badge, and stops
+    /// the grace clock so the reaper leaves the resumed surface alone
+    /// (resume-within-grace, hud-xlx1r).
+    ///
+    /// KNOWN LIMITATION (shared driver lease): all in-process portals share ONE
+    /// driver lease, so a partial reconnect (some owners return, some do not)
+    /// reconnects the whole lease. The still-disconnected siblings are then no
+    /// longer under an Orphaned lease, so the grace reaper cannot bound their stale
+    /// windows. This is unreachable on the only production trigger today — a whole-
+    /// channel drop (`mark_all_projections_disconnected`) also closes the portal_op
+    /// channel, so no per-projection reconnect can arrive — but per-session drop
+    /// wiring (hud-b2llg) will need per-projection lease granularity; tracked as a
+    /// follow-up.
+    fn reconnect_lease_grace_on_resume(&mut self, scene: &mut SceneGraph) {
+        let Some(lease_id) = self.lease_id else {
+            return;
+        };
+        let any_live = self.drive.entries.values().any(|e| !e.hud_disconnected);
+        if any_live && scene.lease_is_orphaned(&lease_id) {
+            match scene.reconnect_lease(&lease_id, scene.now_millis()) {
+                Ok(()) => tracing::info!(
+                    "portal: driver lease reconnected within grace — resuming the same surface"
+                ),
+                Err(error) => tracing::warn!(
+                    ?error,
+                    "portal: failed to reconnect driver lease within grace"
+                ),
+            }
+        }
+    }
+
     /// Bound an ungracefully-dropped cooperative portal's degraded window by the
     /// lease grace, and remove its surface when grace expires (hud-i429x;
     /// openspec `portal-disconnect-resume-ux` §3.2 "staleness bounded by lease
@@ -2421,13 +2470,13 @@ impl InProcessPortalDriver {
     /// dimmed yet was NEVER grace-removed: an unbounded stale window. `expire_leases`
     /// / `disconnect_lease` had zero production callers before this.
     ///
-    /// Runs every drain. `about_to_wait` fires every event-loop iteration under
-    /// `ControlFlow::Poll`, so a dropped portal on an otherwise-idle screen still
-    /// reaps after grace with NO separate timer/wake source — the same idle-safety
-    /// property the zone content-TTL sweep relies on (hud-vfwb1). The steps are
-    /// cheap map scans, all no-ops on the common all-live path.
-    ///
-    /// Three steps over the shared driver lease:
+    /// Runs at the END of every drain (after the render passes; the resume-side
+    /// reconnect is handled up front by [`Self::reconnect_lease_grace_on_resume`]).
+    /// `about_to_wait` fires every event-loop iteration under `ControlFlow::Poll`,
+    /// so a dropped portal on an otherwise-idle screen still reaps after grace with
+    /// NO separate timer/wake source — the same idle-safety property the zone
+    /// content-TTL sweep relies on (hud-vfwb1). The steps are cheap map scans, both
+    /// no-ops on the common all-live path:
     ///
     /// 1. ORPHAN — once EVERY attached projection under the shared lease is latched
     ///    disconnected (`hud_disconnected`), orphan the still-Active lease so the
@@ -2436,14 +2485,9 @@ impl InProcessPortalDriver {
     ///    all-disconnected, not any: the whole-channel drop
     ///    (`mark_all_projections_disconnected`) is the only production trigger
     ///    today, and orphaning a shared lease while one projection is still live
-    ///    would wrongly badge it.
-    /// 2. RECONNECT — if an owner re-attached within grace (some entry is live
-    ///    again) while the lease is still Orphaned, reconnect it so
-    ///    `ensure_driver_lease` reuses the now-Active lease and the SAME surface
-    ///    resumes, and the grace clock stops (resume-within-grace, hud-xlx1r). The
-    ///    re-attach/publish op already cleared `hud_disconnected` and repainted the
-    ///    tile via the op loop; this clears the scene badge and restores mutability.
-    /// 3. REAP — expire the driver lease iff it is Orphaned and its grace has
+    ///    would wrongly badge it. Orphaning at drain END (after the degraded
+    ///    repaint) keeps that repaint under the still-Active lease.
+    /// 2. REAP — expire the driver lease iff it is Orphaned and its grace has
     ///    elapsed, then drop every drive entry whose tile was removed and
     ///    `expire_projection` it in the authority so no further `ProjectedPortalState`
     ///    is produced (stale content can never be re-materialised). Gated on
@@ -2474,21 +2518,7 @@ impl InProcessPortalDriver {
             }
         }
 
-        // 2. RECONNECT: owner returned within grace → resume the same surface.
-        let any_live = self.drive.entries.values().any(|e| !e.hud_disconnected);
-        if any_live && scene.lease_is_orphaned(&lease_id) {
-            match scene.reconnect_lease(&lease_id, now_ms) {
-                Ok(()) => tracing::info!(
-                    "portal: driver lease reconnected within grace — resuming the same surface"
-                ),
-                Err(error) => tracing::warn!(
-                    ?error,
-                    "portal: failed to reconnect driver lease within grace"
-                ),
-            }
-        }
-
-        // 3. REAP: grace elapsed → remove the surface via the orphan path.
+        // 2. REAP: grace elapsed → remove the surface via the orphan path.
         // Gate on Orphaned so an Active lease is never reaped on its 24h resident
         // TTL — only the disconnect/grace path removes a portal here.
         if !scene.lease_is_orphaned(&lease_id) {
@@ -7479,7 +7509,7 @@ mod tests {
     fn production_reattach_within_grace_resumes_same_surface_via_drain_sweep() {
         use std::sync::Arc;
         use tze_hud_projection::HudConnectionMetadata;
-        use tze_hud_scene::TestClock;
+        use tze_hud_scene::{NodeData, TestClock};
 
         const FIRST: &str = "ALPHA-before-drop";
 
@@ -7598,7 +7628,16 @@ mod tests {
             .try_recv()
             .expect("publish reply delivered synchronously")
             .expect("owner publish within grace must be accepted");
-        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), now_wall_us());
+        // Drain far enough past the rate window that the resumed update is DUE and
+        // actually renders this cycle — so the assertion below exercises the real
+        // render path (the reconnect must have restored an Active lease FIRST, or
+        // `set_tile_root_checked` would reject the batch and drop the content).
+        driver.drain_inner(
+            &mut scene,
+            &mut processor,
+            Some(tab_id),
+            now_wall_us() + PORTAL_UPDATE_RATE_WINDOW_WALL_US * 2,
+        );
 
         // Same surface, lease active again, degraded cleared — no reap, no reset.
         let resumed_tile = driver
@@ -7625,6 +7664,25 @@ mod tests {
                 .expect("resumed state materialises")
                 .connection_degraded,
             "reconnect within grace clears the degraded treatment"
+        );
+
+        // The resumed publish PAINTED onto the tile — proving the lease was
+        // reconnected to Active BEFORE the due-loop rendered it. Reconnecting only
+        // after rendering (end-of-drain) would make `set_tile_root_checked` reject
+        // this batch under the still-Orphaned lease and the content would be lost.
+        let root_id = scene
+            .tiles
+            .get(&resumed_tile)
+            .expect("resumed tile present")
+            .root_node
+            .expect("resumed tile has a painted root node");
+        let NodeData::TextMarkdown(tm) = &scene.nodes.get(&root_id).unwrap().data else {
+            panic!("expected TextMarkdown tile root after resume");
+        };
+        assert!(
+            tm.content.contains("BETA-after-resume"),
+            "the resumed publish paints under the reconnected Active lease (P1): got {:?}",
+            tm.content
         );
     }
 }
