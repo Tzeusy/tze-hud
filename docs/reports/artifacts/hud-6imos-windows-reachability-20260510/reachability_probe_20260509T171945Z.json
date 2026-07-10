@@ -5,7 +5,7 @@
   "recorded_at_local": "2026-05-10T01:19:45+08:00",
   "local_timezone": "Asia/Singapore",
   "reference_host": "windows-host.example",
-  "resolved_tailnet_ip": "100.87.181.125",
+  "resolved_tailnet_ip": "198.51.100.1",
   "purpose": "Restore or precisely characterize Windows reference host reachability for validation and soak runs.",
   "constraints": [
     "Use non-interactive commands only.",
@@ -38,28 +38,28 @@
       "name": "dns_getent",
       "command": "getent hosts windows-host.example",
       "exit_code": 0,
-      "stdout": "100.87.181.125  windows-host.example",
+      "stdout": "198.51.100.1  windows-host.example",
       "stderr": ""
     },
     {
       "name": "tailscale_status_target",
-      "command": "timeout 8s tailscale status --json | jq -r '.Peer[] | select((.HostName|ascii_downcase|contains(\"tzehouse\")) or (.DNSName|ascii_downcase|contains(\"tzehouse\")) or ((.TailscaleIPs // [])[]? == \"100.87.181.125\")) | {HostName,DNSName,TailscaleIPs,OS,Online,Active,Relay,CurAddr,LastSeen,LastWrite,LastHandshake,InNetworkMap,InMagicSock,InEngine,KeyExpiry}'",
+      "command": "timeout 8s tailscale status --json | jq -r '.Peer[] | select((.HostName|ascii_downcase|contains(\"tzehouse\")) or (.DNSName|ascii_downcase|contains(\"tzehouse\")) or ((.TailscaleIPs // [])[]? == \"198.51.100.1\")) | {HostName,DNSName,TailscaleIPs,OS,Online,Active,Relay,CurAddr,LastSeen,LastWrite,LastHandshake,InNetworkMap,InMagicSock,InEngine,KeyExpiry}'",
       "exit_code": 0,
-      "stdout": "{ \"HostName\": \"TzeHouse\", \"DNSName\": \"windows-host.example.\", \"TailscaleIPs\": [\"100.87.181.125\", \"fd7a:115c:a1e0:ab12:4843:cd96:6257:b57d\"], \"OS\": \"windows\", \"Online\": false, \"Active\": true, \"Relay\": \"sin\", \"CurAddr\": \"\", \"LastSeen\": \"2026-05-09T16:05:09.1Z\", \"LastWrite\": \"2026-05-10T01:18:46.116687579+08:00\", \"LastHandshake\": \"0001-01-01T00:00:00Z\", \"InNetworkMap\": true, \"InMagicSock\": true, \"InEngine\": true, \"KeyExpiry\": \"2026-07-01T17:59:38Z\" }",
+      "stdout": "{ \"HostName\": \"TzeHouse\", \"DNSName\": \"windows-host.example.\", \"TailscaleIPs\": [\"198.51.100.1\", \"2001:db8::57:b57d\"], \"OS\": \"windows\", \"Online\": false, \"Active\": true, \"Relay\": \"sin\", \"CurAddr\": \"\", \"LastSeen\": \"2026-05-09T16:05:09.1Z\", \"LastWrite\": \"2026-05-10T01:18:46.116687579+08:00\", \"LastHandshake\": \"0001-01-01T00:00:00Z\", \"InNetworkMap\": true, \"InMagicSock\": true, \"InEngine\": true, \"KeyExpiry\": \"2026-07-01T17:59:38Z\" }",
       "stderr": ""
     },
     {
       "name": "tailscale_ping",
       "command": "timeout 12s tailscale ping --timeout=5s --c=3 windows-host.example",
       "exit_code": 124,
-      "stdout": "ping \"100.87.181.125\" timed out\nping \"100.87.181.125\" timed out",
+      "stdout": "ping \"198.51.100.1\" timed out\nping \"198.51.100.1\" timed out",
       "stderr": ""
     },
     {
       "name": "icmp_ping",
       "command": "timeout 12s ping -c 3 -W 3 windows-host.example",
       "exit_code": 1,
-      "stdout": "PING windows-host.example (100.87.181.125) 56(84) bytes of data.\n\n--- windows-host.example ping statistics ---\n3 packets transmitted, 0 received, 100% packet loss, time 2054ms",
+      "stdout": "PING windows-host.example (198.51.100.1) 56(84) bytes of data.\n\n--- windows-host.example ping statistics ---\n3 packets transmitted, 0 received, 100% packet loss, time 2054ms",
       "stderr": ""
     },
     {
@@ -67,7 +67,7 @@
       "command": "for port in 22 50051 9090; do timeout 8s nc -vz -w 5 windows-host.example \"$port\"; done",
       "exit_code": 1,
       "stdout": "",
-      "stderr": "nc: connect to windows-host.example (100.87.181.125) port 22 (tcp) timed out: Operation now in progress\nnc: connect to windows-host.example (100.87.181.125) port 50051 (tcp) timed out: Operation now in progress\nnc: connect to windows-host.example (100.87.181.125) port 9090 (tcp) timed out: Operation now in progress"
+      "stderr": "nc: connect to windows-host.example (198.51.100.1) port 22 (tcp) timed out: Operation now in progress\nnc: connect to windows-host.example (198.51.100.1) port 50051 (tcp) timed out: Operation now in progress\nnc: connect to windows-host.example (198.51.100.1) port 9090 (tcp) timed out: Operation now in progress"
     },
     {
       "name": "ssh_hud-user_whoami",
@@ -85,24 +85,24 @@
     },
     {
       "name": "adjacent_synology_tcp_ssh",
-      "command": "timeout 12s nc -vz -w 5 tzehouse-synology.parrot-hen.ts.net 22",
+      "command": "timeout 12s nc -vz -w 5 proxmox-host.example 22",
       "exit_code": 0,
-      "stdout": "Connection to tzehouse-synology.parrot-hen.ts.net (100.66.12.51) 22 port [tcp/ssh] succeeded!",
+      "stdout": "Connection to proxmox-host.example (198.51.100.2) 22 port [tcp/ssh] succeeded!",
       "stderr": ""
     },
     {
       "name": "adjacent_synology_auth_hud-user",
-      "command": "timeout 15s ssh -o ConnectTimeout=5 -o ServerAliveInterval=3 -o ServerAliveCountMax=1 -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -i ~/.ssh/hud-ssh-key hud-user@tzehouse-synology.parrot-hen.ts.net \"uname -a\"",
+      "command": "timeout 15s ssh -o ConnectTimeout=5 -o ServerAliveInterval=3 -o ServerAliveCountMax=1 -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -i ~/.ssh/hud-ssh-key hud-user@proxmox-host.example \"uname -a\"",
       "exit_code": 255,
       "stdout": "",
-      "stderr": "hud-user@tzehouse-synology.parrot-hen.ts.net: Permission denied (publickey,password)."
+      "stderr": "hud-user@proxmox-host.example: Permission denied (publickey,password)."
     },
     {
       "name": "adjacent_synology_auth_admin-user",
-      "command": "timeout 15s ssh -o ConnectTimeout=5 -o ServerAliveInterval=3 -o ServerAliveCountMax=1 -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -i ~/.ssh/hud-ssh-key admin-user@tzehouse-synology.parrot-hen.ts.net \"uname -a\"",
+      "command": "timeout 15s ssh -o ConnectTimeout=5 -o ServerAliveInterval=3 -o ServerAliveCountMax=1 -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -i ~/.ssh/hud-ssh-key admin-user@proxmox-host.example \"uname -a\"",
       "exit_code": 255,
       "stdout": "",
-      "stderr": "admin-user@tzehouse-synology.parrot-hen.ts.net: Permission denied (publickey,password)."
+      "stderr": "admin-user@proxmox-host.example: Permission denied (publickey,password)."
     }
   ],
   "verdict": {

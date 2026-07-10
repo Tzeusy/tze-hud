@@ -3,7 +3,7 @@
   "issue": "hud-6imos",
   "host": {
     "name": "windows-host.example",
-    "tailnet_ip": "100.87.181.125"
+    "tailnet_ip": "198.51.100.1"
   },
   "reachability": {
     "tailscale_ping": "passed",

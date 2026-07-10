@@ -1,4 +1,4 @@
-{"action": "connect and open resident session", "code": "scenario", "doc": "docs/reports/exemplar-manual-review-checklist.md", "expected_visual": "operator follows JSON step transcript", "phases": "baseline,diagnostic-input", "status": "started", "step_index": 0, "target": "tzehouse-windows.parrot-hen.ts.net:50051", "title": "Text Stream Portal live scenario", "ts_wall": 1783131553}
+{"action": "connect and open resident session", "code": "scenario", "doc": "docs/reports/exemplar-manual-review-checklist.md", "expected_visual": "operator follows JSON step transcript", "phases": "baseline,diagnostic-input", "status": "started", "step_index": 0, "target": "windows-host.example:50051", "title": "Text Stream Portal live scenario", "ts_wall": 1783131553}
   [grpc] Session established: namespace=agent-alpha, caps=['create_tiles', 'modify_own_tiles', 'access_input_events']
   [grpc] Scene display area: 3840x2160
 {"action": "use live scene dimensions for portal placement and drag bounds", "code": "scene:display-area", "expected_visual": "portal can be dragged across the full HUD surface", "scene_height": 2160.0, "scene_width": 3840.0, "status": "checkpoint", "step_index": 0, "title": "Scene display area resolved", "ts_wall": 1783131553}
@@ -158,7 +158,7 @@
   [grpc] Node added: 7243e82f90060647...
   [grpc] Node added: 82c1dda255181b49...
   [grpc] Node added: 7c1cc5f81d9e4845...
-{"action": "inject OS pointer, wheel, and Unicode input into the live overlay", "action_labels": ["focus-composer", "drag-portal-header", "scroll-output-pane", "type-composer-text"], "code": "diagnostic-input", "expected_visual": "composer focuses, portal drags, and OUTPUT pane scrolls via the normal runtime input path", "host": "tzehouse-windows.parrot-hen.ts.net", "status": "started", "step_index": 6, "title": "Compositor-path diagnostic input", "ts_wall": 1783131565, "user": "tzeus"}
+{"action": "inject OS pointer, wheel, and Unicode input into the live overlay", "action_labels": ["focus-composer", "drag-portal-header", "scroll-output-pane", "type-composer-text"], "code": "diagnostic-input", "expected_visual": "composer focuses, portal drags, and OUTPUT pane scrolls via the normal runtime input path", "host": "windows-host.example", "status": "started", "step_index": 6, "title": "Compositor-path diagnostic input", "ts_wall": 1783131565, "user": "admin-user"}
 {"action": "runtime focus manager focused the composer hit region", "code": "input:focus-gained", "expected_visual": "subsequent keyboard events route to composer", "status": "checkpoint", "step_index": 10, "title": "Composer focus gained", "ts_wall": 1783131566}
 {"action": "input composer received pointer down", "code": "input:focus-attempt", "display_x": 2519.0, "display_y": 267.0, "expected_visual": "keyboard focus should move to composer", "status": "checkpoint", "step_index": 10, "title": "Composer pointer down", "ts_wall": 1783131566}
   [grpc] Tile root set; server root_id=860ff36608ab824e...

@@ -22,7 +22,7 @@ Hardware confirmed (2026-04-25):
 | GPU | NVIDIA GeForce RTX 3080 (10 GB) |
 | Driver | 595.97 |
 | CUDA | 13.2 |
-| Network | Tailnet (`parrot-hen.ts.net`) |
+| Network | Tailnet (`windows-host.example`) |
 | OS | Windows (see §2) |
 
 This hardware **exceeds** the original RTX 4060-class procurement bar for the
@@ -567,10 +567,10 @@ If you need to verify or troubleshoot D18 remotely via SSH:
 ```bash
 # Public key auth for user admin-user (or hud-user)
 # Must use explicit identity: -i ~/.ssh/hud-ssh-key
-ssh -i ~/.ssh/hud-ssh-key admin-user@parrot-hen.ts.net
+ssh -i ~/.ssh/hud-ssh-key admin-user@windows-host.example
 
 # SCP with explicit identity
-scp -i ~/.ssh/hud-ssh-key <file> admin-user@parrot-hen.ts.net:C:/path/
+scp -i ~/.ssh/hud-ssh-key <file> admin-user@windows-host.example:C:/path/
 ```
 
 Default SSH identity resolution fails for this host. Always pass `-i ~/.ssh/hud-ssh-key`

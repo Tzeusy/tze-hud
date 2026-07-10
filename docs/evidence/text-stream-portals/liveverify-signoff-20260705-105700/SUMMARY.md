@@ -1,7 +1,7 @@
 # Live owner visual sign-off pass — text-stream portal (tzehouse)
 
 Date: 2026-07-05
-Host: tzehouse-windows.parrot-hen.ts.net (real GPU, overlay mode)
+Host: windows-host.example (real GPU, overlay mode)
 Build: C:\tze_hud\tze_hud.exe LastWriteTime 2026-07-04 14:43 (round5 build)
 Driver: text_stream_portal_exemplar.py (has #1010 lease renewal: renew_lease + 0.75-TTL loop)
 Config change (reversible, backed up to tze_hud.toml.pre-telemetry.bak):

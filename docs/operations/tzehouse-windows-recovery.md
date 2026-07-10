@@ -1,6 +1,6 @@
 # TzeHouse Windows Recovery Runbook
 
-Reference host: `windows-host.example` / `100.87.181.125`
+Reference host: `windows-host.example` / `198.51.100.1`
 
 This runbook is for restoring the Windows HUD reference host before `/user-test`
 validation, strict smoke, or the 60-minute Windows soak. It contains no secrets.
@@ -12,7 +12,7 @@ Synology-mediated command that can power on or wake the Windows machine remotely
 When the Windows node is offline in Tailscale and SSH port `22` times out, the
 supported recovery route is manual/operator action on the Windows host.
 
-The adjacent `tzehouse-synology.parrot-hen.ts.net` node may be online while
+The adjacent `proxmox-host.example` node may be online while
 Windows is offline, but that is not by itself a supported recovery path unless an
 operator supplies and documents a no-secret Wake-on-LAN or equivalent procedure.
 

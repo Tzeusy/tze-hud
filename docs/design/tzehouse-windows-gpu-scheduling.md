@@ -10,7 +10,7 @@
 
 ## 1. Problem Statement
 
-The tzehouse-windows box (`parrot-hen.ts.net`, RTX 3080) is dual-use:
+The tzehouse-windows box (`windows-host.example`, RTX 3080) is dual-use:
 
 | Workload | GPU use | Trigger |
 |---|---|---|

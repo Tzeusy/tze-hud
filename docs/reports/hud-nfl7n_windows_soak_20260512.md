@@ -1,7 +1,7 @@
 # hud-nfl7n Windows Soak Evidence - 2026-05-12
 
 Issue: `hud-nfl7n`
-Host: `TzeHouse` (`windows-host.example`, `100.87.181.125`)
+Host: `TzeHouse` (`windows-host.example`, `198.51.100.1`)
 Runtime config: `C:\tze_hud\benchmark.toml` via `TzeHudBenchmarkOverlay`
 
 ## Verdict

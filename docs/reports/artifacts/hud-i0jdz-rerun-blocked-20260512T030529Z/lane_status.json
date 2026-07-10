@@ -20,15 +20,15 @@
     "tailscale_ping": {
       "command": "timeout 12 tailscale ping -c 1 windows-host.example",
       "exit_code": 0,
-      "stdout": "pong from tzehouse-windows (100.87.181.125) via [2406:3003:2001:183a:9199:e0f6:eee:31f8]:41641 in 6ms"
+      "stdout": "pong from tzehouse-windows (198.51.100.1) via [2406:3003:2001:183a:9199:e0f6:eee:31f8]:41641 in 6ms"
     },
     "tailscale_status": {
       "online": true,
       "host_name": "TzeHouse",
       "dns_name": "windows-host.example.",
       "tailscale_ips": [
-        "100.87.181.125",
-        "fd7a:115c:a1e0:ab12:4843:cd96:6257:b57d"
+        "198.51.100.1",
+        "2001:db8::57:b57d"
       ]
     },
     "ssh_admin-user": {
