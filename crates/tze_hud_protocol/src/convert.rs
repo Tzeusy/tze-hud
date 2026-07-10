@@ -1494,6 +1494,10 @@ pub fn proto_to_widget_registry_snapshot(
 ///   jump-to-latest pill badge count; `0` clears it).
 /// - `AddNode` → [`SceneGraph::add_node_to_tile_checked`] (the composer hit
 ///   region, present only when interaction is enabled).
+/// - `SetPortalSurface` → [`SceneGraph::set_portal_surface`] (the one-time
+///   first-class 8-part surface declaration, hud-rpm9s).
+/// - `UpdatePortalSurfaceState` → [`SceneGraph::update_portal_surface_state`]
+///   (the per-render coalescible lifecycle/display patch, hud-rpm9s).
 ///
 /// Tile geometry (`PublishToTile.bounds`) is intentionally NOT applied: the
 /// in-process driver owns tile placement and scroll geometry (it sizes the tile
@@ -1639,11 +1643,63 @@ pub fn apply_portal_render_batch_to_scene(
                     }
                 }
             }
-            // `ResidentGrpcPortalAdapter::render_batch` is the SOLE producer of the
-            // batches reaching here and emits only the five variants matched above.
-            // Any other variant is silently ignored: if render_batch ever grows a
-            // new variant, add an explicit arm here (and a paint assertion in
-            // `drain_paints_published_transcript_onto_tile`) so it is not dropped.
+            // ── First-class portal surface (RFC 0013 §7.2 promotion; hud-rpm9s) ──
+            //
+            // The cooperative adapter drives the promoted portal through the
+            // first-class surface API in addition to the raw-tile assembly above:
+            // a one-time `SetPortalSurface` declares the governed 8-part descriptor
+            // (Transactional, structural) and a per-render `UpdatePortalSurfaceState`
+            // patches lifecycle/display (coalescible StateStream). Applied here so
+            // the in-process driver path reaches parity with the wire path, which
+            // already decodes these variants (session_server/mutations.rs).
+            Some(Mutation::SetPortalSurface(sps)) => {
+                let Some(surface_proto) = sps.surface.as_ref() else {
+                    tracing::warn!(
+                        "portal in-process apply: SetPortalSurface missing surface; skipped"
+                    );
+                    continue;
+                };
+                match proto_portal_surface_to_scene(surface_proto) {
+                    Ok(surface) => {
+                        if let Err(e) = scene.set_portal_surface(tile_id, surface, namespace) {
+                            tracing::warn!(
+                                ?e,
+                                "portal in-process apply: SetPortalSurface failed — \
+                                 surface not declared"
+                            );
+                        }
+                    }
+                    Err(reason) => {
+                        tracing::warn!(
+                            %reason,
+                            "portal in-process apply: SetPortalSurface invalid surface; skipped"
+                        );
+                    }
+                }
+            }
+            Some(Mutation::UpdatePortalSurfaceState(ups)) => {
+                // Coalescible patch: UNSPECIFIED wire values decode to `None`
+                // (leave-unchanged). A missing surface (patch before the one-time
+                // declaration) is benign — logged and skipped, mirroring the
+                // wire path's per-variant warn-and-skip.
+                let lifecycle = proto_portal_lifecycle_to_scene(ups.lifecycle);
+                let display_state = proto_portal_display_state_to_scene(ups.display_state);
+                if let Err(e) =
+                    scene.update_portal_surface_state(tile_id, lifecycle, display_state, namespace)
+                {
+                    tracing::warn!(
+                        ?e,
+                        "portal in-process apply: UpdatePortalSurfaceState skipped"
+                    );
+                }
+            }
+            // `ResidentGrpcPortalAdapter::render_batch{,_with_surface}` is the SOLE
+            // producer of the batches reaching here (raw-tile content, the
+            // lifecycle accent, unread-count, and the first-class surface
+            // mutations above). Any other variant is silently ignored: if it ever
+            // grows a new variant, add an explicit arm here (and a paint assertion
+            // in `drain_paints_published_transcript_onto_tile`) so it is not
+            // dropped.
             _ => {}
         }
     }

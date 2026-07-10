@@ -1849,7 +1849,7 @@ impl InProcessPortalDriver {
                             // exists) the adapter renders the content batch and we
                             // apply it directly to the scene — the same content the
                             // gRPC family publishes over the wire.
-                            match entry.adapter.render_batch(&state, now_us) {
+                            match entry.adapter.render_batch_with_surface(&state, now_us) {
                                 Ok(batch) => {
                                     tze_hud_protocol::convert::apply_portal_render_batch_to_scene(
                                         scene,
@@ -1916,7 +1916,7 @@ impl InProcessPortalDriver {
                     // gRPC family publishes over the wire; we apply it directly to
                     // the scene. The geometry/scroll tracking below is preserved —
                     // it consumes the same `update` for follow-tail accounting.
-                    match entry.adapter.render_batch(&state, now_us) {
+                    match entry.adapter.render_batch_with_surface(&state, now_us) {
                         Ok(batch) => {
                             tze_hud_protocol::convert::apply_portal_render_batch_to_scene(
                                 scene,
@@ -2179,7 +2179,7 @@ impl InProcessPortalDriver {
             let Some(tile_scene_id) = entry.tile_scene_id else {
                 continue;
             };
-            match entry.adapter.render_batch(&state, now_us) {
+            match entry.adapter.render_batch_with_surface(&state, now_us) {
                 Ok(batch) => {
                     tze_hud_protocol::convert::apply_portal_render_batch_to_scene(
                         scene,
@@ -2319,7 +2319,7 @@ impl InProcessPortalDriver {
             let Some(tile_scene_id) = entry.tile_scene_id else {
                 continue;
             };
-            match entry.adapter.render_batch(&state, now_us) {
+            match entry.adapter.render_batch_with_surface(&state, now_us) {
                 Ok(batch) => {
                     tze_hud_protocol::convert::apply_portal_render_batch_to_scene(
                         scene,
@@ -3892,6 +3892,122 @@ mod tests {
             }
             other => panic!("after render drain: expected TextMarkdown tile root, got {other:?}"),
         }
+    }
+
+    /// Migration guard (hud-rpm9s): the in-process cooperative driver declares
+    /// the FIRST-CLASS portal surface onto the tile (not only raw tiles). After
+    /// the create drain, `scene.portal_surface(tile_id)` must resolve to the
+    /// governed descriptor — proving the driver applied the `SetPortalSurface`
+    /// declaration (and `UpdatePortalSurfaceState` patch) through
+    /// `apply_portal_render_batch_to_scene`'s new arms, in parity with the wire
+    /// path. The raw-tile content root must ALSO still be painted (escape hatch).
+    #[test]
+    fn drain_declares_first_class_portal_surface_on_tile() {
+        use tze_hud_projection::{AdapterGeometrySnapshot, AdapterPortalRect, ProjectionBounds};
+
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("test_surface_decl"),
+            drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
+        };
+
+        let (attach_tx, mut attach_rx) =
+            tokio::sync::oneshot::channel::<Result<String, PortalOpRejection>>();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: "surface-proj".to_string(),
+            display_name: "Surface Projection".to_string(),
+            idempotency_key: None,
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
+            reply: attach_tx,
+        });
+        let owner_token = attach_rx
+            .try_recv()
+            .expect("reply must be sent synchronously")
+            .expect("Attach must be accepted");
+
+        let (pub_tx, mut pub_rx) = tokio::sync::oneshot::channel::<Result<(), PortalOpRejection>>();
+        driver.dispatch_portal_op(PortalOp::PublishOutput {
+            projection_id: "surface-proj".to_string(),
+            owner_token,
+            output_text: "hello surface".to_string(),
+            logical_unit_id: None,
+            output_kind: None,
+            content_classification: None,
+            coalesce_key: None,
+            expects_reply: None,
+            reply: pub_tx,
+        });
+        pub_rx
+            .try_recv()
+            .expect("publish reply must be sent synchronously")
+            .expect("PublishOutput must be accepted");
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+        driver.authority_mut().push_geometry_snapshot(
+            "surface-proj",
+            AdapterGeometrySnapshot {
+                rect: AdapterPortalRect {
+                    x_px: 0,
+                    y_px: 0,
+                    width_px: 600,
+                    height_px: 200,
+                },
+                gesture_active: false,
+                sequence: 1,
+            },
+        );
+
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+
+        let tile_id = driver
+            .drive
+            .entries
+            .get("surface-proj")
+            .expect("drive entry must exist")
+            .tile_scene_id
+            .expect("drain must create a portal tile");
+
+        // The first-class surface descriptor must be declared on the tile.
+        let surface = scene
+            .portal_surface(tile_id)
+            .expect("drain must declare a first-class portal surface on the tile");
+        assert!(
+            surface
+                .parts
+                .iter()
+                .any(|p| p.kind == tze_hud_scene::types::PortalPartKind::Frame),
+            "declared surface must carry the Frame part"
+        );
+        assert_eq!(
+            surface.display_state,
+            tze_hud_scene::types::PortalDisplayState::Expanded,
+            "an expanded portal must declare an Expanded display state"
+        );
+
+        // Escape hatch: the raw-tile content root must still be painted.
+        assert!(
+            scene
+                .tiles
+                .get(&tile_id)
+                .expect("tile exists")
+                .root_node
+                .is_some(),
+            "raw-tile content root must still be painted alongside the surface"
+        );
     }
 
     /// Unit guard for the redaction/zero semantics of the unread-count carry
