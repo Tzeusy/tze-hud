@@ -90,14 +90,6 @@ const PORTAL_ACTIVITY_MARKER_LINE: &str = "⋯ writing";
 /// sync. Ambient, not alarming.
 const PORTAL_STREAMING_CURSOR_GLYPH: &str = " ▍";
 
-/// Layout height (px) of the header band declared as the first-class surface's
-/// `Header` part (hud-rpm9s). Layout geometry, NOT a visual style token: it
-/// mirrors the runtime's `portal.header.drag_band_px` default
-/// ([`tze_hud_scene::types::PORTAL_HEADER_DRAG_BAND_PX_DEFAULT`]) so the declared
-/// header part lines up with the compositor's header/drag band. Clamped to the
-/// surface height for a very short portal.
-const PORTAL_SURFACE_HEADER_BAND_PX: f32 = 52.0;
-
 /// Map the projected portal's redaction-gated lifecycle to the first-class
 /// [`proto::PortalLifecycleStateProto`] i32 (hud-rpm9s).
 ///
@@ -468,6 +460,22 @@ pub struct PortalVisualTokens {
     /// `SetTileLifecycleAccent` overlay state the compositor paints from, so the
     /// adapter holds no literal accent dimension. Token: `portal.lifecycle.accent_width_px`.
     pub lifecycle_accent_width_px: f32,
+
+    // Spatial rhythm (structured per-part layout geometry, hud-zn6yw).
+    //
+    // Layout geometry, NOT visual style: these size the declared `Header` and
+    // inter-section gap of the first-class `PortalSurface` parts (see
+    // `portal_surface_proto`). Resolved from `portal.spacing.*` design tokens so
+    // the adapter holds no literal layout dimension (doctrine: no hardcoded values
+    // in the compositor/adapter). Consumed only by the descriptor's part bounds;
+    // the drag-band affordance height is a SEPARATE concern governed by
+    // `portal.header.drag_band_px` (see `widget_geometry::collect_drag_handle_entries`).
+    /// Height (px) of the declared `Header` part strip. Source token:
+    /// `portal.spacing.header_height_px`.
+    pub header_height_px: f32,
+    /// Vertical gap (px) inserted between stacked portal sections (Header →
+    /// Transcript). Source token: `portal.spacing.section_gap_px`.
+    pub section_gap_px: f32,
 
     // Collapsed card (collapsed presentation)
     pub collapsed_background: proto::Rgba,
@@ -1374,7 +1382,23 @@ impl ResidentGrpcPortalAdapter {
                 ));
             }
             ProjectedPortalPresentation::Expanded => {
-                let header_h = PORTAL_SURFACE_HEADER_BAND_PX.min(full.height);
+                // Header strip height + inter-section gap are resolved from the
+                // `portal.spacing.*` design tokens (hud-zn6yw), never hardcoded.
+                // The header occupies [0, header_h]; a `section_gap` band follows;
+                // the transcript takes the remaining height below it. Both are
+                // clamped so a short surface degrades gracefully (header, then gap,
+                // then whatever transcript height remains — never negative).
+                let header_h = self
+                    .visual_tokens
+                    .header_height_px
+                    .max(0.0)
+                    .min(full.height);
+                let section_gap = self
+                    .visual_tokens
+                    .section_gap_px
+                    .max(0.0)
+                    .min((full.height - header_h).max(0.0));
+                let transcript_y = header_h + section_gap;
                 parts.push(part(
                     proto::PortalPartKindProto::PortalPartKindHeader,
                     proto::Rect {
@@ -1388,9 +1412,9 @@ impl ResidentGrpcPortalAdapter {
                     proto::PortalPartKindProto::PortalPartKindTranscript,
                     proto::Rect {
                         x: 0.0,
-                        y: header_h,
+                        y: transcript_y,
                         width: full.width,
-                        height: (full.height - header_h).max(0.0),
+                        height: (full.height - transcript_y).max(0.0),
                     },
                 ));
                 if state.interaction_enabled {
@@ -2730,6 +2754,8 @@ pub fn portal_visual_tokens_from_part_tokens(
             a: part.lifecycle_inactive_color.a,
         },
         lifecycle_accent_width_px: part.lifecycle_accent_width_px,
+        header_height_px: part.header_height_px,
+        section_gap_px: part.section_gap_px,
         collapsed_background: proto::Rgba {
             r: part.collapsed_background.r,
             g: part.collapsed_background.g,
@@ -2818,6 +2844,21 @@ mod tests {
             Some(M::SetPortalSurface(sps)) => sps.surface.as_ref(),
             _ => None,
         })
+    }
+
+    /// Borrow the bounds of the surface's declared part of the given kind
+    /// (panics if absent — the caller asserts presence by kind).
+    fn part_of(
+        surface: &proto::PortalSurfaceProto,
+        kind: proto::PortalPartKindProto,
+    ) -> proto::Rect {
+        surface
+            .parts
+            .iter()
+            .find(|p| p.kind == kind as i32)
+            .unwrap_or_else(|| panic!("surface must declare a {kind:?} part"))
+            .bounds
+            .expect("declared part must carry bounds")
     }
 
     fn has_publish_to_tile(batch: &session_proto::MutationBatch) -> bool {
@@ -2990,6 +3031,121 @@ mod tests {
         // The whole descriptor must satisfy the scene-side structural contract.
         proto_portal_surface_to_scene(&surface)
             .expect("declared surface must pass scene structural validation");
+    }
+
+    /// hud-zn6yw: the declared `Header` part height and the Header→Transcript
+    /// section gap are resolved from the `portal.spacing.*` tokens carried on
+    /// `PortalVisualTokens`, not from a hardcoded constant. At the canonical
+    /// default tokens (`header_height_px` = 28, `section_gap_px` = 8) the header
+    /// strip is 28px, the transcript starts at 28 + 8 = 36, and the transcript
+    /// takes the remaining surface height. (The previous hardcoded 52px band is
+    /// reconciled away; see the PR body — no visual regression because the
+    /// resident-gRPC adapter declares parts with empty nodes, so these bounds are
+    /// descriptive metadata, not yet a pixel-driving materialized layout.)
+    #[test]
+    fn portal_surface_header_and_gap_honor_default_spacing_tokens() {
+        let config = ResidentGrpcPortalConfig::new(vec![3u8; 16]);
+        let mut adapter = ResidentGrpcPortalAdapter::new(config);
+        adapter.record_created_tile(vec![4u8; 16]);
+        let state = make_expanded_interaction_state("portal-spacing-default");
+
+        let surface = match adapter
+            .portal_surface_declaration_mutation(&state)
+            .expect("declaration must succeed once tile recorded")
+            .mutation
+        {
+            Some(M::SetPortalSurface(sps)) => sps.surface.expect("surface present"),
+            other => panic!("expected SetPortalSurface, got {other:?}"),
+        };
+        let full_h = DEFAULT_EXPANDED_H;
+
+        let header = part_of(&surface, proto::PortalPartKindProto::PortalPartKindHeader);
+        let transcript = part_of(
+            &surface,
+            proto::PortalPartKindProto::PortalPartKindTranscript,
+        );
+        assert_eq!(header.height, 28.0, "header height honors header_height_px");
+        assert_eq!(header.y, 0.0);
+        assert_eq!(
+            transcript.y, 36.0,
+            "transcript starts below the header + section gap (28 + 8)"
+        );
+        assert_eq!(
+            transcript.height,
+            full_h - 36.0,
+            "transcript takes the remaining surface height"
+        );
+    }
+
+    /// hud-zn6yw: overriding the spacing tokens moves the declared part bounds in
+    /// lock-step — a taller header + wider gap pushes the transcript down and
+    /// shrinks it by the same amount, proving the geometry is genuinely
+    /// token-driven rather than constant.
+    #[test]
+    fn portal_surface_header_and_gap_track_token_overrides() {
+        let tokens = PortalVisualTokens {
+            header_height_px: 40.0,
+            section_gap_px: 12.0,
+            ..PortalVisualTokens::default()
+        };
+
+        let config = ResidentGrpcPortalConfig::new(vec![3u8; 16]);
+        let mut adapter = ResidentGrpcPortalAdapter::with_tokens(config, tokens);
+        adapter.record_created_tile(vec![4u8; 16]);
+        let state = make_expanded_interaction_state("portal-spacing-override");
+
+        let surface = match adapter
+            .portal_surface_declaration_mutation(&state)
+            .expect("declaration must succeed once tile recorded")
+            .mutation
+        {
+            Some(M::SetPortalSurface(sps)) => sps.surface.expect("surface present"),
+            other => panic!("expected SetPortalSurface, got {other:?}"),
+        };
+        let full_h = DEFAULT_EXPANDED_H;
+
+        let header = part_of(&surface, proto::PortalPartKindProto::PortalPartKindHeader);
+        let transcript = part_of(
+            &surface,
+            proto::PortalPartKindProto::PortalPartKindTranscript,
+        );
+        assert_eq!(header.height, 40.0, "header height tracks the override");
+        assert_eq!(
+            transcript.y, 52.0,
+            "transcript starts below header(40) + gap(12)"
+        );
+        assert_eq!(transcript.height, full_h - 52.0);
+    }
+
+    /// hud-zn6yw: the `portal.spacing.header_height_px` / `section_gap_px` design
+    /// tokens flow through `portal_visual_tokens_from_part_tokens` onto
+    /// `PortalVisualTokens`, so a profile token-map override reaches the layout.
+    #[test]
+    fn portal_visual_tokens_map_spacing_geometry() {
+        use tze_hud_config::{
+            PORTAL_TOKEN_SPACING_HEADER_HEIGHT_PX, PORTAL_TOKEN_SPACING_SECTION_GAP_PX,
+            resolve_portal_tokens, tokens::DesignTokenMap,
+        };
+
+        // Defaults map through unchanged.
+        let default_visual =
+            portal_visual_tokens_from_part_tokens(&resolve_portal_tokens(&DesignTokenMap::new()));
+        assert_eq!(default_visual.header_height_px, 28.0);
+        assert_eq!(default_visual.section_gap_px, 8.0);
+
+        // A profile override propagates onto PortalVisualTokens.
+        let mut overrides = DesignTokenMap::new();
+        overrides.insert(
+            PORTAL_TOKEN_SPACING_HEADER_HEIGHT_PX.to_string(),
+            "44".to_string(),
+        );
+        overrides.insert(
+            PORTAL_TOKEN_SPACING_SECTION_GAP_PX.to_string(),
+            "16".to_string(),
+        );
+        let overridden = portal_visual_tokens_from_part_tokens(&resolve_portal_tokens(&overrides));
+        assert_eq!(overridden.header_height_px, 44.0);
+        assert_eq!(overridden.section_gap_px, 16.0);
     }
 
     /// A collapsed portal declares a `CollapsedCard` part and a `Collapsed`
