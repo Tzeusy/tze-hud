@@ -443,6 +443,14 @@ impl SceneGraph {
         // (hud-tc153 review P2).
         self.revalidate_portal_surface_part_nodes(tile_id);
 
+        // Node-bounds authority after a viewer whole-portal resize (hud-rpmwt):
+        // if the viewer has taken geometry authority over this tile, reconcile the
+        // just-published root subtree to the tile's resized bounds so an adapter's
+        // stale-wide content cannot re-home the transcript back to its attach-time
+        // wrap width. Scoped to viewer-locked tiles, so ordinary agent tiles are
+        // untouched. See `reconcile_locked_subtree_to_tile_bounds`.
+        self.reconcile_locked_subtree_to_tile_bounds(tile_id, node_id);
+
         self.version += 1;
         Ok(())
     }
@@ -549,6 +557,16 @@ impl SceneGraph {
         }
 
         self.insert_node_tree(&node);
+
+        // Node-bounds authority (hud-rpmwt): a portal render batch adds the
+        // composer hit region as a separate `AddNode` after the transcript root,
+        // so reconcile this newly-added subtree to the tile too — otherwise, on a
+        // viewer-locked (resized) tile, a child published at stale attach-time
+        // bounds keeps stale wrap / hit geometry while only the root was scaled.
+        // Order-independent and no-double-scale (a subtree already tracking the
+        // tile is skipped). Scoped to viewer-locked tiles.
+        self.reconcile_locked_subtree_to_tile_bounds(tile_id, node_id);
+
         self.version += 1;
         Ok(())
     }

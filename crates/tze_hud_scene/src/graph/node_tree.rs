@@ -31,6 +31,100 @@ impl SceneGraph {
         self.hit_region_states.remove(&node_id);
     }
 
+    /// Scale a viewer-locked tile's freshly-published subtree (rooted at
+    /// `subtree_root`) so its tile-local extent tracks the tile's viewer-defined
+    /// content bounds (hud-rpmwt).
+    ///
+    /// Once the viewer takes geometry authority over a portal member via a
+    /// whole-portal resize (`is_viewer_geometry_locked`), the tile-bounds lock
+    /// (hud-lyqun) already ignores adapter-originated `UpdateTileBounds`. But a
+    /// content republish rebuilds the node tree — `set_tile_root` installs the
+    /// transcript, then a separate `AddNode` attaches the composer hit region —
+    /// and the compositor wraps `TextMarkdownNode` text to `node.bounds.width`
+    /// and clips to `tile.bounds`. An adapter that republishes its stale
+    /// attach-time (config) node geometry would therefore re-home the content
+    /// back to the old width — overflowing the resized pane *unclipped* and
+    /// wrapping at the stale width (the exact hud-rpmwt live repro). Reconciling
+    /// each published subtree to the tile bounds — the same scaling
+    /// `scale_tile_node_tree` applies at resize time — makes the tile the single
+    /// wrap-width / hit-geometry authority after a viewer resize.
+    ///
+    /// Called per republished subtree (the [`set_tile_root`] root AND each later
+    /// `add_node_to_tile` child), because both may arrive in one batch and the
+    /// `AddNode` child is not present when the root is installed. Every portal
+    /// node is published tile-filling in the adapter's (possibly stale)
+    /// coordinate space, so each subtree is reconciled independently by its own
+    /// `tile / published-extent` ratio: order-independent and free of
+    /// double-scaling — a subtree already tracking the tile scales by ~1.0 and is
+    /// skipped. Scoped to viewer-locked tiles, so ordinary agent tiles are
+    /// untouched.
+    ///
+    /// Node bounds are tile-local; scaling (not clamping) preserves relative
+    /// child layout, matching the resize path. A no-op when the tile is not
+    /// viewer-locked, when the subtree already tracks the tile, or when either
+    /// the subtree root or the tile has a non-positive extent (NaN-safe: the
+    /// positive-form guards reject non-finite values, so no infinity/NaN reaches
+    /// the scaling walk).
+    ///
+    /// [`set_tile_root`]: SceneGraph::set_tile_root
+    pub(super) fn reconcile_locked_subtree_to_tile_bounds(
+        &mut self,
+        tile_id: SceneId,
+        subtree_root: SceneId,
+    ) {
+        if !self.is_viewer_geometry_locked(tile_id) {
+            return;
+        }
+        let Some(tile_bounds) = self.tiles.get(&tile_id).map(|t| t.bounds) else {
+            return;
+        };
+        let Some(root_bounds) = self.nodes.get(&subtree_root).map(|n| n.data.bounds()) else {
+            return;
+        };
+        // Accept only finite, strictly-positive extents. Rejecting NaN here means
+        // the division below never yields an infinity, and the ratio guard below
+        // stays a plain method-call negation (no partial-ord comparison).
+        let finite_positive = |v: f32| v.is_finite() && v > 0.0;
+        if !finite_positive(root_bounds.width) || !finite_positive(root_bounds.height) {
+            return;
+        }
+        let r_w = tile_bounds.width / root_bounds.width;
+        let r_h = tile_bounds.height / root_bounds.height;
+        // Reject a degenerate tile extent (non-positive / non-finite ratio) —
+        // leave the subtree untouched rather than collapse or invert it.
+        if !finite_positive(r_w) || !finite_positive(r_h) {
+            return;
+        }
+        // Adapter already published resize-aware bounds → nothing to reconcile.
+        // Guards against needless float churn and a tree walk on the common path.
+        if (r_w - 1.0).abs() < f32::EPSILON && (r_h - 1.0).abs() < f32::EPSILON {
+            return;
+        }
+        // Collect the subtree ids with an immutable walk first, then mutate —
+        // mirrors `scale_tile_node_tree` in the runtime resize path so the two
+        // node-scaling sites stay behaviourally identical. The tree is small
+        // (≤ MAX_NODES_PER_TILE) and republish is a coalesced state-stream event,
+        // not a hot loop.
+        let mut stack = vec![subtree_root];
+        let mut ids = Vec::new();
+        while let Some(id) = stack.pop() {
+            let Some(node) = self.nodes.get(&id) else {
+                continue;
+            };
+            ids.push(id);
+            stack.extend(node.children.iter().copied());
+        }
+        for id in ids {
+            if let Some(node) = self.nodes.get_mut(&id) {
+                let b = node.data.bounds_mut();
+                b.x *= r_w;
+                b.y *= r_h;
+                b.width *= r_w;
+                b.height *= r_h;
+            }
+        }
+    }
+
     pub(crate) fn remove_tile_and_nodes(&mut self, tile_id: SceneId) {
         if let Some(tile) = self.tiles.remove(&tile_id)
             && let Some(root_id) = tile.root_node
