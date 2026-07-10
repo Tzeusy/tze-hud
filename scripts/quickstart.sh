@@ -12,8 +12,9 @@
 #   3. Generates a strong random PSK if none is set, and persists it to
 #      `tze_hud.psk` (chmod 600) so re-runs are stable.
 #   4. Prints the ATTACH INFO block: the MCP endpoint URL, the resident-principal
-#      rule, and a ready-to-paste MCP `settings.json` snippet — the discovery
-#      surface the runtime does not (yet) print on stdout itself.
+#      rule, and a ready-to-paste MCP `settings.json` snippet — by delegating to
+#      the runtime's own `tze_hud --print-attach-info` flag so there is a single
+#      source of truth (a built-in fallback covers a not-yet-built binary).
 #   5. Launches the runtime (unless --print-attach-info / --no-launch).
 #
 # Doctrine: cooperative opt-in projection; the screen-sovereign runtime owns the
@@ -98,18 +99,25 @@ if [[ "$DO_BUILD" == "1" ]]; then
   # Adopt the freshly built release target only if the user didn't pin --bin
   # (an explicit --bin is honoured after the build rather than silently replaced).
   if [[ "$USER_BIN" == "0" ]]; then BIN_PATH="${REPO_ROOT}/target/release/tze_hud"; fi
-elif [[ -z "$BIN_PATH" ]]; then
-  warn "No prebuilt tze_hud binary found under target/{release,debug}/."
-  warn "Build it first:  cargo build --bin tze_hud --release"
-  warn "or re-run:       scripts/quickstart.sh --build"
-  exit 2
 fi
-if [[ ! -x "$BIN_PATH" ]]; then
-  warn "tze_hud binary not found or not executable: ${BIN_PATH}"
-  warn "Build it:  cargo build --bin tze_hud --release   (or pass a valid --bin <path>)"
-  exit 2
+
+# A usable binary is REQUIRED to launch, but only OPTIONAL to print the attach
+# block: in --print-attach-info / --no-launch mode the scaffold + PSK + attach
+# discovery are still useful before the first build (the block then comes from
+# the built-in fallback in step 4 instead of `tze_hud --print-attach-info`).
+if [[ -z "$BIN_PATH" || ! -x "$BIN_PATH" ]]; then
+  if [[ "$LAUNCH" == "1" ]]; then
+    warn "No usable tze_hud binary found (looked under target/{release,debug}/ and any --bin)."
+    warn "Build it first:  cargo build --bin tze_hud --release"
+    warn "or re-run:       scripts/quickstart.sh --build"
+    exit 2
+  fi
+  warn "No tze_hud binary yet — scaffolding config + PSK and printing a fallback attach block."
+  warn "Build it (cargo build --bin tze_hud --release) for the authoritative --print-attach-info block."
+  BIN_PATH=""   # signal step 4 to use the fallback rather than a stale/invalid path
+else
+  info "Binary: ${BIN_PATH}"
 fi
-info "Binary: ${BIN_PATH}"
 
 # ── 2. Scaffold a minimal, portal-primary config if absent ────────────────────
 if [[ ! -f "$CONFIG_PATH" ]]; then
@@ -176,41 +184,102 @@ export TZE_HUD_MCP_RESIDENT_PRINCIPAL="$PSK"
 MCP_URL="http://${HOST}:${MCP_PORT}/mcp"
 
 # ── 4. Print the ATTACH INFO discovery block ──────────────────────────────────
-cat <<BANNER
+# Single source of truth: the runtime's own `--print-attach-info` flag
+# (tze_hud_runtime::windowed::render_attach_info, shared with the startup
+# banner). Delegating to the binary means this block can never drift from what
+# the runtime describes. The native flag exits 0 *before* booting — it never
+# starts the compositor — so invoking it here is cheap and safe. It also never
+# prints the PSK value (only placeholders), matching this script's own hygiene.
+#
+# `--host` is display-only in this script; the runtime models exposure as
+# loopback (default) vs all-interfaces, so map HOST=0.0.0.0 to
+# --bind-all-interfaces and leave every other host on the loopback default.
+print_attach_block() {
+  local -a native_args=(
+    --print-attach-info
+    --config "$CONFIG_PATH"
+    --mcp-port "$MCP_PORT"
+    --grpc-port "$GRPC_PORT"
+  )
+  if [[ "$HOST" == "0.0.0.0" ]]; then
+    native_args+=(--bind-all-interfaces)
+  fi
+
+  echo
+  if [[ -x "$BIN_PATH" ]] && "$BIN_PATH" "${native_args[@]}"; then
+    echo
+    return 0
+  fi
+
+  # ── Fallback: binary absent or not yet built (e.g. pre-`--build`) ───────────
+  # Wording/placeholders kept in sync with `render_attach_info` so the two
+  # sources read identically. Never emit the real PSK — placeholders only.
+  warn "tze_hud binary unavailable; printing a built-in fallback attach block."
+  warn "Build it (cargo build --bin tze_hud --release) for the authoritative block."
+  local grpc_line config_line
+  if [[ "$GRPC_PORT" == "0" ]]; then
+    grpc_line=" gRPC         : disabled (--grpc-port 0)"
+  else
+    grpc_line=" gRPC         : ${HOST}:${GRPC_PORT}"
+  fi
+  config_line=" config       : ${CONFIG_PATH}"
+  cat <<BANNER
 
 ────────────────────────────────────────────────────────────────────────────
  tze_hud — ATTACH INFO  (point your LLM session's MCP client here)
 ────────────────────────────────────────────────────────────────────────────
  MCP endpoint : ${MCP_URL}
- Auth bearer  : <your PSK>   (stored in ${PSK_FILE})
- Resident env : TZE_HUD_MCP_RESIDENT_PRINCIPAL = <your PSK>   (already exported)
+${grpc_line}
+${config_line}
 
- The runtime grants the portal_projection_* tools only to a caller that presents
- the PSK as BOTH the resident principal and the MCP bearer. This script already
- exported TZE_HUD_PSK and TZE_HUD_MCP_RESIDENT_PRINCIPAL for the launch below.
+ Auth: every MCP request must send the pre-shared key (PSK) as a bearer token:
+     Authorization: Bearer <your PSK — the value of TZE_HUD_PSK>
 
- MCP client config (e.g. .mcp.json / settings.json), with your PSK substituted:
+ Resident projection (the portal_projection_* tools):
+   The runtime grants the portal_projection_* tools only to a caller whose bearer
+   matches BOTH the configured resident principal AND the PSK. So set the runtime
+   env var TZE_HUD_MCP_RESIDENT_PRINCIPAL EQUAL to your PSK, and send that same PSK
+   as the MCP Authorization: Bearer. PSK auth stays mandatory; this only attaches
+   the resident_mcp capability.
+   (This block never prints the PSK value itself.)
 
+ Paste-ready MCP client config (e.g. .mcp.json / settings.json):
    {
      "mcpServers": {
        "tze-hud-runtime": {
          "type": "url",
          "url": "${MCP_URL}",
-         "headers": { "Authorization": "Bearer <your PSK>" }
+         "headers": {
+           "Authorization": "Bearer <PSK from TZE_HUD_MCP_RESIDENT_PRINCIPAL>"
+         }
        }
      }
    }
 
- Then, in the LLM session, invoke the hud-projection skill and 'attach' — see
- docs/QUICKSTART.md for the copy-paste attach walkthrough.
+ Then, in the LLM session, invoke the \`hud-projection\` skill and 'attach' —
+ see docs/QUICKSTART.md for the full attach walkthrough.
 ────────────────────────────────────────────────────────────────────────────
 
 BANNER
+}
+
+print_attach_block
+
+# This script already exported TZE_HUD_PSK and TZE_HUD_MCP_RESIDENT_PRINCIPAL
+# (both equal to your PSK, stored chmod 600 in ${PSK_FILE}) for the launch below,
+# so you do not need to set them by hand for this session.
 
 if [[ "$LAUNCH" == "0" ]]; then
-  info "--print-attach-info set; not launching. Start the runtime yourself with:"
-  echo "  TZE_HUD_PSK=<psk> TZE_HUD_MCP_RESIDENT_PRINCIPAL=<psk> \\"
-  echo "    ${BIN_PATH} --config ${CONFIG_PATH} --window-mode ${WINDOW_MODE} --mcp-port ${MCP_PORT} --grpc-port ${GRPC_PORT}"
+  if [[ -n "$BIN_PATH" ]]; then
+    info "--print-attach-info set; not launching. Start the runtime yourself with:"
+    echo "  TZE_HUD_PSK=<psk> TZE_HUD_MCP_RESIDENT_PRINCIPAL=<psk> \\"
+    echo "    ${BIN_PATH} --config ${CONFIG_PATH} --window-mode ${WINDOW_MODE} --mcp-port ${MCP_PORT} --grpc-port ${GRPC_PORT}"
+  else
+    info "--print-attach-info set; no binary yet. Build it, then launch:"
+    echo "  cargo build --bin tze_hud --release"
+    echo "  TZE_HUD_PSK=<psk> TZE_HUD_MCP_RESIDENT_PRINCIPAL=<psk> \\"
+    echo "    ./target/release/tze_hud --config ${CONFIG_PATH} --window-mode ${WINDOW_MODE} --mcp-port ${MCP_PORT} --grpc-port ${GRPC_PORT}"
+  fi
   exit 0
 fi
 
