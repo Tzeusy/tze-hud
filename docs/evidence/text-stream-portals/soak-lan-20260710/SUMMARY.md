@@ -3,7 +3,7 @@
 **Result: PASS** — clean full-duration (3600 s) completion with no memory drift.
 
 Date: 2026-07-10
-Target: **hud-windows VM** (vmid 110 on `sentinel.parrot-hen.ts.net` Proxmox) — LAN/tailnet-local, `192.168.4.45:50051` (gRPC) / `:9090` (MCP).
+Target: **hud-windows VM** (vmid 110 on `proxmox-host.example` Proxmox) — LAN/tailnet-local, `windows-vm.example:50051` (gRPC) / `:9090` (MCP).
 Render: WARP software rendering, `--window-mode fullscreen`, scene 1280x800 (no discrete GPU — functional/protocol validation only, not a fidelity/perf run).
 Build: local prebuilt `x86_64-pc-windows-gnu/release/tze_hud.exe` (len 24 627 924), worktree HEAD `345e7c39` (origin/main − 1; all portal fixes through hud-rpmwt present). SCP-deployed to `C:\tze_hud\tze_hud.exe` before the run.
 Driver: `text_stream_portal_exemplar.py` `--phases soak` (has #1010 lease renewal, #1013 authoritative marker, hud-n5bqp bounded mutation-ack retry). Full invocation in `harness-invocation.txt`.
@@ -57,7 +57,7 @@ steady state by ~5 min and stays there:
 ## Artifacts
 
 - `soak.log` — full exemplar stdout (27 988 lines; session, lease grant/renew, per-cycle tile ops, completion).
-- `soak-transcript.jsonl` — structured step transcript.
+- `soak-transcript.json` — structured step transcript.
 - `soak-hud-rss.log` — independent HUD WorkingSet64 series with elapsed timestamps.
 - `soak-markers/soak-complete.marker` — authoritative full-duration completion marker (SOAK_COMPLETE).
 - `harness-invocation.txt` — exact command + environment.
