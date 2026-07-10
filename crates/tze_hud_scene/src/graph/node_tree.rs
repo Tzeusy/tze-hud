@@ -81,16 +81,18 @@ impl SceneGraph {
         let Some(root_bounds) = self.nodes.get(&subtree_root).map(|n| n.data.bounds()) else {
             return;
         };
-        // Positive-form guard rejects zero, negative, AND NaN roots (so the
-        // division below never yields an infinity).
-        if !(root_bounds.width > 0.0) || !(root_bounds.height > 0.0) {
+        // Accept only finite, strictly-positive extents. Rejecting NaN here means
+        // the division below never yields an infinity, and the ratio guard below
+        // stays a plain method-call negation (no partial-ord comparison).
+        let finite_positive = |v: f32| v.is_finite() && v > 0.0;
+        if !finite_positive(root_bounds.width) || !finite_positive(root_bounds.height) {
             return;
         }
         let r_w = tile_bounds.width / root_bounds.width;
         let r_h = tile_bounds.height / root_bounds.height;
         // Reject a degenerate tile extent (non-positive / non-finite ratio) —
         // leave the subtree untouched rather than collapse or invert it.
-        if !(r_w > 0.0) || !(r_h > 0.0) {
+        if !finite_positive(r_w) || !finite_positive(r_h) {
             return;
         }
         // Adapter already published resize-aware bounds → nothing to reconcile.
