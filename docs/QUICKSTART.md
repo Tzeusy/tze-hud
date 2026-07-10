@@ -120,9 +120,13 @@ export TZE_HUD_MCP_RESIDENT_PRINCIPAL="$TZE_HUD_PSK"   # see the note below
   --config tze_hud.toml \
   --window-mode overlay \
   --mcp-port 9090 \
-  --grpc-port 50051 \
-  --psk "$TZE_HUD_PSK"
+  --grpc-port 50051
 ```
+
+> Pass the PSK via the `TZE_HUD_PSK` **environment variable** (as above), not the
+> `--psk` CLI flag. On a multi-user host, argv is world-readable (`ps`,
+> `/proc/<pid>/cmdline`), so a CLI PSK leaks the bearer; the env var is visible
+> only to the process owner.
 
 A window opens. The MCP listener is on `http://127.0.0.1:9090/mcp` (loopback
 only by default — add `--bind-all-interfaces` to expose it on the LAN).

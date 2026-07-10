@@ -53,6 +53,8 @@ docs/operations/private/
 # Isolated worker target dir (hud-nottc)
 /target-nottc/
 
-# First-run quickstart artifacts (scripts/quickstart.sh) — local config + secret PSK
+# First-run quickstart artifacts (scripts/quickstart.sh) — local config + secret PSK.
+# The PSK pattern is unanchored so the secret is ignored no matter which
+# directory quickstart.sh is run from; the (non-secret) config stays root-anchored.
 /tze_hud.toml
-/tze_hud.psk
+tze_hud.psk

@@ -55,10 +55,13 @@ MCP_PORT="9090"
 GRPC_PORT="50051"
 HOST="127.0.0.1"
 BIN_PATH=""
+USER_BIN=0        # 1 when --bin was passed explicitly
 DO_BUILD=0
 LAUNCH=1
 
-usage() { sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; }
+# Print the contiguous leading comment block as help (skip the shebang, stop at
+# the first non-comment line). Robust to header edits — no hardcoded line range.
+usage() { awk 'NR==1 && /^#!/ {next} /^#/ {sub(/^# ?/,""); print; next} {exit}' "$0"; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -69,7 +72,7 @@ while [[ $# -gt 0 ]]; do
     --mcp-port)         MCP_PORT="${2:?--mcp-port requires a value}";        shift 2 ;;
     --grpc-port)        GRPC_PORT="${2:?--grpc-port requires a value}";      shift 2 ;;
     --host)             HOST="${2:?--host requires a value}";                shift 2 ;;
-    --bin)              BIN_PATH="${2:?--bin requires a path}";              shift 2 ;;
+    --bin)              BIN_PATH="${2:?--bin requires a path}"; USER_BIN=1;  shift 2 ;;
     --build)            DO_BUILD=1;                                          shift ;;
     --print-attach-info|--no-launch) LAUNCH=0;                              shift ;;
     -h|--help)          usage; exit 0 ;;
@@ -89,17 +92,17 @@ if [[ -z "$BIN_PATH" ]]; then
   done
 fi
 
-if [[ "$DO_BUILD" == "1" || -z "$BIN_PATH" ]]; then
-  if [[ "$DO_BUILD" == "1" ]]; then
-    info "Building canonical binary: cargo build --bin tze_hud --release"
-    ( cd "$REPO_ROOT" && cargo build --bin tze_hud --release ) || { echo "quickstart: build failed" >&2; exit 3; }
-    BIN_PATH="${REPO_ROOT}/target/release/tze_hud"
-  else
-    warn "No prebuilt tze_hud binary found under target/{release,debug}/."
-    warn "Build it first:  cargo build --bin tze_hud --release"
-    warn "or re-run:       scripts/quickstart.sh --build"
-    exit 2
-  fi
+if [[ "$DO_BUILD" == "1" ]]; then
+  info "Building canonical binary: cargo build --bin tze_hud --release"
+  ( cd "$REPO_ROOT" && cargo build --bin tze_hud --release ) || { echo "quickstart: build failed" >&2; exit 3; }
+  # Adopt the freshly built release target only if the user didn't pin --bin
+  # (an explicit --bin is honoured after the build rather than silently replaced).
+  if [[ "$USER_BIN" == "0" ]]; then BIN_PATH="${REPO_ROOT}/target/release/tze_hud"; fi
+elif [[ -z "$BIN_PATH" ]]; then
+  warn "No prebuilt tze_hud binary found under target/{release,debug}/."
+  warn "Build it first:  cargo build --bin tze_hud --release"
+  warn "or re-run:       scripts/quickstart.sh --build"
+  exit 2
 fi
 if [[ ! -x "$BIN_PATH" ]]; then
   warn "tze_hud binary not found or not executable: ${BIN_PATH}"
@@ -136,8 +139,12 @@ gen_psk() {
   if command -v openssl >/dev/null 2>&1; then
     openssl rand -hex 24
   else
-    # Fallback: 48 hex chars from the kernel CSPRNG.
-    LC_ALL=C tr -dc 'a-f0-9' < /dev/urandom | head -c 48
+    # Fallback: 48 hex chars (24 bytes) from the kernel CSPRNG.
+    # NB: avoid `tr … | head -c 48` — `head` closing the pipe early sends SIGPIPE
+    # to `tr` (exit 141), which under `set -o pipefail` aborts the whole script
+    # before the PSK is written. `dd | od | tr` reads to EOF at every stage, so no
+    # stage closes its input early and the pipeline exits 0. (gemini HIGH / codex P2)
+    dd if=/dev/urandom bs=1 count=24 2>/dev/null | od -An -tx1 | tr -d ' \n'
   fi
 }
 
@@ -208,10 +215,13 @@ if [[ "$LAUNCH" == "0" ]]; then
 fi
 
 # ── 5. Launch the runtime ─────────────────────────────────────────────────────
+# The PSK is passed via the exported TZE_HUD_PSK env var, NOT as a --psk CLI arg:
+# on a multi-user host, argv is world-readable (`ps`, /proc/<pid>/cmdline), so a
+# CLI PSK would leak the bearer (and, since principal==PSK, resident access). The
+# env var is only visible to the process owner. (codex P2)
 info "Launching runtime (Ctrl-C to stop)…"
 exec "$BIN_PATH" \
   --config "$CONFIG_PATH" \
   --window-mode "$WINDOW_MODE" \
   --mcp-port "$MCP_PORT" \
-  --grpc-port "$GRPC_PORT" \
-  --psk "$PSK"
+  --grpc-port "$GRPC_PORT"
