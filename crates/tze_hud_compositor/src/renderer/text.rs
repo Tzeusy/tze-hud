@@ -1425,6 +1425,19 @@ impl super::Compositor {
                 }
             }
 
+            // Transcript-tail streaming cursor (hud-zlq2v): when the node carries
+            // the streaming-cursor tail marker, paint the trailing cursor glyph in
+            // its token-resolved accent at the precise, layout-measured tail of the
+            // latest agent turn. Derived per-render from the marker (which the
+            // adapter emits only while `agent_activity_active`), so it advances with
+            // each streaming publish and clears on quiesce (kbm80) with no separate
+            // per-frame timer. Applied AFTER the reveal fade so a freshly-revealed
+            // tail still shows the cursor accent; a no-op unless the marker is
+            // present, keeping steady tiles byte-identical to the no-cursor path.
+            if let Some(color) = crate::text::markdown_node_tail_cursor_color(tm) {
+                apply_tail_streaming_cursor(&mut item, color);
+            }
+
             items.push(item);
         }
 
@@ -1676,6 +1689,109 @@ fn apply_portal_reveal_fade(
         });
     }
     item.styled_runs = faded.into_boxed_slice();
+}
+
+/// The transcript-tail streaming-cursor glyph (U+258D LEFT THREE EIGHTHS BLOCK).
+///
+/// Mirrors the trailing glyph in `PORTAL_STREAMING_CURSOR_GLYPH` (`" ▍"`) that
+/// `tze_hud_projection::resident_grpc` appends to the streaming transcript body.
+/// Kept in sync with that constant: if the adapter's cursor glyph changes, change
+/// this too (there is no shared crate for the literal).
+const STREAMING_CURSOR_GLYPH: char = '\u{258D}';
+
+/// Byte range of the streaming-cursor glyph at the tail of the latest agent turn,
+/// located in the LAID-OUT (post-markdown-strip) plain text (hud-zlq2v).
+///
+/// Measured against the rendered text — the last occurrence of the cursor glyph —
+/// never against raw-markdown byte arithmetic, so an emphasized or multibyte tail
+/// stays intact. `rfind` returns a char boundary and `len_utf8()` yields the exact
+/// glyph end, so the range is always a valid UTF-8 slice. `None` when the glyph is
+/// absent (cue quiesced, or the tail was truncated away).
+fn tail_cursor_glyph_range(text: &str) -> Option<(usize, usize)> {
+    let start = text.rfind(STREAMING_CURSOR_GLYPH)?;
+    Some((start, start + STREAMING_CURSOR_GLYPH.len_utf8()))
+}
+
+/// Paint the transcript-tail streaming-cursor glyph in its token accent (hud-zlq2v).
+///
+/// Overlays a color-only styled run on exactly the trailing cursor glyph's byte
+/// range (located via [`tail_cursor_glyph_range`] on the laid-out text), so the
+/// cursor renders in `portal.streaming_cursor.color` rather than the transcript
+/// text color. This is the promotion-era replacement for the old byte-0
+/// zero-length sentinel, which the cached-markdown path discarded — the cursor
+/// never actually took its accent before.
+///
+/// Cached-markdown only: like [`apply_portal_reveal_fade`], bail if the item
+/// carries pixel-bearing `color_runs` (the legacy raw-content path uses different
+/// offsets). Existing styled runs (markdown weight/italic/color) are preserved
+/// exactly; only the cursor slice's color is overridden. A no-op when the glyph
+/// is absent, keeping non-streaming tiles byte-identical.
+fn apply_tail_streaming_cursor(item: &mut TextItem, color: [u8; 4]) {
+    use crate::text::StyledRunItem;
+
+    if !item.color_runs.is_empty() {
+        return;
+    }
+    let n = item.text.len();
+    let Some((cur_start, cur_end)) = tail_cursor_glyph_range(&item.text) else {
+        return;
+    };
+
+    // Rebuild styled_runs, splitting at the cursor edges so the accent overlays
+    // exactly the glyph. Slices outside the cursor preserve their original run
+    // (or stay a gap → base color); slices inside get the accent color while
+    // inheriting any weight/italic/monospace so the caret matches its context.
+    let mut bounds: Vec<usize> = Vec::with_capacity(item.styled_runs.len() * 2 + 4);
+    bounds.push(0);
+    bounds.push(n);
+    let mut push_bound = |off: usize| {
+        if off <= n && item.text.is_char_boundary(off) {
+            bounds.push(off);
+        }
+    };
+    push_bound(cur_start);
+    push_bound(cur_end);
+    for run in item.styled_runs.iter() {
+        push_bound(run.start_byte);
+        push_bound(run.end_byte);
+    }
+    bounds.sort_unstable();
+    bounds.dedup();
+
+    let mut rebuilt: Vec<StyledRunItem> = Vec::with_capacity(bounds.len());
+    for win in bounds.windows(2) {
+        let (s, e) = (win[0], win[1]);
+        if s >= e {
+            continue;
+        }
+        // Original run covering `s` (last-writer-wins), if any.
+        let style = item
+            .styled_runs
+            .iter()
+            .rev()
+            .find(|r| r.start_byte <= s && s < r.end_byte);
+        let in_cursor = s >= cur_start && e <= cur_end;
+        if !in_cursor && style.is_none() {
+            // Preserve gaps (base color) — do not synthesize a run.
+            continue;
+        }
+        rebuilt.push(StyledRunItem {
+            start_byte: s,
+            end_byte: e,
+            weight: style.and_then(|r| r.weight),
+            italic: style.map(|r| r.italic).unwrap_or(false),
+            monospace: style.map(|r| r.monospace).unwrap_or(false),
+            color: if in_cursor {
+                Some(color)
+            } else {
+                style.and_then(|r| r.color)
+            },
+            background_color: style.and_then(|r| r.background_color),
+            size_scale: style.and_then(|r| r.size_scale),
+            fill_line_width: false,
+        });
+    }
+    item.styled_runs = rebuilt.into_boxed_slice();
 }
 
 /// Collect [`TextItem`]s for all `TextOverflow::Ellipsis` nodes reachable from
@@ -1976,6 +2092,132 @@ mod portal_reveal_render_tests {
             format!("{:?}", item.styled_runs),
             format!("{:?}", after.styled_runs),
             "settled reveal must not alter styled runs"
+        );
+    }
+
+    // ── Transcript-tail streaming cursor (hud-zlq2v) ──────────────────────────
+
+    use super::{apply_tail_streaming_cursor, tail_cursor_glyph_range};
+    use crate::text::markdown_node_tail_cursor_color;
+
+    /// sRGB color of the styled run covering `byte`, or `None` if uncovered.
+    fn color_at(item: &TextItem, byte: usize) -> Option<[u8; 4]> {
+        item.styled_runs
+            .iter()
+            .rev()
+            .find(|r| r.start_byte <= byte && byte < r.end_byte)
+            .and_then(|r| r.color)
+    }
+
+    /// The cursor byte range is located on the LAID-OUT text and is multibyte /
+    /// grapheme safe: it targets the LAST `▍`, spans exactly its 3 UTF-8 bytes,
+    /// and never splits an adjacent multibyte glyph.
+    #[test]
+    fn tail_cursor_glyph_range_is_multibyte_safe() {
+        // Multibyte content before the cursor; a trailing space then the glyph.
+        let text = "héllo 世界 ▍";
+        let (s, e) = tail_cursor_glyph_range(text).expect("glyph present");
+        assert_eq!(&text[s..e], "▍", "range covers exactly the cursor glyph");
+        assert_eq!(e - s, "▍".len(), "range is the glyph's 3 UTF-8 bytes");
+        assert!(text.is_char_boundary(s) && text.is_char_boundary(e));
+        // Absent glyph → None (quiesced tail).
+        assert_eq!(tail_cursor_glyph_range("no cursor here"), None);
+        // The LAST occurrence wins if the agent text itself contains a `▍`.
+        let two = "a ▍ mid b ▍";
+        let (s2, _) = tail_cursor_glyph_range(two).unwrap();
+        assert_eq!(s2, two.rfind('▍').unwrap(), "targets the tail-most glyph");
+    }
+
+    /// `markdown_node_tail_cursor_color` recognizes ONLY a content-end zero-length
+    /// marker (never the byte-0 sentinels) and returns its token color.
+    #[test]
+    fn tail_cursor_color_reads_content_end_marker_only() {
+        use tze_hud_scene::types::TextColorRun;
+        let content = "some transcript ▍".to_string();
+        let end = content.len() as u32;
+        let accent = Rgba {
+            r: 0.2,
+            g: 0.4,
+            b: 0.8,
+            a: 1.0,
+        };
+        let mut node = TextMarkdownNode {
+            content: content.clone(),
+            bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+            font_size_px: 16.0,
+            font_family: FontFamily::SystemSansSerif,
+            color: Rgba::WHITE,
+            background: None,
+            alignment: TextAlign::Start,
+            overflow: TextOverflow::Clip,
+            // A byte-0 sentinel (e.g. stale/lifecycle) plus the content-end cursor
+            // marker — only the latter must be picked up.
+            color_runs: Box::from([
+                TextColorRun {
+                    start_byte: 0,
+                    end_byte: 0,
+                    color: Rgba::WHITE,
+                },
+                TextColorRun {
+                    start_byte: end,
+                    end_byte: end,
+                    color: accent,
+                },
+            ]),
+        };
+        assert_eq!(
+            markdown_node_tail_cursor_color(&node),
+            Some(crate::text::rgba_to_srgb_u8(accent)),
+            "reads the content-end marker's token color"
+        );
+        // Without the content-end marker (only a byte-0 sentinel) → None.
+        node.color_runs = Box::from([TextColorRun {
+            start_byte: 0,
+            end_byte: 0,
+            color: accent,
+        }]);
+        assert_eq!(
+            markdown_node_tail_cursor_color(&node),
+            None,
+            "a byte-0 sentinel is not the tail cursor"
+        );
+    }
+
+    /// `apply_tail_streaming_cursor` recolors exactly the trailing cursor glyph in
+    /// the accent, leaves surrounding text and pre-existing markdown styling
+    /// untouched, and is a no-op when the glyph is absent.
+    #[test]
+    fn tail_cursor_recolors_only_the_glyph_and_preserves_styling() {
+        let plain = "hello ▍"; // "hello" bold, then space + cursor glyph
+        let item = markdown_item(plain, 5);
+        let accent = [10u8, 20, 30, 255];
+
+        let mut painted = item.clone();
+        apply_tail_streaming_cursor(&mut painted, accent);
+
+        let (cur_s, _) = tail_cursor_glyph_range(plain).unwrap();
+        assert_eq!(
+            color_at(&painted, cur_s),
+            Some(accent),
+            "cursor glyph takes the accent color"
+        );
+        // The bold prefix keeps its weight and does NOT take the accent.
+        let prefix_run = painted
+            .styled_runs
+            .iter()
+            .find(|r| r.start_byte == 0 && r.end_byte > 0)
+            .unwrap();
+        assert_eq!(prefix_run.weight, Some(700), "bold prefix weight survives");
+        assert_ne!(color_at(&painted, 0), Some(accent), "prefix not recolored");
+
+        // No glyph → untouched.
+        let no_cursor = markdown_item("plain tail", 0);
+        let mut same = no_cursor.clone();
+        apply_tail_streaming_cursor(&mut same, accent);
+        assert_eq!(
+            format!("{:?}", no_cursor.styled_runs),
+            format!("{:?}", same.styled_runs),
+            "absent cursor is a no-op"
         );
     }
 }
