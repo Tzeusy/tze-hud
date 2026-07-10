@@ -398,6 +398,11 @@ impl super::Compositor {
                 } else {
                     0.0
                 };
+                // Per-part portal-surface consumption (hud-s4lrw): when the tile
+                // declares a `PortalSurface`, resolve each node's part so the
+                // recursion applies transcript scope + a per-part clip band only
+                // where the schema says. `None` → legacy tile-level behavior.
+                let part_index = portal_part_index(scene, tile.id);
                 self.collect_text_items_from_node(
                     root_id,
                     tile,
@@ -406,6 +411,7 @@ impl super::Compositor {
                     scroll_y,
                     at_tail,
                     transcript_measure_px,
+                    part_index.as_ref(),
                     &mut items,
                 );
 
@@ -1211,7 +1217,6 @@ impl super::Compositor {
     // This mirrors the parameter shape of the free-function twin
     // `collect_ellipsis_text_items_from_node` which also carries the same lint.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn collect_text_items_from_node(
         &self,
         node_id: SceneId,
@@ -1221,6 +1226,7 @@ impl super::Compositor {
         scroll_y: f32,
         at_tail: bool,
         transcript_measure_px: f32,
+        part_index: Option<&HashMap<SceneId, PortalPart>>,
         items: &mut Vec<TextItem>,
     ) {
         let node = match scene.nodes.get(&node_id) {
@@ -1333,36 +1339,66 @@ impl super::Compositor {
             // token legible range. No-op at the default scale. Must mirror the
             // ellipsis collector so truncation keys match this shaped font.
             item.font_size_px = self.scaled_portal_font(item.font_size_px, tile.id, scene);
+            // Per-part transcript scope (hud-s4lrw): under the multi-node model
+            // only the declared `Transcript` part receives the optimal-measure
+            // clamp + tail-anchored ellipsis; composer/header/frame part nodes
+            // wrap to their own width and stay head-anchored. `None` (legacy
+            // single-node portal / non-portal markdown) → every node inherits
+            // the caller's tile-level gate, byte-identical to pre-promotion.
+            let node_is_transcript = node_gets_transcript_treatment(part_index, node_id);
+            let node_measure_px = if node_is_transcript {
+                transcript_measure_px
+            } else {
+                0.0
+            };
             // Optimal-measure clamp (hud-rivcy): cap the transcript's effective
-            // wrap width to `portal.transcript.max_measure_px` (0 = unbounded,
-            // pre-gated by the caller to portal surfaces). Applied BEFORE the
-            // clip computation below so `clip_bounds_width` (derived from
-            // `item.bounds_width`) tracks the clamped measure, and BEFORE the
-            // item is shaped so the wrap width and truncation key both reflect
-            // the cap — matching the prime path in
+            // wrap width to `portal.transcript.max_measure_px` (0 = unbounded).
+            // Applied BEFORE the clip computation below so `clip_bounds_width`
+            // (derived from `item.bounds_width`) tracks the clamped measure, and
+            // BEFORE the item is shaped so the wrap width and truncation key both
+            // reflect the cap — matching the prime path in
             // `collect_ellipsis_text_items_from_node`.
-            item.bounds_width = clamp_transcript_measure(item.bounds_width, transcript_measure_px);
+            item.bounds_width = clamp_transcript_measure(item.bounds_width, node_measure_px);
             // Override viewport for at-tail Ellipsis tiles (hud-lu50e).
             // The prime path (collect_ellipsis_text_items_from_node) already
             // primes TailAnchored keys for these tiles; the per-frame key must
             // match or `prepare_text_items` will miss the primed entry and fall
             // back to inline head-anchored truncation — always showing the head
-            // of the content instead of the newest lines.
-            if at_tail && tm.overflow == TextOverflow::Ellipsis {
+            // of the content instead of the newest lines. Gated to the
+            // transcript part so a bounded composer never tail-follows.
+            if node_is_transcript && at_tail && tm.overflow == TextOverflow::Ellipsis {
                 item.viewport = crate::overflow::TruncationViewport::TailAnchored;
             }
+            // Clip envelope (hud-s4lrw): the drawn content is clamped to the
+            // tile viewport and — for a declared portal part — additionally to
+            // that part's band, so one part's overflow can never paint over a
+            // sibling part's region (e.g. a long transcript over the composer
+            // strip). The band is a *clip* only: it does not alter
+            // `bounds_width`, so the shaped-buffer / truncation caches stay
+            // keyed exactly as before. `None` reproduces the legacy content∩tile
+            // clip.
             let unscrolled_x = item.pixel_x + scroll_x;
             let unscrolled_y = item.pixel_y + scroll_y;
-            let clip_left = unscrolled_x.max(tile.bounds.x);
-            let clip_top = unscrolled_y.max(tile.bounds.y);
-            let clip_right =
-                (unscrolled_x + item.bounds_width).min(tile.bounds.x + tile.bounds.width);
-            let clip_bottom =
-                (unscrolled_y + item.bounds_height).min(tile.bounds.y + tile.bounds.height);
-            item.clip_pixel_x = clip_left;
-            item.clip_pixel_y = clip_top;
-            item.clip_bounds_width = (clip_right - clip_left).max(1.0);
-            item.clip_bounds_height = (clip_bottom - clip_top).max(1.0);
+            let part_band = portal_part_clip_band(part_index, node_id, tile);
+            let (clip_x, clip_y, clip_w, clip_h) = crate::text::portal_part_clip_rect(
+                (
+                    unscrolled_x,
+                    unscrolled_y,
+                    item.bounds_width,
+                    item.bounds_height,
+                ),
+                (
+                    tile.bounds.x,
+                    tile.bounds.y,
+                    tile.bounds.width,
+                    tile.bounds.height,
+                ),
+                part_band,
+            );
+            item.clip_pixel_x = clip_x;
+            item.clip_pixel_y = clip_y;
+            item.clip_bounds_width = clip_w;
+            item.clip_bounds_height = clip_h;
 
             // Per-segment streaming-reveal fade (hud-bl7yi), routed by node
             // identity (hud-g8xpg). Reveal state is keyed per `(tile, node)`, so
@@ -1393,6 +1429,7 @@ impl super::Compositor {
                 scroll_y,
                 at_tail,
                 transcript_measure_px,
+                part_index,
                 items,
             );
         }
@@ -1438,6 +1475,79 @@ pub(super) fn clamp_transcript_measure(bounds_width: f32, max_measure_px: f32) -
     } else {
         bounds_width
     }
+}
+
+/// Build the per-node portal-part lookup for a tile's declared
+/// [`PortalSurface`](tze_hud_scene::types::PortalSurface), if any (hud-s4lrw).
+///
+/// Maps each materialized part's backing `node` id to its
+/// [`PortalPart`](tze_hud_scene::types::PortalPart) so the text collectors can
+/// resolve **per-part** overflow scope (transcript vs. composer/header/…) and
+/// the per-part clip envelope. `PortalPart` is `Copy`, so the map owns its
+/// entries.
+///
+/// Returns `None` when the tile carries no surface **or** the surface has no
+/// materialized part nodes yet — the "one scene node per part" promotion is
+/// strictly additive, so both cases fall back to the pre-promotion tile-level
+/// behavior (the whole scrollable tile is treated as one transcript). This is
+/// what keeps legacy single-node portals byte-identical.
+pub(super) fn portal_part_index(
+    scene: &SceneGraph,
+    tile_id: SceneId,
+) -> Option<HashMap<SceneId, PortalPart>> {
+    let surface = scene.portal_surface(tile_id)?;
+    let mut map: HashMap<SceneId, PortalPart> = HashMap::with_capacity(surface.parts.len());
+    for part in &surface.parts {
+        if let Some(node) = part.node {
+            map.insert(node, *part);
+        }
+    }
+    if map.is_empty() { None } else { Some(map) }
+}
+
+/// Resolve whether a node should receive **transcript** overflow treatment
+/// (optimal-measure wrap clamp + tail-anchored ellipsis) under the multi-node
+/// portal-part model (hud-s4lrw).
+///
+/// - `part_index == None` (legacy single-node portal, or a non-portal markdown
+///   surface): returns `true` so every node inherits the caller's tile-level
+///   gate unchanged (the caller passes a `0.0` measure for non-portal tiles, so
+///   this is a no-op there and identical to pre-promotion behavior).
+/// - `part_index == Some(_)`: only the declared `Transcript` part is a
+///   transcript; composer/header/frame/… parts (and any node not declared as a
+///   part) wrap to their own width and stay head-anchored, so a bounded
+///   composer never inherits the transcript's tail-follow or measure clamp.
+pub(super) fn node_gets_transcript_treatment(
+    part_index: Option<&HashMap<SceneId, PortalPart>>,
+    node_id: SceneId,
+) -> bool {
+    match part_index {
+        None => true,
+        Some(map) => matches!(
+            map.get(&node_id).map(|p| p.kind),
+            Some(PortalPartKind::Transcript)
+        ),
+    }
+}
+
+/// Absolute-pixel clip band for a portal part, if this node is a declared part.
+///
+/// `PortalPart::bounds` is tile-local (origin relative to the host tile), so the
+/// band is offset by the tile origin into the same absolute space as the drawn
+/// glyphs. Returns `None` for the legacy/no-surface case so the caller keeps the
+/// plain content∩tile clip.
+fn portal_part_clip_band(
+    part_index: Option<&HashMap<SceneId, PortalPart>>,
+    node_id: SceneId,
+    tile: &Tile,
+) -> Option<crate::text::ClipBox> {
+    let part = part_index?.get(&node_id)?;
+    Some((
+        tile.bounds.x + part.bounds.x,
+        tile.bounds.y + part.bounds.y,
+        part.bounds.width,
+        part.bounds.height,
+    ))
 }
 
 /// Apply the per-segment streaming-reveal fade to a portal-tile markdown
@@ -1580,6 +1690,7 @@ pub(super) fn collect_ellipsis_text_items_from_node(
     markdown_tokens: &crate::markdown::MarkdownTokens,
     font_clamp: (f32, f32),
     transcript_measure_px: f32,
+    part_index: Option<&HashMap<SceneId, PortalPart>>,
     items: &mut Vec<TextItem>,
 ) {
     let node = match scene.nodes.get(&node_id) {
@@ -1640,14 +1751,25 @@ pub(super) fn collect_ellipsis_text_items_from_node(
                 font_clamp.0,
                 font_clamp.1,
             );
+            // Per-part transcript scope (hud-s4lrw): mirror the render path's
+            // `node_gets_transcript_treatment` gate so the primed key (measure +
+            // viewport) matches exactly. Under a multi-node surface only the
+            // `Transcript` part is clamped/tail-anchored; `None` → legacy
+            // tile-level behavior.
+            let node_is_transcript = node_gets_transcript_treatment(part_index, node_id);
+            let node_measure_px = if node_is_transcript {
+                transcript_measure_px
+            } else {
+                0.0
+            };
             // Optimal-measure clamp (hud-rivcy): apply the SAME transcript wrap
             // cap as the render path so this primed truncation key (which
             // includes `bounds_width`) matches what `collect_text_items_from_node`
-            // shapes. `transcript_measure_px` is pre-gated by the caller to
-            // portal surfaces (0.0 = no clamp elsewhere).
-            item.bounds_width = clamp_transcript_measure(item.bounds_width, transcript_measure_px);
-            // Override viewport based on the tile's follow-tail state.
-            if at_tail {
+            // shapes.
+            item.bounds_width = clamp_transcript_measure(item.bounds_width, node_measure_px);
+            // Override viewport based on the tile's follow-tail state (transcript
+            // part only, matching the render path).
+            if node_is_transcript && at_tail {
                 item.viewport = crate::overflow::TruncationViewport::TailAnchored;
             }
             items.push(item);
@@ -1667,6 +1789,7 @@ pub(super) fn collect_ellipsis_text_items_from_node(
             markdown_tokens,
             font_clamp,
             transcript_measure_px,
+            part_index,
             items,
         );
     }

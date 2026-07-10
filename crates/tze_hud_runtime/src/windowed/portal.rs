@@ -722,6 +722,40 @@ fn scale_tile_node_tree(
     }
 }
 
+/// Scale a tile's first-class [`PortalSurface`] part bounds in lock-step with a
+/// whole-portal resize (hud-s4lrw).
+///
+/// `PortalPart::bounds` is tile-local surface geometry — the per-part clip band
+/// the compositor uses to keep one part's content (e.g. an overlong transcript)
+/// from painting over a sibling part's region. When the viewer resizes the
+/// portal, [`scale_tile_node_tree`] re-flows the part *nodes* to the new pane;
+/// the surface descriptor's declared part bounds must scale by the same per-axis
+/// ratio or the render-side clip band drifts off the content and the per-part
+/// overflow invariant no longer holds at the new geometry.
+///
+/// Part bounds are tile-local (origin relative to the tile top-left), so — like
+/// the node tree — they scale by the raw ratio; a whole-portal *drag* leaves
+/// them untouched (only `tile.bounds` moves). No-op when the tile carries no
+/// surface. Mutates the public `overlay.portal_surfaces` state directly (no
+/// lease/capability gate): this is viewer-driven geometry authority, the same
+/// path that writes `tile.bounds` above.
+fn scale_portal_surface_parts(
+    scene: &mut tze_hud_scene::graph::SceneGraph,
+    tile_id: tze_hud_scene::SceneId,
+    r_w: f32,
+    r_h: f32,
+) {
+    let Some(surface) = scene.overlay.portal_surfaces.get_mut(&tile_id) else {
+        return;
+    };
+    for part in &mut surface.parts {
+        part.bounds.x *= r_w;
+        part.bounds.y *= r_h;
+        part.bounds.width *= r_w;
+        part.bounds.height *= r_h;
+    }
+}
+
 /// Apply a resolved whole-portal resize to the scene: write each member's scaled
 /// bounds, bump the scene version once if any geometry changed, and build the
 /// per-member geometry snapshots to broadcast.
@@ -809,6 +843,11 @@ fn commit_portal_group_resize(
             };
             if node_r_w != 1.0 || node_r_h != 1.0 {
                 scale_tile_node_tree(scene, tile_id, node_r_w, node_r_h);
+                // Keep any first-class portal-surface part bounds in lock-step
+                // with the re-flowed node tree so the compositor's per-part clip
+                // band stays aligned at the new geometry (hud-s4lrw). No-op for
+                // legacy raw-tile portals with no surface descriptor.
+                scale_portal_surface_parts(scene, tile_id, node_r_w, node_r_h);
             }
         }
         // The viewer now owns this member's geometry: take authority so an
