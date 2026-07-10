@@ -1615,7 +1615,8 @@ impl Compositor {
                     md_tokens,
                     font_clamp,
                     transcript_measure_px,
-                    part_index.as_ref(),
+                    part_index,
+                    None,
                     &mut live_items,
                 );
             }

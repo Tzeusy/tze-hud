@@ -411,7 +411,8 @@ impl super::Compositor {
                     scroll_y,
                     at_tail,
                     transcript_measure_px,
-                    part_index.as_ref(),
+                    part_index,
+                    None,
                     &mut items,
                 );
 
@@ -1226,13 +1227,20 @@ impl super::Compositor {
         scroll_y: f32,
         at_tail: bool,
         transcript_measure_px: f32,
-        part_index: Option<&HashMap<SceneId, PortalPart>>,
+        part_index: Option<&[PortalPart]>,
+        active_part: Option<&PortalPart>,
         items: &mut Vec<TextItem>,
     ) {
         let node = match scene.nodes.get(&node_id) {
             Some(n) => n,
             None => return,
         };
+
+        // The part governing this node: its own declared part, else the one
+        // inherited from an ancestor container part (hud-s4lrw, PR #1099 Codex
+        // P2). Threaded into children below so a container part scopes its whole
+        // subtree.
+        let effective_part = resolve_effective_part(part_index, node_id, active_part);
 
         if let NodeData::TextMarkdown(tm) = &node.data {
             // Subtract scroll offset so text glyphs move with the scrolled
@@ -1345,7 +1353,7 @@ impl super::Compositor {
             // wrap to their own width and stay head-anchored. `None` (legacy
             // single-node portal / non-portal markdown) → every node inherits
             // the caller's tile-level gate, byte-identical to pre-promotion.
-            let node_is_transcript = node_gets_transcript_treatment(part_index, node_id);
+            let node_is_transcript = node_gets_transcript_treatment(part_index, effective_part);
             let node_measure_px = if node_is_transcript {
                 transcript_measure_px
             } else {
@@ -1379,7 +1387,7 @@ impl super::Compositor {
             // clip.
             let unscrolled_x = item.pixel_x + scroll_x;
             let unscrolled_y = item.pixel_y + scroll_y;
-            let part_band = portal_part_clip_band(part_index, node_id, tile);
+            let part_band = portal_part_clip_band(effective_part, tile);
             let (clip_x, clip_y, clip_w, clip_h) = crate::text::portal_part_clip_rect(
                 (
                     unscrolled_x,
@@ -1430,6 +1438,7 @@ impl super::Compositor {
                 at_tail,
                 transcript_measure_px,
                 part_index,
+                effective_part,
                 items,
             );
         }
@@ -1477,32 +1486,48 @@ pub(super) fn clamp_transcript_measure(bounds_width: f32, max_measure_px: f32) -
     }
 }
 
-/// Build the per-node portal-part lookup for a tile's declared
-/// [`PortalSurface`](tze_hud_scene::types::PortalSurface), if any (hud-s4lrw).
+/// Borrow a tile's declared [`PortalSurface`](tze_hud_scene::types::PortalSurface)
+/// part list for per-part render consumption, if any (hud-s4lrw).
 ///
-/// Maps each materialized part's backing `node` id to its
-/// [`PortalPart`](tze_hud_scene::types::PortalPart) so the text collectors can
-/// resolve **per-part** overflow scope (transcript vs. composer/header/…) and
-/// the per-part clip envelope. `PortalPart` is `Copy`, so the map owns its
-/// entries.
+/// Returns the surface's `&[PortalPart]` so the text collectors can resolve
+/// **per-part** overflow scope (transcript vs. composer/header/…) and the
+/// per-part clip envelope by a linear scan — the part count is bounded at
+/// [`PORTAL_MAX_PARTS`](tze_hud_scene::types::PORTAL_MAX_PARTS) (8), so a slice
+/// scan is both allocation-free on the per-frame hot path and faster than a
+/// `HashMap` for such small N (PR #1099 review).
 ///
 /// Returns `None` when the tile carries no surface **or** the surface has no
 /// materialized part nodes yet — the "one scene node per part" promotion is
 /// strictly additive, so both cases fall back to the pre-promotion tile-level
 /// behavior (the whole scrollable tile is treated as one transcript). This is
 /// what keeps legacy single-node portals byte-identical.
-pub(super) fn portal_part_index(
-    scene: &SceneGraph,
-    tile_id: SceneId,
-) -> Option<HashMap<SceneId, PortalPart>> {
+pub(super) fn portal_part_index(scene: &SceneGraph, tile_id: SceneId) -> Option<&[PortalPart]> {
     let surface = scene.portal_surface(tile_id)?;
-    let mut map: HashMap<SceneId, PortalPart> = HashMap::with_capacity(surface.parts.len());
-    for part in &surface.parts {
-        if let Some(node) = part.node {
-            map.insert(node, *part);
-        }
+    if surface.parts.iter().any(|p| p.node.is_some()) {
+        Some(&surface.parts)
+    } else {
+        None
     }
-    if map.is_empty() { None } else { Some(map) }
+}
+
+/// Resolve the [`PortalPart`] whose scope governs `node_id`: the part that
+/// directly backs it, or — so a part whose `node` is a *container* (a
+/// `SolidColor`/`HitRegion` root with `TextMarkdown` descendants, which the
+/// scene contract permits) governs its whole subtree — the `inherited` part
+/// carried down from the nearest ancestor part (PR #1099 review, Codex P2).
+///
+/// A node that directly declares a part overrides any inherited scope. Returns
+/// `None` for a node under a surface that is neither a declared part nor a
+/// descendant of one, and (trivially) for the legacy no-surface case where
+/// `part_index` is `None`.
+pub(super) fn resolve_effective_part<'a>(
+    part_index: Option<&'a [PortalPart]>,
+    node_id: SceneId,
+    inherited: Option<&'a PortalPart>,
+) -> Option<&'a PortalPart> {
+    part_index
+        .and_then(|parts| parts.iter().find(|p| p.node == Some(node_id)))
+        .or(inherited)
 }
 
 /// Resolve whether a node should receive **transcript** overflow treatment
@@ -1513,35 +1538,35 @@ pub(super) fn portal_part_index(
 ///   surface): returns `true` so every node inherits the caller's tile-level
 ///   gate unchanged (the caller passes a `0.0` measure for non-portal tiles, so
 ///   this is a no-op there and identical to pre-promotion behavior).
-/// - `part_index == Some(_)`: only the declared `Transcript` part is a
-///   transcript; composer/header/frame/… parts (and any node not declared as a
-///   part) wrap to their own width and stay head-anchored, so a bounded
-///   composer never inherits the transcript's tail-follow or measure clamp.
+/// - `part_index == Some(_)`: only the declared `Transcript` part (or a
+///   descendant of it — see [`resolve_effective_part`]) is a transcript;
+///   composer/header/frame/… parts and any undeclared node wrap to their own
+///   width and stay head-anchored, so a bounded composer never inherits the
+///   transcript's tail-follow or measure clamp.
 pub(super) fn node_gets_transcript_treatment(
-    part_index: Option<&HashMap<SceneId, PortalPart>>,
-    node_id: SceneId,
+    part_index: Option<&[PortalPart]>,
+    effective_part: Option<&PortalPart>,
 ) -> bool {
     match part_index {
         None => true,
-        Some(map) => matches!(
-            map.get(&node_id).map(|p| p.kind),
+        Some(_) => matches!(
+            effective_part.map(|p| p.kind),
             Some(PortalPartKind::Transcript)
         ),
     }
 }
 
-/// Absolute-pixel clip band for a portal part, if this node is a declared part.
+/// Absolute-pixel clip band for a node's effective portal part, if any.
 ///
 /// `PortalPart::bounds` is tile-local (origin relative to the host tile), so the
 /// band is offset by the tile origin into the same absolute space as the drawn
-/// glyphs. Returns `None` for the legacy/no-surface case so the caller keeps the
-/// plain content∩tile clip.
+/// glyphs. Returns `None` for the legacy/no-surface case (and for a node with no
+/// effective part) so the caller keeps the plain content∩tile clip.
 fn portal_part_clip_band(
-    part_index: Option<&HashMap<SceneId, PortalPart>>,
-    node_id: SceneId,
+    effective_part: Option<&PortalPart>,
     tile: &Tile,
 ) -> Option<crate::text::ClipBox> {
-    let part = part_index?.get(&node_id)?;
+    let part = effective_part?;
     Some((
         tile.bounds.x + part.bounds.x,
         tile.bounds.y + part.bounds.y,
@@ -1690,13 +1715,19 @@ pub(super) fn collect_ellipsis_text_items_from_node(
     markdown_tokens: &crate::markdown::MarkdownTokens,
     font_clamp: (f32, f32),
     transcript_measure_px: f32,
-    part_index: Option<&HashMap<SceneId, PortalPart>>,
+    part_index: Option<&[PortalPart]>,
+    active_part: Option<&PortalPart>,
     items: &mut Vec<TextItem>,
 ) {
     let node = match scene.nodes.get(&node_id) {
         Some(n) => n,
         None => return,
     };
+
+    // Effective part for this node (own declared part, else inherited from an
+    // ancestor container part) — must mirror the render path exactly so the
+    // primed truncation keys match (hud-s4lrw, PR #1099 Codex P2).
+    let effective_part = resolve_effective_part(part_index, node_id, active_part);
 
     if let NodeData::TextMarkdown(tm) = &node.data {
         if tm.overflow == tze_hud_scene::types::TextOverflow::Ellipsis {
@@ -1756,7 +1787,7 @@ pub(super) fn collect_ellipsis_text_items_from_node(
             // viewport) matches exactly. Under a multi-node surface only the
             // `Transcript` part is clamped/tail-anchored; `None` → legacy
             // tile-level behavior.
-            let node_is_transcript = node_gets_transcript_treatment(part_index, node_id);
+            let node_is_transcript = node_gets_transcript_treatment(part_index, effective_part);
             let node_measure_px = if node_is_transcript {
                 transcript_measure_px
             } else {
@@ -1790,6 +1821,7 @@ pub(super) fn collect_ellipsis_text_items_from_node(
             font_clamp,
             transcript_measure_px,
             part_index,
+            effective_part,
             items,
         );
     }

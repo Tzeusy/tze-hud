@@ -15779,13 +15779,20 @@ fn portal_part_index_classifies_parts_and_falls_back() {
         .create_tile(tab, "ns", lease, Rect::new(0.0, 0.0, 300.0, 200.0), 1)
         .unwrap();
 
+    // Helper: resolve a node's effective part (no inherited ancestor) and ask
+    // whether it gets transcript treatment — mirrors the collector call shape.
+    let treats_as_transcript = |parts: Option<&[PortalPart]>, node: SceneId| {
+        let ep = text::resolve_effective_part(parts, node, None);
+        text::node_gets_transcript_treatment(parts, ep)
+    };
+
     // No surface declared → index is None (legacy path).
     assert!(
         text::portal_part_index(&scene, tile).is_none(),
         "no surface → no part index (legacy tile-level behavior)"
     );
     // …and with no index every node is treated as a transcript.
-    assert!(text::node_gets_transcript_treatment(None, SceneId::new()));
+    assert!(treats_as_transcript(None, SceneId::new()));
 
     let transcript_node = SceneId::new();
     let composer_node = SceneId::new();
@@ -15801,7 +15808,8 @@ fn portal_part_index_classifies_parts_and_falls_back() {
                 bounds: Rect::new(0.0, 150.0, 300.0, 50.0),
                 node: Some(composer_node),
             },
-            // Geometry-only divider with no materialized node — excluded.
+            // Geometry-only divider with no materialized node — carried in the
+            // slice but never matches a node lookup.
             PortalPart {
                 kind: PortalPartKind::Divider,
                 bounds: Rect::new(0.0, 148.0, 300.0, 2.0),
@@ -15812,23 +15820,38 @@ fn portal_part_index_classifies_parts_and_falls_back() {
     };
     scene.overlay.portal_surfaces.insert(tile, surface);
 
-    let index = text::portal_part_index(&scene, tile).expect("surface present → index");
+    let parts = text::portal_part_index(&scene, tile).expect("surface present → parts");
     assert_eq!(
-        index.len(),
-        2,
-        "only parts with a materialized node are indexed"
+        parts.len(),
+        3,
+        "the slice carries every declared part; node:None parts simply never match"
     );
     assert!(
-        text::node_gets_transcript_treatment(Some(&index), transcript_node),
+        treats_as_transcript(Some(parts), transcript_node),
         "the Transcript part receives transcript treatment"
     );
     assert!(
-        !text::node_gets_transcript_treatment(Some(&index), composer_node),
+        !treats_as_transcript(Some(parts), composer_node),
         "the Composer part must NOT tail-follow / clamp like the transcript"
     );
     assert!(
-        !text::node_gets_transcript_treatment(Some(&index), SceneId::new()),
+        !treats_as_transcript(Some(parts), SceneId::new()),
         "a node not declared as any part is not a transcript under a surface"
+    );
+
+    // Codex P2 (PR #1099): a part whose `node` is a container scopes its whole
+    // subtree — a descendant text node (not itself a declared part) inherits the
+    // ancestor Transcript part and still gets transcript treatment + clip band.
+    let transcript_part = parts
+        .iter()
+        .find(|p| p.node == Some(transcript_node))
+        .copied()
+        .unwrap();
+    let descendant = SceneId::new();
+    let inherited = text::resolve_effective_part(Some(parts), descendant, Some(&transcript_part));
+    assert!(
+        text::node_gets_transcript_treatment(Some(parts), inherited),
+        "a descendant of the Transcript container part inherits transcript treatment"
     );
 }
 
@@ -16024,5 +16047,103 @@ async fn portal_surface_renders_parts_with_per_part_scope_and_clip() {
     assert!(
         composer_item.clip_pixel_y + composer_item.clip_bounds_height <= tile_h + 0.5,
         "composer clip must stay within the tile"
+    );
+}
+
+/// End-to-end (software-GPU) proof of the container-part scope propagation
+/// (hud-s4lrw, PR #1099 Codex P2): a `Transcript` part whose `node` is a
+/// `SolidColor` *container* scopes its whole subtree. The transcript's actual
+/// text lives in a `TextMarkdown` **child** that is not itself a declared part;
+/// it must still tail-anchor and clip to the transcript band by inheriting the
+/// container part's scope through the recursion.
+#[tokio::test]
+async fn portal_surface_container_part_scopes_descendant_text() {
+    use tze_hud_scene::types::{PortalPart, PortalPartKind, PortalSurface, SolidColorNode};
+
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(640, 480).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+    let tile_w = 300.0_f32;
+    let tile_h = 200.0_f32;
+    let band_h = 150.0_f32; // transcript band = top 150px of a 200px tile.
+
+    let mut scene = SceneGraph::new(640.0, 480.0);
+    let tab = scene.create_tab("test", 0).unwrap();
+    let lease = scene.grant_lease("portal", 120_000, vec![]);
+    let tile = scene
+        .create_tile(tab, "portal", lease, Rect::new(0.0, 0.0, tile_w, tile_h), 1)
+        .unwrap();
+    let _ =
+        scene.register_tile_scroll_config(tile, tze_hud_scene::types::TileScrollConfig::vertical());
+
+    // Container root (the declared Transcript part node) — geometry-only.
+    let container = Node {
+        id: SceneId::new(),
+        children: vec![],
+        data: NodeData::SolidColor(SolidColorNode {
+            color: Rgba::new(0.0, 0.0, 0.0, 1.0),
+            bounds: Rect::new(0.0, 0.0, tile_w, band_h),
+            radius: None,
+        }),
+    };
+    let container_id = container.id;
+    scene.set_tile_root(tile, container).unwrap();
+
+    // Transcript text lives in a CHILD of the container, not a declared part.
+    let text_node = Node {
+        id: SceneId::new(),
+        children: vec![],
+        data: NodeData::TextMarkdown(TextMarkdownNode {
+            content: "Line A\nLine B\nLine C\nLine D\nLine E\nLine F\nLine G\nLine H".to_owned(),
+            bounds: Rect::new(0.0, 0.0, tile_w, 400.0),
+            font_size_px: 14.0,
+            font_family: FontFamily::SystemMonospace,
+            color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+            background: None,
+            alignment: TextAlign::Start,
+            overflow: TextOverflow::Ellipsis,
+            color_runs: Box::default(),
+        }),
+    };
+    scene
+        .add_node_to_tile(tile, Some(container_id), text_node)
+        .unwrap();
+
+    // The Transcript part points at the CONTAINER, not the text node.
+    scene.overlay.portal_surfaces.insert(
+        tile,
+        PortalSurface {
+            parts: vec![PortalPart {
+                kind: PortalPartKind::Transcript,
+                bounds: Rect::new(0.0, 0.0, tile_w, band_h),
+                node: Some(container_id),
+            }],
+            ..Default::default()
+        },
+    );
+    scene.set_tile_follow_tail_at_tail(tile, true);
+    compositor.prime_markdown_cache(&scene);
+
+    let items = compositor.collect_text_items(&scene, 640.0, 480.0);
+    let text_item = items
+        .iter()
+        .find(|it| it.text.contains("Line A"))
+        .expect("descendant transcript TextItem present");
+
+    // Inherited transcript scope: tail-anchored despite not being a declared part.
+    assert_eq!(
+        text_item.viewport,
+        crate::overflow::TruncationViewport::TailAnchored,
+        "a descendant of the container Transcript part must inherit tail-follow"
+    );
+    // Inherited clip band: clipped to the 150px band bottom, not the tile bottom.
+    let clip_bottom = text_item.clip_pixel_y + text_item.clip_bounds_height;
+    assert!(
+        (clip_bottom - band_h).abs() < 0.5,
+        "descendant clip bottom {clip_bottom} must sit at the inherited band bottom {band_h}"
+    );
+    assert!(
+        clip_bottom < tile_h,
+        "descendant transcript must be contained to the inherited band, not the whole tile"
     );
 }
