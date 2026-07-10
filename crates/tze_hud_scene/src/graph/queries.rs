@@ -547,18 +547,23 @@ impl SceneGraph {
 /// Absolute header-band rect from a portal surface's `Header` part.
 ///
 /// `part` bounds are surface-local (relative to the host `tile`); this translates
-/// them to absolute display coordinates and intersects with the tile so the band
-/// can never exceed the frame. Returns `None` for a degenerate (sub-pixel) band —
+/// them to absolute display coordinates and returns the true rectangle
+/// intersection with the tile, so the band can never exceed the frame on ANY
+/// edge. `validate_structure` requires only non-negative extents (not a
+/// non-negative origin), so a malformed `Header` part with a negative local
+/// `x`/`y` is clamped to the tile origin here rather than starting the band
+/// above/left of the frame. Returns `None` for a degenerate (sub-pixel) band —
 /// keeping the drag handle off zero-area headers.
 fn header_band_rect(tile: Rect, part: Rect) -> Option<Rect> {
-    let x = tile.x + part.x;
-    let y = tile.y + part.y;
-    let max_w = (tile.x + tile.width - x).max(0.0);
-    let max_h = (tile.y + tile.height - y).max(0.0);
-    let w = part.width.min(max_w);
-    let h = part.height.min(max_h);
+    // Intersect the absolute part rect with the tile rect on all four edges.
+    let x0 = (tile.x + part.x).max(tile.x);
+    let y0 = (tile.y + part.y).max(tile.y);
+    let x1 = (tile.x + part.x + part.width).min(tile.x + tile.width);
+    let y1 = (tile.y + part.y + part.height).min(tile.y + tile.height);
+    let w = x1 - x0;
+    let h = y1 - y0;
     if w < 1.0 || h < 1.0 {
         return None;
     }
-    Some(Rect::new(x, y, w, h))
+    Some(Rect::new(x0, y0, w, h))
 }

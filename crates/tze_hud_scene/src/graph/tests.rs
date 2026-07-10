@@ -4577,6 +4577,62 @@ fn portal_header_band_anchors_keys_off_declared_header_part() {
     );
 }
 
+/// A `Header` part with a negative local origin (accepted by `validate_structure`,
+/// which only requires non-negative extents) is clamped to the tile origin — the
+/// band never starts above/left of the frame (Codex review, hud-m4xay).
+#[test]
+fn portal_header_band_clamps_negative_part_origin_to_tile() {
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab = scene.create_tab("Main", 0).unwrap();
+    let lease = scene.grant_lease(
+        "portal",
+        60_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
+    let tile = scene
+        .create_tile(
+            tab,
+            "portal",
+            lease,
+            Rect::new(100.0, 100.0, 600.0, 400.0),
+            1,
+        )
+        .unwrap();
+    // Header with a negative local origin and an extent that overhangs the frame.
+    let surface = PortalSurface {
+        identity: PortalIdentity {
+            session_id: "sess-portal".to_string(),
+            display_name: "Claude".to_string(),
+            peer_class: PortalPeerClass::ResidentLlm,
+        },
+        lifecycle: PortalLifecycleState::Active,
+        display_state: PortalDisplayState::Expanded,
+        parts: vec![PortalPart {
+            kind: PortalPartKind::Header,
+            bounds: Rect::new(-20.0, -10.0, 600.0, 50.0),
+            node: None,
+        }],
+    };
+    scene.set_portal_surface(tile, surface, "portal").unwrap();
+    let anchors = scene.portal_header_band_anchors(52.0);
+    assert_eq!(anchors.len(), 1);
+    let (_, rect) = anchors[0];
+    // Origin clamped to the tile (100,100); the band never precedes the frame.
+    assert!(
+        rect.x >= 100.0 && rect.y >= 100.0,
+        "band must not start before the tile: {rect:?}"
+    );
+    // And it stays within the tile bounds on the far edges.
+    assert!(
+        rect.x + rect.width <= 700.0 + f32::EPSILON,
+        "band right edge within tile: {rect:?}"
+    );
+    assert!(
+        rect.y + rect.height <= 500.0 + f32::EPSILON,
+        "band bottom edge within tile: {rect:?}"
+    );
+}
+
 /// A declared surface with NO `Header` part falls back to the raw-tile heuristic
 /// (top `band_h` strip), so surface declaration never regresses the escape hatch.
 #[test]
