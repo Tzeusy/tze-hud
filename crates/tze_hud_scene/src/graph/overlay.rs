@@ -424,6 +424,13 @@ impl SceneGraph {
 
     /// Declare or replace the first-class portal surface descriptor over a tile.
     ///
+    /// Enforces namespace isolation plus a live lease + `ModifyOwnTiles`
+    /// capability check (mirroring the checked tile-content mutation paths such
+    /// as [`set_tile_root_checked`](Self::set_tile_root_checked)): a portal
+    /// surface is a content-layer, lease-governed object (RFC 0013 §6), so an
+    /// agent whose `ModifyOwnTiles` capability has been revoked mid-lease must
+    /// not be able to mutate it, even while its lease is otherwise active.
+    ///
     /// Validates the surface's structural invariants
     /// ([`PortalSurface::validate_structure`]) and that every part's referenced
     /// backing node exists and belongs to `tile_id`, so a portal surface cannot
@@ -433,10 +440,11 @@ impl SceneGraph {
         &mut self,
         tile_id: SceneId,
         surface: PortalSurface,
+        agent_namespace: &str,
     ) -> Result<(), ValidationError> {
-        if !self.tiles.contains_key(&tile_id) {
-            return Err(ValidationError::TileNotFound { id: tile_id });
-        }
+        let lease_id = self.portal_tile_lease_checked(tile_id, agent_namespace)?;
+        self.require_active_lease(lease_id)?;
+        self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
         if let Err(reason) = surface.validate_structure() {
             return Err(ValidationError::InvalidPortalSurface { tile_id, reason });
         }
@@ -466,12 +474,20 @@ impl SceneGraph {
     /// This is the coalescible StateStream update path: a `None` field is left
     /// unchanged. Errors if no portal surface has been declared on `tile_id`.
     /// Bumps `scene.version` only when a field actually changes.
+    ///
+    /// Enforces the same namespace + live lease/`ModifyOwnTiles` capability gate
+    /// as [`set_portal_surface`](Self::set_portal_surface) before touching state,
+    /// so a revoked capability blocks state patches too.
     pub fn update_portal_surface_state(
         &mut self,
         tile_id: SceneId,
         lifecycle: Option<PortalLifecycleState>,
         display_state: Option<PortalDisplayState>,
+        agent_namespace: &str,
     ) -> Result<(), ValidationError> {
+        let lease_id = self.portal_tile_lease_checked(tile_id, agent_namespace)?;
+        self.require_active_lease(lease_id)?;
+        self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
         let surface = self
             .overlay
             .portal_surfaces
@@ -506,6 +522,74 @@ impl SceneGraph {
     /// Get the portal surface descriptor for a tile, if any.
     pub fn portal_surface(&self, tile_id: SceneId) -> Option<&PortalSurface> {
         self.overlay.portal_surfaces.get(&tile_id)
+    }
+
+    /// Resolve the lease backing `tile_id`, enforcing namespace isolation.
+    ///
+    /// Mirrors the tile-content `get_tile_lease_checked` gate (which lives in the
+    /// `tiles` submodule and is not visible here): the tile must exist and belong
+    /// to `agent_namespace`. Returns the tile's `lease_id` so the caller can layer
+    /// on `require_active_lease` / `require_capability`.
+    fn portal_tile_lease_checked(
+        &self,
+        tile_id: SceneId,
+        agent_namespace: &str,
+    ) -> Result<SceneId, ValidationError> {
+        let tile = self
+            .tiles
+            .get(&tile_id)
+            .ok_or(ValidationError::TileNotFound { id: tile_id })?;
+        if tile.namespace != agent_namespace {
+            return Err(ValidationError::NamespaceMismatch {
+                tile_id,
+                tile_namespace: tile.namespace.clone(),
+                agent_namespace: agent_namespace.to_string(),
+            });
+        }
+        Ok(tile.lease_id)
+    }
+
+    /// Drop any portal-surface part `node` references for `tile_id` that no longer
+    /// resolve within the tile's current node tree.
+    ///
+    /// The descriptor is deliberately kept across `SetTileRoot`/`PublishToTile`
+    /// content republishes (identity / lifecycle / geometry survive), but those
+    /// paths replace the tile's node subtree, so any `PortalPart.node` pointing at
+    /// a removed node would dangle. Rather than leave stale `SceneId`s that
+    /// consumers cannot resolve, this nulls them back to "not yet materialized"
+    /// (`node = None`); the owning adapter re-binds them on its next
+    /// `SetPortalSurface`. Bumps `scene.version` only when a reference is actually
+    /// pruned. Called by the tile-root replacement path (hud-tc153 review P2).
+    pub(crate) fn revalidate_portal_surface_part_nodes(&mut self, tile_id: SceneId) {
+        // Collect the stale node refs first to avoid borrowing `self` mutably and
+        // immutably at once (node_belongs_to_tile needs &self).
+        let Some(surface) = self.overlay.portal_surfaces.get(&tile_id) else {
+            return;
+        };
+        let stale: Vec<SceneId> = surface
+            .parts
+            .iter()
+            .filter_map(|p| p.node)
+            .filter(|&node_id| !self.node_belongs_to_tile(node_id, tile_id))
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        let surface = self
+            .overlay
+            .portal_surfaces
+            .get_mut(&tile_id)
+            .expect("portal surface presence verified immediately above");
+        let mut changed = false;
+        for part in &mut surface.parts {
+            if part.node.is_some_and(|n| stale.contains(&n)) {
+                part.node = None;
+                changed = true;
+            }
+        }
+        if changed {
+            self.version += 1;
+        }
     }
 
     /// Whether `node_id` exists and is reachable from `tile_id`'s root node tree.

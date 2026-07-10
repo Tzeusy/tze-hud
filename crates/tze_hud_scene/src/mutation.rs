@@ -995,18 +995,9 @@ impl SceneGraph {
             }
             // ── Portal surface (RFC 0013 §7.2 promotion) ─────────────────
             SceneMutation::SetPortalSurface { tile_id, surface } => {
-                let tile = self
-                    .tiles
-                    .get(tile_id)
-                    .ok_or(ValidationError::TileNotFound { id: *tile_id })?;
-                if tile.namespace != namespace {
-                    return Err(ValidationError::NamespaceMismatch {
-                        tile_id: *tile_id,
-                        tile_namespace: tile.namespace.clone(),
-                        agent_namespace: namespace.to_string(),
-                    });
-                }
-                self.set_portal_surface(*tile_id, surface.clone())?;
+                // Checked path enforces namespace isolation + live
+                // lease/ModifyOwnTiles capability (hud-tc153 review P1).
+                self.set_portal_surface(*tile_id, surface.clone(), namespace)?;
                 Ok(vec![])
             }
             SceneMutation::UpdatePortalSurfaceState {
@@ -1014,18 +1005,7 @@ impl SceneGraph {
                 lifecycle,
                 display_state,
             } => {
-                let tile = self
-                    .tiles
-                    .get(tile_id)
-                    .ok_or(ValidationError::TileNotFound { id: *tile_id })?;
-                if tile.namespace != namespace {
-                    return Err(ValidationError::NamespaceMismatch {
-                        tile_id: *tile_id,
-                        tile_namespace: tile.namespace.clone(),
-                        agent_namespace: namespace.to_string(),
-                    });
-                }
-                self.update_portal_surface_state(*tile_id, *lifecycle, *display_state)?;
+                self.update_portal_surface_state(*tile_id, *lifecycle, *display_state, namespace)?;
                 Ok(vec![])
             }
         }
@@ -1581,6 +1561,194 @@ mod tests {
             ValidationErrorCode::NamespaceMismatch
         );
         assert_eq!(scene.portal_surface(tile_id), None);
+    }
+
+    /// hud-tc153 review P1: a portal surface is a content-layer, lease-governed
+    /// object, so once `ModifyOwnTiles` is revoked mid-lease both
+    /// `SetPortalSurface` and `UpdatePortalSurfaceState` must be rejected with
+    /// `CapabilityMissing` — an active lease alone is not sufficient authority.
+    #[test]
+    fn portal_surface_mutations_require_live_modify_capability() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let create = make_batch(
+            "agent",
+            vec![SceneMutation::CreateTile {
+                tab_id,
+                namespace: "agent".to_string(),
+                lease_id,
+                bounds: Rect::new(10.0, 10.0, 400.0, 300.0),
+                z_order: 1,
+            }],
+        );
+        let tile_id = scene.apply_batch(&create).created_ids[0];
+
+        // Declare a surface while the capability is still present — succeeds.
+        let declare = make_batch(
+            "agent",
+            vec![SceneMutation::SetPortalSurface {
+                tile_id,
+                surface: PortalSurface {
+                    lifecycle: PortalLifecycleState::Active,
+                    display_state: PortalDisplayState::Expanded,
+                    ..Default::default()
+                },
+            }],
+        );
+        assert!(scene.apply_batch(&declare).applied);
+
+        // Revoke ModifyOwnTiles; the lease stays active.
+        scene
+            .revoke_capability(lease_id, &Capability::ModifyOwnTiles)
+            .expect("revoke must succeed");
+
+        // SetPortalSurface is now blocked by the missing capability.
+        let set = make_batch(
+            "agent",
+            vec![SceneMutation::SetPortalSurface {
+                tile_id,
+                surface: PortalSurface {
+                    lifecycle: PortalLifecycleState::Blocked,
+                    ..Default::default()
+                },
+            }],
+        );
+        let set_result = scene.apply_batch(&set);
+        assert!(!set_result.applied, "SetPortalSurface must be rejected");
+        assert_eq!(
+            set_result.rejection.unwrap().errors[0].code,
+            ValidationErrorCode::CapabilityMissing
+        );
+
+        // UpdatePortalSurfaceState is likewise blocked.
+        let patch = make_batch(
+            "agent",
+            vec![SceneMutation::UpdatePortalSurfaceState {
+                tile_id,
+                lifecycle: Some(PortalLifecycleState::Blocked),
+                display_state: None,
+            }],
+        );
+        let patch_result = scene.apply_batch(&patch);
+        assert!(
+            !patch_result.applied,
+            "UpdatePortalSurfaceState must be rejected"
+        );
+        assert_eq!(
+            patch_result.rejection.unwrap().errors[0].code,
+            ValidationErrorCode::CapabilityMissing
+        );
+
+        // The originally declared state is untouched by the rejected writes.
+        let surviving = scene.portal_surface(tile_id).unwrap();
+        assert_eq!(surviving.lifecycle, PortalLifecycleState::Active);
+        assert_eq!(surviving.display_state, PortalDisplayState::Expanded);
+    }
+
+    /// hud-tc153 review P2: the descriptor survives a content republish, but a
+    /// part node reference that pointed at the now-removed root must not dangle —
+    /// `SetTileRoot` prunes it back to `None` so consumers never resolve a stale
+    /// `SceneId`.
+    #[test]
+    fn portal_part_node_refs_pruned_on_root_republish() {
+        let (mut scene, tile_id, root_id) = portal_scene_with_tile();
+
+        // Declare a surface whose transcript part points at the current root node.
+        let declare = make_batch(
+            "agent",
+            vec![SceneMutation::SetPortalSurface {
+                tile_id,
+                surface: PortalSurface {
+                    parts: vec![PortalPart {
+                        kind: PortalPartKind::Transcript,
+                        bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+                        node: Some(root_id),
+                    }],
+                    ..Default::default()
+                },
+            }],
+        );
+        assert!(scene.apply_batch(&declare).applied);
+        assert_eq!(
+            scene.portal_surface(tile_id).unwrap().parts[0].node,
+            Some(root_id),
+            "part must reference the declared node before republish"
+        );
+
+        // Republish the tile root with a fresh node tree (the old root is removed).
+        let new_root = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::SolidColor(SolidColorNode {
+                color: Rgba::new(0.1, 0.1, 0.1, 1.0),
+                bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+                radius: None,
+            }),
+        };
+        let new_root_id = new_root.id;
+        let republish = make_batch(
+            "agent",
+            vec![SceneMutation::SetTileRoot {
+                tile_id,
+                node: new_root,
+            }],
+        );
+        assert!(scene.apply_batch(&republish).applied);
+
+        // The descriptor survives, but the dangling ref to the removed old root is
+        // pruned to None (not left pointing at a node no longer in the graph, and
+        // not silently repointed at the new root).
+        let part = &scene.portal_surface(tile_id).unwrap().parts[0];
+        assert_eq!(
+            part.node, None,
+            "stale part node ref must be pruned to None on root republish"
+        );
+        assert_ne!(
+            part.node,
+            Some(new_root_id),
+            "prune must not silently adopt the new root as the part's node"
+        );
+    }
+
+    /// hud-tc153 review (Gemini): a portal part with negative width/height is
+    /// rejected as an invalid portal surface, mirroring the non-negative extent
+    /// expected of tile/node bounds.
+    #[test]
+    fn set_portal_surface_rejects_negative_part_bounds() {
+        let (mut scene, tile_id, _root_id) = portal_scene_with_tile();
+        let set = make_batch(
+            "agent",
+            vec![SceneMutation::SetPortalSurface {
+                tile_id,
+                surface: PortalSurface {
+                    parts: vec![PortalPart {
+                        kind: PortalPartKind::Frame,
+                        bounds: Rect::new(0.0, 0.0, -10.0, 20.0),
+                        node: None,
+                    }],
+                    ..Default::default()
+                },
+            }],
+        );
+        let result = scene.apply_batch(&set);
+        assert!(
+            !result.applied,
+            "negative-extent part bounds must be rejected"
+        );
+        assert_eq!(
+            result.rejection.unwrap().errors[0].code,
+            ValidationErrorCode::InvalidPortalSurface
+        );
+        assert_eq!(
+            scene.portal_surface(tile_id),
+            None,
+            "rejected write must not store overlay state"
+        );
     }
 
     #[test]

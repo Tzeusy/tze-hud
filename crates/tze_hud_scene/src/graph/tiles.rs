@@ -436,6 +436,13 @@ impl SceneGraph {
             .expect("tile_id existence verified earlier in set_tile_root_impl");
         tile.root_node = Some(node_id);
 
+        // Replacing the root subtree removes the previous node tree, so any portal
+        // surface part still pointing at a removed node would dangle. Prune those
+        // stale refs back to `None` (the adapter re-binds on its next
+        // SetPortalSurface) so consumers never resolve a stale SceneId
+        // (hud-tc153 review P2).
+        self.revalidate_portal_surface_part_nodes(tile_id);
+
         self.version += 1;
         Ok(())
     }

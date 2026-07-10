@@ -464,7 +464,7 @@ impl PortalSurface {
     /// - at most [`PORTAL_MAX_PARTS`] parts,
     /// - no duplicate part kind,
     /// - identity strings within their byte budgets,
-    /// - all part `bounds` finite.
+    /// - all part `bounds` finite and non-negative in extent.
     ///
     /// Returns a human-readable reason on the first violation. This is a pure
     /// structural check; tile ownership / node reachability are enforced by the
@@ -499,6 +499,15 @@ impl PortalSurface {
             if !(b.x.is_finite() && b.y.is_finite() && b.width.is_finite() && b.height.is_finite())
             {
                 return Err(format!("part {:?} has non-finite bounds", part.kind));
+            }
+            // Negative width/height are invalid for visual layout and can cause
+            // rendering anomalies in the compositor; reject them defensively,
+            // mirroring the non-negative extent expected of tile/node bounds.
+            if b.width < 0.0 || b.height < 0.0 {
+                return Err(format!(
+                    "part {:?} has negative bounds extent (width {}, height {})",
+                    part.kind, b.width, b.height
+                ));
             }
         }
         Ok(())
@@ -3546,6 +3555,30 @@ mod tests {
                 .unwrap_err()
                 .contains("non-finite")
         );
+    }
+
+    #[test]
+    fn portal_surface_validate_rejects_negative_extent_bounds() {
+        for bounds in [
+            Rect::new(0.0, 0.0, -10.0, 10.0),
+            Rect::new(0.0, 0.0, 10.0, -10.0),
+        ] {
+            let surface = PortalSurface {
+                parts: vec![PortalPart {
+                    kind: PortalPartKind::Frame,
+                    bounds,
+                    node: None,
+                }],
+                ..Default::default()
+            };
+            assert!(
+                surface
+                    .validate_structure()
+                    .unwrap_err()
+                    .contains("negative bounds extent"),
+                "negative-extent bounds {bounds:?} must be rejected"
+            );
+        }
     }
 
     #[test]
