@@ -5944,6 +5944,27 @@ mod tests {
             transcript_after.width
         );
 
+        // 2b) A child node added AFTER the root within the same republish (a
+        //     portal batch attaches the composer as a separate `AddNode` after
+        //     `SetTileRoot`) is reconciled too — otherwise only the root scales
+        //     and the child keeps stale attach-time geometry. Add a child at the
+        //     stale attach width and assert it tracks the resized pane.
+        let root_id_for_child = scene.tiles.get(&transcript_id).unwrap().root_node.unwrap();
+        let (child_id, child_node) = make_node(attach_bounds);
+        scene
+            .add_node_to_tile(transcript_id, Some(root_id_for_child), child_node)
+            .unwrap();
+        let child_width = match &scene.nodes.get(&child_id).unwrap().data {
+            NodeData::TextMarkdown(tm) => tm.bounds.width,
+            other => panic!("expected TextMarkdown, got {other:?}"),
+        };
+        assert!(
+            (child_width - transcript_after.width).abs() < 1e-2,
+            "a child added after the root must also be reconciled to the resized \
+             pane: expected ~{}, got {child_width} (stale attach width was 180)",
+            transcript_after.width
+        );
+
         // 3) Scoping guard: once the viewer releases geometry authority, a
         //    republish is NOT reconciled — the adapter regains node-bounds
         //    control, proving the fix is gated on the lock and cannot distort
