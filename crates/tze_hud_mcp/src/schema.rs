@@ -178,6 +178,43 @@ fn tool_descriptors() -> Vec<Value> {
 mod tests {
     use super::*;
 
+    /// Serialized byte size of a whole tools/list payload subset. This is the
+    /// wire cost every attached MCP session pays once in its context window, so
+    /// the budget guards below lock in the token-efficiency work (hud-hzsgp) and
+    /// catch a regression back toward the pre-slimming verbosity.
+    ///
+    /// The `portal_projection_*` schemas — the projection self-attach surface —
+    /// were slimmed from ~9,336 to ~6,836 serialized bytes by removing per-field
+    /// doc-comment redundancy while keeping every property, enum value, default,
+    /// and bound. The budgets carry modest headroom for small future additions;
+    /// tighten or raise them deliberately (never to smuggle prose back in).
+    #[test]
+    fn tools_list_stays_within_token_budget() {
+        let list = tools_list_result();
+        let tools = list["tools"].as_array().unwrap();
+        let full_bytes = serde_json::to_string(&list).unwrap().len();
+        let portal_bytes: usize = tools
+            .iter()
+            .filter(|t| {
+                t["name"]
+                    .as_str()
+                    .is_some_and(|n| n.starts_with("portal_projection_"))
+            })
+            .map(|t| serde_json::to_string(t).unwrap().len())
+            .sum();
+
+        assert!(
+            portal_bytes <= 7_500,
+            "portal_projection_* tools/list bytes {portal_bytes} exceeds budget 7500 \
+             (pre-slimming was 9336); did a verbose field doc creep back in?"
+        );
+        assert!(
+            full_bytes <= 20_000,
+            "full tools/list bytes {full_bytes} exceeds budget 20000 \
+             (pre-slimming was 21549)"
+        );
+    }
+
     /// Fetch a single tool's `inputSchema` from the live `tools/list` payload.
     fn input_schema(tool_name: &str) -> Value {
         let list = tools_list_result();

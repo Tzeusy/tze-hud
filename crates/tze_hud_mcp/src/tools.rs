@@ -2199,34 +2199,26 @@ pub fn handle_inject_composer_paste(
 /// Parameters for `portal_projection_attach`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionAttachParams {
-    /// Caller-assigned identifier for this projection session (max 128 bytes).
-    ///
-    /// Must be unique among active projections in the authority.  Re-attaching
-    /// with the same `projection_id` is rejected unless an `idempotency_key`
-    /// matches a prior accepted attach.
+    /// Session id (max 128 bytes), unique among active projections. Reuse needs a matching `idempotency_key`.
     pub projection_id: String,
-    /// Human-readable label for this projection session (max 128 bytes).
+    /// Human-readable label (max 128 bytes).
     pub display_name: String,
-    /// Optional idempotency key — supply the same key to replay-safely re-attach
-    /// after a network interruption.
+    /// Optional key for replay-safe re-attach after an interruption.
     #[serde(default)]
     pub idempotency_key: Option<String>,
-    /// LLM provider kind as a snake_case string (`codex`, `claude`, `opencode`,
-    /// `other`). Omitting defaults to `other`. An unrecognized value is rejected.
+    /// Optional provider: `codex`|`claude`|`opencode`|`other` (default `other`).
     #[serde(default)]
     pub provider_kind: Option<String>,
-    /// Viewer-facing content classification as a snake_case string (`public`,
-    /// `household`, `private`, `sensitive`). Omitting defaults to `private`
-    /// (safe-by-default). An unrecognized value is rejected.
+    /// Optional classification: `public`|`household`|`private`|`sensitive` (default `private`).
     #[serde(default)]
     pub content_classification: Option<String>,
-    /// Optional human-readable workspace hint (e.g. project directory).
+    /// Optional workspace hint (e.g. project directory).
     #[serde(default)]
     pub workspace_hint: Option<String>,
-    /// Optional human-readable repository hint (e.g. repo URL or name).
+    /// Optional repository hint (e.g. repo URL or name).
     #[serde(default)]
     pub repository_hint: Option<String>,
-    /// Optional icon profile hint for visual identity selection.
+    /// Optional icon profile hint for visual identity.
     #[serde(default)]
     pub icon_profile_hint: Option<String>,
     /// Optional HUD target hint for multi-display routing.
@@ -2318,34 +2310,25 @@ pub async fn handle_portal_projection_attach(
 /// Parameters for `portal_projection_publish`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionPublishParams {
-    /// Projection identifier from a prior `portal_projection_attach` call.
+    /// Projection session id from attach.
     pub projection_id: String,
-    /// Owner token returned by the successful `portal_projection_attach` response.
+    /// Owner token from attach.
     pub owner_token: String,
-    /// Text to append to the projection transcript.
+    /// Text to append to the transcript.
     pub output_text: String,
-    /// Optional logical-unit ID for idempotent deduplication (max 128 bytes).
+    /// Optional logical-unit id for idempotent dedup (max 128 bytes).
     #[serde(default)]
     pub logical_unit_id: Option<String>,
-    /// Optional output kind (`assistant`, `tool`, `status`, `error`, `other`).
-    /// Defaults to `assistant` when omitted. An unrecognized value is rejected.
-    /// `viewer` is reserved for the runtime's echo of the operator's own reply
-    /// and is rejected if published by an adapter.
+    /// Optional kind: `assistant` (default)|`tool`|`status`|`error`|`other`.
     #[serde(default)]
     pub output_kind: Option<String>,
-    /// Optional viewer-facing content classification (`public`, `household`,
-    /// `private`, `sensitive`). Defaults to the safe-by-default `private` when
-    /// omitted. An unrecognized value is rejected.
+    /// Optional classification: `public`|`household`|`private`|`sensitive` (default `private`).
     #[serde(default)]
     pub content_classification: Option<String>,
-    /// Optional coalesce key. Repeated publishes sharing the key collapse
-    /// in-place into one transcript unit instead of appending. Omit for append.
+    /// Optional key; repeated publishes with the same key collapse in-place instead of appending.
     #[serde(default)]
     pub coalesce_key: Option<String>,
-    /// Optional question signal (a.k.a. `Question`): set `true` to mark this
-    /// output as a question awaiting a viewer reply. Omitted/`false` is the
-    /// exact pre-existing behavior — no ambient cue is rendered. This is a
-    /// backward-compatible, opt-in presence semantic (hud-jip0k).
+    /// Optional; `true` marks this output as a question awaiting a viewer reply.
     #[serde(default)]
     pub expects_reply: Option<bool>,
 }
@@ -2453,21 +2436,13 @@ pub async fn handle_portal_projection_publish(
 /// Parameters for `portal_projection_publish_status`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionPublishStatusParams {
-    /// Projection identifier from a prior `portal_projection_attach` call.
+    /// Projection session id from attach.
     pub projection_id: String,
-    /// Owner token returned by the successful `portal_projection_attach` response.
+    /// Owner token from attach.
     pub owner_token: String,
-    /// Lifecycle state as a snake_case string. Accepted values are exactly
-    /// `attached`, `active`, `degraded`, `hud_unavailable`, `detached`,
-    /// `cleanup_pending`, `expired`; an unrecognized value is rejected. This is
-    /// how the LLM signals its session lifecycle to the viewer (e.g. `active`
-    /// while working, `degraded`/`hud_unavailable` when impaired, `detached` when
-    /// done). There is no `waiting`/`blocked` state — use `status_text` for that
-    /// detail, or an `output_kind: status` transcript line.
+    /// Lifecycle: `attached`|`active`|`degraded`|`hud_unavailable`|`detached`|`cleanup_pending`|`expired`. No `waiting`/`blocked` — use `status_text`.
     pub lifecycle_state: String,
-    /// Optional human-readable status detail recorded with the lifecycle state
-    /// (e.g. what the session is waiting on). Rejected if it exceeds the
-    /// authority's configured `max_status_text_bytes`.
+    /// Optional status detail (bounded by the authority's `max_status_text_bytes`).
     #[serde(default)]
     pub status_text: Option<String>,
 }
@@ -2569,26 +2544,17 @@ pub async fn handle_portal_projection_publish_status(
 /// Parameters for `portal_projection_get_pending_input`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionGetPendingInputParams {
-    /// Projection identifier from a prior `portal_projection_attach` call.
+    /// Projection session id from attach.
     pub projection_id: String,
-    /// Owner token returned by the successful `portal_projection_attach` response.
+    /// Owner token from attach.
     pub owner_token: String,
-    /// Optional cap on the number of items returned. Clamped to the authority's
-    /// configured `max_poll_items`. Omit to use the authority default.
+    /// Optional cap on items returned (clamped to the authority's `max_poll_items`).
     #[serde(default)]
     pub max_items: Option<usize>,
-    /// Optional cap on the total response byte budget. Clamped to the
-    /// authority's configured `max_poll_response_bytes`. Omit to use the
-    /// authority default.
+    /// Optional cap on response bytes (clamped to the authority's `max_poll_response_bytes`).
     #[serde(default)]
     pub max_bytes: Option<usize>,
-    /// Optional long-poll wait in milliseconds (clamped to 30000). When set, the
-    /// call blocks until at least one input item is available or the wait
-    /// elapses, instead of returning immediately — so the LLM can await the
-    /// viewer's reply with one call rather than a busy-poll loop. Omit (or `0`)
-    /// for the legacy return-immediately behavior. The wait is served on the MCP
-    /// side and never blocks the runtime; delivery latency is bounded by a short
-    /// internal poll interval.
+    /// Optional long-poll wait in ms (clamped to 30000); blocks until input arrives or elapses. Omit/`0` returns immediately.
     #[serde(default)]
     pub wait_ms: Option<u64>,
 }
@@ -2708,20 +2674,18 @@ pub async fn handle_portal_projection_get_pending_input(
 /// Parameters for `portal_projection_acknowledge_input`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionAcknowledgeInputParams {
-    /// Projection identifier from a prior `portal_projection_attach` call.
+    /// Projection session id from attach.
     pub projection_id: String,
-    /// Owner token returned by the successful `portal_projection_attach` response.
+    /// Owner token from attach.
     pub owner_token: String,
-    /// Identifier of the input item being acknowledged (from a prior
-    /// `portal_projection_get_pending_input` response).
+    /// Input item id from a `get_pending_input` response.
     pub input_id: String,
-    /// Acknowledgement state: `handled`, `deferred`, or `rejected`.
+    /// `handled`|`deferred`|`rejected`.
     pub ack_state: String,
-    /// Optional human-readable message recorded with the acknowledgement.
+    /// Optional message recorded with the acknowledgement.
     #[serde(default)]
     pub ack_message: Option<String>,
-    /// Optional re-delivery floor (wall-clock µs). Valid only when `ack_state`
-    /// is `deferred`.
+    /// Optional re-delivery floor (wall-clock µs); valid only with `deferred`.
     #[serde(default)]
     pub not_before_wall_us: Option<u64>,
 }
@@ -2814,11 +2778,11 @@ pub async fn handle_portal_projection_acknowledge_input(
 /// Parameters for `portal_projection_detach`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionDetachParams {
-    /// Projection identifier from a prior `portal_projection_attach` call.
+    /// Projection session id from attach.
     pub projection_id: String,
-    /// Owner token returned by the successful `portal_projection_attach` response.
+    /// Owner token from attach.
     pub owner_token: String,
-    /// Human-readable reason recorded in the audit log.
+    /// Human-readable reason for the audit log.
     pub reason: String,
 }
 
@@ -2900,17 +2864,17 @@ pub async fn handle_portal_projection_detach(
 /// Parameters for `portal_projection_cleanup`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionCleanupParams {
-    /// Projection identifier from a prior `portal_projection_attach` call.
+    /// Projection session id from attach.
     pub projection_id: String,
-    /// Cleanup authority: `owner` or `operator`.
+    /// `owner` or `operator`.
     pub cleanup_authority: String,
-    /// Owner token required when `cleanup_authority = "owner"`.
+    /// Owner token (required when `cleanup_authority = owner`).
     #[serde(default)]
     pub owner_token: Option<String>,
-    /// Operator credential required when `cleanup_authority = "operator"`.
+    /// Operator credential (required when `cleanup_authority = operator`).
     #[serde(default)]
     pub operator_authority: Option<String>,
-    /// Human-readable reason recorded in the audit log.
+    /// Human-readable reason for the audit log.
     pub reason: String,
 }
 
