@@ -1096,7 +1096,9 @@ impl ResidentGrpcPortalAdapter {
             mutations.push(proto::MutationProto {
                 mutation: Some(proto::mutation_proto::Mutation::AddNode(
                     proto::AddNodeMutation {
-                        tile_id,
+                        // Clone: the unread-count badge mutation below also needs
+                        // `tile_id` (it is pushed after this composer AddNode).
+                        tile_id: tile_id.clone(),
                         parent_id: root_id_be,
                         node: Some(proto::NodeProto {
                             id: Vec::new(),
@@ -1127,6 +1129,35 @@ impl ResidentGrpcPortalAdapter {
                 )),
             });
         }
+
+        // Ambient unread-output count for the jump-to-latest pill badge
+        // (hud-hwk2m, portal-chat-grade-affordances §Jump-to-Latest Affordance).
+        // A coalescible StateStream tile-update carrying the runtime-owned unread
+        // count as per-tile overlay state — the bridged-transport counterpart of
+        // the in-process driver's direct `set_tile_unread_count` call. Without it a
+        // bridged portal's pill rendered without the badge the in-process path got
+        // in #1088 (the count only reached the scene on the suppressed in-process
+        // arm). Emitted every render so the latest count coalesces, exactly like
+        // the lifecycle accent above; the count rides overlay state so it survives
+        // the `PublishToTile` content republish (which replaces the node tree).
+        // Value mirrors the in-process arm's `unread_output_count.unwrap_or(0)`: a
+        // redacted (`None`) or empty count sends 0 → clears the badge, and the
+        // pill's own `scrolled_back` gate hides it the instant the viewer returns
+        // to the tail. Pushed LAST so the composer hit region stays at a fixed
+        // index for the interaction-path tests.
+        let unread_count = state
+            .unread_output_count
+            .unwrap_or(0)
+            .min(u32::MAX as usize) as u32;
+        mutations.push(proto::MutationProto {
+            mutation: Some(proto::mutation_proto::Mutation::SetTileUnreadCount(
+                proto::SetTileUnreadCountMutation {
+                    // Final use of `tile_id` in this batch — move, no clone.
+                    tile_id,
+                    count: unread_count,
+                },
+            )),
+        });
 
         Ok(session_proto::MutationBatch {
             batch_id: new_scene_id_bytes(),
@@ -2714,6 +2745,95 @@ mod tests {
         );
     }
 
+    // ── Jump-to-latest unread badge over the bridged transport (hud-hwk2m) ────
+
+    /// The jump-to-latest pill's ambient unread badge reaches a BRIDGED portal
+    /// via the wire, at parity with the in-process driver's direct
+    /// `set_tile_unread_count` call (#1088 / hud-g1ena.3). `render_batch` must
+    /// emit exactly one `SetTileUnreadCount` mutation each render, carrying
+    /// `unread_output_count.unwrap_or(0)`:
+    ///
+    /// - `Some(N)` → count == N (the pill carries the badge);
+    /// - `Some(0)` and a redacted `None` → count == 0 (no badge — same gating as
+    ///   the in-transcript ambient indicator);
+    ///
+    /// and it must NOT be an `AddNode` (so `classify_inbound_batch` keeps the
+    /// batch StateStream — a bridged portal stays on the coalescible path).
+    #[test]
+    fn jump_to_latest_unread_count_rides_state_stream_tile_update() {
+        fn unread_of(
+            batch: &session_proto::MutationBatch,
+        ) -> Option<proto::SetTileUnreadCountMutation> {
+            batch.mutations.iter().find_map(|m| match &m.mutation {
+                Some(proto::mutation_proto::Mutation::SetTileUnreadCount(u)) => Some(u.clone()),
+                _ => None,
+            })
+        }
+        fn has_add_node(batch: &session_proto::MutationBatch) -> bool {
+            batch.mutations.iter().any(|m| {
+                matches!(
+                    &m.mutation,
+                    Some(proto::mutation_proto::Mutation::AddNode(_))
+                )
+            })
+        }
+
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let mut adapter = ResidentGrpcPortalAdapter::new(config);
+        adapter.record_created_tile(vec![7u8; 16]);
+
+        // Case 1: a non-empty ambient unread count → the pill carries the badge.
+        // Non-interactive: the badge must not flip the batch Transactional.
+        let mut unread = make_expanded_interaction_state("portal-unread");
+        unread.interaction_enabled = false;
+        unread.unread_output_count = Some(4);
+        let batch = adapter
+            .render_batch(&unread, 0)
+            .expect("render_batch must succeed");
+        let mutation = unread_of(&batch).expect("render_batch must emit a SetTileUnreadCount");
+        assert_eq!(
+            mutation.count, 4,
+            "the bridged pill badge must carry the aggregate unread count"
+        );
+        assert_eq!(
+            mutation.tile_id,
+            vec![7u8; 16],
+            "the badge mutation must target the portal's created tile"
+        );
+        assert!(
+            !has_add_node(&batch),
+            "the unread badge must not be an AddNode (would flip the batch \
+             Transactional — hud-mzk74 / bridged coalescing)"
+        );
+
+        // Case 2: an empty count (0) clears the badge.
+        let mut empty = make_expanded_interaction_state("portal-unread");
+        empty.interaction_enabled = false;
+        empty.unread_output_count = Some(0);
+        let batch = adapter
+            .render_batch(&empty, 0)
+            .expect("render_batch must succeed");
+        assert_eq!(
+            unread_of(&batch).expect("mutation still emitted").count,
+            0,
+            "an empty unread count must clear the badge (count 0)"
+        );
+
+        // Case 3: a redacted (`None`) count also clears the badge — matching the
+        // in-process arm's `unread_output_count.unwrap_or(0)` gating.
+        let mut redacted = make_expanded_interaction_state("portal-unread");
+        redacted.interaction_enabled = false;
+        redacted.unread_output_count = None;
+        let batch = adapter
+            .render_batch(&redacted, 0)
+            .expect("render_batch must succeed");
+        assert_eq!(
+            unread_of(&batch).expect("mutation still emitted").count,
+            0,
+            "a redacted (None) unread count must clear the badge (count 0)"
+        );
+    }
+
     // ── Composer hit region activation (hud-hxe91) ────────────────────────────
 
     /// render_batch must emit an AddNodeMutation with a HitRegionNodeProto
@@ -2733,16 +2853,18 @@ mod tests {
             .render_batch(&state, 0)
             .expect("render_batch must succeed with interaction_enabled");
 
-        // Should be 4 mutations: PublishToTile, UpdateTileInputMode,
-        // SetTileLifecycleAccent (always emitted, hud-m48i0), AddNode.
+        // Should be 5 mutations: PublishToTile, UpdateTileInputMode,
+        // SetTileLifecycleAccent (always emitted, hud-m48i0), AddNode (composer hit
+        // region), SetTileUnreadCount (always emitted last, hud-hwk2m).
         assert_eq!(
             batch.mutations.len(),
-            4,
+            5,
             "interaction_enabled=true must produce PublishToTile + UpdateTileInputMode + \
-             SetTileLifecycleAccent + AddNode (composer hit region)"
+             SetTileLifecycleAccent + AddNode (composer hit region) + SetTileUnreadCount"
         );
 
-        // The fourth mutation must be AddNode with accepts_composer_input=true.
+        // The fourth mutation must be AddNode with accepts_composer_input=true
+        // (SetTileUnreadCount is pushed last, so the composer stays at index 3).
         let add_node_mutation = &batch.mutations[3];
         match &add_node_mutation.mutation {
             Some(tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(an)) => {
@@ -2888,13 +3010,23 @@ mod tests {
             .render_batch(&state, 0)
             .expect("render_batch must succeed");
 
-        // Should be 3 mutations: PublishToTile + UpdateTileInputMode +
-        // SetTileLifecycleAccent (always emitted, hud-m48i0). No AddNode.
+        // Should be 4 mutations: PublishToTile + UpdateTileInputMode +
+        // SetTileLifecycleAccent (always emitted, hud-m48i0) + SetTileUnreadCount
+        // (always emitted, hud-hwk2m). No AddNode (composer hit region).
         assert_eq!(
             batch.mutations.len(),
-            3,
-            "interaction_enabled=false must produce exactly 3 mutations \
-             (PublishToTile + UpdateTileInputMode + SetTileLifecycleAccent, no AddNode)"
+            4,
+            "interaction_enabled=false must produce exactly 4 mutations \
+             (PublishToTile + UpdateTileInputMode + SetTileLifecycleAccent + \
+              SetTileUnreadCount, no AddNode)"
+        );
+        assert!(
+            !batch.mutations.iter().any(|m| matches!(
+                &m.mutation,
+                Some(proto::mutation_proto::Mutation::AddNode(_))
+            )),
+            "interaction_enabled=false must emit no AddNode (would flip the batch \
+             Transactional — hud-mzk74)"
         );
     }
 

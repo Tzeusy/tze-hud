@@ -430,6 +430,29 @@ fn convert_proto_mutations(
                     }
                 }
             }
+            Some(crate::proto::mutation_proto::Mutation::SetTileUnreadCount(stuc)) => {
+                match bytes_to_scene_id(&stuc.tile_id) {
+                    Ok(tile_id) => {
+                        scene_mutations.push(SceneMutation::SetTileUnreadCount {
+                            tile_id,
+                            count: stuc.count as usize,
+                        });
+                        // No `pending_touch_ids` entry: the badge count is runtime
+                        // overlay state, not a published element, so it must not
+                        // bump the tile's element-store `last_published_at`
+                        // (mirrors SetTileLifecycleAccent). The count always rides
+                        // alongside a co-travelling `PublishToTile` content mutation
+                        // in the portal render batch, whose repaint carries it.
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = stuc.tile_id.len(),
+                            "SetTileUnreadCount{log_suffix}: invalid tile_id length \
+                             (expected 16 bytes); mutation skipped — SDK bug or wire corruption"
+                        );
+                    }
+                }
+            }
             Some(crate::proto::mutation_proto::Mutation::SetPortalSurface(sps)) => {
                 match bytes_to_scene_id(&sps.tile_id) {
                     Ok(tile_id) => {
