@@ -496,7 +496,8 @@ impl PortalSurface {
             }
             seen |= bit;
             let b = part.bounds;
-            if !(b.x.is_finite() && b.y.is_finite() && b.width.is_finite() && b.height.is_finite()) {
+            if !(b.x.is_finite() && b.y.is_finite() && b.width.is_finite() && b.height.is_finite())
+            {
                 return Err(format!("part {:?} has non-finite bounds", part.kind));
             }
         }
@@ -3456,6 +3457,117 @@ impl Default for ZoneRegistry {
 mod tests {
     use super::*;
     use std::mem::size_of;
+
+    // ── Portal surface structural validation (RFC 0013 §7.2; hud-tc153) ──────
+
+    fn portal_part(kind: PortalPartKind) -> PortalPart {
+        PortalPart {
+            kind,
+            bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+            node: None,
+        }
+    }
+
+    #[test]
+    fn portal_surface_validate_accepts_all_eight_parts() {
+        let surface = PortalSurface {
+            parts: PortalPartKind::ALL
+                .iter()
+                .copied()
+                .map(portal_part)
+                .collect(),
+            ..Default::default()
+        };
+        assert_eq!(surface.parts.len(), PORTAL_MAX_PARTS);
+        assert!(surface.validate_structure().is_ok());
+    }
+
+    #[test]
+    fn portal_surface_validate_rejects_duplicate_kind() {
+        let surface = PortalSurface {
+            parts: vec![
+                portal_part(PortalPartKind::Transcript),
+                portal_part(PortalPartKind::Transcript),
+            ],
+            ..Default::default()
+        };
+        assert!(
+            surface
+                .validate_structure()
+                .unwrap_err()
+                .contains("duplicate")
+        );
+    }
+
+    #[test]
+    fn portal_surface_validate_rejects_oversized_identity() {
+        let surface = PortalSurface {
+            identity: PortalIdentity {
+                session_id: "x".repeat(PORTAL_SESSION_ID_MAX_BYTES + 1),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(
+            surface
+                .validate_structure()
+                .unwrap_err()
+                .contains("session_id")
+        );
+
+        let surface = PortalSurface {
+            identity: PortalIdentity {
+                display_name: "y".repeat(PORTAL_DISPLAY_NAME_MAX_BYTES + 1),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(
+            surface
+                .validate_structure()
+                .unwrap_err()
+                .contains("display_name")
+        );
+    }
+
+    #[test]
+    fn portal_surface_validate_rejects_non_finite_bounds() {
+        let surface = PortalSurface {
+            parts: vec![PortalPart {
+                kind: PortalPartKind::Frame,
+                bounds: Rect::new(f32::NAN, 0.0, 10.0, 10.0),
+                node: None,
+            }],
+            ..Default::default()
+        };
+        assert!(
+            surface
+                .validate_structure()
+                .unwrap_err()
+                .contains("non-finite")
+        );
+    }
+
+    #[test]
+    fn portal_part_kind_text_bearing_classification() {
+        // Geometry-only parts are NOT text-bearing (readability technique None).
+        for k in [
+            PortalPartKind::Divider,
+            PortalPartKind::CaptureBackstop,
+            PortalPartKind::GestureShield,
+        ] {
+            assert!(!k.is_text_bearing(), "{k:?} must be geometry-only");
+        }
+        for k in [
+            PortalPartKind::Frame,
+            PortalPartKind::Header,
+            PortalPartKind::Composer,
+            PortalPartKind::Transcript,
+            PortalPartKind::CollapsedCard,
+        ] {
+            assert!(k.is_text_bearing(), "{k:?} must be text-bearing");
+        }
+    }
 
     // ── SceneId size invariant ────────────────────────────────────────────────
 

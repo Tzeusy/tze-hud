@@ -1685,7 +1685,9 @@ pub fn scene_portal_lifecycle_to_proto(s: PortalLifecycleState) -> i32 {
         PortalLifecycleState::Unspecified => {
             proto::PortalLifecycleStateProto::PortalLifecycleStateUnspecified
         }
-        PortalLifecycleState::Active => proto::PortalLifecycleStateProto::PortalLifecycleStateActive,
+        PortalLifecycleState::Active => {
+            proto::PortalLifecycleStateProto::PortalLifecycleStateActive
+        }
         PortalLifecycleState::WaitingForInput => {
             proto::PortalLifecycleStateProto::PortalLifecycleStateWaitingForInput
         }
@@ -1731,7 +1733,9 @@ pub fn scene_portal_display_state_to_proto(s: PortalDisplayState) -> i32 {
         PortalDisplayState::Unspecified => {
             proto::PortalDisplayStateProto::PortalDisplayStateUnspecified
         }
-        PortalDisplayState::Collapsed => proto::PortalDisplayStateProto::PortalDisplayStateCollapsed,
+        PortalDisplayState::Collapsed => {
+            proto::PortalDisplayStateProto::PortalDisplayStateCollapsed
+        }
         PortalDisplayState::Expanded => proto::PortalDisplayStateProto::PortalDisplayStateExpanded,
     };
     e as i32
@@ -1745,7 +1749,9 @@ pub fn proto_portal_part_kind_to_scene(v: i32) -> Option<PortalPartKind> {
         Ok(proto::PortalPartKindProto::PortalPartKindFrame) => Some(PortalPartKind::Frame),
         Ok(proto::PortalPartKindProto::PortalPartKindHeader) => Some(PortalPartKind::Header),
         Ok(proto::PortalPartKindProto::PortalPartKindComposer) => Some(PortalPartKind::Composer),
-        Ok(proto::PortalPartKindProto::PortalPartKindTranscript) => Some(PortalPartKind::Transcript),
+        Ok(proto::PortalPartKindProto::PortalPartKindTranscript) => {
+            Some(PortalPartKind::Transcript)
+        }
         Ok(proto::PortalPartKindProto::PortalPartKindDivider) => Some(PortalPartKind::Divider),
         Ok(proto::PortalPartKindProto::PortalPartKindCollapsedCard) => {
             Some(PortalPartKind::CollapsedCard)
@@ -1769,7 +1775,9 @@ pub fn scene_portal_part_kind_to_proto(k: PortalPartKind) -> i32 {
         PortalPartKind::Transcript => proto::PortalPartKindProto::PortalPartKindTranscript,
         PortalPartKind::Divider => proto::PortalPartKindProto::PortalPartKindDivider,
         PortalPartKind::CollapsedCard => proto::PortalPartKindProto::PortalPartKindCollapsedCard,
-        PortalPartKind::CaptureBackstop => proto::PortalPartKindProto::PortalPartKindCaptureBackstop,
+        PortalPartKind::CaptureBackstop => {
+            proto::PortalPartKindProto::PortalPartKindCaptureBackstop
+        }
         PortalPartKind::GestureShield => proto::PortalPartKindProto::PortalPartKindGestureShield,
     };
     e as i32
@@ -1783,7 +1791,9 @@ pub fn scene_portal_part_kind_to_proto(k: PortalPartKind) -> i32 {
 /// does. A part whose `kind` is UNSPECIFIED/unknown, or whose non-empty `node`
 /// is not 16 bytes, is rejected. The resulting surface must pass
 /// [`PortalSurface::validate_structure`].
-pub fn proto_portal_surface_to_scene(p: &proto::PortalSurfaceProto) -> Result<PortalSurface, String> {
+pub fn proto_portal_surface_to_scene(
+    p: &proto::PortalSurfaceProto,
+) -> Result<PortalSurface, String> {
     let identity = p
         .identity
         .as_ref()
@@ -1797,7 +1807,10 @@ pub fn proto_portal_surface_to_scene(p: &proto::PortalSurfaceProto) -> Result<Po
     let mut parts = Vec::with_capacity(p.parts.len());
     for part in &p.parts {
         let Some(kind) = proto_portal_part_kind_to_scene(part.kind) else {
-            return Err(format!("part has unspecified/unknown kind (wire value {})", part.kind));
+            return Err(format!(
+                "part has unspecified/unknown kind (wire value {})",
+                part.kind
+            ));
         };
         let bounds = part
             .bounds
@@ -1858,6 +1871,96 @@ pub fn scene_portal_surface_to_proto(s: &PortalSurface) -> proto::PortalSurfaceP
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Portal surface proto round-trips (RFC 0013 §7.2; hud-tc153) ──────────
+
+    #[test]
+    fn portal_surface_scene_proto_round_trip_preserves_all_fields() {
+        let node_id = SceneId::new();
+        let surface = PortalSurface {
+            identity: PortalIdentity {
+                session_id: "sess-42".to_string(),
+                display_name: "Operator".to_string(),
+                peer_class: PortalPeerClass::Operator,
+            },
+            lifecycle: PortalLifecycleState::WaitingForInput,
+            display_state: PortalDisplayState::Collapsed,
+            parts: vec![
+                PortalPart {
+                    kind: PortalPartKind::Transcript,
+                    bounds: Rect::new(1.0, 2.0, 300.0, 200.0),
+                    node: Some(node_id),
+                },
+                PortalPart {
+                    kind: PortalPartKind::Divider,
+                    bounds: Rect::new(150.0, 0.0, 2.0, 200.0),
+                    node: None,
+                },
+            ],
+        };
+
+        let proto = scene_portal_surface_to_proto(&surface);
+        let restored =
+            proto_portal_surface_to_scene(&proto).expect("valid surface must round-trip");
+        assert_eq!(restored, surface);
+        // The materialized part node id survives the big-endian byte round-trip.
+        assert_eq!(restored.parts[0].node, Some(node_id));
+    }
+
+    #[test]
+    fn portal_state_patch_unspecified_means_unchanged() {
+        // UNSPECIFIED wire values decode to None ("leave unchanged") for the
+        // coalescible patch path.
+        assert_eq!(
+            proto_portal_lifecycle_to_scene(
+                proto::PortalLifecycleStateProto::PortalLifecycleStateUnspecified as i32
+            ),
+            None
+        );
+        assert_eq!(
+            proto_portal_display_state_to_scene(
+                proto::PortalDisplayStateProto::PortalDisplayStateUnspecified as i32
+            ),
+            None
+        );
+        // A concrete value decodes to Some.
+        assert_eq!(
+            proto_portal_lifecycle_to_scene(
+                proto::PortalLifecycleStateProto::PortalLifecycleStateBlocked as i32
+            ),
+            Some(PortalLifecycleState::Blocked)
+        );
+    }
+
+    #[test]
+    fn portal_surface_conversion_rejects_unspecified_part_kind() {
+        let proto = proto::PortalSurfaceProto {
+            identity: None,
+            lifecycle: 0,
+            display_state: 0,
+            parts: vec![proto::PortalPartProto {
+                kind: proto::PortalPartKindProto::PortalPartKindUnspecified as i32,
+                bounds: None,
+                node: vec![],
+            }],
+        };
+        assert!(proto_portal_surface_to_scene(&proto).is_err());
+    }
+
+    #[test]
+    fn portal_surface_conversion_rejects_bad_node_length() {
+        let proto = proto::PortalSurfaceProto {
+            identity: None,
+            lifecycle: 0,
+            display_state: 0,
+            parts: vec![proto::PortalPartProto {
+                kind: proto::PortalPartKindProto::PortalPartKindTranscript as i32,
+                bounds: None,
+                node: vec![1, 2, 3], // not 16 bytes
+            }],
+        };
+        assert!(proto_portal_surface_to_scene(&proto).is_err());
+    }
 
     // ── SceneId / ResourceId proto round-trips ───────────────────────────────
 

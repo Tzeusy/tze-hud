@@ -1341,6 +1341,248 @@ mod tests {
         );
     }
 
+    // ── Portal surface (RFC 0013 §7.2 promotion; hud-tc153) ──────────────────
+
+    /// Set up a tab + lease + tile whose root is a known SolidColor node, and
+    /// return `(scene, tile_id, root_node_id)`. Mirrors the raw-tile pilot: the
+    /// tile's content node is what a portal part points at.
+    fn portal_scene_with_tile() -> (SceneGraph, SceneId, SceneId) {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let create = make_batch(
+            "agent",
+            vec![SceneMutation::CreateTile {
+                tab_id,
+                namespace: "agent".to_string(),
+                lease_id,
+                bounds: Rect::new(10.0, 10.0, 400.0, 300.0),
+                z_order: 1,
+            }],
+        );
+        let tile_id = scene.apply_batch(&create).created_ids[0];
+        let root = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::SolidColor(SolidColorNode {
+                color: Rgba::new(0.0, 0.0, 0.0, 1.0),
+                bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+                radius: None,
+            }),
+        };
+        let root_id = root.id;
+        let set_root = make_batch(
+            "agent",
+            vec![SceneMutation::SetTileRoot {
+                tile_id,
+                node: root,
+            }],
+        );
+        assert!(scene.apply_batch(&set_root).applied);
+        (scene, tile_id, root_id)
+    }
+
+    /// The Phase-0 raw-tile assembly is expressible via the promoted surface:
+    /// a `SetPortalSurface` declaring all eight named parts lands in overlay
+    /// state, bumps `scene.version`, and reads back verbatim.
+    #[test]
+    fn set_portal_surface_expresses_all_eight_parts() {
+        let (mut scene, tile_id, root_id) = portal_scene_with_tile();
+
+        // All eight parts; the transcript part points at the tile's content node
+        // (raw-tile expression), the rest carry geometry only.
+        let parts: Vec<PortalPart> = PortalPartKind::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, &kind)| PortalPart {
+                kind,
+                bounds: Rect::new(0.0, i as f32 * 10.0, 400.0, 10.0),
+                node: if kind == PortalPartKind::Transcript {
+                    Some(root_id)
+                } else {
+                    None
+                },
+            })
+            .collect();
+        let surface = PortalSurface {
+            identity: PortalIdentity {
+                session_id: "sess-1".to_string(),
+                display_name: "Claude".to_string(),
+                peer_class: PortalPeerClass::ResidentLlm,
+            },
+            lifecycle: PortalLifecycleState::Active,
+            display_state: PortalDisplayState::Expanded,
+            parts,
+        };
+
+        let v_before = scene.version;
+        let set = make_batch(
+            "agent",
+            vec![SceneMutation::SetPortalSurface {
+                tile_id,
+                surface: surface.clone(),
+            }],
+        );
+        assert!(
+            scene.apply_batch(&set).applied,
+            "SetPortalSurface must apply"
+        );
+        assert_eq!(scene.portal_surface(tile_id), Some(&surface));
+        assert!(
+            scene.version > v_before,
+            "declaring a portal surface must bump scene.version"
+        );
+
+        // Redundant re-declare of the same surface is a version no-op (idle stays idle).
+        let v_before_redundant = scene.version;
+        let set_same = make_batch(
+            "agent",
+            vec![SceneMutation::SetPortalSurface { tile_id, surface }],
+        );
+        assert!(scene.apply_batch(&set_same).applied);
+        assert_eq!(scene.version, v_before_redundant);
+
+        // Cleanup on tile deletion.
+        let delete = make_batch("agent", vec![SceneMutation::DeleteTile { tile_id }]);
+        assert!(scene.apply_batch(&delete).applied);
+        assert_eq!(
+            scene.portal_surface(tile_id),
+            None,
+            "portal surface overlay state must be cleaned up on tile deletion"
+        );
+    }
+
+    /// `UpdatePortalSurfaceState` coalesces: a `None` field is left unchanged and
+    /// a redundant patch does not bump `scene.version`.
+    #[test]
+    fn update_portal_surface_state_patches_and_coalesces() {
+        let (mut scene, tile_id, _root_id) = portal_scene_with_tile();
+        let set = make_batch(
+            "agent",
+            vec![SceneMutation::SetPortalSurface {
+                tile_id,
+                surface: PortalSurface {
+                    lifecycle: PortalLifecycleState::Active,
+                    display_state: PortalDisplayState::Expanded,
+                    ..Default::default()
+                },
+            }],
+        );
+        assert!(scene.apply_batch(&set).applied);
+
+        // Patch only display_state; lifecycle (None) is left unchanged.
+        let patch = make_batch(
+            "agent",
+            vec![SceneMutation::UpdatePortalSurfaceState {
+                tile_id,
+                lifecycle: None,
+                display_state: Some(PortalDisplayState::Collapsed),
+            }],
+        );
+        let v_before = scene.version;
+        assert!(scene.apply_batch(&patch).applied);
+        let s = scene.portal_surface(tile_id).unwrap();
+        assert_eq!(
+            s.lifecycle,
+            PortalLifecycleState::Active,
+            "lifecycle unchanged"
+        );
+        assert_eq!(
+            s.display_state,
+            PortalDisplayState::Collapsed,
+            "display patched"
+        );
+        assert!(
+            scene.version > v_before,
+            "a real state change bumps version"
+        );
+
+        // Redundant patch (same values) is a version no-op.
+        let v_before_redundant = scene.version;
+        let patch_same = make_batch(
+            "agent",
+            vec![SceneMutation::UpdatePortalSurfaceState {
+                tile_id,
+                lifecycle: None,
+                display_state: Some(PortalDisplayState::Collapsed),
+            }],
+        );
+        assert!(scene.apply_batch(&patch_same).applied);
+        assert_eq!(scene.version, v_before_redundant);
+    }
+
+    /// Patching a tile that has no declared portal surface is rejected with
+    /// `PortalSurfaceNotFound` (you must `SetPortalSurface` first).
+    #[test]
+    fn update_portal_surface_state_requires_prior_surface() {
+        let (mut scene, tile_id, _root_id) = portal_scene_with_tile();
+        let patch = make_batch(
+            "agent",
+            vec![SceneMutation::UpdatePortalSurfaceState {
+                tile_id,
+                lifecycle: Some(PortalLifecycleState::Blocked),
+                display_state: None,
+            }],
+        );
+        let result = scene.apply_batch(&patch);
+        assert!(!result.applied);
+        assert_eq!(
+            result.rejection.unwrap().errors[0].code,
+            ValidationErrorCode::PortalSurfaceNotFound
+        );
+    }
+
+    /// A portal part referencing a node that is not in the host tile's tree is
+    /// rejected with `InvalidPortalSurface` (a surface cannot borrow foreign nodes).
+    #[test]
+    fn set_portal_surface_rejects_foreign_part_node() {
+        let (mut scene, tile_id, _root_id) = portal_scene_with_tile();
+        let set = make_batch(
+            "agent",
+            vec![SceneMutation::SetPortalSurface {
+                tile_id,
+                surface: PortalSurface {
+                    parts: vec![PortalPart {
+                        kind: PortalPartKind::Transcript,
+                        bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+                        node: Some(SceneId::new()), // not in the tile
+                    }],
+                    ..Default::default()
+                },
+            }],
+        );
+        let result = scene.apply_batch(&set);
+        assert!(!result.applied);
+        assert_eq!(
+            result.rejection.unwrap().errors[0].code,
+            ValidationErrorCode::InvalidPortalSurface
+        );
+    }
+
+    /// Cross-namespace `SetPortalSurface` is rejected and mutates no overlay state.
+    #[test]
+    fn set_portal_surface_rejects_cross_namespace() {
+        let (mut scene, tile_id, _root_id) = portal_scene_with_tile();
+        let intruder = make_batch(
+            "intruder",
+            vec![SceneMutation::SetPortalSurface {
+                tile_id,
+                surface: PortalSurface::default(),
+            }],
+        );
+        let result = scene.apply_batch(&intruder);
+        assert!(!result.applied);
+        assert_eq!(
+            result.rejection.unwrap().errors[0].code,
+            ValidationErrorCode::NamespaceMismatch
+        );
+        assert_eq!(scene.portal_surface(tile_id), None);
+    }
+
     #[test]
     fn test_mutation_batch_rollback_on_failure() {
         let mut scene = SceneGraph::new(1920.0, 1080.0);

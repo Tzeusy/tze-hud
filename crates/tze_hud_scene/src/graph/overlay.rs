@@ -472,9 +472,11 @@ impl SceneGraph {
         lifecycle: Option<PortalLifecycleState>,
         display_state: Option<PortalDisplayState>,
     ) -> Result<(), ValidationError> {
-        let surface = self.overlay.portal_surfaces.get_mut(&tile_id).ok_or(
-            ValidationError::PortalSurfaceNotFound { tile_id },
-        )?;
+        let surface = self
+            .overlay
+            .portal_surfaces
+            .get_mut(&tile_id)
+            .ok_or(ValidationError::PortalSurfaceNotFound { tile_id })?;
         let mut changed = false;
         if let Some(next) = lifecycle {
             if surface.lifecycle != next {
