@@ -131,6 +131,24 @@ export TZE_HUD_MCP_RESIDENT_PRINCIPAL="$TZE_HUD_PSK"   # see the note below
 A window opens. The MCP listener is on `http://127.0.0.1:9090/mcp` (loopback
 only by default — add `--bind-all-interfaces` to expose it on the LAN).
 
+On launch the runtime also prints a short **startup banner** to stdout — once,
+unconditionally, even when `TZE_HUD_LOG` is unset — so you can see where it is
+listening without turning on logging:
+
+```text
+────────────────────────────────────────────────────────────────────
+ tze_hud runtime ready
+   gRPC   : 127.0.0.1:50051
+   MCP    : http://127.0.0.1:9090/mcp   (auth: Authorization: Bearer <TZE_HUD_PSK>)
+   attach : invoke the `hud-projection` skill in an LLM session, or run
+            scripts/quickstart.sh — see docs/QUICKSTART.md
+────────────────────────────────────────────────────────────────────
+```
+
+The banner is deliberately non-secret: it shows only the bound addresses and an
+attach hint, never the PSK. (A disabled service — `--mcp-port 0` or
+`--grpc-port 0` — shows as `disabled`.)
+
 > **The resident-principal rule (this is the one non-obvious bit).** The
 > `portal_projection_*` MCP tools are *Resident* tools. The runtime grants them
 > only to a caller whose bearer matches **both** the configured resident
@@ -202,7 +220,7 @@ curl -s -X POST http://127.0.0.1:9090/mcp \
 |---|---|
 | `canonical startup requires a readable config file` | No config resolved. Run from a dir containing `tze_hud.toml`, or pass `--config <path>`. `quickstart.sh` scaffolds one. |
 | `refusing startup with default PSK value "tze-hud-key"` | Set a non-trivial PSK (`--psk` / `TZE_HUD_PSK`). `quickstart.sh` generates one. |
-| Nothing printed on stdout after launch | Structured logs are gated behind the `TZE_HUD_LOG` env filter. Run with `TZE_HUD_LOG=info` to see startup/bind logs. (`quickstart.sh` prints the attach block regardless.) |
+| Nothing printed on stdout after launch | The runtime always prints a one-time non-secret startup banner (bind addrs + attach hint). *Structured* logs beyond it are gated behind the `TZE_HUD_LOG` env filter — run with `TZE_HUD_LOG=info` for detailed startup/bind logs. (`quickstart.sh` prints the attach block regardless.) |
 | Projection tool call rejected `CAPABILITY_REQUIRED` | `TZE_HUD_MCP_RESIDENT_PRINCIPAL` is not set equal to the PSK, or the bearer differs from the PSK. Make principal == bearer == PSK. |
 | `No active tab` on the autonomous test VM | Known runtime bug (hud-d5rcd) on the WARP-rendered VM: call MCP `create_tab {"name":"Main"}` once before portal work. Not needed on a normal GPU desktop where `[[tabs]]` materializes. |
 | Window won't open on a headless box | Expected — you need a real display server. Use overlay/fullscreen on a desktop, or the TigerVNC path in `README.md`. |

@@ -105,10 +105,12 @@ pub(super) fn build_runtime_context(cfg: &WindowedConfig) -> (SharedRuntimeConte
 
 /// Start network services (gRPC) on a dedicated Tokio multi-thread runtime.
 ///
-/// Returns `(network_rt, handles)`:
+/// Returns `(network_rt, handles, ..., grpc_bound_addr)`:
 /// - `network_rt` is `Some(NetworkRuntime)` when `grpc_port != 0`; `None` if
 ///   all services are disabled (port 0 disables gRPC).
 /// - `handles` contains join handles for each spawned server task.
+/// - `grpc_bound_addr` is `Some` with the *actually bound* socket address when
+///   gRPC is enabled and bound successfully; `None` when gRPC is disabled.
 ///
 /// ## gRPC server
 ///
@@ -118,10 +120,16 @@ pub(super) fn build_runtime_context(cfg: &WindowedConfig) -> (SharedRuntimeConte
 /// (all interfaces - explicit opt-in required, hud-1aswu.1).
 /// Setting `grpc_port = 0` skips server creation (compositor-only mode).
 ///
+/// The listener is bound *eagerly* (before the serve task is spawned) so a
+/// port conflict fails startup fast and the returned `grpc_bound_addr` reflects
+/// a listener that is genuinely up — rather than an address the serve task
+/// might fail to bind asynchronously (hud-ylwqc).
+///
 /// ## Errors
 ///
-/// Returns `Err` if the `NetworkRuntime` Tokio runtime cannot be created, or if
-/// the gRPC server address fails to parse.
+/// Returns `Err` if the `NetworkRuntime` Tokio runtime cannot be created, if
+/// the gRPC server address fails to parse, or if the gRPC listener fails to
+/// bind (e.g. the port is already in use).
 #[allow(clippy::type_complexity)] // return type is self-documenting in this internal helper
 pub(super) fn start_network_services(
     grpc_port: u16,
@@ -137,6 +145,7 @@ pub(super) fn start_network_services(
         Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::ElementRepositionedEvent>>,
         Option<tokio::sync::broadcast::Sender<(String, tze_hud_protocol::proto::EventBatch)>>,
         Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::FramePresented>>,
+        Option<std::net::SocketAddr>,
     ),
     Box<dyn std::error::Error>,
 > {
@@ -147,7 +156,7 @@ pub(super) fn start_network_services(
         // Compositor-only mode: no session, so no present-ack subscriber. The
         // compositor thread still drains the present-ack queue (bounded memory)
         // but has no sender to broadcast on (hud-4va6q).
-        return Ok((None, Vec::new(), None, None, None));
+        return Ok((None, Vec::new(), None, None, None, None));
     }
 
     // Build the multi-thread Tokio runtime for network tasks.
@@ -193,19 +202,43 @@ pub(super) fn start_network_services(
 
     tracing::info!(grpc_addr = %addr, "windowed runtime: starting gRPC server");
 
-    // Spawn the combined gRPC server task onto the network runtime.
+    // Bind the gRPC listener eagerly (hud-ylwqc). `std::net::TcpListener::bind`
+    // is synchronous and needs no reactor, so we learn immediately whether the
+    // port is available and can surface a genuine bound address — instead of
+    // letting `tonic::Server::serve(addr)` bind lazily inside the spawned task
+    // where a conflict would only be logged after we already reported "ready".
+    let std_listener = std::net::TcpListener::bind(addr)
+        .map_err(|e| format!("windowed runtime: failed to bind gRPC listener on {addr}: {e}"))?;
+    std_listener.set_nonblocking(true).map_err(|e| {
+        format!("windowed runtime: failed to set gRPC listener non-blocking on {addr}: {e}")
+    })?;
+    let grpc_bound_addr = std_listener
+        .local_addr()
+        .map_err(|e| format!("windowed runtime: failed to read gRPC local_addr: {e}"))?;
+
+    // Spawn the combined gRPC server task onto the network runtime, serving over
+    // the already-bound listener via `serve_with_incoming`.
     let handle = network_rt.rt.spawn(async move {
+        // `from_std` requires a Tokio reactor, so it runs inside the task.
+        let tokio_listener = match tokio::net::TcpListener::from_std(std_listener) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!(error = %e, "gRPC: failed to adopt bound listener into Tokio runtime");
+                return;
+            }
+        };
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(tokio_listener);
         tonic::transport::Server::builder()
             .add_service(HudSessionServer::new(service))
             .add_service(RuntimeServiceServer::new(runtime_svc))
-            .serve(addr)
+            .serve_with_incoming(incoming)
             .await
             .unwrap_or_else(|e| {
                 tracing::error!(error = %e, "gRPC server exited with error");
             });
     });
 
-    tracing::info!(grpc_addr = %addr, "windowed runtime: gRPC server task spawned");
+    tracing::info!(grpc_addr = %grpc_bound_addr, "windowed runtime: gRPC server task spawned");
 
     Ok((
         Some(network_rt),
@@ -213,7 +246,47 @@ pub(super) fn start_network_services(
         Some(element_repositioned_tx),
         Some(input_event_tx),
         Some(frame_presented_tx),
+        Some(grpc_bound_addr),
     ))
+}
+
+/// Render the non-secret startup banner printed to stdout once the network
+/// listeners are up (hud-ylwqc).
+///
+/// The runtime otherwise emits nothing on stdout unless `TZE_HUD_LOG` is set
+/// (tracing is gated on that env var), so a fresh operator has no way to learn
+/// where the runtime is listening or how to attach. This banner makes the
+/// runtime self-describing on first run.
+///
+/// **Security invariant:** this function deliberately takes *only* bound socket
+/// addresses. The PSK (and every other credential) is not in scope here, so the
+/// banner is provably incapable of leaking a secret — see the unit tests. When
+/// a service is disabled, its address is passed as `None` and rendered as
+/// `disabled` rather than a bogus endpoint.
+pub(super) fn render_startup_banner(
+    grpc_addr: Option<std::net::SocketAddr>,
+    mcp_addr: Option<std::net::SocketAddr>,
+) -> String {
+    const RULE: &str = "────────────────────────────────────────────────────────────────────";
+    let mut lines: Vec<String> = Vec::with_capacity(7);
+    lines.push(RULE.to_string());
+    lines.push(" tze_hud runtime ready".to_string());
+    match grpc_addr {
+        Some(addr) => lines.push(format!("   gRPC   : {addr}")),
+        None => lines.push("   gRPC   : disabled".to_string()),
+    }
+    match mcp_addr {
+        Some(addr) => lines.push(format!(
+            "   MCP    : http://{addr}/mcp   (auth: Authorization: Bearer <TZE_HUD_PSK>)"
+        )),
+        None => lines.push("   MCP    : disabled".to_string()),
+    }
+    lines.push(
+        "   attach : invoke the `hud-projection` skill in an LLM session, or run".to_string(),
+    );
+    lines.push("            scripts/quickstart.sh — see docs/QUICKSTART.md".to_string());
+    lines.push(RULE.to_string());
+    lines.join("\n")
 }
 
 #[cfg(test)]
@@ -221,13 +294,48 @@ mod tests {
     use super::super::test_support::make_shared_state;
     use super::*;
 
+    /// The banner must never contain the PSK, even when one is configured.
+    /// `render_startup_banner` takes only bound addresses (never the secret),
+    /// so this holds by construction; the test guards against future edits that
+    /// might thread a credential through the banner.
+    #[test]
+    fn startup_banner_never_contains_psk() {
+        let psk = "SUPER-SECRET-PSK-2f9c1a7e-do-not-leak";
+        // Simulate a fully-configured runtime with a PSK set in the environment.
+        let grpc: std::net::SocketAddr = "127.0.0.1:50051".parse().unwrap();
+        let mcp: std::net::SocketAddr = "127.0.0.1:9090".parse().unwrap();
+        let banner = render_startup_banner(Some(grpc), Some(mcp));
+        assert!(
+            !banner.contains(psk),
+            "startup banner must not leak the PSK; banner was:\n{banner}"
+        );
+        // Also assert the banner carries the useful, non-secret discovery info.
+        assert!(banner.contains("127.0.0.1:50051"), "gRPC addr missing");
+        assert!(
+            banner.contains("http://127.0.0.1:9090/mcp"),
+            "MCP URL missing"
+        );
+        assert!(banner.contains("hud-projection"), "attach hint missing");
+        assert!(banner.contains("tze_hud runtime ready"), "header missing");
+    }
+
+    /// Disabled services render as `disabled`, not a bogus `:0` endpoint.
+    #[test]
+    fn startup_banner_renders_disabled_services() {
+        let banner = render_startup_banner(None, None);
+        assert!(banner.contains("gRPC   : disabled"));
+        assert!(banner.contains("MCP    : disabled"));
+        // Attach hint is always present so the runtime stays self-describing.
+        assert!(banner.contains("hud-projection"));
+    }
+
     /// When `grpc_port == 0`, `start_network_services` must return `None` for
     /// the runtime and an empty handle list (compositor-only mode, AC §2).
     #[test]
     fn start_network_services_grpc_port_zero_returns_no_runtime() {
         let shared_state = make_shared_state();
         let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
-        let (rt, handles, _tx, _scroll_tx, present_tx) =
+        let (rt, handles, _tx, _scroll_tx, present_tx, grpc_addr) =
             start_network_services(0, "test-psk", shared_state, ctx, true, false)
                 .expect("start_network_services should not fail for port 0");
         assert!(
@@ -242,6 +350,10 @@ mod tests {
             present_tx.is_none(),
             "grpc_port=0 has no session, so no present-ack sender (hud-4va6q)"
         );
+        assert!(
+            grpc_addr.is_none(),
+            "grpc_port=0 must not report a bound gRPC address"
+        );
     }
 
     /// When `grpc_port != 0`, `start_network_services` must return `Some` for
@@ -250,9 +362,15 @@ mod tests {
     fn start_network_services_nonzero_port_returns_runtime_and_handle() {
         let shared_state = make_shared_state();
         let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
-        // Use a high ephemeral port unlikely to conflict.
-        let (rt, handles, _tx, _scroll_tx, present_tx) =
-            start_network_services(59781, "test-psk", shared_state, ctx, true, true)
+        // Allocate an ephemeral port so parallel CI runs don't collide on a
+        // fixed port (the listener is now bound eagerly, so a fixed port would
+        // flake under concurrency).
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .map(|a| a.port())
+            .expect("failed to allocate ephemeral port");
+        let (rt, handles, _tx, _scroll_tx, present_tx, grpc_addr) =
+            start_network_services(port, "test-psk", shared_state, ctx, true, true)
                 .expect("start_network_services should not error for a valid port");
         assert!(
             rt.is_some(),
@@ -267,6 +385,11 @@ mod tests {
             "non-zero grpc_port must expose the session present-ack sender so the \
              compositor thread can broadcast FramePresented (hud-4va6q)"
         );
+        assert_eq!(
+            grpc_addr.map(|a| a.port()),
+            Some(port),
+            "non-zero grpc_port must report the genuine bound gRPC address"
+        );
         // Abort the spawned task so the test doesn't leave a lingering server.
         for h in handles {
             h.abort();
@@ -280,7 +403,7 @@ mod tests {
         for _ in 0..2 {
             let shared_state = make_shared_state();
             let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
-            let (rt, handles, _tx, _scroll_tx, _present_tx) =
+            let (rt, handles, _tx, _scroll_tx, _present_tx, _grpc_addr) =
                 start_network_services(0, "psk", shared_state, ctx, false, false)
                     .expect("port-0 must not error");
             assert!(rt.is_none());
@@ -308,7 +431,7 @@ mod tests {
             .expect("failed to allocate ephemeral port for loopback bind test");
         let shared_state = make_shared_state();
         let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
-        let (rt, handles, _, _, _) =
+        let (rt, handles, _, _, _, _) =
             start_network_services(port, "psk", shared_state, ctx, false, false)
                 .expect("loopback bind must succeed on a freshly allocated ephemeral port");
         assert!(rt.is_some(), "loopback bind must create a NetworkRuntime");
@@ -328,7 +451,7 @@ mod tests {
             .expect("failed to allocate ephemeral port for all-interfaces bind test");
         let shared_state = make_shared_state();
         let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
-        let (rt, handles, _, _, _) =
+        let (rt, handles, _, _, _, _) =
             start_network_services(port, "psk", shared_state, ctx, false, true)
                 .expect("all-interfaces bind must succeed on a freshly allocated ephemeral port");
         assert!(
