@@ -467,10 +467,19 @@ pub struct PortalVisualTokens {
     // inter-section gap of the first-class `PortalSurface` parts (see
     // `portal_surface_proto`). Resolved from `portal.spacing.*` design tokens so
     // the adapter holds no literal layout dimension (doctrine: no hardcoded values
-    // in the compositor/adapter). Consumed only by the descriptor's part bounds;
-    // the drag-band affordance height is a SEPARATE concern governed by
-    // `portal.header.drag_band_px` (see `widget_geometry::collect_drag_handle_entries`).
-    /// Height (px) of the declared `Header` part strip. Source token:
+    // in the compositor/adapter).
+    //
+    // The `Header` part is NOT merely descriptive: `SceneGraph::portal_header_band_anchors`
+    // prefers the declared surface's `Header` part bounds (even with an empty
+    // backing node) to size the draggable header band, so `header_height_px` is
+    // the effective header/drag-band height for any resident portal that declares
+    // a surface (which is all of them). Its default therefore MATCHES
+    // `PORTAL_HEADER_DRAG_BAND_PX_DEFAULT` (52) so the band is unchanged at
+    // defaults; `portal.header.drag_band_px` still governs the raw-tile fallback
+    // (portals without a declared surface). Replaces the former hardcoded 52px
+    // `PORTAL_SURFACE_HEADER_BAND_PX` constant.
+    /// Height (px) of the declared `Header` part strip — also the draggable header
+    /// band for surface-declared portals. Source token:
     /// `portal.spacing.header_height_px`.
     pub header_height_px: f32,
     /// Vertical gap (px) inserted between stacked portal sections (Header →
@@ -673,7 +682,16 @@ pub struct ResidentGrpcPortalAdapter {
     /// matching part (hud-rpm9s review). This tracks the last-declared topology so
     /// [`render_batch_with_surface`](Self::render_batch_with_surface) re-declares
     /// only when it actually changes, and coalescibly patches otherwise.
-    declared_topology: Option<(ProjectedPortalPresentation, bool)>,
+    ///
+    /// The key also carries the spacing-geometry signature
+    /// (`header_height_px` / `section_gap_px` as raw f32 bits, hud-zn6yw): those
+    /// tokens size the declared Header/Transcript part bounds but ride ONLY the
+    /// `SetPortalSurface` declaration (the coalescible `UpdatePortalSurfaceState`
+    /// patch carries no geometry). So a live profile swap via `set_visual_tokens`
+    /// that changes them MUST re-declare, or the declared part bounds — and the
+    /// header/drag-band derived from them — would stay stale until the next
+    /// presentation/interaction transition.
+    declared_topology: Option<(ProjectedPortalPresentation, bool, u32, u32)>,
 }
 
 /// Local composer draft display state cached in the adapter.
@@ -1296,7 +1314,16 @@ impl ResidentGrpcPortalAdapter {
         now_wall_us: u64,
     ) -> Result<session_proto::MutationBatch, ResidentGrpcAdapterError> {
         let mut batch = self.render_batch(state, now_wall_us)?;
-        let topology = (state.presentation, state.interaction_enabled);
+        // The declaration key is (presentation, interaction) PLUS the spacing
+        // geometry signature: header/section part bounds ride only the full
+        // declaration, so a token swap that changes them must re-declare too
+        // (hud-zn6yw).
+        let topology = (
+            state.presentation,
+            state.interaction_enabled,
+            self.visual_tokens.header_height_px.to_bits(),
+            self.visual_tokens.section_gap_px.to_bits(),
+        );
         if self.declared_topology != Some(topology) {
             // First declaration OR a topology-changing transition: (re)declare the
             // full surface (carries full state); no patch in the same batch.
@@ -3036,12 +3063,11 @@ mod tests {
     /// hud-zn6yw: the declared `Header` part height and the Header→Transcript
     /// section gap are resolved from the `portal.spacing.*` tokens carried on
     /// `PortalVisualTokens`, not from a hardcoded constant. At the canonical
-    /// default tokens (`header_height_px` = 28, `section_gap_px` = 8) the header
-    /// strip is 28px, the transcript starts at 28 + 8 = 36, and the transcript
-    /// takes the remaining surface height. (The previous hardcoded 52px band is
-    /// reconciled away; see the PR body — no visual regression because the
-    /// resident-gRPC adapter declares parts with empty nodes, so these bounds are
-    /// descriptive metadata, not yet a pixel-driving materialized layout.)
+    /// default tokens (`header_height_px` = 52, `section_gap_px` = 8) the header
+    /// strip is 52px — matching the former hardcoded `PORTAL_SURFACE_HEADER_BAND_PX`
+    /// and `PORTAL_HEADER_DRAG_BAND_PX_DEFAULT`, so the draggable header band
+    /// (derived from this part by `portal_header_band_anchors`) is unchanged — the
+    /// transcript starts at 52 + 8 = 60, and takes the remaining surface height.
     #[test]
     fn portal_surface_header_and_gap_honor_default_spacing_tokens() {
         let config = ResidentGrpcPortalConfig::new(vec![3u8; 16]);
@@ -3064,15 +3090,15 @@ mod tests {
             &surface,
             proto::PortalPartKindProto::PortalPartKindTranscript,
         );
-        assert_eq!(header.height, 28.0, "header height honors header_height_px");
+        assert_eq!(header.height, 52.0, "header height honors header_height_px");
         assert_eq!(header.y, 0.0);
         assert_eq!(
-            transcript.y, 36.0,
-            "transcript starts below the header + section gap (28 + 8)"
+            transcript.y, 60.0,
+            "transcript starts below the header + section gap (52 + 8)"
         );
         assert_eq!(
             transcript.height,
-            full_h - 36.0,
+            full_h - 60.0,
             "transcript takes the remaining surface height"
         );
     }
@@ -3130,7 +3156,7 @@ mod tests {
         // Defaults map through unchanged.
         let default_visual =
             portal_visual_tokens_from_part_tokens(&resolve_portal_tokens(&DesignTokenMap::new()));
-        assert_eq!(default_visual.header_height_px, 28.0);
+        assert_eq!(default_visual.header_height_px, 52.0);
         assert_eq!(default_visual.section_gap_px, 8.0);
 
         // A profile override propagates onto PortalVisualTokens.
@@ -3235,6 +3261,58 @@ mod tests {
         assert!(
             !has_set(&d) && has_patch(&d),
             "steady collapsed topology patches only"
+        );
+    }
+
+    /// hud-zn6yw (Codex P2): a live profile swap that changes the spacing geometry
+    /// (`header_height_px` / `section_gap_px`) MUST re-declare the surface, not
+    /// just patch — the part bounds (and the header/drag-band derived from them)
+    /// ride only the `SetPortalSurface` declaration, so without re-declaration the
+    /// new geometry would stay stale until the next presentation/interaction
+    /// transition.
+    #[test]
+    fn render_batch_with_surface_redeclares_on_spacing_token_swap() {
+        let config = ResidentGrpcPortalConfig::new(vec![8u8; 16]);
+        let mut adapter = ResidentGrpcPortalAdapter::new(config);
+        adapter.record_created_tile(vec![9u8; 16]);
+        let state = make_expanded_interaction_state("portal-spacing-swap");
+
+        let has_set = |b: &session_proto::MutationBatch| {
+            b.mutations
+                .iter()
+                .any(|m| matches!(&m.mutation, Some(M::SetPortalSurface(_))))
+        };
+
+        // 1) First render declares.
+        let a = adapter.render_batch_with_surface(&state, 0).unwrap();
+        assert!(has_set(&a), "first render declares");
+
+        // 2) Steady state (no token change) → no re-declaration.
+        let b = adapter.render_batch_with_surface(&state, 1).unwrap();
+        assert!(!has_set(&b), "unchanged geometry does not re-declare");
+
+        // 3) Profile swap changing the header height → re-declare with new bounds.
+        adapter.set_visual_tokens(PortalVisualTokens {
+            header_height_px: 72.0,
+            ..PortalVisualTokens::default()
+        });
+        let c = adapter.render_batch_with_surface(&state, 2).unwrap();
+        assert!(
+            has_set(&c),
+            "a header_height_px swap must re-declare the surface"
+        );
+        let surface = set_portal_surface_of(&c).expect("re-declaration carries a surface");
+        let header = part_of(surface, proto::PortalPartKindProto::PortalPartKindHeader);
+        assert_eq!(
+            header.height, 72.0,
+            "re-declared header honors the new token"
+        );
+
+        // 4) Steady state again at the new geometry → no re-declaration.
+        let d = adapter.render_batch_with_surface(&state, 3).unwrap();
+        assert!(
+            !has_set(&d),
+            "new geometry is now steady; no re-declaration"
         );
     }
 
