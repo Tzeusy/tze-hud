@@ -19,13 +19,23 @@
 # Diagnostics go to stderr; only export lines (or the IP) go to stdout.
 set -euo pipefail
 
-# Proxmox host that fronts the VM. Provide the real value via SENTINEL_HOST env
-# (never hardcode it here — this is a public repo; see AGENTS.md scrub convention).
-SENTINEL="${SENTINEL_HOST:-root@proxmox-host.example}"
+# Proxmox host that fronts the VM. Never hardcode the real value here — this is
+# a public repo (see AGENTS.md scrub convention). Resolution order: SENTINEL_HOST
+# env var, then SENTINEL_HOST= in the private git-ignored env file, else fail fast.
 VMID=110
 HUD_SSH_KEY="${HUD_SSH_KEY:-$HOME/.ssh/hud-ssh-key}"
 HOMELAB_ENV="${HOMELAB_ENV:-$HOME/gt/homelab/mayor/rig/.env}"
 MCP_PORT=9090
+
+SENTINEL="${SENTINEL_HOST:-}"
+if [ -z "$SENTINEL" ] && [ -r "$HOMELAB_ENV" ]; then
+  SENTINEL=$(grep '^SENTINEL_HOST=' "$HOMELAB_ENV" | head -1 | cut -d= -f2-)
+fi
+if [ -z "$SENTINEL" ]; then
+  echo "hud_vm_env: ERROR — SENTINEL_HOST not set and not found in $HOMELAB_ENV." >&2
+  echo "hud_vm_env: set SENTINEL_HOST=user@proxmox-host (real value lives in the private operator mapping, not this repo)." >&2
+  exit 1
+fi
 
 ssh_sentinel() { ssh -o BatchMode=yes -o ConnectTimeout=8 "$SENTINEL" "$@"; }
 

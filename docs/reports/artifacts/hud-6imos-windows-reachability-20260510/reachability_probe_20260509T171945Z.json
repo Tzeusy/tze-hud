@@ -45,7 +45,7 @@
       "name": "tailscale_status_target",
       "command": "timeout 8s tailscale status --json | jq -r '.Peer[] | select((.HostName|ascii_downcase|contains(\"tzehouse\")) or (.DNSName|ascii_downcase|contains(\"tzehouse\")) or ((.TailscaleIPs // [])[]? == \"198.51.100.1\")) | {HostName,DNSName,TailscaleIPs,OS,Online,Active,Relay,CurAddr,LastSeen,LastWrite,LastHandshake,InNetworkMap,InMagicSock,InEngine,KeyExpiry}'",
       "exit_code": 0,
-      "stdout": "{ \"HostName\": \"TzeHouse\", \"DNSName\": \"windows-host.example.\", \"TailscaleIPs\": [\"198.51.100.1\", \"fd7a:115c:a1e0:ab12:4843:cd96:6257:b57d\"], \"OS\": \"windows\", \"Online\": false, \"Active\": true, \"Relay\": \"sin\", \"CurAddr\": \"\", \"LastSeen\": \"2026-05-09T16:05:09.1Z\", \"LastWrite\": \"2026-05-10T01:18:46.116687579+08:00\", \"LastHandshake\": \"0001-01-01T00:00:00Z\", \"InNetworkMap\": true, \"InMagicSock\": true, \"InEngine\": true, \"KeyExpiry\": \"2026-07-01T17:59:38Z\" }",
+      "stdout": "{ \"HostName\": \"TzeHouse\", \"DNSName\": \"windows-host.example.\", \"TailscaleIPs\": [\"198.51.100.1\", \"2001:db8::57:b57d\"], \"OS\": \"windows\", \"Online\": false, \"Active\": true, \"Relay\": \"sin\", \"CurAddr\": \"\", \"LastSeen\": \"2026-05-09T16:05:09.1Z\", \"LastWrite\": \"2026-05-10T01:18:46.116687579+08:00\", \"LastHandshake\": \"0001-01-01T00:00:00Z\", \"InNetworkMap\": true, \"InMagicSock\": true, \"InEngine\": true, \"KeyExpiry\": \"2026-07-01T17:59:38Z\" }",
       "stderr": ""
     },
     {

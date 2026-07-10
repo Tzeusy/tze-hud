@@ -28,7 +28,7 @@
       "dns_name": "windows-host.example.",
       "tailscale_ips": [
         "198.51.100.1",
-        "fd7a:115c:a1e0:ab12:4843:cd96:6257:b57d"
+        "2001:db8::57:b57d"
       ]
     },
     "ssh_admin-user": {
