@@ -31,6 +31,11 @@ struct ProjectionSession {
     workspace_hint: Option<String>,
     repository_hint: Option<String>,
     icon_profile_hint: Option<String>,
+    /// Optional HUD routing hint carried from the `attach` request. Persisted so
+    /// the accepted-and-validated value is no longer silently dropped and is
+    /// surfaced through `ProjectedPortalState` for introspection. Inert in the
+    /// current single-HUD deploy; multi-HUD routing will consume it later.
+    hud_target: Option<String>,
     portal_id: String,
     portal_presentation: ProjectedPortalPresentation,
     owner_token_verifier: String,
@@ -749,6 +754,7 @@ impl ProjectionAuthority {
                 workspace_hint: request.workspace_hint,
                 repository_hint: request.repository_hint,
                 icon_profile_hint: request.icon_profile_hint,
+                hud_target: request.hud_target,
                 portal_id: portal_id_for_projection(
                     PortalSurfaceKind::TextStreamRawTile,
                     &request.envelope.projection_id,
@@ -1817,6 +1823,9 @@ fn projected_portal_state(
             .flatten(),
         icon_profile_hint: identity_visible
             .then(|| session.icon_profile_hint.clone())
+            .flatten(),
+        hud_target: identity_visible
+            .then(|| session.hud_target.clone())
             .flatten(),
         lifecycle_state: lifecycle_visible.then_some(session.lifecycle_state),
         status_text: lifecycle_visible

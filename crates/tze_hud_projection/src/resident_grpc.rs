@@ -2544,6 +2544,7 @@ mod tests {
             workspace_hint: None,
             repository_hint: None,
             icon_profile_hint: None,
+            hud_target: None,
             lifecycle_state: None,
             status_text: None,
             visible_transcript: vec![],

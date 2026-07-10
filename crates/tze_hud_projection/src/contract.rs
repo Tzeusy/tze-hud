@@ -983,6 +983,12 @@ pub struct ProjectedPortalState {
     pub repository_hint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon_profile_hint: Option<String>,
+    /// Optional HUD routing hint carried from the `attach` request, surfaced for
+    /// introspection. Redaction-gated identically to the sibling identity hints
+    /// (`None` when the viewer may not see attach identity). Inert in the current
+    /// single-HUD deploy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hud_target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle_state: Option<ProjectionLifecycleState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
