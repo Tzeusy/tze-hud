@@ -1490,6 +1490,8 @@ pub fn proto_to_widget_registry_snapshot(
 /// - `UpdateTileInputMode` → [`SceneGraph::update_tile_input_mode`].
 /// - `SetTileLifecycleAccent` → [`SceneGraph::set_tile_lifecycle_accent`] /
 ///   [`SceneGraph::clear_tile_lifecycle_accent`].
+/// - `SetTileUnreadCount` → [`SceneGraph::set_tile_unread_count`] (the ambient
+///   jump-to-latest pill badge count; `0` clears it).
 /// - `AddNode` → [`SceneGraph::add_node_to_tile_checked`] (the composer hit
 ///   region, present only when interaction is enabled).
 ///
@@ -1584,6 +1586,16 @@ pub fn apply_portal_render_batch_to_scene(
                     }
                 }
             }
+            Some(Mutation::SetTileUnreadCount(stuc)) => {
+                // Ambient unread-output count for the jump-to-latest pill badge
+                // (hud-hwk2m). `0` clears the badge. The in-process driver also
+                // sets this directly at its drain site with the identical
+                // `unread_output_count.unwrap_or(0)` value, so applying the
+                // co-travelling mutation here is idempotent — but keeping the arm
+                // means the render batch stays fully self-describing, and it is
+                // exactly this mutation a bridged portal relies on over the wire.
+                scene.set_tile_unread_count(tile_id, stuc.count as usize);
+            }
             Some(Mutation::AddNode(an)) => {
                 // parent_id is big-endian RFC 4122 bytes (render_batch uses the
                 // root node's `as_bytes()`); the root node's own id was encoded
@@ -1621,7 +1633,7 @@ pub fn apply_portal_render_batch_to_scene(
                 }
             }
             // `ResidentGrpcPortalAdapter::render_batch` is the SOLE producer of the
-            // batches reaching here and emits only the four variants matched above.
+            // batches reaching here and emits only the five variants matched above.
             // Any other variant is silently ignored: if render_batch ever grows a
             // new variant, add an explicit arm here (and a paint assertion in
             // `drain_paints_published_transcript_onto_tile`) so it is not dropped.

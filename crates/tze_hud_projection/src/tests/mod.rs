@@ -1008,6 +1008,98 @@ fn accepted_portal_input_echoes_viewer_unit_into_transcript() {
     assert_eq!(viewer_unit.output_text, "ok");
 }
 
+/// hud-hwk2m end-to-end: the jump-to-latest pill's ambient unread badge reaches a
+/// BRIDGED portal via the wire (`SetTileUnreadCount` in the resident-gRPC render
+/// batch), at parity with the in-process driver's direct `set_tile_unread_count`
+/// call (#1088). Agent output raises the badge; a viewer echo (Viewer Reply Echo)
+/// must NOT bump it — while still leaving the update drainable
+/// (`portal_update_pending`), the very gotcha that #979 guarded on the append
+/// side. This ties the count that flows into `ProjectedPortalState` to the count
+/// the bridge adapter puts on the wire.
+#[cfg(feature = "resident-grpc")]
+#[test]
+fn bridged_jump_to_latest_badge_reflects_unread_and_ignores_viewer_echo() {
+    use crate::resident_grpc::{ResidentGrpcPortalAdapter, ResidentGrpcPortalConfig};
+    use tze_hud_protocol::proto;
+
+    // The count the bridged pill badge carries: the single `SetTileUnreadCount`
+    // mutation the resident-gRPC adapter emits for `state`.
+    fn badge_count(adapter: &ResidentGrpcPortalAdapter, state: &ProjectedPortalState) -> u32 {
+        let batch = adapter
+            .render_batch(state, 0)
+            .expect("render_batch must succeed");
+        batch
+            .mutations
+            .iter()
+            .find_map(|m| match &m.mutation {
+                Some(proto::mutation_proto::Mutation::SetTileUnreadCount(u)) => Some(u.count),
+                _ => None,
+            })
+            .expect("a bridged render must emit a SetTileUnreadCount for the pill badge")
+    }
+
+    let mut authority = ProjectionAuthority::default();
+    let owner_token = attach(&mut authority, "projection-a");
+
+    let mut adapter = ResidentGrpcPortalAdapter::new(ResidentGrpcPortalConfig::new(vec![9u8; 16]));
+    adapter.record_created_tile(vec![9u8; 16]);
+
+    // Two agent turns raise the ambient unread count to 2.
+    for (rid, unit, ts) in [("req-a", "unit-a", 20), ("req-b", "unit-b", 21)] {
+        assert!(
+            authority
+                .handle_publish_output(
+                    output_request_keyed(
+                        "projection-a",
+                        &owner_token,
+                        rid,
+                        "agent turn",
+                        Some(unit),
+                        None,
+                    ),
+                    "caller-a",
+                    ts,
+                )
+                .accepted
+        );
+    }
+    let state = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("portal state materializes");
+    assert_eq!(state.unread_output_count, Some(2));
+    assert_eq!(
+        badge_count(&adapter, &state),
+        2,
+        "the bridged pill badge must carry the agent-output unread count"
+    );
+
+    // A viewer echo appends the viewer's own already-seen text WITHOUT raising
+    // unread (Viewer Reply Echo) — the badge must not grow.
+    let feedback =
+        authority.submit_portal_input("projection-a", portal_submission("input-1", "ok"));
+    assert_eq!(feedback.feedback_state, PortalInputFeedbackState::Accepted);
+    // ...but the echo must still be drainable: portal_update_pending schedules a
+    // render so the viewer's own text is not stranded (the #979 no-bump gotcha).
+    assert_eq!(
+        authority.next_due_projection_id().as_deref(),
+        Some("projection-a"),
+        "a viewer echo must still schedule a portal render (portal_update_pending)"
+    );
+    let after_echo = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("portal state materializes");
+    assert_eq!(
+        after_echo.unread_output_count,
+        Some(2),
+        "a viewer echo must not bump the ambient unread count"
+    );
+    assert_eq!(
+        badge_count(&adapter, &after_echo),
+        2,
+        "the bridged pill badge must not grow on a viewer echo (no unread bump)"
+    );
+}
+
 #[test]
 fn rate_limited_viewer_echo_is_drained_and_stays_unread_zero() {
     // Regression (gemini/codex review on #979): a viewer echo correctly does not

@@ -148,6 +148,11 @@ pub(super) fn classify_inbound_batch(batch: &MutationBatch) -> TrafficClass {
                 // which is what flipped lifecycle-visible portals off the
                 // coalescible path when the accent was a per-republish AddNode.
                 Mutation::SetTileLifecycleAccent(_) => {}
+                // Ambient unread-output count for the jump-to-latest badge — a
+                // coalescible content/state update, exactly like the lifecycle
+                // accent above. It must NOT mark the batch Transactional so a
+                // steady-state portal stays on the coalescible path (hud-hwk2m).
+                Mutation::SetTileUnreadCount(_) => {}
                 // Declaring/replacing the first-class portal surface is structural
                 // (identity + parts) — Transactional (RFC 0013 §7.2 promotion).
                 Mutation::SetPortalSurface(_) => return TrafficClass::Transactional,
@@ -171,7 +176,7 @@ pub(super) fn classify_inbound_batch(batch: &MutationBatch) -> TrafficClass {
 mod inbound_tests {
     use super::*;
     use crate::proto::mutation_proto::Mutation;
-    use crate::proto::{MutationProto, SetTileLifecycleAccentMutation};
+    use crate::proto::{MutationProto, SetTileLifecycleAccentMutation, SetTileUnreadCountMutation};
 
     fn batch(mutations: Vec<Mutation>) -> MutationBatch {
         MutationBatch {
@@ -218,6 +223,39 @@ mod inbound_tests {
                 tile_id: vec![0u8; 16],
                 color: None,
                 width_px: 0.0,
+            },
+        )]);
+        assert_eq!(classify_inbound_batch(&b), TrafficClass::StateStream);
+    }
+
+    /// hud-hwk2m: the jump-to-latest unread-count badge update, riding an
+    /// otherwise-StateStream portal republish, must stay StateStream — exactly
+    /// like the lifecycle accent. If it flipped the batch Transactional it would
+    /// knock a bridged portal off the coalescible path under load.
+    #[test]
+    fn unread_count_update_stays_state_stream() {
+        let b = batch(vec![
+            Mutation::PublishToTile(Default::default()),
+            Mutation::UpdateTileInputMode(Default::default()),
+            Mutation::SetTileUnreadCount(SetTileUnreadCountMutation {
+                tile_id: vec![0u8; 16],
+                count: 4,
+            }),
+        ]);
+        assert_eq!(
+            classify_inbound_batch(&b),
+            TrafficClass::StateStream,
+            "a portal republish carrying the unread badge count must remain coalescible StateStream"
+        );
+    }
+
+    /// A bare unread-count mutation is a pure content update → StateStream.
+    #[test]
+    fn unread_count_alone_is_state_stream() {
+        let b = batch(vec![Mutation::SetTileUnreadCount(
+            SetTileUnreadCountMutation {
+                tile_id: vec![0u8; 16],
+                count: 0,
             },
         )]);
         assert_eq!(classify_inbound_batch(&b), TrafficClass::StateStream);

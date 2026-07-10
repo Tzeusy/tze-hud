@@ -248,7 +248,36 @@ message MutationProto {
     SetTileLifecycleAccentMutation set_tile_lifecycle_accent = 13;
     SetPortalSurfaceMutation    set_portal_surface     = 14;
     UpdatePortalSurfaceStateMutation update_portal_surface_state = 15;
+    SetTileUnreadCountMutation  set_tile_unread_count  = 16;
   }
+}
+
+// Set (or clear) the ambient unread-output count a tile's jump-to-latest pill
+// MAY carry as a centered badge (hud-g1ena.3 / portal-chat-grade-affordances
+// §Jump-to-Latest Affordance).
+//
+// This is a *coalescible StateStream* tile-update (client→server MutationBatch,
+// RFC 0005 §3.3 / §3.1; Four Message Classes "State-stream"), exactly like
+// SetTileLifecycleAccentMutation: the count reflects runtime-owned unread state
+// and is refreshed each portal drain, never carried as a per-republish `AddNode`
+// (which would flip an otherwise-StateStream portal to Transactional, hud-mzk74).
+//
+// Stored as runtime overlay state keyed by `tile_id` (mirroring the local-first
+// scroll config and lifecycle accent), so it survives the transcript's
+// `PublishToTile` content republishes — which replace the whole node tree and
+// would wipe any child badge node. The compositor reads it via
+// `SceneGraph::tile_unread_count` when collecting the pill badge; the pill's own
+// `scrolled_back` gate hides the badge the instant the viewer returns to the
+// tail. This is the bridged-transport counterpart of the in-process driver's
+// direct `set_tile_unread_count` call — carrying the count over the wire gives a
+// bridged portal's pill the same badge (hud-hwk2m).
+//
+// `count = 0` clears the badge; the producer sends 0 for both a genuine empty
+// count and a redaction-gated (absent) count, matching the in-process arm's
+// `unread_output_count.unwrap_or(0)`.
+message SetTileUnreadCountMutation {
+  bytes  tile_id = 1;  // 16-byte SceneId of the target tile
+  uint32 count   = 2;  // Ambient unread-output count; 0 clears the badge
 }
 
 // Set (or clear) the lifecycle-affordance accent for a tile.
