@@ -3072,7 +3072,14 @@ pub struct SceneGraphSnapshot {
     /// a node reference.
     ///
     /// [`revalidate_portal_surface_part_nodes`]: crate::graph::SceneGraph::revalidate_portal_surface_part_nodes
-    #[serde(default)]
+    ///
+    /// Serde: `default` on read (older snapshots that predate this field
+    /// deserialize to an empty map) and `skip_serializing_if` empty on write, so
+    /// an empty map is omitted from the canonical JSON. This keeps the checksum
+    /// bytes byte-identical to a pre-field snapshot, so
+    /// [`verify_checksum`](Self::verify_checksum) still succeeds for older
+    /// surface-less snapshots instead of failing on a spurious `"portal_surfaces":{}`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub portal_surfaces: std::collections::BTreeMap<SceneId, PortalSurface>,
 
     /// Zone registry snapshot: types, instances, active publications.

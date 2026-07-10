@@ -553,6 +553,31 @@ fn snapshot_portal_surfaces_are_tile_keyed_for_namespace_visibility() {
     assert!(!visible_to_a.contains_key(&tile_b));
 }
 
+/// A snapshot with no portal surfaces must omit the `portal_surfaces` key from
+/// its canonical JSON, so its checksum is byte-identical to a pre-field snapshot.
+/// This preserves `verify_checksum()` for older surface-less snapshots produced
+/// before this field existed (hud-ruynm backward-compat; guards the P2 raised on
+/// PR #1098 where an unconditionally-serialized empty map broke old checksums).
+#[test]
+fn snapshot_without_portal_surfaces_omits_field_and_verifies_like_old_format() {
+    let (scene, _tile_id, _root_id) = portal_snapshot_scene("agent");
+    let snapshot = scene.take_snapshot(1_000, 2_000);
+    assert!(snapshot.portal_surfaces.is_empty());
+
+    let json = snapshot.to_json().unwrap();
+    assert!(
+        !json.contains("portal_surfaces"),
+        "an empty portal_surfaces map must be omitted from canonical JSON so the \
+         checksum matches a pre-field snapshot; got: {json}"
+    );
+
+    // Deserializing that surface-less JSON (as an older client/tool would) still
+    // reproduces a valid checksum — no spurious `\"portal_surfaces\":{}` sneaks in.
+    let restored = SceneGraphSnapshot::from_json(&json).unwrap();
+    assert!(restored.portal_surfaces.is_empty());
+    assert!(restored.verify_checksum());
+}
+
 #[test]
 fn test_lease_expiry() {
     let (mut scene, clock) = scene_with_test_clock();
