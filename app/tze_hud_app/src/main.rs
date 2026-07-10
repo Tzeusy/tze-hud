@@ -657,6 +657,39 @@ fn parse_window_mode(s: &str) -> Result<WindowMode, String> {
     }
 }
 
+/// On Windows, reattach the process's standard handles to the launching
+/// terminal's console (hud-b7c0m; Codex P2 on PR #1112).
+///
+/// This binary is a GUI-subsystem app (`#![windows_subsystem = "windows"]`), so a
+/// launch from PowerShell/cmd gives the process *no* console and `print!` output
+/// is silently discarded unless the caller redirected the standard handles.
+/// `AttachConsole(ATTACH_PARENT_PROCESS)` binds the standard handles to the
+/// parent's console, but only when a handle is not already set — so an explicit
+/// redirect (`tze_hud --print-attach-info > info.txt`) is preserved. It is a
+/// harmless no-op when there is no parent console (e.g. a double-click launch,
+/// which has no terminal to show the block on anyway).
+#[cfg(windows)]
+fn attach_parent_console() {
+    // (DWORD)-1 — attach to the console of the parent process.
+    const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn AttachConsole(dw_process_id: u32) -> i32;
+    }
+    // Safety: FFI call into kernel32 with a constant argument; it touches no
+    // memory we own and is defined to no-op / fail cleanly when the process
+    // already has (or has no) console.
+    unsafe {
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+/// Non-Windows platforms already run the fast path on a normal console; nothing
+/// to attach.
+#[cfg(not(windows))]
+#[inline]
+fn attach_parent_console() {}
+
 /// Compute the attach-info block for the current startup options (hud-b7c0m).
 ///
 /// Resolves the same config the runtime would use (honouring `--config`) for the
@@ -725,7 +758,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // onboarding aid that works on any platform without a shell, so it must not
     // fail-closed on a missing/invalid config the way canonical startup does.
     if opts.print_attach_info {
+        // On Windows this is a GUI-subsystem binary with no console by default,
+        // so bind stdout to the launching terminal before printing, else the
+        // block is invisible (Codex P2, PR #1112). No-op elsewhere.
+        attach_parent_console();
         print!("{}", render_attach_info_block(&opts));
+        // `process::exit` skips destructors, so flush the buffered block first.
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
         std::process::exit(0);
     }
 
