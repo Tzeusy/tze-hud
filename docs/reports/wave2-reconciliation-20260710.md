@@ -21,15 +21,15 @@ reconciliation bead. All implementation PRs are merged into the branch base
 
 | Child | PR | Area | Verdict |
 |---|---|---|---|
-| hud-5i16d | #973 | Wire disconnect/degraded trigger into runtime | **LIVE** (§3) |
-| hud-h3mvo | #978 | One-shot forced degraded repaint on pure drop | **LIVE** (§3) |
-| hud-acy4o | #972 | Plumb MCP attach identity fields | **WIRED** (§4) — 1 minor gap |
-| hud-l9lf6 | #970 | tools/list + initialize introspection | **WIRED** (§4) |
-| — schemars | #1014 | Derive tools/list inputSchema via schemars | **WIRED** (§4) |
-| — slimming | #1094 | Schema/skill token slimming + byte-budget guard | **WIRED** (§4) |
-| hud-xlx1r | #974 | Grace-expiry removal + disconnect→resume e2e tests | **VERIFIED** (§6) |
-| hud-b09ag | #971 | kbd-livelock regression guard | **VERIFIED** (§6) |
-| hud-jgf41 | — | Visible disconnect **badge** | **NOT SHIPPED** (blocked; §7) |
+| hud-5i16d | #973 | Wire disconnect/degraded trigger into runtime | **LIVE** (§2) |
+| hud-h3mvo | #978 | One-shot forced degraded repaint on pure drop | **LIVE** (§2) |
+| hud-acy4o | #972 | Plumb MCP attach identity fields | **WIRED** (§3) — 1 minor gap |
+| hud-l9lf6 | #970 | tools/list + initialize introspection | **WIRED** (§3) |
+| — schemars | #1014 | Derive tools/list inputSchema via schemars | **WIRED** (§3) |
+| — slimming | #1094 | Schema/skill token slimming + byte-budget guard | **WIRED** (§3) |
+| hud-xlx1r | #974 | Grace-expiry removal + disconnect→resume e2e tests | **VERIFIED** (§5) |
+| hud-b09ag | #971 | kbd-livelock regression guard | **VERIFIED** (§5) |
+| hud-jgf41 | — | Visible disconnect **badge** | **NOT SHIPPED** (blocked; §6) |
 
 ---
 
@@ -88,7 +88,7 @@ Chain of evidence (production, non-test):
 transcript **dim** and (b) a content-free marker **line**
 `"⊘ disconnected — stream stale"` (`resident_grpc.rs:27`, emitted at `:1449-1456`
 before the redaction-gated lifecycle line so it survives redaction). There is **no
-dedicated badge widget** — that is hud-jgf41 (§7), which is polish, not a
+dedicated badge widget** — that is hud-jgf41 (§6), which is polish, not a
 correctness gap. The doctrine comment at `resident_grpc.rs:1406` deliberately keeps
 this ambient ("not a loud badge").
 
@@ -307,7 +307,7 @@ edit is a beads mutation, deferred to the coordinator per the worker contract.
   blockers (the failure-UX is visible; FU-2 is the pre-existing grace-reaper
   remainder).
 - **`portal-disconnect-resume-ux` OpenSpec change:** keep OPEN. Its own §6.2(a)
-  gate (the hud-jgf41 badge) plus FU-2 (§3.2 production grace-removal) are the
+  gate (the hud-jgf41 badge) plus FU-2 (openspec §3.2 production grace-removal) are the
   remaining items before archive. The spec delta itself is sound and unchanged.
 
 ---
