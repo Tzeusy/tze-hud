@@ -7474,4 +7474,84 @@ mod tests {
             "pointer-up must not change the selection established by the drag"
         );
     }
+
+    /// hud-uui70: the single-line profile's `glyph_x` table is measured in
+    /// UNSCROLLED draft space (`measure_composer_single_line_layout`); once a
+    /// long draft triggers caret-follow horizontal scroll (`h_scroll_px`,
+    /// hud-zlfi4), `composer_pointer_byte_offset` must fold that scroll back
+    /// into the de-inset screen-space x before consulting the glyph table —
+    /// otherwise a click's screen x is looked up directly against unscrolled
+    /// draft coordinates and lands on the WRONG byte.
+    ///
+    /// One row `[0, 6)` ("abcdef") with the SAME non-uniform per-glyph table
+    /// as the sibling multi-line drag test, published with `h_scroll_px:
+    /// 20.0` (`input_box: None`, matching what the single-line profile
+    /// actually publishes). A click at node-local x=26 de-insets to
+    /// screen-space text_x=20:
+    /// - WITHOUT the h_scroll correction (the pre-hud-uui70 bug), 20 is
+    ///   nearest to byte 2 (glyph x=15, distance 5) — the exact wrong byte
+    ///   the sibling multi-line test's row 0 also resolves to at this same
+    ///   pixel, proving this is a real, distinct mismatch and not a fixture
+    ///   artifact.
+    /// - WITH the correction, draft-space x = 20 + 20 (h_scroll_px) = 40,
+    ///   nearest to byte 4 (glyph x=45, distance 5) — a DIFFERENT byte,
+    ///   proving the fix actually changes the outcome (mutation-checked).
+    #[test]
+    fn composer_pointer_down_folds_h_scroll_into_single_line_hit_test() {
+        use tze_hud_input::{
+            ComposerVisualLayout, ComposerVisualLine, FocusManager, InputProcessor,
+        };
+
+        let (scene, tab_id) = scene_with_pointer_composer();
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+        let processor = InputProcessor::new();
+        let (mut app, _rx) = make_windowed_keyboard_test_app(scene, fm, processor);
+
+        app.state.cursor_x = 200.0;
+        app.state.cursor_y = 50.0;
+        app.enqueue_pointer_event(PointerEventKind::Down);
+        app.enqueue_pointer_event(PointerEventKind::Up);
+        assert!(app.state.input_processor.is_composer_active());
+
+        for ch in ["a", "b", "c", "d", "e", "f"] {
+            app.state.input_processor.route_character_to_composer(ch);
+        }
+
+        let layout = ComposerVisualLayout {
+            lines: vec![ComposerVisualLine {
+                start_byte: 0,
+                end_byte: 6,
+                glyph_x: vec![
+                    (0, 0.0),
+                    (1, 5.0),
+                    (2, 15.0),
+                    (3, 30.0),
+                    (4, 45.0),
+                    (5, 60.0),
+                    (6, 75.0),
+                ],
+            }],
+            text_len: 6,
+            input_box: None,
+            h_scroll_px: 20.0,
+        };
+        *app.state.composer_visual_layout.lock().unwrap() = Some(layout);
+
+        app.state.cursor_x = 26.0;
+        app.state.cursor_y = 10.0;
+        app.enqueue_pointer_event(PointerEventKind::Down);
+        let snapshot = app
+            .state
+            .input_processor
+            .composer_draft_snapshot()
+            .expect("composer draft must still be active");
+        assert_eq!(
+            (snapshot.1, snapshot.2),
+            (4, 4),
+            "pointer-down at screen text_x=20 with h_scroll_px=20 must resolve \
+             to draft-space x=40 -> byte 4, not byte 2 (the wrong answer a \
+             missing h_scroll correction would produce)"
+        );
+    }
 }

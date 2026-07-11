@@ -986,6 +986,24 @@ impl WinitApp {
     /// single-line composer profile (`portal.composer.max_lines == 1`,
     /// hud-zlfi4) never publishes one, and a multi-line composer may not have
     /// one yet on the first frame after focus gain.
+    ///
+    /// `layout.h_scroll_px` is folded back into the de-inset screen-space x
+    /// before the lookup (hud-uui70): the single-line profile's `glyph_x`
+    /// table is measured in UNSCROLLED draft space
+    /// (`TextRasterizer::measure_composer_single_line_layout`), but once a
+    /// long draft triggers caret-follow horizontal scroll (hud-zlfi4) the
+    /// on-screen glyphs are shifted left by `h_scroll_px` — the inverse of
+    /// the chrome-layer caret quad's `caret_x - h_scroll_px`
+    /// (`append_composer_caret_vertices`) and `composer_ime_caret_anchor`'s
+    /// identical correction: draft-space x = screen-space x + `h_scroll_px`.
+    /// `h_scroll_px` is always `0.0` for the multi-line profile (it wraps
+    /// instead of scrolling horizontally), so this is a no-op there. No upper
+    /// clamp is applied after folding in the scroll: `byte_at_x`'s
+    /// nearest-glyph search already clamps its BYTE result to the row's
+    /// range, so an unclamped pixel value past the scrolled draft's visible
+    /// end still resolves to the correct (rightmost) glyph — a pixel-space
+    /// clamp sized to the box (not the scrolled draft) would instead
+    /// truncate a valid far-scrolled x back onto an earlier, wrong glyph.
     fn composer_pointer_byte_offset(
         &self,
         scene: &SceneGraph,
@@ -1019,8 +1037,7 @@ impl WinitApp {
         if let Some(layout) = fresh_layout {
             let content_inset =
                 tze_hud_config::resolve_portal_tokens(&self.state.global_tokens).content_inset_px;
-            let text_x =
-                (local_x - content_inset).clamp(0.0, (node_w - content_inset * 2.0).max(0.0));
+            let text_x = (local_x - content_inset + layout.h_scroll_px).max(0.0);
             return Some(layout.byte_at_point(text_x, local_y, node_h));
         }
 
