@@ -1,0 +1,183 @@
+[
+ {
+  "ts_wall_us": 1783737469126375,
+  "code": "scenario:start",
+  "projection_id": "bridge-routing-live",
+  "host": "<vm-ip>",
+  "note": "bridge-enabled runtime (--resident-grpc-portal)"
+ },
+ {
+  "ts_wall_us": 1783737469140148,
+  "code": "attach",
+  "accepted": true,
+  "status": "projection attached"
+ },
+ {
+  "ts_wall_us": 1783737469151104,
+  "code": "publish",
+  "unit": "A"
+ },
+ {
+  "ts_wall_us": 1783737475185864,
+  "code": "snapshot:baseline",
+  "portal_tiles": [
+   {
+    "tile_id": "019f4f09-c662-7c92-a009-cc4dba6c4a28",
+    "namespace": "resident-grpc-portal",
+    "lease_id": "019f4f09-c662-7c92-a009-cc2e2ec815a7"
+   }
+  ],
+  "surfaces": [
+   {
+    "surface_id": "019f4f09-c662-7c92-a009-cc4dba6c4a28",
+    "lifecycle": "Active",
+    "display_state": "Expanded",
+    "part_kinds": [
+     "Frame",
+     "Header",
+     "Transcript",
+     "Composer"
+    ]
+   }
+  ]
+ },
+ {
+  "ts_wall_us": 1783737475198516,
+  "code": "publish",
+  "unit": "B"
+ },
+ {
+  "ts_wall_us": 1783737476711133,
+  "code": "publish",
+  "unit": "C"
+ },
+ {
+  "ts_wall_us": 1783737478288621,
+  "code": "publish",
+  "unit": "D"
+ },
+ {
+  "ts_wall_us": 1783737485814593,
+  "code": "snapshot:streamed",
+  "portal_tiles": [
+   {
+    "tile_id": "019f4f09-c662-7c92-a009-cc4dba6c4a28",
+    "namespace": "resident-grpc-portal",
+    "lease_id": "019f4f09-c662-7c92-a009-cc2e2ec815a7"
+   }
+  ],
+  "surfaces": [
+   {
+    "surface_id": "019f4f09-c662-7c92-a009-cc4dba6c4a28",
+    "lifecycle": "Active",
+    "display_state": "Expanded",
+    "part_kinds": [
+     "Frame",
+     "Header",
+     "Transcript",
+     "Composer"
+    ]
+   }
+  ]
+ },
+ {
+  "ts_wall_us": 1783737485887055,
+  "code": "publish:unread-bursts",
+  "count": 4
+ },
+ {
+  "ts_wall_us": 1783737491905176,
+  "code": "snapshot:unread",
+  "portal_tiles": [
+   {
+    "tile_id": "019f4f09-c662-7c92-a009-cc4dba6c4a28",
+    "namespace": "resident-grpc-portal",
+    "lease_id": "019f4f09-c662-7c92-a009-cc2e2ec815a7"
+   }
+  ],
+  "note": "unread count is #[serde(skip)] overlay state; not in snapshot"
+ },
+ {
+  "ts_wall_us": 1783737491917060,
+  "code": "inject_composer_paste",
+  "result": {
+   "injected": true,
+   "text_len": 62
+  }
+ },
+ {
+  "ts_wall_us": 1783737495435006,
+  "code": "get_pending_input",
+  "result": {
+   "accepted": true,
+   "items": [],
+   "remaining_bytes": 0,
+   "remaining_count": 0,
+   "status_summary": "pending input returned"
+  }
+ },
+ {
+  "ts_wall_us": 1783737495468971,
+  "code": "detach",
+  "result": {
+   "accepted": true,
+   "status_summary": "projection detached and private state purged"
+  }
+ },
+ {
+  "ts_wall_us": 1783737501485994,
+  "code": "snapshot:detached",
+  "portal_tiles": [],
+  "n_portal_surfaces": 0
+ },
+ {
+  "ts_wall_us": 1783737501486027,
+  "code": "scenario:end",
+  "verdicts": {
+   "1_attach_publish_routes_via_bridge": {
+    "pass": true,
+    "portal_tile_namespace": "resident-grpc-portal",
+    "expected": "resident-grpc-portal",
+    "in_process_would_be": "tze_hud_portal_driver"
+   },
+   "2_transcript_streaming": {
+    "pass": true,
+    "still_bridged": true,
+    "surface_lifecycle": "Active",
+    "part_kinds": [
+     "Frame",
+     "Header",
+     "Transcript",
+     "Composer"
+    ],
+    "publishes_accepted": 4,
+    "note": "4 sequential publishes (A-D) accepted by the authority; the bridged PortalSurface stays materialised with a Transcript part across the stream. Transcript pixel text is not in the topology snapshot (pixel capture unreliable on this software-GPU VM)."
+   },
+   "3_unread_jump_to_latest_parity": {
+    "pass": null,
+    "bridged_path_active": true,
+    "note": "SetTileUnreadCountMutation (#1107) is emitted on the bridged path by construction (resident_grpc.rs render_batch), but the numeric unread value lands in RuntimeOverlayState.tile_unread_counts (#[serde(skip)]) and is not carried in SceneGraphSnapshot/portal_surfaces \u2014 not externally observable over gRPC; pixel capture unreliable on this software-GPU VM."
+   },
+   "4_composer_input_over_bridge": {
+    "pass": null,
+    "paste_injected": {
+     "injected": true,
+     "text_len": 62
+    },
+    "pending_input": {
+     "accepted": true,
+     "items": [],
+     "remaining_bytes": 0,
+     "remaining_count": 0,
+     "status_summary": "pending input returned"
+    },
+    "note": "inject_composer_paste produces DRAFT state only; over the bridge it is classified as DraftState and dropped by drain_resident_grpc_input (only ComposerDraftSubmit reaches pending-input). A submit reaching pending-input requires a real OS Enter keypress on the focused bridged composer \u2014 no keyboard-free MCP/gRPC substitute exists in this build. Draft-state ingress over the bridge is exercised; pending-input submit is not keyboard-free."
+   },
+   "5_clean_detach_teardown": {
+    "pass": true,
+    "portal_tiles_after_detach": [],
+    "n_portal_surfaces_after_detach": 0
+   }
+  }
+ }
+]
