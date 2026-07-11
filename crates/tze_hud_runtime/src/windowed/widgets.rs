@@ -49,8 +49,14 @@ pub(super) struct ImeCaretAnchor {
 /// - `cursor_byte` — the caret's raw-draft byte offset.
 ///
 /// With a fresh layout the caret x is the shaped `x_at_cursor` (offset by the
-/// inset) and, when the layout carries input-box geometry (multi-line profile),
-/// the vertical position is the caret's visual row within that box. Without a
+/// inset), corrected by `l.h_scroll_px` for the single-line profile's
+/// caret-follow horizontal scroll — `x_at_cursor` is measured in unscrolled
+/// draft space, so this recovers the SAME rendered screen x the chrome-layer
+/// caret quad draws at (`layout.caret_x - layout.h_scroll_px`,
+/// `append_composer_caret_vertices`); `h_scroll_px` is `0.0` for the
+/// multi-line profile (wraps instead of scrolling), so this is a no-op there.
+/// When the layout carries input-box geometry (multi-line profile), the
+/// vertical position is the caret's visual row within that box. Without a
 /// layout (first post-focus frame, or a single-line profile before its layout is
 /// published) the anchor falls back to the node interior — still near the caret,
 /// never the window origin. The x is clamped into the node interior so a long
@@ -66,7 +72,7 @@ pub(super) fn composer_ime_caret_anchor(
 ) -> ImeCaretAnchor {
     let (caret_x, caret_top, caret_h) = match layout {
         Some(l) => {
-            let x = content_inset + l.x_at_cursor(cursor_byte);
+            let x = content_inset + l.x_at_cursor(cursor_byte) - l.h_scroll_px;
             let (top, h) = match l.input_box {
                 Some(bx) => {
                     let row = l.line_of(cursor_byte).unwrap_or(0);
@@ -647,11 +653,37 @@ mod tests {
             }],
             text_len: 3,
             input_box: None,
+            h_scroll_px: 0.0,
         };
         // Caret before byte 2 → shaped x 20.0; + inset 8 → 28; + region_x 100 → 128.
         let a = composer_ime_caret_anchor(100.0, 200.0, 400.0, 40.0, 8.0, Some(&layout), 2);
         assert_eq!(a.x, 128.0);
         assert_eq!(a.y, 208.0, "single-line caret top = region_y + inset");
+    }
+
+    /// A single-line layout with an active caret-follow horizontal scroll
+    /// (`h_scroll_px`) must anchor the IME candidate window at the caret's
+    /// ACTUAL rendered screen x — `x_at_cursor − h_scroll_px` — the same
+    /// correction the chrome-layer caret quad applies
+    /// (`append_composer_caret_vertices`'s `caret_x - h_scroll_px`). Before this
+    /// fix the anchor used the raw unscrolled `x_at_cursor`, misplacing the
+    /// candidate window for any horizontally-scrolled single-line composer.
+    #[test]
+    fn ime_anchor_corrects_for_single_line_h_scroll() {
+        let layout = tze_hud_input::ComposerVisualLayout {
+            lines: vec![tze_hud_input::ComposerVisualLine {
+                start_byte: 0,
+                end_byte: 3,
+                glyph_x: vec![(0, 0.0), (1, 10.0), (2, 20.0), (3, 30.0)],
+            }],
+            text_len: 3,
+            input_box: None,
+            h_scroll_px: 15.0,
+        };
+        // Caret before byte 2 → shaped x 20.0; − scroll 15 → 5; + inset 8 → 13;
+        // + region_x 100 → 113 (vs. 128 with no scroll correction).
+        let a = composer_ime_caret_anchor(100.0, 200.0, 400.0, 40.0, 8.0, Some(&layout), 2);
+        assert_eq!(a.x, 113.0);
     }
 
     /// A multi-line layout with input-box geometry anchors the caret at its
@@ -680,6 +712,7 @@ mod tests {
                 first_visible_row: 0,
                 visible_rows: 2,
             }),
+            h_scroll_px: 0.0,
         };
         // Cursor at byte 4 → row 1; y = region_y + row0_top + 1*line_height.
         let a = composer_ime_caret_anchor(100.0, 200.0, 400.0, 60.0, 8.0, Some(&layout), 4);
@@ -699,6 +732,7 @@ mod tests {
             }],
             text_len: 1,
             input_box: None,
+            h_scroll_px: 0.0,
         };
         let a = composer_ime_caret_anchor(100.0, 200.0, 400.0, 40.0, 8.0, Some(&layout), 1);
         // region_w 400, inset 8 → max x = region_x + (400 - 8) = 492.

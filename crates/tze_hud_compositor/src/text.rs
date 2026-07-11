@@ -718,6 +718,10 @@ impl TextRasterizer {
             }],
             text_len: text.len(),
             input_box: None,
+            // Set by the caller (`prime_composer_scroll_offset`), which knows
+            // the caret-follow scroll for this frame; this function only
+            // shapes glyph geometry.
+            h_scroll_px: 0.0,
         }
     }
 
@@ -907,6 +911,8 @@ impl TextRasterizer {
             // `composer_input_box` geometry after measuring, so the input box
             // stays single-sourced by the compositor (hud-lw60x).
             input_box: None,
+            // Multi-line profile wraps rather than scrolling horizontally.
+            h_scroll_px: 0.0,
         }
     }
 

@@ -1192,8 +1192,14 @@ impl Compositor {
             // byte-fraction guess for every single-line composer. `input_box:
             // None` here is correct (not a gap) — a single row already occupies
             // the whole box, so `byte_at_point`'s even-split fallback is exact.
-            let visual_layout =
+            let mut visual_layout =
                 tr.measure_composer_single_line_layout(&text, font_size_px, line_height_multiplier);
+            // Stamp the same-frame caret-follow scroll onto the published layout
+            // (hud-hxhnt finding 3) so a consumer that needs the caret's actual
+            // on-screen x — the IME anchor — can recover rendered screen space
+            // from the layout's unscrolled `glyph_x` by subtracting this. Mirrors
+            // `ComposerLayout.h_scroll_px` above exactly (same frame, same value).
+            visual_layout.h_scroll_px = self.composer_layout.h_scroll_px;
             if let Ok(mut guard) = self.composer_visual_layout.lock() {
                 *guard = Some(visual_layout);
             }

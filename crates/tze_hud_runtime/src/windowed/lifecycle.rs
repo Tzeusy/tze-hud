@@ -217,7 +217,7 @@ pub(super) fn read_windows_clipboard_text() -> Option<String> {
 /// (the local draft edit for a cut still applies regardless).
 #[cfg(target_os = "windows")]
 pub(super) fn write_windows_clipboard_text(text: &str) {
-    use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND};
+    use windows::Win32::Foundation::{HANDLE, HWND};
     use windows::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
     };

@@ -254,6 +254,19 @@ pub struct ComposerVisualLayout {
     /// → visual-row mapping (hud-lw60x); when `None`, `byte_at_point` falls back
     /// to splitting the passed content height evenly across the rows.
     pub input_box: Option<ComposerInputBoxGeometry>,
+    /// Horizontal caret-follow scroll (px) applied when this layout was
+    /// rendered — single-line profile only; `0.0` for the multi-line profile
+    /// (which wraps instead of scrolling horizontally, hud-hxhnt finding 3).
+    ///
+    /// `glyph_x` / `x_at_cursor` are measured in UNSCROLLED draft space (the
+    /// natural single-line width, `Wrap::None`); consumers that need the
+    /// caret's actual on-screen x — e.g. the OS IME candidate-window anchor
+    /// (`composer_ime_caret_anchor`) — must subtract this to land in rendered
+    /// screen space, mirroring the chrome-layer caret quad's own
+    /// `caret_x - h_scroll_px` (`append_composer_caret_vertices`). The
+    /// pointer hit-test (`byte_at_point`/`byte_at_x`) intentionally does NOT
+    /// apply this yet — that is the tracked, separate hud-uui70 follow-up.
+    pub h_scroll_px: f32,
 }
 
 impl ComposerVisualLine {
@@ -3427,6 +3440,7 @@ mod tests {
             ],
             text_len: 6,
             input_box: None,
+            h_scroll_px: 0.0,
         }
     }
 
@@ -3487,6 +3501,7 @@ mod tests {
             lines: vec![],
             text_len: 0,
             input_box: None,
+            h_scroll_px: 0.0,
         };
         assert_eq!(empty.byte_at_point(20.0, 10.0, 100.0), 0);
     }
@@ -3521,6 +3536,7 @@ mod tests {
             ],
             text_len: 9,
             input_box,
+            h_scroll_px: 0.0,
         }
     }
 
@@ -3816,6 +3832,7 @@ mod tests {
             }],
             text_len: 4,
             input_box: None,
+            h_scroll_px: 0.0,
         }));
         // Single-row layout (lines.len()==1) is not multi-row → hard-newline: Up → start.
         mgr.route_key_down("ArrowUp", "ArrowUp", false, false, false);
