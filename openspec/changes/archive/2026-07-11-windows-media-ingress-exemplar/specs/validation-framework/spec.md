@@ -7,6 +7,8 @@ The Windows media ingress exemplar SHALL be validated through three lanes: a det
 Source: `openspec/specs/validation-framework/spec.md`, `openspec/specs/media-webrtc-bounded-ingress/spec.md`, `openspec/specs/media-webrtc-privacy-operator-policy/spec.md`
 Scope: Active only for the accepted Windows-only one-stream media slice.
 
+**Archive carve-outs (Lane B / Lane C partially OUTSTANDING):** Lane A (synthetic) is fully satisfied and machine-verified. Lane B (live Windows) has proven authenticated admission, operator-disable, and a 10-min record-only soak, but its "self-owned/local video source rendered in the approved HUD media zone" + "first-frame time" clauses are NOT met live (`first_frame_time_ms=null`, `nonzero_frame_sample_count=0`) — the live decode → compositor path is deliberately deferred (gen-1 synthetic path, `design.md` §5); live rendered-frame proof is carve-out B. Lane C (YouTube) has only official-embed source evidence; the raw-frame bridge into `MediaIngressOpen` is NOT implemented and is owner-policy-gated (`RAW_YOUTUBE_BRIDGE_DECISION="blocked_pending_policy_approval"`; beads `hud-o33hj`/`hud-d82p7`/`hud-s0pit`) — carve-out A. Both are tracked follow-ons, not satisfied requirements (reconciliation `docs/reports/windows-media-ingress-gen1-reconciliation-20260711.md`).
+
 #### Scenario: synthetic lane gates correctness
 
 - **WHEN** the synthetic media validation lane runs

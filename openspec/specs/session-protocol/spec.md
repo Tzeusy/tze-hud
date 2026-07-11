@@ -952,12 +952,18 @@ Scope: post-v1
 
 ### Requirement: Embodied Presence Stream (Post-v1)
 Embodied agents (EMBODIED presence level) and their separate WebRTC media signaling stream are explicitly deferred to post-v1. EMBODIED=3 in PresenceLevel SHALL be reserved. Fields 50-99 in both ClientMessage and ServerMessage SHALL be reserved for post-v1 embodied presence and media signaling.
+Narrow exception: the accepted (now archived) `windows-media-ingress-exemplar` change (`openspec/changes/archive/2026-07-11-windows-media-ingress-exemplar/specs/session-protocol/spec.md`) activates a bounded, default-off, Windows-only, video-only media-ingress signaling slice that uses the reserved media-signaling fields `MediaIngressOpen`(60)/`MediaIngressClose`(61)/`MediaIngressOpenResult`(60)/`MediaIngressState`(61)/`MediaIngressCloseNotice`(62) plus SDP/ICE, admitted only behind the exemplar's enablement/capability/privacy/operator/budget gates. This exception does NOT enable EMBODIED presence, audio, bidirectional AV, or any other field in the 50-99 range; default runtime startup without explicit media-ingress configuration MUST still expose no media signaling stream.
 Source: RFC 0005 §12.5
 Scope: post-v1
 
 #### Scenario: Deferred marker
-- **WHEN** v1 ships
+- **WHEN** v1 ships without the `windows-media-ingress-exemplar` media-ingress configuration
 - **THEN** EMBODIED presence level SHALL be reserved but not implemented, and no WebRTC media signaling stream SHALL be available
+
+#### Scenario: Windows media-ingress narrow exception
+- **WHEN** the `windows-media-ingress-exemplar` slice is explicitly configured and its admission gates pass
+- **THEN** the bounded video-only `MediaIngress*` signaling messages on fields 60-62 MAY be exchanged for the single approved `media-pip` stream
+- **AND** all other fields in the reserved 50-99 range, EMBODIED presence, and audio/bidirectional AV signaling SHALL remain deferred
 
 ---
 

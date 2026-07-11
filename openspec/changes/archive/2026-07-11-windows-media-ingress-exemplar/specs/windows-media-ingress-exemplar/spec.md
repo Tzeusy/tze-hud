@@ -7,6 +7,8 @@ The runtime SHALL support a Windows-only media ingress exemplar that presents ex
 Source: `about/heart-and-soul/v1.md`, `about/heart-and-soul/architecture.md`, `openspec/specs/media-webrtc-bounded-ingress/spec.md`
 Scope: Active only for the accepted Windows-only one-stream media slice.
 
+**Archive carve-out B (live render clause OUTSTANDING):** the "MUST render in the approved content-layer media zone" clause below is proven only in headless/synthetic tests; on the live Windows lane the stream was admitted but rendered no frames (`first_frame_time_ms=null`), because the live decode → compositor path is deliberately deferred (gen-1 synthetic path, `design.md` §5). Live rendered-frame proof is a tracked follow-on, not a satisfied requirement (reconciliation `docs/reports/windows-media-ingress-gen1-reconciliation-20260711.md`, carve-out B).
+
 #### Scenario: Windows-only media exemplar is admitted
 
 - **WHEN** the Windows runtime starts with explicit media-ingress enablement and a configured approved media zone
@@ -24,6 +26,8 @@ The YouTube exemplar SHALL use a local sidecar/source-evidence runner that relie
 
 Source: `about/heart-and-soul/architecture.md`, YouTube IFrame Player API, YouTube API Services Developer Policies
 Scope: Active only for source-evidence and policy-gated bridge decisions in the accepted Windows-only media slice.
+
+**Archive carve-out A (YouTube raw-frame bridge OWNER-POLICY-GATED):** the approved Windows-only raw-frame bridge (official player sidecar → `MediaIngressOpen`) described above is NOT implemented and is held behind an owner policy gate — `RAW_YOUTUBE_BRIDGE_DECISION="blocked_pending_policy_approval"` (`.claude/skills/user-test/scripts/windows_media_ingress_exemplar.py`). Only official-embed source evidence has shipped; the raw-frame-bridge clauses are tracked blockers (beads `hud-o33hj`/`hud-d82p7`/`hud-s0pit`, PRs #658/#659 parked pending the owner decision), not satisfied requirements (reconciliation `docs/reports/windows-media-ingress-gen1-reconciliation-20260711.md`, carve-out A).
 
 #### Scenario: exemplar uses supported player source
 
