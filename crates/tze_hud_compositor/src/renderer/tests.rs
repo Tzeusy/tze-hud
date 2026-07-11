@@ -28,6 +28,23 @@ fn should_skip_gpu_tests() -> bool {
         .unwrap_or(false)
 }
 
+/// Process-wide count of GPU-gated tests that hit `require_gpu!`'s early
+/// return (no wgpu adapter available, or `TZE_HUD_SKIP_GPU_TESTS=1`).
+///
+/// Without this, a skipped test reports as an ordinary `test ... ok` in
+/// `cargo test` output — indistinguishable from a test that actually
+/// exercised the render path. PR #1148's RefCell double-borrow panic escaped
+/// exactly this way: the render-path regression tests that would have caught
+/// it (`markdown_primer_landing_converges_on_render_path_hud_u4lq2`,
+/// `reused_compositor_across_scenes_lands_markdown_primer_hud_u4lq2`) silently
+/// no-op'd in a no-GPU sandbox; only CI's GPU/llvmpipe lane actually ran them
+/// (hud-7o3rw). `require_gpu!` now `eprintln!`s a loud, greppable
+/// `"SKIPPED (no GPU)"` marker — carrying the exact call-site location and
+/// this running count — on every skip, so `grep -c "SKIPPED (no GPU)"` over
+/// captured test output tells a contributor exactly how many render-path
+/// tests did NOT run for real in this environment.
+static GPU_SKIP_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Skips a GPU-dependent test by returning early if no GPU is available.
 ///
 /// Usage inside an `async fn` test:
@@ -35,13 +52,35 @@ fn should_skip_gpu_tests() -> bool {
 /// let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
 /// ```
 ///
-/// Expands to a `match` that returns `()` (silently skips) when the
-/// helper returns `None` (no adapter found or `TZE_HUD_SKIP_GPU_TESTS=1`).
+/// Expands to a `match` that returns `()` when the helper returns `None` (no
+/// adapter found or `TZE_HUD_SKIP_GPU_TESTS=1`) — by default `cargo test`
+/// then reports the test as an ordinary `ok`, identical to a test that ran
+/// the real render path. To make that gap visible instead of silent
+/// (hud-7o3rw), the `None` arm first prints a `"SKIPPED (no GPU)"` marker
+/// carrying the exact `require_gpu!` call site (`file!()`/`line!()` resolve
+/// to the *invocation* site here, not this macro definition, so each call
+/// site gets its own precise, independently-greppable location) and the
+/// running `GPU_SKIP_COUNT`. This is deliberately NOT turned into a
+/// panic/failure: no-GPU / no-llvmpipe environments (including some CI
+/// lanes) are expected to skip these tests, and a hard failure there would
+/// break every headless environment instead of just surfacing the coverage
+/// gap.
 macro_rules! require_gpu {
     ($expr:expr) => {
         match $expr {
             Some(v) => v,
-            None => return,
+            None => {
+                let skip_count =
+                    GPU_SKIP_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                eprintln!(
+                    "SKIPPED (no GPU) [{skip_count} skipped so far] at {}:{} — this \
+                     render-path test did NOT exercise the real render path in this \
+                     environment; only a GPU- or llvmpipe-backed lane actually runs it",
+                    file!(),
+                    line!(),
+                );
+                return;
+            }
         }
     };
 }
@@ -77,7 +116,7 @@ fn scene_with_node(node: Node) -> SceneGraph {
 /// ```
 async fn make_compositor_and_surface(w: u32, h: u32) -> Option<(Compositor, HeadlessSurface)> {
     if should_skip_gpu_tests() {
-        eprintln!("skipping GPU test: TZE_HUD_SKIP_GPU_TESTS=1");
+        eprintln!("SKIPPED (no GPU) reason: TZE_HUD_SKIP_GPU_TESTS=1 is set");
         return None;
     }
     match Compositor::new_headless(w, h).await {
@@ -86,7 +125,7 @@ async fn make_compositor_and_surface(w: u32, h: u32) -> Option<(Compositor, Head
             Some((compositor, surface))
         }
         Err(CompositorError::NoAdapter) => {
-            eprintln!("skipping GPU test: no wgpu adapter available");
+            eprintln!("SKIPPED (no GPU) reason: no wgpu adapter available in this environment");
             None
         }
         Err(e) => panic!("unexpected compositor error: {e}"),
