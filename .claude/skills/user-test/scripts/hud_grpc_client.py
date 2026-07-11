@@ -39,15 +39,10 @@ import asyncio
 import io
 import json
 import os
-import shutil
-import subprocess
 import sys
-import tempfile
 import time
 import uuid
 from collections.abc import Callable
-from functools import lru_cache
-from pathlib import Path
 from typing import Any, Optional
 
 import grpc
@@ -117,90 +112,28 @@ def make_avatar_png(rgb: tuple[int, int, int]) -> bytes:
     return buf.getvalue()
 
 
-@lru_cache(maxsize=1)
-def _blake3_helper_path() -> str:
-    """Build a tiny cached cargo helper that prints a BLAKE3 digest in hex."""
-    helper_override = os.getenv("HUD_GRPC_BLAKE3_HELPER")
-    if helper_override:
-        helper_path = Path(helper_override)
-        if not helper_path.exists():
-            raise RuntimeError(
-                f"HUD_GRPC_BLAKE3_HELPER is set but file does not exist: {helper_path}"
-            )
-        return str(helper_path)
-
-    cargo = shutil.which("cargo")
-    if cargo is None:
-        raise RuntimeError(
-            "Could not compute BLAKE3 digest: install Python package 'blake3', "
-            "or set HUD_GRPC_BLAKE3_HELPER to a prebuilt helper binary, "
-            "or install cargo for on-demand helper compilation."
-        )
-
-    helper_dir = Path(tempfile.mkdtemp(prefix="hud-grpc-blake3-"))
-    (helper_dir / "src").mkdir(parents=True, exist_ok=True)
-    (helper_dir / "Cargo.toml").write_text(
-        """[package]
-name = "hud-grpc-blake3"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-blake3 = "1"
-hex = "0.4"
-""",
-        encoding="utf-8",
-    )
-    (helper_dir / "src" / "main.rs").write_text(
-        """use std::io::Read;
-
-fn main() {
-    let mut buf = Vec::new();
-    std::io::stdin().read_to_end(&mut buf).unwrap();
-    let hash = blake3::hash(&buf);
-    println!("{}", hex::encode(hash.as_bytes()));
-}
-""",
-        encoding="utf-8",
-    )
-
-    subprocess.run(
-        [cargo, "build", "--quiet", "--release"],
-        check=True,
-        cwd=helper_dir,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    binary_name = "hud-grpc-blake3.exe" if os.name == "nt" else "hud-grpc-blake3"
-    binary_path = helper_dir / "target" / "release" / binary_name
-    if not binary_path.exists():
-        raise RuntimeError(f"missing BLAKE3 helper binary at {binary_path}")
-    return str(binary_path)
-
-
 def _blake3_digest_bytes(data: bytes) -> bytes:
-    """Compute a BLAKE3 digest without adding a Python dependency."""
+    """Compute a BLAKE3 digest of ``data``.
+
+    Requires the ``blake3`` Python package, which is declared in this script's
+    PEP-723 dependency header (and installed by the user-test CI lane and by
+    ``uv run``). We deliberately do NOT fall back to compiling a throwaway Rust
+    helper on the fly: that hid a slow (2s+ warm cache) crates.io network
+    dependency behind a "pure Python" surface and broke offline. Fail fast with
+    an actionable message instead.
+    """
     try:
         import blake3  # type: ignore
-
-        return blake3.blake3(data).digest()
-    except ModuleNotFoundError:
-        pass
-
-    try:
-        helper = _blake3_helper_path()
-    except RuntimeError as exc:
+    except ModuleNotFoundError as exc:
         raise RuntimeError(
-            f"{exc} (input size={len(data)} bytes)"
+            "BLAKE3 digest requires the 'blake3' Python package. "
+            "Install it with: pip install blake3  "
+            "(or run this script via 'uv run', which installs the PEP-723 "
+            "dependencies automatically). Required for avatar/image digest "
+            "verification."
         ) from exc
-    proc = subprocess.run(
-        [helper],
-        input=data,
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    return bytes.fromhex(proc.stdout.decode("utf-8").strip())
+
+    return blake3.blake3(data).digest()
 
 
 def avatar_resource_id_from_png(png_bytes: bytes) -> bytes:
