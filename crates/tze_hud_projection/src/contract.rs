@@ -412,6 +412,21 @@ impl PublishOutputRequest {
     pub fn validate(&self, bounds: &ProjectionBounds) -> Result<(), ProjectionContractError> {
         self.envelope.validate(ProjectionOperation::PublishOutput)?;
         validate_owner_token(&self.owner_token)?;
+        // §Viewer Reply Echo: the viewer turn kind is authored only by the
+        // runtime's submit path; an adapter publish through this contract
+        // MUST NOT be able to forge one. `tze_hud_runtime::portal_projection_driver
+        // ::parse_output_kind` already string-rejects "viewer" before this
+        // request is even constructed, but that is only one of several
+        // callers of `handle_publish_output` — reject it here too so every
+        // caller of this contract (including transports that skip the driver
+        // shim) is covered.
+        if self.output_kind == OutputKind::Viewer {
+            return Err(ProjectionContractError::InvalidArgument(
+                "output_kind \"viewer\" is reserved for viewer-submitted input \
+                 and cannot be published by an agent"
+                    .to_string(),
+            ));
+        }
         if self.output_text.len() > bounds.max_output_bytes_per_call {
             return Err(ProjectionContractError::StableCode(
                 ProjectionErrorCode::ProjectionOutputTooLarge,

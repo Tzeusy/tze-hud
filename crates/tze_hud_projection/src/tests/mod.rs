@@ -872,6 +872,46 @@ fn oversized_output_is_rejected_with_stable_code() {
     );
 }
 
+/// hud-xwt6d: `OutputKind::Viewer` is reserved for the runtime's own
+/// `submit_portal_input` echo path (§Viewer Reply Echo — "an adapter MUST
+/// NOT ... forge a viewer turn through the output-publication contract").
+/// Before this fix the rejection existed only in
+/// `tze_hud_runtime::portal_projection_driver::parse_output_kind`, a string
+/// check ahead of the authority call — any other caller of
+/// `handle_publish_output` that constructs a `PublishOutputRequest` directly
+/// (e.g. the `--stdio` dev harness in
+/// `crates/tze_hud_projection/src/bin/projection_authority.rs`) had no guard
+/// at all. This drives the contract/authority layer directly (bypassing the
+/// driver shim entirely) and asserts the forged publish is rejected and
+/// leaves no trace in the retained transcript or unread accounting.
+#[test]
+fn viewer_kind_publish_is_rejected_at_contract_layer() {
+    let mut authority = ProjectionAuthority::default();
+    let owner_token = attach(&mut authority, "projection-a");
+    let mut request = output_request("projection-a", &owner_token, "req-output");
+    request.output_kind = OutputKind::Viewer;
+
+    let response = authority.handle_publish_output(request, "caller-a", 20);
+    assert!(
+        !response.accepted,
+        "a forged viewer-kind publish must be rejected at the contract layer"
+    );
+    assert_eq!(
+        response.error_code,
+        Some(ProjectionErrorCode::ProjectionInvalidArgument)
+    );
+
+    let summary = authority.state_summary("projection-a").unwrap();
+    assert_eq!(
+        summary.retained_transcript_units, 0,
+        "a rejected forged viewer turn must not land in the retained transcript"
+    );
+    assert_eq!(
+        summary.unread_output_count, 0,
+        "a rejected forged viewer turn must not increment unread accounting"
+    );
+}
+
 #[test]
 fn logical_unit_id_replay_is_idempotent() {
     let mut authority = ProjectionAuthority::default();
