@@ -1,6 +1,6 @@
 {
- "active_tab": "019f4f09-9932-7e23-be6a-23b54a91b602",
- "checksum": "c2b3f3c48807316ad8befba431e48012133cb116abe334071c0d823d3c8fb2a8",
+ "active_tab": "019f4f19-a7ae-7a71-b611-7949fc6f98aa",
+ "checksum": "13966c2b011a2e15d6e50b8a885219036baeff9e3ac368e958e41cc91e6f8732",
  "display_area": {
   "height": 800.0,
   "width": 1280.0,
@@ -8,9 +8,9 @@
   "y": 0.0
  },
  "nodes": {
-  "019f4f0a-07c0-7522-a3a2-d4c4d42ea6bf": {
+  "019f4f1a-180a-7c90-b4aa-c155955b7928": {
    "children": [
-    "019f4f0a-07c1-7213-b91b-f0d271f87b1b"
+    "019f4f1a-180a-7c90-b4aa-c171123590ac"
    ],
    "data": {
     "TextMarkdown": {
@@ -61,9 +61,9 @@
      "overflow": "Ellipsis"
     }
    },
-   "id": "019f4f0a-07c0-7522-a3a2-d4c4d42ea6bf"
+   "id": "019f4f1a-180a-7c90-b4aa-c155955b7928"
   },
-  "019f4f0a-07c1-7213-b91b-f0d271f87b1b": {
+  "019f4f1a-180a-7c90-b4aa-c171123590ac": {
    "children": [],
    "data": {
     "HitRegion": {
@@ -106,11 +106,11 @@
      "tooltip": null
     }
    },
-   "id": "019f4f0a-07c1-7213-b91b-f0d271f87b1b"
+   "id": "019f4f1a-180a-7c90-b4aa-c171123590ac"
   }
  },
  "portal_surfaces": {
-  "019f4f09-c662-7c92-a009-cc4dba6c4a28": {
+  "019f4f19-d6df-7a01-86da-46c37ac6191a": {
    "display_state": "Expanded",
    "identity": {
     "display_name": "bridge routing live-verify",
@@ -163,18 +163,18 @@
   }
  },
  "sequence": 9,
- "snapshot_mono_us": 34274292,
- "snapshot_wall_us": 1783737491261926,
+ "snapshot_mono_us": 34721864,
+ "snapshot_wall_us": 1783738544007559,
  "tabs": {
   "0": {
-   "created_at_ms": 1783737456946,
+   "created_at_ms": 1783738509230,
    "display_order": 0,
-   "id": "019f4f09-9932-7e23-be6a-23b54a91b602",
+   "id": "019f4f19-a7ae-7a71-b611-7949fc6f98aa",
    "name": "Main"
   }
  },
  "tiles": {
-  "019f4f09-c662-7c92-a009-cc4dba6c4a28": {
+  "019f4f19-d6df-7a01-86da-46c37ac6191a": {
    "bounds": {
     "height": 360.0,
     "width": 720.0,
@@ -182,9 +182,9 @@
     "y": 180.0
    },
    "expires_at": null,
-   "id": "019f4f09-c662-7c92-a009-cc4dba6c4a28",
+   "id": "019f4f19-d6df-7a01-86da-46c37ac6191a",
    "input_mode": "Capture",
-   "lease_id": "019f4f09-c662-7c92-a009-cc2e2ec815a7",
+   "lease_id": "019f4f19-d6df-7a01-86da-46a9d374c0ff",
    "namespace": "resident-grpc-portal",
    "opacity": 1.0,
    "present_at": null,
@@ -196,9 +196,9 @@
     "max_tiles": 8,
     "max_update_rate_hz": 30.0
    },
-   "root_node": "019f4f0a-07c0-7522-a3a2-d4c4d42ea6bf",
+   "root_node": "019f4f1a-180a-7c90-b4aa-c155955b7928",
    "sync_group": null,
-   "tab_id": "019f4f09-9932-7e23-be6a-23b54a91b602",
+   "tab_id": "019f4f19-a7ae-7a71-b611-7949fc6f98aa",
    "visual_hint": "None",
    "z_order": 160
   }

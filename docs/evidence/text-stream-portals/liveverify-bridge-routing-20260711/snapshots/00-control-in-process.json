@@ -1,6 +1,6 @@
 {
- "active_tab": "019f4f0a-bc8d-7c03-890c-48bc3e767041",
- "checksum": "b1c5997f743d8851f64a128dee51f73b04c8785215a3e0effba6d6f91a9f1069",
+ "active_tab": "019f4f1a-bc64-7160-a6d4-0ab3e15744de",
+ "checksum": "5f1b57f57f41297966473d827a6ebfc514198579c93ec834e9dc0fe84f810fbd",
  "display_area": {
   "height": 800.0,
   "width": 1280.0,
@@ -8,9 +8,9 @@
   "y": 0.0
  },
  "nodes": {
-  "019f4f0b-0a4e-7cc0-bed6-173cd38ca678": {
+  "019f4f1a-d1b0-7971-bbe5-0c12a4a8f4ab": {
    "children": [
-    "019f4f0b-0a4e-7cc0-bed6-175cb0413464"
+    "019f4f1a-d1b0-7971-bbe5-0c300944b63f"
    ],
    "data": {
     "TextMarkdown": {
@@ -61,9 +61,9 @@
      "overflow": "Ellipsis"
     }
    },
-   "id": "019f4f0b-0a4e-7cc0-bed6-173cd38ca678"
+   "id": "019f4f1a-d1b0-7971-bbe5-0c12a4a8f4ab"
   },
-  "019f4f0b-0a4e-7cc0-bed6-175cb0413464": {
+  "019f4f1a-d1b0-7971-bbe5-0c300944b63f": {
    "children": [],
    "data": {
     "HitRegion": {
@@ -106,11 +106,11 @@
      "tooltip": null
     }
    },
-   "id": "019f4f0b-0a4e-7cc0-bed6-175cb0413464"
+   "id": "019f4f1a-d1b0-7971-bbe5-0c300944b63f"
   }
  },
  "portal_surfaces": {
-  "019f4f0b-0a4e-7cc0-bed6-172ed3598f14": {
+  "019f4f1a-d1b0-7971-bbe5-0c0bee1ff4a5": {
    "display_state": "Expanded",
    "identity": {
     "display_name": "in-process control",
@@ -164,17 +164,17 @@
  },
  "sequence": 0,
  "snapshot_mono_us": 0,
- "snapshot_wall_us": 1783737557717962,
+ "snapshot_wall_us": 1783738591798741,
  "tabs": {
   "0": {
-   "created_at_ms": 1783737531533,
+   "created_at_ms": 1783738580068,
    "display_order": 0,
-   "id": "019f4f0a-bc8d-7c03-890c-48bc3e767041",
+   "id": "019f4f1a-bc64-7160-a6d4-0ab3e15744de",
    "name": "Main"
   }
  },
  "tiles": {
-  "019f4f0b-0a4e-7cc0-bed6-172ed3598f14": {
+  "019f4f1a-d1b0-7971-bbe5-0c0bee1ff4a5": {
    "bounds": {
     "height": 360.0,
     "width": 720.0,
@@ -182,9 +182,9 @@
     "y": 0.0
    },
    "expires_at": null,
-   "id": "019f4f0b-0a4e-7cc0-bed6-172ed3598f14",
+   "id": "019f4f1a-d1b0-7971-bbe5-0c0bee1ff4a5",
    "input_mode": "Capture",
-   "lease_id": "019f4f0b-0a4d-7430-bc7e-7fdb66cae9b6",
+   "lease_id": "019f4f1a-d1b0-7971-bbe5-0bf3b3c863d2",
    "namespace": "tze_hud_portal_driver",
    "opacity": 1.0,
    "present_at": null,
@@ -196,9 +196,9 @@
     "max_tiles": 8,
     "max_update_rate_hz": 30.0
    },
-   "root_node": "019f4f0b-0a4e-7cc0-bed6-173cd38ca678",
+   "root_node": "019f4f1a-d1b0-7971-bbe5-0c12a4a8f4ab",
    "sync_group": null,
-   "tab_id": "019f4f0a-bc8d-7c03-890c-48bc3e767041",
+   "tab_id": "019f4f1a-bc64-7160-a6d4-0ab3e15744de",
    "visual_hint": "None",
    "z_order": 160
   }

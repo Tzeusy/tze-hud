@@ -50,23 +50,29 @@ The owner flips exactly as hud-hfuxy specifies.
 
 ## Per-check verdicts
 
+The observer's `SceneSnapshot` also carries the bridged portal's **rendered transcript
+markdown** at `nodes[].data.TextMarkdown.content` — so the actual streamed units and the
+rendered unread indicator are observable over gRPC, not merely the part topology.
+
 | # | Check | Verdict | Evidence |
 |---|-------|---------|----------|
-| 1 | Portal **attach + publish renders via the bridge** (not the in-process arm) | **PASS** | Bridged tile `namespace = resident-grpc-portal` vs control `tze_hud_portal_driver`. `snapshots/00`,`01`; `logs/verdicts.json §1`. |
-| 2 | **Transcript streaming** updates flow end-to-end over the bridge | **PASS** | 4 sequential `portal_projection_publish` (A–D) accepted; bridged `PortalSurface` stays `lifecycle=Active` with parts `[Frame,Header,Transcript,Composer]` and tile stays `resident-grpc-portal`. `snapshots/02`; `§2`. Transcript *pixel* text not asserted (topology snapshot carries no text; pixel capture unreliable on this software-GPU VM). |
-| 3 | **Unread count / jump-to-latest pill** parity on the bridged path (#1107) | **N/A — plumbing exercised, value not externally observable** | #1107's `SetTileUnreadCountMutation` is emitted on the bridged path by construction (`resident_grpc.rs render_batch`), but the numeric unread value lands in `RuntimeOverlayState.tile_unread_counts` (`#[serde(skip)]`) and is absent from `SceneGraphSnapshot`/`portal_surfaces`. Not readable over gRPC snapshot; pixel-only, and capture is unreliable here. Bridged path confirmed active during the unread bursts. `snapshots/03`; `§3`. |
+| 1 | Portal **attach + publish renders via the bridge** (not the in-process arm) | **PASS** | Bridged tile `namespace = resident-grpc-portal` vs control `tze_hud_portal_driver`; unit A present in the bridged tile's rendered `TextMarkdown` content. `snapshots/00`,`01`; `logs/verdicts.json §1`. |
+| 2 | **Transcript streaming** updates flow end-to-end over the bridge | **PASS** | 4 sequential `portal_projection_publish` (A–D) — **all four units A,B,C,D appear in the bridged portal's rendered `nodes[].data.TextMarkdown.content`** (baseline showed only A), surface `lifecycle=Active`, tile stays `resident-grpc-portal`. Proves the bridge keeps applying streamed updates, not just that a Transcript part exists. `snapshots/01`→`02`; `§2`. |
+| 3 | **Unread count / jump-to-latest** parity on the bridged path (#1107) | **PASS (rendered-indicator parity)** | The unread indicator (`"N unread"`) renders in the bridged portal's `TextMarkdown` content and **matches the in-process control's rendered indicator** (`"1 unread"` both) — parity confirmed on the bridged transport. `snapshots/03` vs `00`; `§3`. Caveat: the numeric value stays small because `unread_output_count` resets on each authority drain (~frame cadence), so a snapshot round-trip catches a post-drain value — a *growing* count is not race-free observable, and the separate compositor `tile_unread_count` pill remains `#[serde(skip)]` / pixel-only. |
 | 4 | **Composer input** (draft/submit) flows back over the bridge | **PARTIAL — draft ingress exercised; submit needs OS keyboard** | `inject_composer_paste` injected (`injected=true`), producing draft state, which the bridge classifies as `ResidentBridgeInputKind::DraftState` and `drain_resident_grpc_input` **drops** (only `Submit` reaches pending-input). `portal_projection_get_pending_input` correctly returned 0 items. A submit reaching pending-input requires a real OS Enter keypress on the focused bridged composer — no keyboard-free MCP/gRPC substitute exists in this build. `§4`. |
 | 5 | **Clean detach / teardown** | **PASS** | `portal_projection_detach` on the bridged projection → observer snapshot shows `0` tiles and `0` portal_surfaces (bridge tombstone removed the materialised tile). `snapshots/99`; `§5`. Verified on a freshly-restarted runtime (clean scene) to avoid leftover-projection confounds. |
 
 ## Product observations (reported, not filed)
 
-- **No product bug found in the hud-hfuxy routing itself** — routing, streaming, and detach/teardown
-  behave exactly as specified over the bridged transport.
-- **Observability gap (not a regression):** the unread count (#1107) and the per-projection transport
-  are both invisible to external gRPC observers by design (`#[serde(skip)]` overlay + WM-S2b exclusion).
-  Live verification of the unread badge and composer-submit on this headless software-GPU VM is blocked
-  on (a) a snapshot-exposed unread field or diagnostic RPC, and (b) reliable OS keyboard injection — the
-  same keyboard limitation prior text-stream evidence rounds recorded (`liveverify-20260710-0955`
+- **No product bug found in the hud-hfuxy routing itself** — routing, streaming (units A–D rendered
+  over the bridge), the rendered unread indicator, and detach/teardown all behave exactly as specified
+  over the bridged transport.
+- **Observability notes (not regressions):** the per-projection *transport* is excluded from the wire
+  by design (WM-S2b), so routing is proven via the materialised tile's owning `namespace`. The numeric
+  compositor `tile_unread_count` pill lives in a `#[serde(skip)]` overlay and is pixel-only, but the
+  portal's *rendered* unread indicator is present in the `TextMarkdown` node content and was used for
+  the #1107 parity check. The remaining gap is composer **submit** ingress, which needs reliable OS
+  keyboard injection — the same limitation prior text-stream rounds recorded (`liveverify-20260710-0955`
   pncm3/2v8br/acfvp).
 
 ## Hygiene

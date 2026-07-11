@@ -10,8 +10,9 @@ current-`main` (`cae4b302`) binary.
 **Headline result:** with the bridge enabled, a projection attached through the ordinary MCP
 facade is materialised by the bridge — its portal tile is owned by agent `resident-grpc-portal`
 — whereas the identical attach with the bridge disabled is materialised in-process under
-`tze_hud_portal_driver`. Streaming and clean detach/teardown work over the bridged transport.
-See **`VERDICTS.md`** for the per-check table, the A/B control, and caveats.
+`tze_hud_portal_driver`. Streamed transcript units (A–D) and the unread indicator render over
+the bridged transport (observed in the snapshot's `TextMarkdown` node content), and detach
+teardown is clean. See **`VERDICTS.md`** for the per-check table, the A/B control, and caveats.
 
 ## Contents
 
