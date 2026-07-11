@@ -557,6 +557,8 @@ impl Compositor {
         // ── Keyboard focus ring (chrome layer, hud-k6yvb) ───────────────────
         let mut focus_ring_vertices: Vec<RectVertex> = Vec::new();
         self.append_focus_ring_vertices(scene, &mut focus_ring_vertices, sw, sh);
+        // ── Composer caret quad (chrome layer, same pass, hud-hxhnt) ────────
+        self.append_composer_caret_vertices(scene, &mut focus_ring_vertices, sw, sh);
 
         // ── Chrome context menu (hud-zc7f) ─────────────────────────────────
         let context_menu_vertices = self.collect_context_menu_vertices(scene, sw, sh);
@@ -866,6 +868,8 @@ impl Compositor {
         // ── Keyboard focus ring (chrome layer, hud-k6yvb) ───────────────────
         let mut focus_ring_vertices: Vec<RectVertex> = Vec::new();
         self.append_focus_ring_vertices(scene, &mut focus_ring_vertices, sw, sh);
+        // ── Composer caret quad (chrome layer, same pass, hud-hxhnt) ────────
+        self.append_composer_caret_vertices(scene, &mut focus_ring_vertices, sw, sh);
         if !focus_ring_vertices.is_empty() {
             self.encode_drag_handle_pass(&mut encoder, &frame.view, &focus_ring_vertices);
         }
@@ -1012,6 +1016,8 @@ impl Compositor {
         self.append_drag_handle_vertices(scene, &drag_handles, &mut chrome_vertices, sw, sh);
         // Keyboard focus ring in the chrome pass, above all content (hud-k6yvb).
         self.append_focus_ring_vertices(scene, &mut chrome_vertices, sw, sh);
+        // Composer caret quad, same chrome pass (hud-hxhnt).
+        self.append_composer_caret_vertices(scene, &mut chrome_vertices, sw, sh);
 
         let chrome_buffer = if chrome_vertices.is_empty() {
             None

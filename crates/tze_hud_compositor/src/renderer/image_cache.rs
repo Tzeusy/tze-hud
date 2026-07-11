@@ -125,56 +125,6 @@ pub(crate) fn caret_visible_at(elapsed: std::time::Duration) -> bool {
     (elapsed.as_nanos() / half) % 2 == 0
 }
 
-/// Build the display string for the composer echo overlay: the draft text with
-/// the caret glyph (`▌`, U+258C LEFT HALF BLOCK) inserted at `cursor_byte` when
-/// `caret_visible` is `true`.
-///
-/// When `caret_visible` is `false` (blink "off" phase) the caret is omitted
-/// entirely so the strip shows just the draft text — there is no separate caret
-/// draw call to toggle, so omitting the glyph IS the hidden state.
-///
-/// `cursor_byte` is an **agent-provided** offset and may be:
-/// - out-of-range (> `text.len()`) — clamped to `text.len()`.
-/// - mid-multi-byte-character — snapped **down** to the nearest valid char
-///   boundary (same pattern as the overflow / input crates).
-///
-/// Either way this function never panics on agent input.
-pub(crate) fn composer_display_text_blink(
-    text: &str,
-    cursor_byte: usize,
-    caret_visible: bool,
-) -> String {
-    composer_display_text_blink_inner(text, cursor_byte, caret_visible)
-}
-
-/// Always-caret-visible convenience wrapper used by the caret-positioning unit
-/// tests (the production render path always goes through
-/// [`composer_display_text_blink`] with the live blink phase).
-#[cfg(test)]
-pub(crate) fn composer_display_text(text: &str, cursor_byte: usize) -> String {
-    composer_display_text_blink_inner(text, cursor_byte, true)
-}
-
-fn composer_display_text_blink_inner(
-    text: &str,
-    cursor_byte: usize,
-    caret_visible: bool,
-) -> String {
-    if !caret_visible {
-        return text.to_string();
-    }
-    // Clamp to [0, text.len()] first, then walk back to a char boundary.
-    let mut cursor = cursor_byte.min(text.len());
-    while cursor > 0 && !text.is_char_boundary(cursor) {
-        cursor -= 1;
-    }
-    let mut display = String::with_capacity(text.len() + '▌'.len_utf8());
-    display.push_str(&text[..cursor]);
-    display.push('▌');
-    display.push_str(&text[cursor..]);
-    display
-}
-
 /// Apply one drain cycle: take the pending update from `handle` and write it
 /// into `current`.
 ///
@@ -287,6 +237,15 @@ pub(crate) struct ComposerLayout {
     pub(crate) h_scroll_px: f32,
     /// Natural single-line content width (px) — single-line profile only.
     pub(crate) content_width: f32,
+    /// Caret x (px), measured from the start of the draft — single-line profile
+    /// only; `0` when wrapping (the multi-line profile locates the caret via the
+    /// published [`tze_hud_input::ComposerVisualLayout`] instead, hud-hxhnt).
+    ///
+    /// Raw (pre-scroll) value from `TextRasterizer::measure_composer_caret`,
+    /// stashed here by `Compositor::prime_composer_scroll_offset` so the
+    /// chrome-layer caret quad (`Compositor::append_composer_caret_vertices`)
+    /// does not need its own text-rasterizer pass to relocate it.
+    pub(crate) caret_x: f32,
     /// Number of text lines the box currently shows (`1..=max_lines`); drives the
     /// upward-grown box height.
     pub(crate) visible_lines: f32,
@@ -306,6 +265,7 @@ impl Default for ComposerLayout {
             wrap: false,
             h_scroll_px: 0.0,
             content_width: 0.0,
+            caret_x: 0.0,
             visible_lines: 1.0,
             total_lines: 1.0,
             vscroll_px: 0.0,

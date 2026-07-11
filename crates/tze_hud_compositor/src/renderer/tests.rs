@@ -1,9 +1,8 @@
 use super::*;
 use crate::surface::HeadlessSurface;
 use image_cache::{
-    CARET_BLINK_HALF_PERIOD, ComposerLayout, caret_visible_at, composer_display_text,
-    composer_display_text_blink, composer_scroll_offset, composer_vertical_line_offset,
-    composer_visible_line_count,
+    CARET_BLINK_HALF_PERIOD, ComposerLayout, caret_visible_at, composer_scroll_offset,
+    composer_vertical_line_offset, composer_visible_line_count,
 };
 use tze_hud_input::{DRAG_OPACITY_BOOST, DRAG_Z_ORDER_BOOST};
 use tze_hud_scene::graph::SceneGraph;
@@ -12019,140 +12018,316 @@ fn caret_blink_phase_square_wave() {
     assert!(!caret_visible_at(half * 3), "hidden in fourth half-period");
 }
 
-/// Blink-aware display builder: the off phase omits the caret glyph entirely
-/// (the hidden state), while the on phase matches the always-on builder.
-#[test]
-fn caret_blink_display_omits_glyph_when_hidden() {
-    const CARET: char = '▌';
-
-    // On phase → identical to the always-visible builder.
-    let on = composer_display_text_blink("hello", 2, true);
-    assert_eq!(on, composer_display_text("hello", 2));
-    assert!(on.contains(CARET), "on phase must contain the caret glyph");
-
-    // Off phase → just the draft text, no caret.
-    let off = composer_display_text_blink("hello", 2, false);
-    assert_eq!(off, "hello");
-    assert!(
-        !off.contains(CARET),
-        "off phase must not contain the caret glyph"
-    );
-
-    // Off phase must not panic on an OOB / mid-multibyte cursor either.
-    let _ = composer_display_text_blink("éclat", 1, false);
+/// Build a minimal scene (one tile, one composer HitRegion) matching the
+/// geometry used by `composer_echo_confined_to_bottom_strip_full_tile_hitregion`
+/// et al: tile at `(20, 30, 200, 120)`, HitRegion at `(12, 16, 140, 72)` — so
+/// `region.x == 38` and `region.y == 46` with the default `content_inset_px`
+/// (6.0), giving deterministic expected caret pixel coordinates across the
+/// hud-hxhnt regression tests below.
+fn composer_caret_test_scene() -> (SceneGraph, SceneId, SceneId) {
+    let mut scene = SceneGraph::new(320.0, 200.0);
+    let tab_id = scene.create_tab("test", 0).unwrap();
+    let lease_id = scene.grant_lease("test", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "test",
+            lease_id,
+            Rect::new(20.0, 30.0, 200.0, 120.0),
+            1,
+        )
+        .unwrap();
+    let root_id = SceneId::new();
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: root_id,
+                children: vec![],
+                data: NodeData::SolidColor(SolidColorNode {
+                    color: Rgba::new(0.0, 0.0, 0.0, 0.0),
+                    bounds: Rect::new(0.0, 0.0, 200.0, 120.0),
+                    radius: None,
+                }),
+            },
+        )
+        .unwrap();
+    let hit_id = SceneId::new();
+    scene
+        .add_node_to_tile(
+            tile_id,
+            Some(root_id),
+            Node {
+                id: hit_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(12.0, 16.0, 140.0, 72.0),
+                    interaction_id: "composer".to_owned(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    accepts_composer_input: true,
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap();
+    (scene, tile_id, hit_id)
 }
 
-/// The caret glyph (`▌`, U+258C LEFT HALF BLOCK) must be inserted at the
-/// correct byte offset in the draft text.
-///
-/// - Offset 0 → caret leads the text.
-/// - Offset == text.len() → caret trails the text.
-/// - Offset in the middle → caret splits the text at that byte.
-/// - Offset > text.len() → clamped to text.len() (no panic on OOB).
-///
-/// Calls the real `composer_display_text` free function (production code path)
-/// so changes to the production logic are caught here automatically.
-#[test]
-fn composer_caret_insertion_positions() {
-    const CARET: char = '▌'; // U+258C LEFT HALF BLOCK
+/// hud-hxhnt finding 2 (gate a): the rendered/measured draft text must NEVER
+/// contain the `▌` (U+258C) caret glyph any more — the caret is a chrome-layer
+/// quad now, not an inserted character — regardless of blink phase. This is the
+/// core "no jitter" guarantee: if the glyph were still inserted, toggling it
+/// would reflow every trailing character on each blink tick.
+#[tokio::test]
+async fn composer_draft_text_never_contains_caret_glyph() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(320, 200).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+    let (scene, tile_id, hit_id) = composer_caret_test_scene();
+    let tokens = resolve_composer_overlay_tokens(&std::collections::HashMap::new());
+    let tile = scene.tiles.get(&tile_id).unwrap();
 
-    // Caret at start.
-    let display = composer_display_text("hello", 0);
+    compositor.local_composer = Some(LocalComposerState {
+        text: "hello world".to_owned(),
+        cursor_byte: 5,
+        selection_anchor: 5,
+        at_capacity: false,
+        node_id: hit_id,
+        placeholder: None,
+    });
+
+    // Blink "on" phase (fresh compositor → elapsed == 0 → solid).
+    let on = compositor
+        .collect_composer_text_item(tile, &scene, 320.0, 200.0, &tokens)
+        .expect("focused composer must produce a text item");
     assert!(
-        display.starts_with(CARET),
-        "cursor=0: caret must lead the text, got {display:?}"
+        !on.text.contains('▌'),
+        "draft text must never contain the caret glyph (on phase), got {:?}",
+        on.text
     );
-    assert_eq!(&display[CARET.len_utf8()..], "hello");
-
-    // Caret at end.
-    let text = "hello";
-    let display = composer_display_text(text, text.len());
-    assert!(
-        display.ends_with(CARET),
-        "cursor=len: caret must trail the text, got {display:?}"
-    );
-    assert_eq!(&display[..display.len() - CARET.len_utf8()], "hello");
-
-    // Caret in the middle (at byte 2 of "hello" → "he" + CARET + "llo").
-    let display = composer_display_text("hello", 2);
-    let caret_s = CARET.to_string();
     assert_eq!(
-        display,
-        format!("he{caret_s}llo"),
-        "cursor=2: caret must split text at byte 2"
+        on.text.as_ref(),
+        "hello world",
+        "draft text must be the raw draft verbatim (on phase)"
     );
 
-    // Caret out-of-bounds → clamped to end (no panic).
-    let display = composer_display_text("hi", 9999);
+    // Blink "off" phase (force elapsed past one half-period).
+    compositor.composer_caret_blink_start = std::time::Instant::now()
+        .checked_sub(CARET_BLINK_HALF_PERIOD)
+        .expect("test clock must have enough uptime to rewind one half-period");
+    let off = compositor
+        .collect_composer_text_item(tile, &scene, 320.0, 200.0, &tokens)
+        .expect("focused composer must produce a text item");
     assert!(
-        display.ends_with(CARET),
-        "out-of-bounds cursor must be clamped to text end, got {display:?}"
+        !off.text.contains('▌'),
+        "draft text must never contain the caret glyph (off phase), got {:?}",
+        off.text
     );
-    assert_eq!(&display[..display.len() - CARET.len_utf8()], "hi");
-
-    // Empty text + cursor=0 → only the caret.
-    let display = composer_display_text("", 0);
     assert_eq!(
-        display,
-        CARET.to_string(),
-        "empty text + cursor=0 must produce only the caret"
+        off.text.as_ref(),
+        "hello world",
+        "draft text must be identical across blink phases — blink-invariant (hud-hxhnt)"
+    );
+    assert_eq!(
+        on.text, off.text,
+        "the draft TextItem must not change at all when the caret blinks off"
     );
 }
 
-/// A mid-multi-byte `cursor_byte` must NOT panic; the caret must snap to the
-/// nearest valid char boundary below the given offset.
-///
-/// Regression test for the pre-fix bug where `cs.text[..cursor]` panicked
-/// when `cursor` was not on a char boundary (e.g. `cursor_byte=1` inside the
-/// 2-byte é U+00E9 at the start of "éclat").
-#[test]
-fn composer_caret_mid_multibyte_snaps_to_boundary() {
-    const CARET: char = '▌'; // U+258C LEFT HALF BLOCK
-    let caret_s = CARET.to_string();
+/// hud-hxhnt finding 2 (gate b): the caret renders as a zero-width-relative
+/// vertical QUAD at the shaped caret-x, emitted by
+/// `append_composer_caret_vertices` — the same primitive/pass as the focus ring.
+/// Uses an EMPTY draft so the expected caret x is deterministic (no font-metric
+/// dependency): `region.x + content_inset_px` exactly, matching the geometry
+/// `composer_echo_confined_to_bottom_strip_full_tile_hitregion` pins for this
+/// same scene (region.x == 38, strip_y == 83.6, content_inset_px == 6.0).
+#[tokio::test]
+async fn composer_caret_quad_emitted_at_expected_position() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(320, 200).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+    let (scene, _tile_id, hit_id) = composer_caret_test_scene();
 
-    // "éclat": é is U+00E9, encoded as [0xC3, 0xA9] (2 bytes).
-    //   byte 0 → start of é (valid boundary)
-    //   byte 1 → inside é  (NOT a boundary — must snap to 0)
-    //   byte 2 → start of 'c' (valid boundary)
-    let text = "éclat";
-    assert_eq!(text.len(), 6, "é is 2 bytes; éclat is 6 bytes total");
-    assert!(text.is_char_boundary(0));
-    assert!(!text.is_char_boundary(1), "byte 1 is inside é");
-    assert!(text.is_char_boundary(2));
+    compositor.local_composer = Some(LocalComposerState {
+        text: String::new(),
+        cursor_byte: 0,
+        selection_anchor: 0,
+        at_capacity: false,
+        node_id: hit_id,
+        placeholder: None,
+    });
+    compositor.prime_composer_scroll_offset(&scene);
 
-    // cursor_byte=1 is mid-char → must snap down to 0 (no panic).
-    let display = composer_display_text(text, 1);
-    // Caret snapped to byte 0 → caret leads the entire text.
+    let mut verts: Vec<crate::pipeline::RectVertex> = Vec::new();
+    compositor.append_composer_caret_vertices(&scene, &mut verts, 320.0, 200.0);
     assert_eq!(
-        display,
-        format!("{caret_s}éclat"),
-        "cursor_byte=1 (mid-é) must snap to byte 0: caret leads text, got {display:?}"
+        verts.len(),
+        6,
+        "one caret quad must emit 6 vertices (2 triangles), got {}",
+        verts.len()
     );
 
-    // cursor_byte=2 → valid boundary between é and c.
-    let display = composer_display_text(text, 2);
-    assert_eq!(
-        display,
-        format!("é{caret_s}clat"),
-        "cursor_byte=2 (after é) must split correctly, got {display:?}"
-    );
+    // Expected pixel geometry (mirrors the sibling text-item test's constants):
+    // strip_height = 16*LINE_HEIGHT_MULTIPLIER + 12; strip_y = 46 + (72 - strip_height).
+    let strip_height = 16.0 * crate::text::LINE_HEIGHT_MULTIPLIER + 12.0;
+    let strip_y = 46.0 + (72.0 - strip_height);
+    let expected_x = 38.0; // region.x (20+12=32) + content_inset_px (6.0)
+    let expected_y = strip_y + 6.0; // input_box.y + content_inset_px
 
-    // cursor_byte way out of range → clamped to end (no panic).
-    let display = composer_display_text(text, 99999);
-    assert_eq!(
-        display,
-        format!("éclat{caret_s}"),
-        "out-of-range cursor must trail the text, got {display:?}"
-    );
-
-    // Verify the pre-fix code path WOULD have panicked (documents the regression).
-    // We cannot call the old code, but we can assert the invariant that snapping
-    // produces a result whose prefix is a valid UTF-8 slice — the exact property
-    // the pre-fix bare `&text[..cursor]` violated.
-    let snap_result = std::panic::catch_unwind(|| composer_display_text(text, 1));
+    let expected_left = (expected_x / 320.0) * 2.0 - 1.0;
+    let expected_top = 1.0 - (expected_y / 200.0) * 2.0;
+    let min_x = verts
+        .iter()
+        .map(|v| v.position[0])
+        .fold(f32::INFINITY, f32::min);
+    let max_y_ndc = verts
+        .iter()
+        .map(|v| v.position[1])
+        .fold(f32::NEG_INFINITY, f32::max);
     assert!(
-        snap_result.is_ok(),
-        "composer_display_text must not panic on mid-multibyte cursor_byte"
+        (min_x - expected_left).abs() < 1e-3,
+        "caret quad left edge NDC mismatch: got {min_x}, want {expected_left} (pixel x {expected_x})"
+    );
+    assert!(
+        (max_y_ndc - expected_top).abs() < 1e-3,
+        "caret quad top edge NDC mismatch: got {max_y_ndc}, want {expected_top} (pixel y {expected_y})"
+    );
+}
+
+/// hud-hxhnt finding 2 (gate c): the selection highlight `StyledRunItem` byte
+/// range is the RAW `[min(cursor, anchor), max(cursor, anchor))` range — no
+/// +3-byte caret-glyph shift, since the caret is no longer inserted into the
+/// display string.
+#[tokio::test]
+async fn composer_selection_styled_run_uses_raw_byte_offsets() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(320, 200).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+    let (scene, tile_id, hit_id) = composer_caret_test_scene();
+    let tokens = resolve_composer_overlay_tokens(&std::collections::HashMap::new());
+    let tile = scene.tiles.get(&tile_id).unwrap();
+
+    let check = |compositor: &mut Compositor,
+                 cursor: usize,
+                 anchor: usize,
+                 want: (usize, usize)| {
+        compositor.local_composer = Some(LocalComposerState {
+            text: "hello".to_owned(),
+            cursor_byte: cursor,
+            selection_anchor: anchor,
+            at_capacity: false,
+            node_id: hit_id,
+            placeholder: None,
+        });
+        let item = compositor
+            .collect_composer_text_item(tile, &scene, 320.0, 200.0, &tokens)
+            .expect("focused composer with a selection must produce a text item");
+        assert_eq!(
+            item.styled_runs.len(),
+            1,
+            "an active selection must emit exactly one styled run (cursor={cursor}, anchor={anchor})"
+        );
+        let run = &item.styled_runs[0];
+        assert_eq!(
+            (run.start_byte, run.end_byte),
+            want,
+            "selection byte range must be the RAW [min,max) range, no caret-glyph shift \
+             (cursor={cursor}, anchor={anchor})"
+        );
+        assert_eq!(
+            run.background_color,
+            Some(tokens.selection_bg),
+            "selection run must be colored from portal.composer.selection_color"
+        );
+    };
+
+    // cursor < anchor.
+    check(&mut compositor, 2, 4, (2, 4));
+    // cursor > anchor.
+    check(&mut compositor, 4, 2, (2, 4));
+    // whole string selected, cursor at start.
+    check(&mut compositor, 0, 5, (0, 5));
+    // whole string selected, cursor at end.
+    check(&mut compositor, 5, 0, (0, 5));
+
+    // cursor == anchor → no selection → no styled run.
+    compositor.local_composer = Some(LocalComposerState {
+        text: "hello".to_owned(),
+        cursor_byte: 3,
+        selection_anchor: 3,
+        at_capacity: false,
+        node_id: hit_id,
+        placeholder: None,
+    });
+    let item = compositor
+        .collect_composer_text_item(tile, &scene, 320.0, 200.0, &tokens)
+        .expect("focused composer must produce a text item");
+    assert!(
+        item.styled_runs.is_empty(),
+        "cursor == anchor must emit no selection styled run"
+    );
+}
+
+/// hud-hxhnt finding 1 (gate d): the SINGLE-LINE composer profile must now also
+/// publish a one-row `ComposerVisualLayout` (previously only the multi-line
+/// profile did), so the runtime's pointer hit-test can use real glyph geometry
+/// instead of a linear byte-fraction guess for single-line composers too.
+#[tokio::test]
+async fn single_line_composer_publishes_visual_layout() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(320, 200).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+    let (scene, _tile_id, hit_id) = composer_caret_test_scene();
+
+    compositor.local_composer = Some(LocalComposerState {
+        text: "hi".to_owned(),
+        cursor_byte: 2,
+        selection_anchor: 2,
+        at_capacity: false,
+        node_id: hit_id,
+        placeholder: None,
+    });
+    // Default token map → max_lines defaults to > 1, so pin max_lines=1 to
+    // force the single-line profile explicitly (rather than relying on the
+    // default, which could drift independently of this test's intent).
+    compositor
+        .token_map
+        .insert("portal.composer.max_lines".to_string(), "1".to_string());
+    compositor.prime_composer_scroll_offset(&scene);
+
+    let visual = compositor
+        .composer_visual_layout
+        .lock()
+        .unwrap()
+        .clone()
+        .expect(
+            "single-line profile must now publish a ComposerVisualLayout (hud-hxhnt finding 1)",
+        );
+
+    assert_eq!(visual.text_len, 2, "text_len must match the 2-byte draft");
+    assert_eq!(
+        visual.lines.len(),
+        1,
+        "single-line profile publishes exactly one row"
+    );
+    let line = &visual.lines[0];
+    assert_eq!(line.start_byte, 0);
+    assert_eq!(line.end_byte, 2);
+    assert_eq!(
+        line.glyph_x.last().map(|&(b, _)| b),
+        Some(2),
+        "the trailing sentinel must map the row end (text.len())"
+    );
+    assert!(
+        visual.input_box.is_none(),
+        "single-line profile has no rendered multi-row box — byte_at_point's \
+         even-split-over-one-row fallback is exact, so input_box stays None"
+    );
+    assert_eq!(
+        visual.x_at_cursor(0),
+        0.0,
+        "caret x at byte 0 must be the line origin"
+    );
+    assert!(
+        visual.x_at_cursor(2) > 0.0,
+        "caret x at the end of a non-empty draft must be past the origin"
     );
 }
 
@@ -13792,108 +13967,15 @@ fn composer_selection_bg_token_override_propagates() {
     );
 }
 
-/// Byte-offset mapping from original-text selection range to display-string
-/// selection range (accounting for the 3-byte ▌ caret glyph).
-///
-/// The rules are:
-/// - Cursor at or before anchor: ▌ is inserted at `cursor_byte`, shifting
-///   anchor by +3 in the display string.
-///   `display_sel_start = cursor_byte`, `display_sel_end = anchor + 3`.
-/// - Cursor after anchor: ▌ is inserted at `cursor_byte`, shifting cursor by
-///   +3 but anchor is unshifted (anchor < cursor).
-///   `display_sel_start = anchor`, `display_sel_end = cursor + 3`.
-///
-/// CPU-only — verifies the offset arithmetic directly, no GPU required.
-#[test]
-fn composer_selection_display_byte_offsets() {
-    const CARET: char = '▌'; // U+258C LEFT HALF BLOCK, 3 UTF-8 bytes
-    let caret_len = CARET.len_utf8(); // 3
-
-    // Helper: given (text, cursor, anchor), compute expected display string
-    // and expected (display_sel_start, display_sel_end).
-    let check =
-        |text: &str, cursor: usize, anchor: usize, expected_start: usize, expected_end: usize| {
-            let display = composer_display_text(text, cursor);
-            // Check that the expected byte range is valid within the display string.
-            assert!(
-                expected_end <= display.len(),
-                "expected_end {expected_end} > display.len() {} for text={text:?} \
-             cursor={cursor} anchor={anchor}",
-                display.len()
-            );
-            assert!(
-                display.is_char_boundary(expected_start),
-                "expected_start {expected_start} is not a char boundary in display {display:?}",
-            );
-            assert!(
-                display.is_char_boundary(expected_end),
-                "expected_end {expected_end} is not a char boundary in display {display:?}",
-            );
-            // The selected slice of the display string must not contain the start
-            // of a character from outside the selection.
-            let _ = &display[expected_start..expected_end];
-            (display, expected_start, expected_end)
-        };
-
-    // Case 1: cursor < anchor ("hello", cursor=2, anchor=4 → "he▌ll" ... "o")
-    //  display = "he▌llo"   (cursor=2 → ▌ at byte 2)
-    //  original sel = [2, 4]
-    //  display_sel_start = 2  (where ▌ starts, which is the selection start)
-    //  display_sel_end   = 4 + 3 = 7
-    let (display, sel_start, sel_end) = check("hello", 2, 4, 2, 7);
-    assert_eq!(
-        &display[sel_start..sel_end],
-        format!("{CARET}ll").as_str(),
-        "cursor<anchor: selected slice must be ▌ll"
-    );
-
-    // Case 2: cursor > anchor ("hello", cursor=4, anchor=2 → "hell▌o")
-    //  display = "hell▌o"  (cursor=4 → ▌ at byte 4)
-    //  original sel = [2, 4]
-    //  display_sel_start = 2   (anchor, unshifted)
-    //  display_sel_end   = 4 + 3 = 7
-    let (display, sel_start, sel_end) = check("hello", 4, 2, 2, 7);
-    assert_eq!(
-        &display[sel_start..sel_end],
-        format!("ll{CARET}").as_str(),
-        "cursor>anchor: selected slice must be ll▌"
-    );
-
-    // Case 3: cursor == anchor → no selection (both equal, so styled_runs is empty).
-    // We just verify the display text is as expected; no assertion on offsets
-    // because the production code branches on cursor != anchor.
-    let display = composer_display_text("hello", 3);
-    assert_eq!(
-        display,
-        format!("hel{CARET}lo"),
-        "cursor==anchor: display text must be hel▌lo"
-    );
-
-    // Case 4: cursor=0, anchor=5 (whole string selected, cursor at start)
-    //  display = "▌hello"   (cursor=0 → ▌ at byte 0)
-    //  display_sel_start = 0
-    //  display_sel_end   = 5 + 3 = 8
-    let (display, sel_start, sel_end) = check("hello", 0, 5, 0, 8);
-    assert_eq!(
-        &display[sel_start..sel_end],
-        format!("{CARET}hello").as_str(),
-        "cursor=0,anchor=5: selected slice must be ▌hello"
-    );
-
-    // Case 5: cursor=5, anchor=0 (whole string selected, cursor at end)
-    //  display = "hello▌"   (cursor=5 → ▌ at byte 5)
-    //  display_sel_start = 0   (anchor, unshifted)
-    //  display_sel_end   = 5 + 3 = 8
-    let (display, sel_start, sel_end) = check("hello", 5, 0, 0, 8);
-    assert_eq!(
-        &display[sel_start..sel_end],
-        format!("hello{CARET}").as_str(),
-        "cursor=5,anchor=0: selected slice must be hello▌"
-    );
-
-    // Suppress unused warning on caret_len (used in documenting the rules above).
-    let _ = caret_len;
-}
+// Note (hud-hxhnt): the byte-offset-mapping test that used to live here
+// (`composer_selection_display_byte_offsets`) verified the +3-byte caret-glyph
+// shift arithmetic against the (now removed) `composer_display_text` glyph
+// insertion helper. That accounting no longer exists — the caret is a
+// chrome-layer quad, and the selection styled run uses RAW byte offsets — so
+// the test was replaced by `composer_selection_styled_run_uses_raw_byte_offsets`
+// above, which exercises the same five (cursor, anchor) cases through the real
+// production `collect_composer_text_item` path instead of reimplementing the
+// arithmetic against a free-standing helper.
 
 // ── Tile background color token tests [hud-9wljr.10] ─────────────────────
 

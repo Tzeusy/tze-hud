@@ -659,6 +659,68 @@ impl TextRasterizer {
         (caret_x, content_width)
     }
 
+    /// Measure the single-line composer draft's [`tze_hud_input::ComposerVisualLayout`]
+    /// (hud-hxhnt finding 1) — a one-row visual layout so the runtime's pointer
+    /// hit-test (`composer_pointer_byte_offset`) can map a click to a real
+    /// glyph-geometry byte offset via `ComposerVisualLayout::byte_at_point` instead
+    /// of falling back to a crude linear byte-fraction guess.
+    ///
+    /// Before this, only the multi-line profile (`measure_composer_visual_layout`)
+    /// published a visual layout; the single-line profile published nothing, so a
+    /// single-line composer's pointer caret placement was always the linear-guess
+    /// fallback. This shapes `text` the same way [`Self::measure_composer_caret`]
+    /// does (unbounded width, `Wrap::None` — the natural single-line width) and
+    /// records the same `(byte, x)` glyph-boundary pairs
+    /// [`Self::measure_composer_visual_layout`] does, just for the single
+    /// unwrapped run.
+    ///
+    /// Returns a layout with exactly one [`tze_hud_input::ComposerVisualLine`]
+    /// spanning `[0, text.len())`, a trailing `(text.len(), line_width)` sentinel,
+    /// `text_len = text.len()`, and `input_box: None` (the single-line profile has
+    /// no rendered multi-row box; `byte_at_point` falls back to an even split over
+    /// the one row, which is exact for a single row).
+    pub(crate) fn measure_composer_single_line_layout(
+        &mut self,
+        text: &str,
+        font_size_px: f32,
+        line_height_multiplier: f32,
+    ) -> tze_hud_input::ComposerVisualLayout {
+        let line_height = font_size_px * line_height_multiplier;
+        let mut buf = Buffer::new(
+            &mut self.font_system,
+            Metrics::new(font_size_px, line_height),
+        );
+        // Unbounded width + no wrap → the natural single-line width, matching
+        // measure_composer_caret's shaping exactly so the two never disagree.
+        buf.set_size(&mut self.font_system, None, None);
+        buf.set_wrap(&mut self.font_system, Wrap::None);
+        let base_attrs = Attrs::new().family(Family::SansSerif).weight(Weight(400));
+        buf.set_text(&mut self.font_system, text, base_attrs, Shaping::Advanced);
+        buf.shape_until_scroll(&mut self.font_system, false);
+
+        let mut glyph_x: Vec<(usize, f32)> = Vec::new();
+        let mut line_w = 0.0f32;
+        if let Some(run) = buf.layout_runs().next() {
+            line_w = run.line_w;
+            for g in run.glyphs.iter() {
+                glyph_x.push((g.start, g.x));
+            }
+        }
+        // Trailing sentinel maps the row end (caret past the last glyph).
+        glyph_x.push((text.len(), line_w));
+        glyph_x.sort_by(|a, b| a.0.cmp(&b.0));
+
+        tze_hud_input::ComposerVisualLayout {
+            lines: vec![tze_hud_input::ComposerVisualLine {
+                start_byte: 0,
+                end_byte: text.len(),
+                glyph_x,
+            }],
+            text_len: text.len(),
+            input_box: None,
+        }
+    }
+
     /// Measure a composer draft under WORD WRAP for the multi-line profile
     /// (hud-nx7yq.1).
     ///
@@ -670,10 +732,11 @@ impl TextRasterizer {
     ///   byte; the last line when the caret is at or past the end).
     ///
     /// `caret_byte` is snapped down to a valid UTF-8 boundary, so agent-provided
-    /// offsets never panic. `text` is expected to already contain the caret glyph
-    /// at `caret_byte` (the caller passes the display string) so the measured wrap
-    /// matches what is rendered — sizing the box for the caret-present layout keeps
-    /// the box from clipping the caret at a wrap boundary.
+    /// offsets never panic. `text` is the RAW draft text (hud-hxhnt): the caret is
+    /// a chrome-layer quad now, not an inserted glyph, so the rendered text is
+    /// always the raw draft and this measures the same string — the box sizing and
+    /// the render never disagree, and a zero-width caret at a wrap boundary clips
+    /// harmlessly (no glyph to clip).
     ///
     /// Same wrap parameters as the render path (`bounds_width = wrap_width`,
     /// [`WRAPPED_TEXT_WRAP`]), so the line counts agree — including the
