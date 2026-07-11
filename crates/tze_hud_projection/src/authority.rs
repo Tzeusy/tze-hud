@@ -2017,16 +2017,12 @@ fn append_transcript_unit(
                     max_visible_transcript_bytes,
                 );
                 promote_to_active_if_recovering(session);
-                // Viewer echoes are the viewer's own already-seen text, so they do
-                // not raise unread/attention (text-stream-portals "Viewer Reply Echo").
-                // They must still be drainable, though: flag the update pending so a
-                // rate-limited (coalesced) viewer echo is not stranded by
-                // take_due_portal_update's `unread==0 && !pending` early return.
-                if request.output_kind != OutputKind::Viewer {
-                    session.unread_output_count += 1;
-                } else {
-                    session.portal_update_pending = true;
-                }
+                // `request.output_kind` is never `OutputKind::Viewer` here:
+                // `PublishOutputRequest::validate` rejects it before
+                // `handle_publish_output` ever reaches this function's only call
+                // site (§Viewer Reply Echo — viewer echoes append through the
+                // separate `append_input_history_unit` instead).
+                session.unread_output_count += 1;
                 // Bump next_transcript_sequence so the coalescer receives a
                 // strictly-increasing sequence that clears the post-drain
                 // stale-sequence guard (defect fix: hud-endkj).
@@ -2055,15 +2051,11 @@ fn append_transcript_unit(
         max_visible_transcript_bytes,
     );
     promote_to_active_if_recovering(session);
-    // Viewer echoes are the viewer's own already-seen text, so they do not raise
-    // unread/attention (text-stream-portals "Viewer Reply Echo"). They must still
-    // be drainable: flag the update pending so a rate-limited viewer echo is not
-    // stranded by take_due_portal_update's `unread==0 && !pending` early return.
-    if request.output_kind != OutputKind::Viewer {
-        session.unread_output_count += 1;
-    } else {
-        session.portal_update_pending = true;
-    }
+    // `request.output_kind` is never `OutputKind::Viewer` here:
+    // `PublishOutputRequest::validate` rejects it before `handle_publish_output`
+    // ever reaches this function's only call site (§Viewer Reply Echo — viewer
+    // echoes append through the separate `append_input_history_unit` instead).
+    session.unread_output_count += 1;
     session.next_transcript_sequence - 1
 }
 
