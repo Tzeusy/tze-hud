@@ -168,22 +168,30 @@ fn parse_output_kind(raw: Option<&str>) -> Result<OutputKind, String> {
     }
 }
 
-/// Refresh a render state's ambient unread-output count from the freshly
-/// drained batch, preserving redaction (hud-meqet).
+/// Refresh a render state's unread-output count field from the freshly
+/// drained batch, preserving redaction (hud-meqet; extended to the
+/// clearance-corrected divider count by hud-n95zc).
 ///
 /// `take_due_portal_update` zeroes `session.unread_output_count` as it consumes
-/// a drain, so the subsequent `projected_portal_state` reads a stale `0` — the
-/// live count survives only on the drained `PortalTranscriptUpdate`. This maps
-/// the render state's already-gated field to the drained count:
+/// a drain, so the subsequent `projected_portal_state` reads a stale `0` for
+/// EVERY field it derives from that session field — both the ambient
+/// `unread_output_count` ("N unread" ticker) and `visible_unread_output_count`
+/// (the in-transcript divider boundary, `resident_grpc::unread_divider_boundary`)
+/// — the live count survives only on the drained `PortalTranscriptUpdate`. This
+/// maps a render state's already-gated field to the drained count:
 ///
 /// - `Some(_)` — the `reveal_unread` policy gate revealed the count, so refresh
 ///   it to `drained` (this is the fix: `Some(0)` from the zeroed session becomes
-///   `Some(drained)`, un-suppressing the indicator on a real coalesced drain).
+///   `Some(drained)`, un-suppressing the indicator/divider on a real coalesced
+///   drain). Callers pass this the raw drained count for both fields: every
+///   production call site uses `ProjectedPortalPolicy::permit_all()`, so no
+///   viewer-clearance filtering ever removes a unit from `visible_transcript`
+///   and the clearance-corrected count coincides with the aggregate.
 /// - `None` — the count was redacted upstream; leave it redacted. We never
 ///   resurrect a redacted `None` into a leaked count.
 ///
 /// A `drained` value of `0` maps a revealed slot to `Some(0)`, which the
-/// downstream indicator suppresses exactly like the redacted `None`.
+/// downstream indicator/divider suppresses exactly like the redacted `None`.
 fn carry_drained_unread_count(state_count: Option<usize>, drained: usize) -> Option<usize> {
     state_count.map(|_| drained)
 }
@@ -1685,6 +1693,22 @@ impl InProcessPortalDriver {
             // `render_batch` create/render arms.
             state.unread_output_count =
                 carry_drained_unread_count(state.unread_output_count, update.unread_output_count);
+            // In-transcript unread-divider liveness (hud-n95zc). Same ordering
+            // hazard as the ambient count above, one field over:
+            // `projected_portal_state` derived `visible_unread_output_count` from
+            // the same now-zeroed `session.unread_output_count`, so
+            // `unread_divider_boundary` (resident_grpc.rs) saw `Some(0)` on every
+            // real drain and the divider never rendered in production — only the
+            // ambient count had a carry-forward fix (hud-meqet). Under the
+            // `permit_all()` policy every production call site uses, no viewer
+            // clearance filters any unit out of `visible_transcript`, so the
+            // just-drained raw count is exactly the correct clearance-corrected
+            // value here too — the same substitution `carry_drained_unread_count`
+            // already performs for the ambient field.
+            state.visible_unread_output_count = carry_drained_unread_count(
+                state.visible_unread_output_count,
+                update.unread_output_count,
+            );
 
             // One-shot cue-quiesce scheduling (hud-kbm80). The agent-activity /
             // streaming-cursor cue is derived from the newest transcript unit's
@@ -2184,10 +2208,28 @@ impl InProcessPortalDriver {
             // Re-derive state so the repaint reflects the current (degraded)
             // connection latch. If the session vanished between the drop and
             // here, drop the now-orphaned drive entry instead of repainting.
-            let Some(state) = self.authority.projected_portal_state(&proj_id, &policy) else {
+            let Some(mut state) = self.authority.projected_portal_state(&proj_id, &policy) else {
                 self.detach_projection(&proj_id);
                 continue;
             };
+            // In-transcript unread-divider liveness on a degraded repaint
+            // (hud-n95zc). This re-derivation reads `session.unread_output_count`
+            // fresh, which is a stale 0 whenever the portal's own prior due-loop
+            // drain already zeroed it (idle since, same premise the quiesce pass
+            // below relies on) — so `visible_unread_output_count` would read
+            // `Some(0)` and the divider would vanish from an otherwise still-live
+            // degraded repaint. Restore it from the last-materialised raw drained
+            // count the same way the quiesce pass does, mirroring
+            // `carry_drained_unread_count`'s ambient-count pattern for this field.
+            if let Some(carried) = self
+                .drive
+                .entries
+                .get(&proj_id)
+                .map(|e| e.activity_cue_carried_unread)
+            {
+                state.visible_unread_output_count =
+                    carry_drained_unread_count(state.visible_unread_output_count, carried);
+            }
             // Per-projection transport routing (hud-g7ool / hud-vne15): a bridged
             // projection's degraded state is forwarded over the bridge and its
             // in-process repaint suppressed, mirroring the due-loop rule (tee iff
@@ -2306,6 +2348,12 @@ impl InProcessPortalDriver {
             {
                 state.unread_output_count =
                     carry_drained_unread_count(state.unread_output_count, carried);
+                // In-transcript unread-divider liveness (hud-n95zc): same stale-0
+                // race as the ambient count just above, for the field
+                // `unread_divider_boundary` actually reads. Carried by the same
+                // idle-premise argument documented above.
+                state.visible_unread_output_count =
+                    carry_drained_unread_count(state.visible_unread_output_count, carried);
             }
             // Per-projection transport routing (hud-g7ool / hud-vne15): a bridged
             // projection's quiesced state is forwarded over the bridge and its
@@ -4453,6 +4501,129 @@ mod tests {
                     tm.content.contains("3 unread"),
                     "the ambient unread indicator must survive drain-then-render for a \
                      nonzero count; expected a `3 unread` line, got content: {:?}",
+                    tm.content
+                );
+            }
+            other => panic!("expected TextMarkdown tile root, got {other:?}"),
+        }
+    }
+
+    /// Regression (hud-n95zc): the in-transcript unread divider reads
+    /// `visible_unread_output_count`, not the ambient `unread_output_count`
+    /// covered by the sibling test above — and that field had NO carry-forward
+    /// fix, so `take_due_portal_update` zeroing `session.unread_output_count`
+    /// before `projected_portal_state` derived it meant the divider never
+    /// rendered on a real drain, even after hud-meqet fixed the ambient ticker.
+    /// Existing divider unit tests in `resident_grpc.rs` all construct
+    /// `ProjectedPortalState` fixtures directly and so never exercised this
+    /// zero-then-read ordering; this drives the real `drain_inner`
+    /// drain-then-render path (`take_due` zeroes the session, THEN state is
+    /// built, THEN it is painted) and asserts the divider marker survives.
+    #[test]
+    fn drain_then_render_surfaces_unread_divider() {
+        use tze_hud_projection::{AdapterGeometrySnapshot, AdapterPortalRect, ProjectionBounds};
+        use tze_hud_scene::NodeData;
+
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("test_unread_divider"),
+            drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
+        };
+
+        // Attach.
+        let (attach_tx, mut attach_rx) =
+            tokio::sync::oneshot::channel::<Result<String, PortalOpRejection>>();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: "unread-divider-proj".to_string(),
+            display_name: "Unread Divider Projection".to_string(),
+            idempotency_key: None,
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
+            reply: attach_tx,
+        });
+        let owner_token = attach_rx
+            .try_recv()
+            .expect("reply must be sent synchronously")
+            .expect("Attach must be accepted");
+
+        // Publish two agent-authored (non-viewer) turns → unread_output_count = 2,
+        // so there is a nonviewer retained unit for the divider to sit before.
+        for i in 0..2 {
+            let (pub_tx, mut pub_rx) =
+                tokio::sync::oneshot::channel::<Result<(), PortalOpRejection>>();
+            driver.dispatch_portal_op(PortalOp::PublishOutput {
+                projection_id: "unread-divider-proj".to_string(),
+                owner_token: owner_token.clone(),
+                output_text: format!("turn-{i}"),
+                logical_unit_id: None,
+                output_kind: None,
+                content_classification: None,
+                coalesce_key: None,
+                expects_reply: None,
+                reply: pub_tx,
+            });
+            pub_rx
+                .try_recv()
+                .expect("publish reply must be sent synchronously")
+                .expect("PublishOutput must be accepted");
+        }
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+        driver.authority_mut().push_geometry_snapshot(
+            "unread-divider-proj",
+            AdapterGeometrySnapshot {
+                rect: AdapterPortalRect {
+                    x_px: 0,
+                    y_px: 0,
+                    width_px: 600,
+                    height_px: 200,
+                },
+                gesture_active: false,
+                sequence: 1,
+            },
+        );
+
+        // Drive the real drain: take_due (zeroes the session) THEN build state
+        // THEN render into the tile — the exact production ordering that
+        // starved `visible_unread_output_count` before this fix.
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+
+        let tile_id = driver
+            .drive
+            .entries
+            .get("unread-divider-proj")
+            .expect("drive entry must still exist after drain")
+            .tile_scene_id
+            .expect("drain must create a portal tile in the scene");
+        let root_id = scene
+            .tiles
+            .get(&tile_id)
+            .expect("portal tile must exist in scene")
+            .root_node
+            .expect("portal tile must have a painted root node");
+        match &scene.nodes.get(&root_id).unwrap().data {
+            NodeData::TextMarkdown(tm) => {
+                // Literal marker text mirrors resident_grpc.rs's private
+                // `PORTAL_UNREAD_DIVIDER_LINE` const, which is not reachable from
+                // this crate.
+                assert!(
+                    tm.content.contains("─── unread ───"),
+                    "the in-transcript unread divider must survive drain-then-render \
+                     for a nonzero visible unread count; expected a \
+                     `─── unread ───` marker, got content: {:?}",
                     tm.content
                 );
             }
