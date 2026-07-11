@@ -38,14 +38,14 @@ use super::Compositor;
 use super::ViewerEchoEntry;
 use super::draw_cmds::{TexturedDrawCmd, compute_fit_mode};
 use super::image_cache::{
-    ComposerLayout, caret_visible_at, composer_display_text_blink, composer_region_fit_lines,
-    composer_scroll_offset, composer_vertical_line_offset, composer_visible_line_count,
+    ComposerLayout, caret_visible_at, composer_region_fit_lines, composer_scroll_offset,
+    composer_vertical_line_offset, composer_visible_line_count,
 };
 use super::token_colors::{
     ComposerOverlayTokens, ComposerVerticalAnchor, TILE_BG_DEFAULT, TILE_BG_STATIC_IMAGE,
     TILE_BG_TEXT_MARKDOWN, linear_to_srgb, resolve_composer_overlay_tokens,
     resolve_focus_ring_tokens, resolve_resize_grip_tokens, resolve_tile_bg_token,
-    resolve_tile_spacing_tokens, resolve_viewer_echo_tokens,
+    resolve_tile_spacing_tokens, resolve_viewer_echo_tokens, srgb_to_linear,
 };
 
 // The composer's content inset (historically the `COMPOSER_TEXT_MARGIN = 6.0`
@@ -512,6 +512,148 @@ impl Compositor {
         for edge in Self::focus_ring_edge_rects(region, ring.width_px) {
             Self::append_clipped_rect_vertices(tile, edge, sw, sh, ring_color, vertices);
         }
+    }
+
+    /// Emit the composer caret as a thin, token-styled, ZERO-WIDTH-RELATIVE
+    /// vertical quad into `vertices`, for the chrome-layer pass drawn above the
+    /// composer draft text — the SAME layer/primitive as the keyboard focus ring
+    /// (`append_focus_ring_vertices`, immediately above) (hud-hxhnt finding 2).
+    ///
+    /// Replaces the previous approach of inserting a `▌` (U+258C) glyph into the
+    /// rendered draft string: that glyph occupied width, so every blink toggle
+    /// shifted every trailing character by one glyph-width (visible jitter). The
+    /// draft text collected by `collect_composer_text_item` is now shaped RAW —
+    /// blink-invariant — and this quad marks the caret position independently, so
+    /// toggling it on/off never moves a single text pixel.
+    ///
+    /// No-op (emits nothing) when:
+    /// - no composer is active, or its owning tile cannot be located this frame;
+    /// - the empty-draft placeholder hint is showing (mirrors
+    ///   `collect_composer_text_item`'s placeholder gate — the placeholder is a
+    ///   static hint with no caret, hud-evk0j);
+    /// - the blink phase is hidden AND no selection is active. While a selection
+    ///   is active the caret marks the moving selection edge, so it stays solid
+    ///   (mirrors the pre-hud-hxhnt "recolor caret glyph" gate exactly).
+    ///
+    /// Geometry:
+    /// - **Single-line profile** (`self.composer_layout.wrap == false`): x is the
+    ///   raw caret x stashed on `composer_layout.caret_x` by
+    ///   `prime_composer_scroll_offset` (from `measure_composer_caret`), shifted by
+    ///   the same horizontal caret-follow scroll the draft text uses
+    ///   (`h_scroll_px`) so the quad and the text never drift apart. y/height span
+    ///   the single input line.
+    /// - **Multi-line profile** (`wrap == true`): x/row come from the published
+    ///   `self.composer_visual_layout` (the hud-21o6x reverse channel) —
+    ///   `x_at_cursor` / `line_of` — the SAME measurement the input layer's
+    ///   soft-wrap vertical-caret-movement uses, so the quad can never disagree
+    ///   with where the text pipeline actually painted the row. A stale layout
+    ///   (`text_len` mismatch against the current draft) is skipped rather than
+    ///   drawn at a wrong position, mirroring the input layer's own staleness
+    ///   guard.
+    pub(super) fn append_composer_caret_vertices(
+        &self,
+        scene: &SceneGraph,
+        vertices: &mut Vec<RectVertex>,
+        sw: f32,
+        sh: f32,
+    ) {
+        let Some(ref cs) = self.local_composer else {
+            return;
+        };
+        // Placeholder path: the empty-draft dimmed hint carries no caret (mirrors
+        // collect_composer_text_item's placeholder gate exactly).
+        if cs.text.is_empty() && cs.placeholder.as_deref().is_some_and(|p| !p.is_empty()) {
+            return;
+        }
+        let has_selection = cs.selection_anchor != cs.cursor_byte;
+        if !has_selection && !caret_visible_at(self.composer_caret_blink_start.elapsed()) {
+            return;
+        }
+
+        // Locate the tile + region the same way collect_composer_text_item /
+        // prime_composer_scroll_offset do: the first visible tile (by drag-boosted
+        // z-order) whose subtree contains the focused composer node.
+        let Some(tile) = Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene)
+            .into_iter()
+            .find(|t| Self::composer_region_bounds(t, scene, cs.node_id).is_some())
+        else {
+            return;
+        };
+        let Some(region) = Self::composer_region_bounds(tile, scene, cs.node_id) else {
+            return;
+        };
+
+        let tokens = resolve_composer_overlay_tokens(&self.token_map);
+        let line_height_multiplier =
+            crate::markdown::MarkdownTokens::default().line_height_multiplier;
+        let layout = self.composer_layout;
+        let input_box = Self::composer_input_box(
+            region,
+            tokens.font_size_px,
+            line_height_multiplier,
+            layout.visible_lines,
+            tokens.anchor,
+            tokens.content_inset_px,
+        );
+        let line_height = (tokens.font_size_px * line_height_multiplier).max(1.0);
+        let content_inset = tokens.content_inset_px;
+
+        // Caret x/y, box-local (relative to the input box's top-left interior).
+        let (caret_x, caret_y, caret_h) = if layout.wrap {
+            // Multi-line profile: locate the caret's visual row + x via the
+            // published ComposerVisualLayout (hud-21o6x channel) — the SAME
+            // measurement the input layer's soft-wrap navigation uses.
+            let Ok(guard) = self.composer_visual_layout.lock() else {
+                return;
+            };
+            let Some(visual) = guard.as_ref() else {
+                return;
+            };
+            if visual.text_len != cs.text.len() {
+                // Stale layout for this frame's draft — skip rather than draw at a
+                // wrong position (mirrors the input layer's staleness guard).
+                return;
+            }
+            let cursor = cs.cursor_byte.min(cs.text.len());
+            let Some(line_idx) = visual.line_of(cursor) else {
+                return;
+            };
+            let x = visual.x_at_cursor(cursor);
+            let y = (line_idx as f32) * line_height - layout.vscroll_px;
+            (x, y, line_height)
+        } else {
+            // Single-line profile: caret_x was measured once in
+            // prime_composer_scroll_offset and stashed on composer_layout, shifted
+            // by the same horizontal caret-follow scroll the draft text uses.
+            let x = layout.caret_x - layout.h_scroll_px;
+            let one_line = (input_box.height - content_inset * 2.0).max(1.0);
+            (x, 0.0, one_line)
+        };
+
+        if !caret_x.is_finite() || !caret_y.is_finite() {
+            return;
+        }
+
+        let caret_width = tokens.caret_width_px.max(0.5);
+        let rect = Rect::new(
+            input_box.x + content_inset + caret_x,
+            input_box.y + content_inset + caret_y,
+            caret_width,
+            caret_h,
+        );
+
+        // caret_color is stored sRGB u8 (StyledRunItem-encoding, hud-khfgx); the
+        // flat-rect quad pipeline wants linear f32 like the focus ring / resize
+        // grip, so round-trip it back through srgb_to_linear.
+        let [cr, cg, cb, ca] = tokens.caret_color;
+        let to_linear_u8 = |v: u8| srgb_to_linear(v as f32 / 255.0);
+        let caret_color = self.gpu_color_raw([
+            to_linear_u8(cr),
+            to_linear_u8(cg),
+            to_linear_u8(cb),
+            ca as f32 / 255.0,
+        ]);
+        Self::append_clipped_rect_vertices(tile, rect, sw, sh, caret_color, vertices);
     }
 
     /// Dot rects for the portal resize-grip affordance: a diagonal dot-grid mark
@@ -1034,19 +1176,43 @@ impl Compositor {
                     content_inset,
                 ),
                 content_width,
+                // Stashed raw (pre-scroll) so the chrome-layer caret quad
+                // (append_composer_caret_vertices) can relocate the caret without
+                // its own text-rasterizer pass (hud-hxhnt finding 2).
+                caret_x,
                 visible_lines: 1.0,
                 total_lines: 1.0,
                 vscroll_px: 0.0,
             };
+
+            // Publish a one-row ComposerVisualLayout for the single-line profile
+            // too (hud-hxhnt finding 1): before this, only the multi-line branch
+            // below published one, so the runtime's pointer hit-test
+            // (`composer_pointer_byte_offset`) fell back to a crude linear
+            // byte-fraction guess for every single-line composer. `input_box:
+            // None` here is correct (not a gap) — a single row already occupies
+            // the whole box, so `byte_at_point`'s even-split fallback is exact.
+            let mut visual_layout =
+                tr.measure_composer_single_line_layout(&text, font_size_px, line_height_multiplier);
+            // Stamp the same-frame caret-follow scroll onto the published layout
+            // (hud-hxhnt finding 3) so a consumer that needs the caret's actual
+            // on-screen x — the IME anchor — can recover rendered screen space
+            // from the layout's unscrolled `glyph_x` by subtracting this. Mirrors
+            // `ComposerLayout.h_scroll_px` above exactly (same frame, same value).
+            visual_layout.h_scroll_px = self.composer_layout.h_scroll_px;
+            if let Ok(mut guard) = self.composer_visual_layout.lock() {
+                *guard = Some(visual_layout);
+            }
             return;
         }
 
         // ── Multi-line profile (hud-nx7yq.1): wrap, grow upward, vscroll. ──
-        // Measure the DISPLAY string (caret glyph inserted) so the measured wrap
-        // matches the rendered wrap and the box never clips the caret line.
-        let display = composer_display_text_blink(&text, cursor_byte, true);
+        // Measure the RAW draft text (hud-hxhnt): the caret is a chrome-layer
+        // quad now, not an inserted glyph, so the rendered text is always the raw
+        // draft and this measures the same string the render pass shapes — a
+        // zero-width caret at a wrap boundary clips harmlessly (no glyph there).
         let (total_lines, caret_line) = tr.measure_composer_wrapped(
-            &display,
+            &text,
             cursor_byte,
             window_width,
             font_size_px,
@@ -1069,6 +1235,9 @@ impl Compositor {
             wrap: true,
             h_scroll_px: 0.0,
             content_width: 0.0,
+            // Unused in the multi-line profile: the caret quad's x is located via
+            // the published ComposerVisualLayout (below) instead.
+            caret_x: 0.0,
             visible_lines: visible_lines as f32,
             total_lines: total_lines as f32,
             vscroll_px,
@@ -1127,37 +1296,22 @@ impl Compositor {
     /// - `self.text_rasterizer` is absent (text path not initialised).
     /// - The tile does not contain the focused composer node.
     ///
-    /// The caret character (`▌`, U+258C, LEFT HALF BLOCK) is inserted at the
-    /// cursor byte position in the draft text so glyphon renders it as part of
-    /// the normal text flow.  This avoids a separate GPU draw call for the
-    /// caret while giving a visually correct block-caret appearance.
+    /// The rendered text is the RAW draft (or the placeholder hint) — no caret
+    /// glyph is inserted (hud-hxhnt finding 2). The caret is drawn separately as a
+    /// chrome-layer quad (`append_composer_caret_vertices`, above all composer
+    /// content, mirroring the focus ring), so this text is blink-invariant: toggling
+    /// the caret on/off never reflows a single glyph in the draft.
     ///
     /// When a selection is active (`cursor_byte != selection_anchor`), a
     /// [`crate::text::StyledRunItem`] with `background_color` set to
-    /// `tokens.selection_bg` is emitted covering the selected byte range in the
-    /// display string.  The text pipeline's `compute_inline_backdrop_quads` then
-    /// renders a highlight quad behind the selected characters using glyph-level
-    /// geometry — no separate geometry pass is required.
-    ///
-    /// ### Byte-offset accounting for the inserted caret glyph
-    ///
-    /// `▌` (U+258C) is 3 UTF-8 bytes.  It is inserted at `cursor_byte` in the
-    /// display string, shifting all bytes after that point by +3.  The
-    /// selection range `[sel_start, sel_end]` in the *original* text becomes:
-    ///
-    /// - Case `cursor_byte <= selection_anchor` (cursor at or before anchor):
-    ///   - `display_sel_start = cursor_byte` (▌ is the first selected char)
-    ///   - `display_sel_end   = selection_anchor + 3`
-    /// - Case `cursor_byte > selection_anchor` (cursor after anchor):
-    ///   - `display_sel_start = selection_anchor` (unshifted, before ▌)
-    ///   - `display_sel_end   = cursor_byte + 3` (▌ is after the selection)
-    ///
-    /// The selection byte range is display-string byte offsets, so the highlight
-    /// spans correctly across wrapped lines in the multi-line profile (the text
-    /// pipeline positions each glyph on its own line); the offset math above is
-    /// unaffected by wrapping. The run sets `fill_line_width` so the text pipeline
-    /// draws the standard multi-line text-selection shape (hud-scgyw): partial
-    /// first/last line, full-width interior lines.
+    /// `tokens.selection_bg` is emitted covering the selected byte range — now the
+    /// RAW `[min(cursor, anchor), max(cursor, anchor))` range, with no caret-glyph
+    /// shift to account for. The text pipeline's `compute_inline_backdrop_quads`
+    /// then renders a highlight quad behind the selected characters using
+    /// glyph-level geometry — no separate geometry pass is required. The run sets
+    /// `fill_line_width` so the text pipeline draws the standard multi-line
+    /// text-selection shape (hud-scgyw): partial first/last line, full-width
+    /// interior lines.
     pub(super) fn collect_composer_text_item(
         &self,
         tile: &Tile,
@@ -1184,17 +1338,9 @@ impl Compositor {
             tokens.content_inset_px,
         );
 
-        // Insert the caret glyph at the cursor byte offset, gated by the blink
-        // phase.  composer_display_text_blink handles OOB and non-char-boundary
-        // offsets safely.  The blink phase is derived from the runtime's own
-        // clock (compositor thread) — the model never sits in this loop.
-        //
-        // While a selection is active the caret marks the moving selection edge,
-        // so it stays solid (no blink); the selection-offset math below relies on
-        // the caret glyph being present.
         // Empty-draft placeholder (hud-evk0j): when the draft buffer is empty and
         // the composer carries a non-empty placeholder hint, render that hint in
-        // the dimmed placeholder color instead of the (empty) draft + caret. The
+        // the dimmed placeholder color instead of the (empty) draft. The
         // placeholder is render-only — it is not in `cs.text`, so it is never
         // submitted, carries no caret or selection, and vanishes the instant the
         // user types (a non-empty `cs.text` falls through to the normal path).
@@ -1204,13 +1350,7 @@ impl Compositor {
             None
         };
 
-        let has_selection = cs.selection_anchor != cs.cursor_byte;
-        let caret_visible =
-            has_selection || caret_visible_at(self.composer_caret_blink_start.elapsed());
-        let display_text = match placeholder {
-            Some(hint) => hint.to_string(),
-            None => composer_display_text_blink(&cs.text, cs.cursor_byte, caret_visible),
-        };
+        let display_text: &str = placeholder.unwrap_or(cs.text.as_str());
 
         let text_margin = tokens.content_inset_px;
 
@@ -1227,8 +1367,8 @@ impl Compositor {
         // Placeholder text uses the dimmed placeholder token color; a live draft AT
         // CAPACITY uses the token-driven at-capacity color so the whole draft line
         // reads in the at-capacity hue the instant the byte cap is hit; a normal live
-        // draft uses the composer text color. The caret / selection styled runs below
-        // still override their own sub-ranges (hud-9gyao, hud-evk0j).
+        // draft uses the composer text color. The selection styled run below still
+        // overrides its own sub-range (hud-9gyao, hud-evk0j).
         let text_color = composer_draft_base_color(tokens, cs.at_capacity, placeholder.is_some());
 
         let bw = (region.width - text_margin * 2.0).max(1.0);
@@ -1240,78 +1380,35 @@ impl Compositor {
         let _ = sh;
 
         // Build a selection-highlight styled run when a non-empty selection
-        // exists.  The run covers the selected characters in the *display*
-        // string (which has the 3-byte ▌ inserted at `cursor_byte`).
+        // exists, over the RAW text byte range (hud-hxhnt: no caret glyph, so no
+        // +3-byte shift to account for).
         //
-        // `cursor_byte` and `selection_anchor` are agent-provided and are
-        // clamped to valid char boundaries by composer_display_text / the
-        // ComposerDraft invariants; we still guard with `min(text.len())` here
-        // so a stale snapshot with an out-of-range anchor cannot panic.
-        let caret_utf8_len = '▌'.len_utf8(); // 3
+        // `cursor_byte` and `selection_anchor` are agent-provided; clamp with
+        // `.min(text.len())` so a stale snapshot with an out-of-range anchor
+        // cannot panic.
         let styled_runs: Box<[crate::text::StyledRunItem]> = if placeholder.is_some() {
-            // Placeholder is a static dimmed hint: no caret glyph, no selection
-            // highlight — the whole run is the placeholder color (hud-evk0j).
+            // Placeholder is a static dimmed hint: no selection highlight — the
+            // whole run is the placeholder color (hud-evk0j).
             Box::new([])
         } else {
             let anchor = cs.selection_anchor.min(cs.text.len());
             let cursor = cs.cursor_byte.min(cs.text.len());
-            let display_len = display_text.len();
-            if anchor != cursor {
-                // Map original-text offsets to display-string offsets.
-                let (display_sel_start, display_sel_end) = if cursor <= anchor {
-                    // ▌ is inserted at `cursor` (= start of selection in display).
-                    (cursor, anchor + caret_utf8_len)
-                } else {
-                    // ▌ is inserted at `cursor` (after selection end in original).
-                    (anchor, cursor + caret_utf8_len)
-                };
-                // Clamp to display_text bounds (defensive).
-                let sel_start = display_sel_start.min(display_len);
-                let sel_end = display_sel_end.min(display_len);
-                if sel_start < sel_end {
-                    Box::new([crate::text::StyledRunItem {
-                        start_byte: sel_start,
-                        end_byte: sel_end,
-                        weight: None,
-                        italic: false,
-                        monospace: false,
-                        color: None,
-                        background_color: Some(tokens.selection_bg),
-                        size_scale: None,
-                        // Standard multi-line text-selection shape: full-width
-                        // interior lines when the selection wraps (hud-scgyw).
-                        fill_line_width: true,
-                    }])
-                } else {
-                    Box::new([])
-                }
-            } else if caret_visible {
-                // No selection: color the caret glyph itself from the caret token
-                // (hud-khfgx, vd-caret-selection-placeholder-not-tokenized). The ▌
-                // glyph was inserted at `cursor` in `display_text` gated by the same
-                // `caret_visible` blink phase, so its display range is exactly
-                // `[cursor, cursor + caret_utf8_len)`. A foreground run over that
-                // range recolors only the caret; the default token equals the
-                // composer text color, so the default profile is unchanged. During
-                // an active selection the caret sits inside the selection highlight,
-                // so no caret run is emitted (avoids overlapping runs).
-                let caret_start = cursor.min(display_len);
-                let caret_end = (cursor + caret_utf8_len).min(display_len);
-                if caret_start < caret_end {
-                    Box::new([crate::text::StyledRunItem {
-                        start_byte: caret_start,
-                        end_byte: caret_end,
-                        weight: None,
-                        italic: false,
-                        monospace: false,
-                        color: Some(tokens.caret_color),
-                        background_color: None,
-                        size_scale: None,
-                        fill_line_width: false,
-                    }])
-                } else {
-                    Box::new([])
-                }
+            let sel_start = anchor.min(cursor);
+            let sel_end = anchor.max(cursor);
+            if sel_start < sel_end {
+                Box::new([crate::text::StyledRunItem {
+                    start_byte: sel_start,
+                    end_byte: sel_end,
+                    weight: None,
+                    italic: false,
+                    monospace: false,
+                    color: None,
+                    background_color: Some(tokens.selection_bg),
+                    size_scale: None,
+                    // Standard multi-line text-selection shape: full-width
+                    // interior lines when the selection wraps (hud-scgyw).
+                    fill_line_width: true,
+                }])
             } else {
                 Box::new([])
             }
@@ -1319,9 +1416,10 @@ impl Compositor {
 
         // Per-profile text layout:
         // - Single-line (hud-zlfi4): lay the draft on ONE unwrapped line — layout
-        //   width is the wider of the box and the measured content width plus one
-        //   em of slack for the caret glyph, so word-wrap never triggers and the
-        //   draft slides horizontally + clips instead of wrapping.
+        //   width is the wider of the box and the measured content width plus a
+        //   small slack margin (sub-pixel shaping-rounding safety; no caret glyph
+        //   needs room for any more, hud-hxhnt), so word-wrap never triggers and
+        //   the draft slides horizontally + clips instead of wrapping.
         // - Multi-line (hud-nx7yq.1): layout width is the box interior so glyphon
         //   word-wraps within it; layout height is the FULL wrapped-content height
         //   so every line lays out, and the box then clips + vertically scrolls it.
@@ -1335,7 +1433,7 @@ impl Compositor {
         };
 
         Some(crate::text::TextItem {
-            text: Arc::from(display_text.as_str()),
+            text: Arc::from(display_text),
             // Shift the draft left by the horizontal caret-follow offset (0 in the
             // multi-line profile).
             pixel_x: region.x + text_margin - scroll_offset,

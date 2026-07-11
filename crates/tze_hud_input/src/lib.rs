@@ -1022,6 +1022,21 @@ impl InputProcessor {
         self.composer_draft_manager.focused_node()
     }
 
+    /// The focused composer's currently selected draft text, or `None` when no
+    /// composer is focused or the selection is empty.
+    ///
+    /// The runtime uses this to snapshot the selection for the OS clipboard on
+    /// Ctrl+C / Ctrl+X BEFORE routing the keystroke (a cut mutates the buffer, so
+    /// the copy must be read first). Kept out of the input layer because clipboard
+    /// access is an OS concern owned by the windowed runtime.
+    pub fn composer_selected_text(&self) -> Option<String> {
+        let draft = self.composer_draft_manager.draft()?;
+        if !draft.has_selection() {
+            return None;
+        }
+        Some(draft.selected_text().to_string())
+    }
+
     /// Snapshot current composer draft state for local echo rendering.
     ///
     /// Returns

@@ -998,6 +998,17 @@ pub(super) struct ComposerOverlayTokens {
     /// Sourced from the `portal.composer.anchor` token (`"top"` / `"bottom"`);
     /// defaults to `Bottom` so every existing bottom-strip profile is unchanged.
     pub(super) anchor: ComposerVerticalAnchor,
+    /// Caret quad stroke width in physical px (hud-hxhnt finding 2).
+    ///
+    /// The composer caret renders as a thin, zero-width-relative-to-text
+    /// vertical quad (`Compositor::append_composer_caret_vertices`) instead of an
+    /// inserted `▌` glyph, so glyph-width jitter on blink toggle is gone — the
+    /// draft text no longer shifts when the caret blinks. Sourced from
+    /// `portal.composer.caret_width_px`; defaults to
+    /// [`COMPOSER_OVERLAY_DEFAULT_CARET_WIDTH_PX`] (1.5), a conventional thin
+    /// text-caret stroke. Non-finite / non-positive overrides fall back to the
+    /// default so a malformed token cannot collapse the caret to invisible.
+    pub(super) caret_width_px: f32,
     /// Horizontal + vertical content inset (physical px) between the composer
     /// region edge and the draft text, applied uniformly on every side.
     ///
@@ -1041,6 +1052,10 @@ const COMPOSER_OVERLAY_DEFAULT_MAX_LINES: u32 = 6;
 /// `COMPOSER_TEXT_MARGIN` literal, so an absent token reproduces the prior spacing
 /// exactly (no visual regression).
 const COMPOSER_OVERLAY_DEFAULT_CONTENT_INSET_PX: f32 = 6.0;
+
+/// Default composer caret quad width in physical px (hud-hxhnt finding 2): a
+/// conventional thin text-caret stroke.
+const COMPOSER_OVERLAY_DEFAULT_CARET_WIDTH_PX: f32 = 1.5;
 
 pub(super) fn resolve_composer_overlay_tokens(
     token_map: &HashMap<String, String>,
@@ -1141,6 +1156,14 @@ pub(super) fn resolve_composer_overlay_tokens(
         .filter(|&v| v.is_finite() && v >= 0.0)
         .unwrap_or(COMPOSER_OVERLAY_DEFAULT_CONTENT_INSET_PX);
 
+    // Caret quad width (default 1.5px). Reject non-finite / non-positive
+    // overrides so a malformed token cannot collapse the caret to invisible.
+    let caret_width_px = token_map
+        .get("portal.composer.caret_width_px")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|&v| v.is_finite() && v > 0.0)
+        .unwrap_or(COMPOSER_OVERLAY_DEFAULT_CARET_WIDTH_PX);
+
     // Vertical anchor (default: Bottom — the bottom-chat strip). Only an explicit
     // `top` (case-insensitive) selects the top-anchored exemplar input pane; any
     // other / missing / malformed value falls back to Bottom so existing profiles
@@ -1173,6 +1196,7 @@ pub(super) fn resolve_composer_overlay_tokens(
         font_size_px,
         max_lines,
         anchor,
+        caret_width_px,
         content_inset_px,
     }
 }

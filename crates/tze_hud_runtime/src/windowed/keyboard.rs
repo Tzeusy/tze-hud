@@ -12,7 +12,7 @@ use super::input_dispatch::{
     dispatch_focus_event, dispatch_keyboard_event, dispatch_pointer_event,
     dispatch_scroll_offset_event,
 };
-use super::lifecycle::{INTERACTION_LOCK_BUDGET, spin_acquire};
+use super::lifecycle::{INTERACTION_LOCK_BUDGET, spin_acquire, write_windows_clipboard_text};
 
 pub(super) struct ComposerDeliveryContext {
     pub(super) namespace: String,
@@ -653,6 +653,21 @@ impl WinitApp {
                 self.state
                     .input_processor
                     .set_composer_visual_layout(layout);
+            }
+            // Ctrl+C / Ctrl+X (copy / cut): snapshot the current selection to the
+            // OS clipboard BEFORE routing the keystroke — a cut mutates the draft
+            // in `route_key_down_to_composer` below, so the copy must be read
+            // first. The input layer then consumes the keystroke (and, for cut,
+            // deletes the selection), so it never leaks to the agent. Clipboard
+            // write is a no-op off Windows; an empty selection writes nothing
+            // (hud-hxhnt). Ctrl+Alt is excluded so it cannot shadow AltGr.
+            if raw.modifiers.ctrl
+                && !raw.modifiers.alt
+                && matches!(raw.key_code.as_str(), "KeyC" | "KeyX")
+            {
+                if let Some(selected) = self.state.input_processor.composer_selected_text() {
+                    write_windows_clipboard_text(&selected);
+                }
             }
             // Capture the input-started-at instant for local-ack latency
             // measurement on the composer keystroke path (hud-r3ax6 / hud-o9ybl).
