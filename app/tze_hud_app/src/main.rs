@@ -426,16 +426,13 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
     while i < args.len() {
         match args[i].as_str() {
             "--help" | "-h" => {
-                // Same GUI-subsystem console fix as --print-attach-info
-                // (hud-b7c0m / hud-41q9t): bind stdout to the launching
-                // terminal before printing, else the help text is invisible
-                // on Windows. No-op elsewhere.
-                attach_parent_console();
+                // The console is already attached once at the top of `main`
+                // (hud-q2glv), so the help text reaches the launching terminal
+                // on Windows without a per-arm attach here.
                 print_help();
                 std::process::exit(0);
             }
             "--version" | "-V" => {
-                attach_parent_console();
                 print_version();
                 std::process::exit(0);
             }
@@ -674,6 +671,12 @@ fn parse_window_mode(s: &str) -> Result<WindowMode, String> {
 /// redirect (`tze_hud --print-attach-info > info.txt`) is preserved. It is a
 /// harmless no-op when there is no parent console (e.g. a double-click launch,
 /// which has no terminal to show the block on anyway).
+///
+/// Called ONCE at the very top of `main` (hud-q2glv). A single early attach
+/// covers every output path — `--help`/`--version`, `--print-attach-info`, the
+/// `tracing` log stream, and every startup `eprintln!` + `exit(1)` failure —
+/// so no per-path call is needed. It never `AllocConsole`s, so the double-click
+/// happy path shows no flashing console window.
 #[cfg(windows)]
 fn attach_parent_console() {
     // (DWORD)-1 — attach to the console of the parent process.
@@ -733,6 +736,21 @@ fn render_attach_info_block(opts: &StartupOptions) -> String {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Bind the standard handles to the launching terminal ONCE, before any
+    // output is produced (hud-q2glv). This is the GUI-subsystem console fix
+    // that hud-b7c0m/#1112 (--print-attach-info) and hud-41q9t/#1140
+    // (--help/--version) applied per-arm — hoisted to a single call here so it
+    // ALSO covers the paths those missed: every startup `eprintln!` +
+    // `exit(1)` failure (unknown flag, config/PSK/validation errors) and the
+    // `tracing` log stream, all of which were otherwise silently discarded on
+    // the Windows GUI-subsystem binary. Safe on the happy path: it attaches to
+    // an existing parent console (terminal launch) or no-ops when there is none
+    // (double-click) — it never AllocConsole's, so no console window flashes —
+    // and it preserves an explicit redirect (`tze_hud … > out.txt`). No-op off
+    // Windows. Because it runs before the per-arm/attach-info calls it made
+    // redundant were removed, those paths now rely on this single attach.
+    attach_parent_console();
+
     // Initialise structured logging. JSON if TZE_HUD_LOG_JSON=1.
     let log_json = std::env::var("TZE_HUD_LOG_JSON").as_deref() == Ok("1");
     if log_json {
@@ -764,10 +782,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // onboarding aid that works on any platform without a shell, so it must not
     // fail-closed on a missing/invalid config the way canonical startup does.
     if opts.print_attach_info {
-        // On Windows this is a GUI-subsystem binary with no console by default,
-        // so bind stdout to the launching terminal before printing, else the
-        // block is invisible (Codex P2, PR #1112). No-op elsewhere.
-        attach_parent_console();
+        // The console was attached once at the top of `main` (hud-q2glv), so on
+        // Windows this GUI-subsystem binary's block reaches the launching
+        // terminal (Codex P2, PR #1112) without a per-branch attach here.
         print!("{}", render_attach_info_block(&opts));
         // `process::exit` skips destructors, so flush the buffered block first.
         use std::io::Write;
@@ -1244,13 +1261,15 @@ mod tests {
         );
     }
 
-    /// hud-41q9t: `--help`/`--version` now call `attach_parent_console()` before
-    /// printing, mirroring the `--print-attach-info` console fix from hud-b7c0m.
-    /// The two early-exit branches themselves call `std::process::exit` and
-    /// cannot be driven in-process, so this pins the one thing a unit test CAN
-    /// assert: the function is callable and a true no-op on this (non-Windows)
-    /// platform. The `#[cfg(windows)]` variant is covered by the windows-gnu
-    /// cross-target clippy/build gate instead.
+    /// hud-q2glv: `main` calls `attach_parent_console()` once at startup so
+    /// every output path — `--help`/`--version`, `--print-attach-info`, tracing
+    /// logs, and startup `eprintln!` + `exit(1)` errors — reaches the launching
+    /// terminal on the Windows GUI-subsystem binary. That call site runs before
+    /// `std::process::exit` and drives real handles, so it cannot be exercised
+    /// in-process; this pins the one thing a unit test CAN assert: the function
+    /// is callable and a true no-op on this (non-Windows) platform. The
+    /// `#[cfg(windows)]` variant is covered by the windows-gnu cross-target
+    /// clippy/build gate instead.
     #[test]
     fn attach_parent_console_is_a_callable_noop_off_windows() {
         attach_parent_console();
