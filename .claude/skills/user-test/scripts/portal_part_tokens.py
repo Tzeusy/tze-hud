@@ -66,6 +66,7 @@ PORTAL_TOKEN_COMPOSER_PLACEHOLDER_COLOR = "portal.composer.placeholder_color"
 PORTAL_TOKEN_TRANSCRIPT_BACKGROUND = "portal.transcript.background"
 PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR = "portal.transcript.text_color"
 PORTAL_TOKEN_TRANSCRIPT_FONT_SIZE = "portal.transcript.font_size"
+PORTAL_TOKEN_TRANSCRIPT_SYSTEM_COLOR = "portal.transcript.system_color"
 PORTAL_TOKEN_TRANSCRIPT_DIM_TEXT_COLOR = "portal.transcript.dim_text_color"
 PORTAL_TOKEN_TRANSCRIPT_DIM_BACKGROUND = "portal.transcript.dim_background"
 PORTAL_TOKEN_TRANSCRIPT_MAX_MEASURE_PX = "portal.transcript.max_measure_px"
@@ -147,6 +148,7 @@ _RUST_DEFAULTS: dict[str, str] = {
     "TRANSCRIPT_BACKGROUND": "#0A0D11",
     "TRANSCRIPT_TEXT_COLOR": "#E6EFFA",
     "TRANSCRIPT_FONT_SIZE": "16",
+    "TRANSCRIPT_SYSTEM_COLOR": "#8A97AD",
     "TRANSCRIPT_DIM_TEXT_COLOR": "#6B7689",
     "TRANSCRIPT_DIM_BACKGROUND": "#07090C",
     "STALE_MARKER_COLOR": "#B87333",
@@ -217,6 +219,7 @@ CANONICAL_DEFAULTS: dict[str, str] = {
     PORTAL_TOKEN_TRANSCRIPT_BACKGROUND: _RUST_DEFAULTS["TRANSCRIPT_BACKGROUND"],
     PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR: _RUST_DEFAULTS["TRANSCRIPT_TEXT_COLOR"],
     PORTAL_TOKEN_TRANSCRIPT_FONT_SIZE: _RUST_DEFAULTS["TRANSCRIPT_FONT_SIZE"],
+    PORTAL_TOKEN_TRANSCRIPT_SYSTEM_COLOR: _RUST_DEFAULTS["TRANSCRIPT_SYSTEM_COLOR"],
     PORTAL_TOKEN_TRANSCRIPT_DIM_TEXT_COLOR: _RUST_DEFAULTS["TRANSCRIPT_DIM_TEXT_COLOR"],
     PORTAL_TOKEN_TRANSCRIPT_DIM_BACKGROUND: _RUST_DEFAULTS["TRANSCRIPT_DIM_BACKGROUND"],
     PORTAL_TOKEN_TRANSCRIPT_MAX_MEASURE_PX: _RUST_DEFAULTS["TRANSCRIPT_MAX_MEASURE_PX"],
@@ -340,6 +343,7 @@ class PortalPartTokens:
     transcript_background: Rgba
     transcript_text_color: Rgba
     transcript_font_size_px: float
+    transcript_system_color: Rgba
     transcript_dim_text_color: Rgba
     transcript_dim_background: Rgba
     transcript_max_measure_px: float
@@ -445,6 +449,7 @@ def resolve_portal_tokens(overrides: Optional[dict[str, str]] = None) -> PortalP
         transcript_background=_color(tm, PORTAL_TOKEN_TRANSCRIPT_BACKGROUND),
         transcript_text_color=_color(tm, PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR),
         transcript_font_size_px=_px(tm, PORTAL_TOKEN_TRANSCRIPT_FONT_SIZE),
+        transcript_system_color=_color(tm, PORTAL_TOKEN_TRANSCRIPT_SYSTEM_COLOR),
         transcript_dim_text_color=_color(tm, PORTAL_TOKEN_TRANSCRIPT_DIM_TEXT_COLOR),
         transcript_dim_background=_color(tm, PORTAL_TOKEN_TRANSCRIPT_DIM_BACKGROUND),
         transcript_max_measure_px=_px(tm, PORTAL_TOKEN_TRANSCRIPT_MAX_MEASURE_PX),
