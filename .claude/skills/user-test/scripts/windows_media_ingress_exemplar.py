@@ -39,7 +39,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 sys.path.insert(0, str(_SCRIPT_DIR / "proto_gen"))
 
-from hud_grpc_client import HudClient  # noqa: E402
+from hud_grpc_client import HudClient, MediaIngressRejected  # noqa: E402
 from proto_gen import session_pb2  # noqa: E402
 
 
@@ -317,6 +317,7 @@ async def run_local_producer(args: argparse.Namespace) -> dict[str, Any]:
         height=args.height,
         fps=args.fps,
     )
+    expect_reject = getattr(args, "expect_reject_code", None)
     async with HudClient(
         args.target,
         psk=psk,
@@ -324,6 +325,48 @@ async def run_local_producer(args: argparse.Namespace) -> dict[str, Any]:
         capabilities=["media_ingress", "publish_zone:media-pip", "read_telemetry"],
         initial_subscriptions=["SCENE_TOPOLOGY"],
     ) as client:
+        if expect_reject is not None:
+            # Authenticated admission-rejection proof: the session must establish
+            # (PSK accepted) and MediaIngressOpen must be rejected with exactly the
+            # expected reject_code. A clean admission is a failure for this lane.
+            try:
+                result = await client.open_media_ingress(
+                    client_stream_id=stream_uuid.bytes,
+                    agent_sdp_offer=sdp_offer,
+                    zone_name=zone_name,
+                    content_classification=args.content_classification,
+                    declared_peak_kbps=args.declared_peak_kbps,
+                    codec_preference=[session_pb2.VIDEO_H264_BASELINE],
+                    timeout=args.timeout_s,
+                )
+            except MediaIngressRejected as rejected:
+                if rejected.reject_code != expect_reject:
+                    raise RuntimeError(
+                        "media ingress rejected with unexpected reject_code "
+                        f"{rejected.reject_code!r} (expected {expect_reject!r}): "
+                        f"{rejected.reject_reason}"
+                    ) from rejected
+                return {
+                    "lane": "hud-media-ingress-local-producer",
+                    "target": args.target,
+                    "agent_id": args.agent_id,
+                    "source_label": args.source_label,
+                    "video_only": True,
+                    "zone_name": zone_name,
+                    "content_classification": args.content_classification,
+                    "client_stream_id": stream_uuid.hex,
+                    "authenticated": True,
+                    "admitted": False,
+                    "reject_code": rejected.reject_code,
+                    "reject_reason": rejected.reject_reason,
+                    "expected_reject_code": expect_reject,
+                    "sdp_offer_bytes": len(sdp_offer),
+                    "rejected_at_unix": int(time.time()),
+                }
+            raise RuntimeError(
+                f"expected admission rejection {expect_reject!r} but stream was "
+                f"admitted (epoch={result.stream_epoch})"
+            )
         result = await client.open_media_ingress(
             client_stream_id=stream_uuid.bytes,
             agent_sdp_offer=sdp_offer,
@@ -574,6 +617,15 @@ def build_parser() -> argparse.ArgumentParser:
     local.add_argument("--declared-peak-kbps", type=int, default=2_000)
     local.add_argument("--hold-s", type=float, default=10.0)
     local.add_argument("--timeout-s", type=float, default=10.0)
+    local.add_argument(
+        "--expect-reject-code",
+        help=(
+            "Assert MediaIngressOpen is rejected with this reject_code "
+            "(e.g. MEDIA_DISABLED). Exit 0 only if the authenticated session is "
+            "established and admission is rejected with exactly this code; a clean "
+            "admission or a different/absent rejection is a failure."
+        ),
+    )
     add_common_evidence_arg(local)
 
     youtube = sub.add_parser("youtube-sidecar", help="launch official YouTube embed evidence")
