@@ -191,7 +191,11 @@ _RUST_DEFAULTS: dict[str, str] = {
     "WINDOW_RESIZE_GRIP_HOVER_COLOR": "#8A93A6",
     "WINDOW_RESIZE_GRIP_SIZE_PX": "14",
     "SPACING_CONTENT_INSET_PX": "6",
-    "SPACING_HEADER_HEIGHT_PX": "28",
+    # hud-zn6yw (PR #1122): bumped 28 -> 52 to match
+    # PORTAL_HEADER_DRAG_BAND_PX_DEFAULT so the declared Header part's bounds
+    # don't shrink the live draggable header band. Mirrors
+    # crates/tze_hud_config/src/portal_tokens.rs::mod defaults::SPACING_HEADER_HEIGHT_PX.
+    "SPACING_HEADER_HEIGHT_PX": "52",
     "SPACING_SECTION_GAP_PX": "8",
     "TRANSCRIPT_MAX_MEASURE_PX": "0",
 }
