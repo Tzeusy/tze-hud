@@ -4959,13 +4959,21 @@ mod tests {
         let pending_pos = md
             .find("pending HUD input: 3")
             .expect("pending-input line rendered");
+        let feedback_pos = md.find("✓ sent").expect("feedback line rendered");
         let composer_pos = md
             .find("composer: ready")
             .expect("composer status line rendered");
         // ...BEFORE the composer status line...
         assert!(
-            pending_pos < composer_pos,
+            pending_pos < composer_pos && feedback_pos < composer_pos,
             "input-status lines must precede the composer status line: {md}"
+        );
+        // ...with pending-input preceding feedback (push_input_status_lines'
+        // fixed relative order, unchanged by hud-ycurc — only their position
+        // relative to the composer status line moved)...
+        assert!(
+            pending_pos < feedback_pos,
+            "pending-input line must precede the feedback line: {md}"
         );
         // ...and the composer status is still the final line.
         assert!(
