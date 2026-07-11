@@ -52,6 +52,7 @@ use tze_hud_scene::types::{FontFamily, Node, NodeData, NodeLayout, SceneId};
 use crate::markdown::MarkdownTokens;
 use crate::text::{
     LINE_HEIGHT_MULTIPLIER, composer_wrap_line_widths, measure_markdown_content_height,
+    text_content_box_margins,
 };
 
 /// One child's inputs for vertical-flow height measurement.
@@ -198,30 +199,41 @@ pub fn resolve_vertical_flow(
 }
 
 /// The height a single flowed child occupies in a vertical stack: measured
-/// wrapped text height for `TextMarkdown` children (reusing the render path's
-/// shaper via [`measure_child_height`]), or the child's explicit `bounds.height`
-/// for non-text children (solid color, image, hit region), which carry their own
-/// fixed geometry rather than flowing text.
-fn flow_child_height(font_system: &mut FontSystem, node: &Node, text_vertical_padding: f32) -> f32 {
+/// wrapped text height for `TextMarkdown` children, or the child's explicit
+/// `bounds.height` for non-text children (solid color, image, hit region), which
+/// carry their own fixed geometry rather than flowing text.
+///
+/// Text children are measured through the SAME content-box translation the render
+/// path applies ([`text_content_box_margins`]): the wrap width is the content box
+/// `bounds.width - 2*margin_x` (NOT the raw bounds width) and the vertical padding
+/// is `2*margin_y`, so the measured row height equals the painted row height
+/// (hud-yfj8u fidelity — the render path and this measurement share one margin
+/// formula and cannot drift).
+fn flow_child_height(font_system: &mut FontSystem, node: &Node) -> f32 {
     match &node.data {
-        NodeData::TextMarkdown(tm) => measure_child_height(
-            font_system,
-            &FlowChild {
-                content: &tm.content,
-                wrap_width: tm.bounds.width,
-                font_size_px: tm.font_size_px,
-                font_family: tm.font_family,
-                vertical_padding: text_vertical_padding,
-                // Plain-text measurement for now (hud-yfj8u): the pre-pass has no
-                // production caller and threads no `MarkdownTokens`. Transcript
-                // turns are markdown, so the render-wiring follow-up (hud-pd9bp)
-                // SHOULD thread the tile's `MarkdownTokens` through here and pass
-                // `Some(..)` so stacked turn heights match the render path's
-                // parse+shape (hud-3xdlf); until then this matches the plain-text
-                // heights the resolver was unit-tested against.
-                markdown_tokens: None,
-            },
-        ),
+        NodeData::TextMarkdown(tm) => {
+            let line_height = tm.font_size_px * LINE_HEIGHT_MULTIPLIER;
+            let (margin_x, margin_y) =
+                text_content_box_margins(tm.bounds.width, tm.bounds.height, line_height);
+            measure_child_height(
+                font_system,
+                &FlowChild {
+                    content: &tm.content,
+                    wrap_width: (tm.bounds.width - margin_x * 2.0).max(1.0),
+                    font_size_px: tm.font_size_px,
+                    font_family: tm.font_family,
+                    vertical_padding: margin_y * 2.0,
+                    // Plain-text measurement for now (hud-yfj8u): the pre-pass has
+                    // no production caller and threads no `MarkdownTokens`.
+                    // Transcript turns are markdown, so the render-wiring follow-up
+                    // (hud-pd9bp) SHOULD thread the tile's `MarkdownTokens` here and
+                    // pass `Some(..)` so stacked turn heights match the render
+                    // path's parse+shape (hud-3xdlf); until then this matches the
+                    // plain-text heights the resolver was unit-tested against.
+                    markdown_tokens: None,
+                },
+            )
+        }
         NodeData::SolidColor(n) => n.bounds.height.max(0.0),
         NodeData::StaticImage(n) => n.bounds.height.max(0.0),
         NodeData::HitRegion(n) => n.bounds.height.max(0.0),
@@ -240,8 +252,10 @@ fn flow_child_height(font_system: &mut FontSystem, node: &Node, text_vertical_pa
 /// **Behavior-preserving.** An `Absolute` parent contributes nothing, so a scene
 /// with no `VerticalFlow` node yields an EMPTY map — the render path then falls
 /// back to each child's own `bounds.y` and rendering is byte-identical to before
-/// this capability existed. `gap` (design token) and `text_vertical_padding` (the
-/// render path's text margin) are supplied by the caller, never invented here.
+/// this capability existed. `gap` (design token) is supplied by the caller; each
+/// text child's wrap width and vertical padding are derived from its own bounds
+/// via the render path's shared content-box margin formula, so nothing is
+/// invented here.
 ///
 /// This is the compositor-side pre-pass. Substituting the resolved y at the
 /// render geometry sites (and GPU pixel verification of the stacked result) is
@@ -251,7 +265,6 @@ pub fn resolve_tile_flow_offsets(
     font_system: &mut FontSystem,
     nodes: &HashMap<SceneId, Node>,
     gap: f32,
-    text_vertical_padding: f32,
 ) -> HashMap<SceneId, f32> {
     let mut offsets = HashMap::new();
     for parent in nodes.values() {
@@ -265,7 +278,7 @@ pub fn resolve_tile_flow_offsets(
             .collect();
         let heights: Vec<f32> = children
             .iter()
-            .map(|child| flow_child_height(font_system, child, text_vertical_padding))
+            .map(|child| flow_child_height(font_system, child))
             .collect();
         let start_y = parent.data.bounds().y;
         for (child, y) in children.iter().zip(stack_offsets(&heights, gap, start_y)) {
@@ -745,7 +758,7 @@ mod tests {
         let a = text_node("one", 0.0, 300.0);
         let b = text_node("two", 40.0, 300.0);
         let map = scene_map(vec![a, b]);
-        let offsets = resolve_tile_flow_offsets(&mut fs, &map, 8.0, 4.0);
+        let offsets = resolve_tile_flow_offsets(&mut fs, &map, 8.0);
         assert!(
             offsets.is_empty(),
             "absolute-only scene must resolve no flow offsets"
@@ -767,7 +780,7 @@ mod tests {
 
         let map = scene_map(vec![parent, c0, c1, c2]);
         let gap = 8.0;
-        let offsets = resolve_tile_flow_offsets(&mut fs, &map, gap, 4.0);
+        let offsets = resolve_tile_flow_offsets(&mut fs, &map, gap);
 
         assert_eq!(offsets.len(), 3, "every flow child gets a resolved y");
         // First child sits at the parent's top.
@@ -777,7 +790,7 @@ mod tests {
         );
         // Children are strictly ordered top-to-bottom and do not overlap.
         assert!(offsets[&id0] < offsets[&id1] && offsets[&id1] < offsets[&id2]);
-        let h0 = flow_child_height(&mut fs, &map[&id0], 4.0);
+        let h0 = flow_child_height(&mut fs, &map[&id0]);
         assert!(
             offsets[&id1] >= offsets[&id0] + h0 + gap - 1e-3,
             "second child must clear the first plus the gap: {offsets:?}"
