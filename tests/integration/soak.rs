@@ -438,6 +438,7 @@ async fn update_tile_content(
                                             radius: -1.0,
                                         },
                                     )),
+                                    children: vec![],
                                 }),
                             },
                         )),

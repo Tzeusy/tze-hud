@@ -467,6 +467,7 @@ fn apply_content_update(
             SceneMutation::SetTileRoot {
                 tile_id,
                 node: new_bg,
+                descendants: vec![],
             },
         ],
     ))
@@ -744,6 +745,7 @@ fn disconnect_during_lifecycle_orphans_tile_with_badge() {
         vec![SceneMutation::SetTileRoot {
             tile_id,
             node: root,
+            descendants: vec![],
         }],
     ));
     assert!(set_result.applied, "SetTileRoot must be accepted");
@@ -825,6 +827,7 @@ fn grace_period_expiry_removes_tile_after_disconnect() {
         vec![SceneMutation::SetTileRoot {
             tile_id,
             node: root,
+            descendants: vec![],
         }],
     ));
 
@@ -1002,6 +1005,7 @@ fn dashboard_agent_cannot_mutate_foreign_namespace_tile() {
                     radius: None,
                 }),
             },
+            descendants: vec![],
         }],
     ));
 

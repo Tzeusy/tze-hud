@@ -89,10 +89,19 @@ fn convert_proto_mutations(
                 // matching scene_id_to_bytes / bytes_to_scene_id wire contract.
                 match bytes_to_scene_id(&str_.tile_id) {
                     Ok(tile_id) => {
+                        // Materialize any inline `children` subtree atomically
+                        // (hud-ga4md): flat root-first list → root + descendants,
+                        // carried on the single coalescible SetTileRoot mutation.
+                        // Empty children = one-element list = flat root (unchanged).
                         if let Some(ref node_proto) = str_.node
-                            && let Some(node) = convert::proto_node_to_scene(node_proto)
+                            && let Some(mut nodes) = convert::proto_node_tree_to_scene(node_proto)
                         {
-                            scene_mutations.push(SceneMutation::SetTileRoot { tile_id, node });
+                            let node = nodes.remove(0);
+                            scene_mutations.push(SceneMutation::SetTileRoot {
+                                tile_id,
+                                node,
+                                descendants: nodes,
+                            });
                         }
                     }
                     Err(_) => {
@@ -197,10 +206,15 @@ fn convert_proto_mutations(
 
                 let mut had_content = false;
                 if let Some(ref node_proto) = pt.node {
-                    if let Some(node) = convert::proto_node_to_scene(node_proto) {
+                    // Inline-subtree materialization (hud-ga4md): see the
+                    // SetTileRoot arm above — flat list split into root +
+                    // descendants on one coalescible mutation.
+                    if let Some(mut nodes) = convert::proto_node_tree_to_scene(node_proto) {
+                        let node = nodes.remove(0);
                         scene_mutations.push(SceneMutation::SetTileRoot {
                             tile_id: element_id,
                             node,
+                            descendants: nodes,
                         });
                         had_content = true;
                     } else {

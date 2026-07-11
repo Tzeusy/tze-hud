@@ -292,6 +292,7 @@ fn run_scene_workload() -> f64 {
             mutations.push(SceneMutation::SetTileRoot {
                 tile_id: tile_ids[idx],
                 node,
+                descendants: vec![],
             });
         }
 

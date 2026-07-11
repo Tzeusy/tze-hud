@@ -89,28 +89,15 @@ pub enum SceneMutation {
     // methods; the gRPC layer is responsible for verifying `manage_tabs`
     // before dispatching the batch.
     /// Create a new tab. RFC 0001 §2.2.
-    CreateTab {
-        name: String,
-        display_order: u32,
-    },
+    CreateTab { name: String, display_order: u32 },
     /// Delete a tab and all its tiles. RFC 0001 §2.2.
-    DeleteTab {
-        tab_id: SceneId,
-    },
+    DeleteTab { tab_id: SceneId },
     /// Rename a tab. RFC 0001 §2.2.
-    RenameTab {
-        tab_id: SceneId,
-        new_name: String,
-    },
+    RenameTab { tab_id: SceneId, new_name: String },
     /// Change the display_order of a tab. RFC 0001 §2.2.
-    ReorderTab {
-        tab_id: SceneId,
-        new_order: u32,
-    },
+    ReorderTab { tab_id: SceneId, new_order: u32 },
     /// Switch the active tab. RFC 0001 §2.2.
-    SwitchActiveTab {
-        tab_id: SceneId,
-    },
+    SwitchActiveTab { tab_id: SceneId },
     // ── Tile mutations (require create_tiles / modify_own_tiles) ──────────
     /// Create a new tile. Requires `create_tiles` + `modify_own_tiles`. RFC 0001 §2.3.
     CreateTile {
@@ -121,20 +108,11 @@ pub enum SceneMutation {
         z_order: u32,
     },
     /// Update tile bounds. RFC 0001 §2.3.
-    UpdateTileBounds {
-        tile_id: SceneId,
-        bounds: Rect,
-    },
+    UpdateTileBounds { tile_id: SceneId, bounds: Rect },
     /// Update tile z-order. RFC 0001 §2.3.
-    UpdateTileZOrder {
-        tile_id: SceneId,
-        z_order: u32,
-    },
+    UpdateTileZOrder { tile_id: SceneId, z_order: u32 },
     /// Update tile opacity (must be in [0.0, 1.0]). RFC 0001 §2.3.
-    UpdateTileOpacity {
-        tile_id: SceneId,
-        opacity: f32,
-    },
+    UpdateTileOpacity { tile_id: SceneId, opacity: f32 },
     /// Update tile input mode. RFC 0001 §2.3.
     UpdateTileInputMode {
         tile_id: SceneId,
@@ -151,13 +129,21 @@ pub enum SceneMutation {
         expires_at: Option<u64>,
     },
     /// Delete a tile and all its nodes. RFC 0001 §2.3.
-    DeleteTile {
-        tile_id: SceneId,
-    },
+    DeleteTile { tile_id: SceneId },
     // ── Node mutations ────────────────────────────────────────────────────
     SetTileRoot {
         tile_id: SceneId,
+        /// Root node of the tile's content subtree. `node.children` reference the
+        /// SceneIds materialized from `descendants`.
         node: Node,
+        /// Inline descendants of `node` (any depth), root EXCLUDED, in a flat
+        /// list (hud-ga4md). Materialized atomically with the root as ONE
+        /// mutation so a multi-node portal body (transcript + head-anchored
+        /// composer + INPUT band) rides a single coalescible StateStream update
+        /// instead of a per-node `AddNode` fan-out that would flip the batch
+        /// Transactional and break republish latest-wins coalescing (hud-mzk74).
+        /// Empty = a flat single-node root (pre-children behavior).
+        descendants: Vec<Node>,
     },
     AddNode {
         tile_id: SceneId,
@@ -236,18 +222,11 @@ pub enum SceneMutation {
         max_deferrals: u32,
     },
     /// Delete a sync group by ID. All member tiles are released automatically.
-    DeleteSyncGroup {
-        group_id: SceneId,
-    },
+    DeleteSyncGroup { group_id: SceneId },
     /// Add a tile to a sync group. Replaces any previous group membership.
-    JoinSyncGroup {
-        tile_id: SceneId,
-        group_id: SceneId,
-    },
+    JoinSyncGroup { tile_id: SceneId, group_id: SceneId },
     /// Remove a tile from its current sync group. No-op if not in a group.
-    LeaveSyncGroup {
-        tile_id: SceneId,
-    },
+    LeaveSyncGroup { tile_id: SceneId },
     // ── Scroll mutations (require ModifyOwnTiles) ──────────────────────
     /// Register or replace local-first scroll config for a tile.
     /// Enables adapter-driven scroll via `SetScrollOffset`.
@@ -283,10 +262,7 @@ pub enum SceneMutation {
     /// republishes. `count = 0` clears the badge. This is the bridged-transport
     /// counterpart of the in-process driver's direct `set_tile_unread_count`
     /// call, giving a bridged portal's pill the same badge (hud-hwk2m).
-    SetTileUnreadCount {
-        tile_id: SceneId,
-        count: usize,
-    },
+    SetTileUnreadCount { tile_id: SceneId, count: usize },
     /// Set (or clear) the composer interaction hit region an interaction-enabled
     /// portal exposes over its host tile (hud-iofav). Coalescible StateStream
     /// tile-update (RFC 0005 §3.3), mirroring `SetTileLifecycleAccent`: the spec is
@@ -848,9 +824,20 @@ impl SceneGraph {
                 Ok(vec![])
             }
             // ── Node mutations ────────────────────────────────────────────────
-            SceneMutation::SetTileRoot { tile_id, node } => {
+            SceneMutation::SetTileRoot {
+                tile_id,
+                node,
+                descendants,
+            } => {
                 // Use checked variant to enforce namespace isolation and ModifyOwnTiles capability.
-                self.set_tile_root_checked(*tile_id, node.clone(), namespace)?;
+                // The whole inline subtree (root + descendants) materializes as one
+                // mutation so it stays a coalescible StateStream update (hud-ga4md).
+                self.set_tile_root_tree_checked(
+                    *tile_id,
+                    node.clone(),
+                    descendants.clone(),
+                    namespace,
+                )?;
                 Ok(vec![node.id])
             }
             SceneMutation::AddNode {
@@ -1486,6 +1473,7 @@ mod tests {
             vec![SceneMutation::SetTileRoot {
                 tile_id,
                 node: transcript_root(text),
+                descendants: vec![],
             }],
         );
         assert!(scene.apply_batch(&set_root).applied);
@@ -1593,6 +1581,7 @@ mod tests {
                 vec![SceneMutation::SetTileRoot {
                     tile_id,
                     node: transcript_root(text),
+                    descendants: vec![],
                 }],
             );
             assert!(scene.apply_batch(&republish).applied);
@@ -1765,6 +1754,7 @@ mod tests {
             vec![SceneMutation::SetTileRoot {
                 tile_id,
                 node: root,
+                descendants: vec![],
             }],
         );
         assert!(scene.apply_batch(&set_root).applied);
@@ -2101,6 +2091,7 @@ mod tests {
             vec![SceneMutation::SetTileRoot {
                 tile_id,
                 node: new_root,
+                descendants: vec![],
             }],
         );
         assert!(scene.apply_batch(&republish).applied);

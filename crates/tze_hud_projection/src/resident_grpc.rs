@@ -1668,6 +1668,11 @@ impl ResidentGrpcPortalAdapter {
                     overflow: proto::TextOverflowProto::Ellipsis as i32,
                 },
             )),
+            // Phase-1 pilot still publishes the whole transcript as a single blob
+            // node; the inline multi-part body (transcript + head-anchored composer
+            // + INPUT band as separate children) is future promotion work (hud-26869,
+            // blocked on this NodeProto.children groundwork). Empty = flat (hud-ga4md).
+            children: vec![],
         }
     }
 
