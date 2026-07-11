@@ -33,7 +33,7 @@ Scope: Active only for the accepted Windows-only one-stream media slice.
 #### Scenario: audio-bearing ingress is rejected
 
 - **WHEN** an ingress request includes audio channel semantics or an active audio track
-- **THEN** the runtime MUST reject the request with a deterministic `AUDIO_UNSUPPORTED` admission reason
+- **THEN** the runtime MUST reject the request with a deterministic `AUDIO_NOT_SUPPORTED` admission reason
 - **AND** it MUST NOT route audio to output
 
 ### Requirement: Timing, Lease, and Budget Bounds
@@ -42,6 +42,8 @@ An admitted media stream MUST remain governed by presentation timing, lease life
 
 Source: `openspec/specs/media-webrtc-bounded-ingress/spec.md`
 Scope: Active only for the accepted Windows-only one-stream media slice.
+
+**Archive carve-out C (expired-frame-drop — NOT yet satisfied):** as of this archive the "expired media frame is dropped" scenario below is enforced only at admission (`validate_timing_hints` in `crates/tze_hud_protocol/src/session_server/media.rs`) and by terminal-surface upload rejection (`crates/tze_hud_compositor/src/renderer/video.rs::upload_video_frame` / `prune_terminal_video_surfaces`). There is NO shipped per-frame decode/present path that drops a frame arriving after its expiry and records a dropped-frame reason, because the live GStreamer-decode → compositor wiring is deliberately deferred (gen-1 ships the synthetic frame path, `design.md` §5). The lease-revocation and budget-breach scenarios below are satisfied; the expired-frame-drop scenario is a tracked follow-on on the decode-path lane, not a satisfied requirement (reconciliation `docs/reports/windows-media-ingress-gen1-reconciliation-20260711.md`, carve-out C).
 
 #### Scenario: expired media frame is dropped
 

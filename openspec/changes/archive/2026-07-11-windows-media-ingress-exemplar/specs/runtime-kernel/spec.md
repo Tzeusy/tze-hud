@@ -25,6 +25,8 @@ Decoded media frames for the Windows media slice MUST cross into the compositor 
 Source: `crates/tze_hud_compositor/src/video_surface.rs`, `crates/tze_hud_runtime/src/gst_decode_pipeline.rs`, `openspec/specs/runtime-kernel/spec.md`
 Scope: Active only for the accepted Windows-only one-stream media slice.
 
+**Archive carve-out B (live first-frame render proof OUTSTANDING):** the "decoded frame replaces placeholder" scenario below is proven only in headless/synthetic tests (`crates/tze_hud_runtime/tests/pixel_readback.rs`, `crates/tze_hud_compositor/src/video_surface.rs::VideoRenderState`). On the live Windows lane a stream was admitted but presented NO frames (`first_frame_time_ms=null`, `nonzero_frame_sample_count=0`) because the live GStreamer-decode → compositor wiring is deliberately deferred (gen-1 ships the synthetic frame path, `design.md` §5). Live rendered-frame proof is a tracked follow-on on the decode-path lane, not a satisfied requirement (reconciliation `docs/reports/windows-media-ingress-gen1-reconciliation-20260711.md`, carve-out B).
+
 #### Scenario: decoded frame replaces placeholder
 
 - **WHEN** an admitted stream produces a decoded RGBA frame for its assigned surface
