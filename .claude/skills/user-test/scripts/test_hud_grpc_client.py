@@ -21,6 +21,7 @@ except ModuleNotFoundError:  # pragma: no cover - environment dependent
 
 from hud_grpc_client import (
     HudClient,
+    _blake3_digest_bytes,
     _resource_id_bytes,
     avatar_resource_id_from_png,
     build_presence_card_accent_node,
@@ -56,6 +57,51 @@ class HudGrpcClientTests(unittest.IsolatedAsyncioTestCase):
         rid2 = avatar_resource_id_from_png(png)
         self.assertEqual(len(rid1), 32)
         self.assertEqual(rid1, rid2)
+
+    def _assert_blake3_import_failure_hard_errors(self, raised_exc):
+        """Force ``import blake3`` to fail with ``raised_exc`` via a meta-path
+        finder and assert ``_blake3_digest_bytes`` converts it into an actionable
+        ``RuntimeError`` (chained). Guards the contract even when the wheel is
+        installed (as it is in CI). Restores the module cache on exit so the
+        block never leaks into other tests."""
+        import sys
+
+        class _BlockBlake3:
+            def find_spec(self, name, path=None, target=None):
+                if name == "blake3" or name.startswith("blake3."):
+                    raise raised_exc
+                return None
+
+        saved = sys.modules.pop("blake3", None)
+        finder = _BlockBlake3()
+        sys.meta_path.insert(0, finder)
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                _blake3_digest_bytes(b"payload")
+            self.assertIn("pip install blake3", str(ctx.exception))
+            self.assertIs(ctx.exception.__cause__, raised_exc)
+        finally:
+            sys.meta_path.remove(finder)
+            if saved is not None:
+                sys.modules["blake3"] = saved
+
+    def test_blake3_digest_hard_errors_without_wheel(self):
+        """A missing ``blake3`` wheel (``ModuleNotFoundError``) raises a hard,
+        actionable error rather than silently shelling out to an on-demand cargo
+        compile (hud-6vrwq)."""
+        self._assert_blake3_import_failure_hard_errors(
+            ModuleNotFoundError("blocked for test: blake3", name="blake3")
+        )
+
+    def test_blake3_digest_hard_errors_on_broken_wheel(self):
+        """A present-but-broken ``blake3`` wheel raises a bare ``ImportError``
+        (binary/ABI mismatch, missing shared lib, Windows DLL load failure) —
+        which is NOT a ``ModuleNotFoundError``. The digest helper must still
+        surface the actionable RuntimeError, so it catches the broad
+        ``ImportError`` (hud-6vrwq review follow-up)."""
+        self._assert_blake3_import_failure_hard_errors(
+            ImportError("blocked for test: broken blake3 extension", name="blake3")
+        )
 
     def test_presence_card_node_builders_match_spec(self):
         resource_id = b"\x11" * 32
