@@ -1318,19 +1318,62 @@ impl super::Compositor {
                     // In steady-state (commit-time-primed) frames this branch is
                     // never taken.  The warn! makes the miss observable in
                     // production logs without panicking. [hud-rbf91]
+                    //
+                    // Counted (hud-u4lq2): a growing count past the first
+                    // post-prime frame means the primer's background result
+                    // never landed and this "rare" fallback became the
+                    // permanent per-frame path — see `markdown_cache_miss_count`.
+                    self.markdown_cache_miss_count
+                        .set(self.markdown_cache_miss_count.get() + 1);
                     tracing::warn!(
                         node_id = ?node_id,
                         content_len = tm.content.len(),
                         "markdown cache miss on render path — expected commit-time prime \
                          (hud-xcp9b); parsing inline to preserve styling [hud-380dl]"
                     );
-                    let parsed = crate::markdown::parse_markdown_subset(&tm.content, md_tokens);
-                    TextItem::from_text_markdown_cached(
-                        tm,
-                        tile.bounds.x - scroll_x,
-                        tile.bounds.y - scroll_y,
-                        &parsed,
-                    )
+                    // Self-healing fallback cache (hud-u4lq2 defense-in-depth):
+                    // check the small side cache before paying a fresh parse.
+                    // Whatever caused the primer's authoritative snapshot to
+                    // miss this key, we must not re-pay the full parse cost
+                    // every single frame — see `Compositor::markdown_fallback_cache`.
+                    // Scope the immutable `Ref` to this block so it is
+                    // dropped before the `else` branch below might need
+                    // `borrow_mut()`.  The scrutinee of `if let ... else`
+                    // has its temporary lifetime extended to the end of the
+                    // WHOLE if/else (not just the `then` arm) — leaving the
+                    // `.borrow()` call directly in the `if let` condition
+                    // would keep the `Ref` alive into the `else` arm and
+                    // panic with `already borrowed: BorrowMutError` on
+                    // every genuine fallback-cache miss. Confirmed via a
+                    // standalone repro during hud-u4lq2 review.
+                    let cache_hit = {
+                        self.markdown_fallback_cache
+                            .borrow()
+                            .get(&content_key)
+                            .map(|parsed| {
+                                TextItem::from_text_markdown_cached(
+                                    tm,
+                                    tile.bounds.x - scroll_x,
+                                    tile.bounds.y - scroll_y,
+                                    parsed,
+                                )
+                            })
+                    };
+                    if let Some(item) = cache_hit {
+                        item
+                    } else {
+                        let parsed = crate::markdown::parse_markdown_subset(&tm.content, md_tokens);
+                        let item = TextItem::from_text_markdown_cached(
+                            tm,
+                            tile.bounds.x - scroll_x,
+                            tile.bounds.y - scroll_y,
+                            &parsed,
+                        );
+                        self.markdown_fallback_cache
+                            .borrow_mut()
+                            .insert(content_key, parsed);
+                        item
+                    }
                 }
             } else {
                 // Pixel-bearing color_runs present: use the legacy path that

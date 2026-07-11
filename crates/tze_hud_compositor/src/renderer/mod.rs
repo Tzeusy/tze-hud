@@ -285,6 +285,48 @@ pub struct Compositor {
     /// Invalidated and rebuilt on every `prime_markdown_cache` call when the
     /// scene version changes.  Evicted in sync with `markdown_cache.evict_except`.
     pub(crate) node_key_cache: HashMap<SceneId, [u8; 32]>,
+    /// Cumulative count of `collect_text_items_from_node` markdown-cache misses
+    /// on the render path (hud-u4lq2).
+    ///
+    /// A miss here means the primer's published snapshot did not contain the
+    /// entry for a node's content key, so the render path fell back to
+    /// [`Self::markdown_fallback_cache`] (or a fresh inline parse on that
+    /// cache's own miss). In steady state (commit-time-primed, background
+    /// parse landed) this must stay at 0 after the first prime; a nonzero,
+    /// growing count means the primer's background result never landed and
+    /// the render path is silently paying re-parse cost every frame. Kept as
+    /// defense-in-depth observability (surfaced by
+    /// [`Self::markdown_cache_miss_count`]), not just a test hook.
+    ///
+    /// `Cell`, not a plain `u64`: incremented from `collect_text_items_from_node`,
+    /// which takes `&self` (the collect phase is read-only by design), so a
+    /// shared-reference-compatible counter is needed. Single-threaded (render
+    /// path only) — no atomic required.
+    pub(crate) markdown_cache_miss_count: std::cell::Cell<u64>,
+    /// Self-healing fallback cache for markdown-cache misses on the render
+    /// path (hud-u4lq2 defense-in-depth).
+    ///
+    /// A miss in [`Self::markdown_primer`]'s authoritative snapshot is
+    /// expected only transiently (first frame before any commit-time prime,
+    /// or a node added mid-frame after `prime_markdown_cache` already ran).
+    /// Whatever the cause, `collect_text_items_from_node` inserts the
+    /// inline-parsed result here so the SAME miss is never paid twice: the
+    /// next frame's lookup checks this cache before falling back to a fresh
+    /// `parse_markdown_subset` call. This bounds the cost of ANY cache-miss
+    /// condition — including ones not yet understood — to one parse per
+    /// distinct missing key, rather than one parse per frame forever.
+    ///
+    /// Deliberately a small side cache (O(1) insert), not a clone-and-replace
+    /// of the primer's authoritative `MarkdownCache`: the miss path must never
+    /// pay an O(cache size) cost just to self-heal one entry. Cleared at the
+    /// start of every successful `prime_markdown_cache` call — a fresh
+    /// commit-time prime supersedes any entries parked here, so nothing here
+    /// can shadow updated content or grow unbounded across scene mutations.
+    ///
+    /// `RefCell`, not `Cell`, because the value type (`ParsedMarkdown`) is not
+    /// `Copy`; `collect_text_items_from_node` still only needs `&self`.
+    pub(crate) markdown_fallback_cache:
+        std::cell::RefCell<HashMap<[u8; 32], crate::markdown::ParsedMarkdown>>,
     /// Design-token–resolved markdown styling for the **portal** transcript
     /// surface (hud-5jbra.2) — prefers `portal.*`-namespaced keys.
     ///
@@ -305,13 +347,35 @@ pub struct Compositor {
     /// `prime_markdown_cache` is gated on this value so it only runs when the
     /// scene has actually changed.  Initialized to `u64::MAX` so the first
     /// frame always primes.
+    ///
+    /// hud-u4lq2: `version` alone cannot distinguish "the same scene,
+    /// unchanged" from "a DIFFERENT `SceneGraph` instance that happens to have
+    /// reached the same version number" — two independently-constructed
+    /// `SceneGraph`s commonly do (e.g. two benchmark scenarios sharing one
+    /// `Compositor`). See [`Self::markdown_cache_scene_instance`], checked
+    /// alongside this field, for the guard against that case.
     markdown_cache_scene_version: u64,
+    /// The process-unique `SceneGraph::instance_id` last seen by
+    /// `prime_markdown_cache`, checked alongside
+    /// [`Self::markdown_cache_scene_version`] (hud-u4lq2). `None` means "never
+    /// primed". A mismatch here forces a re-prime even when `scene.version`
+    /// happens to equal the stored sentinel, so a `Compositor` reused across a
+    /// freshly-constructed `SceneGraph` can never have its priming silently
+    /// skipped by version-number coincidence.
+    markdown_cache_scene_instance: Option<u64>,
     /// The `SceneGraph::version` value at the last `prime_truncation_cache` call.
     ///
     /// `prime_truncation_cache` is gated on this value so it only runs when the
     /// scene has actually changed.  Initialized to `u64::MAX` so the first
     /// frame always primes.
+    ///
+    /// hud-u4lq2: see [`Self::markdown_cache_scene_version`]'s doc for why
+    /// [`Self::truncation_cache_scene_instance`] is checked alongside it.
     truncation_cache_scene_version: u64,
+    /// The process-unique `SceneGraph::instance_id` last seen by
+    /// `prime_truncation_cache`. Same rationale as
+    /// [`Self::markdown_cache_scene_instance`] (hud-u4lq2).
+    truncation_cache_scene_instance: Option<u64>,
     /// Operator-configured per-surface bound (bytes) for the truncation cache's
     /// viewport-adjacent-window fallback, sourced from the resolved
     /// `DisplayProfile` via [`Compositor::set_max_truncation_input_bytes`].
@@ -637,10 +701,14 @@ impl Compositor {
             token_map: HashMap::new(),
             markdown_primer: crate::markdown::MarkdownPrimer::new(),
             node_key_cache: HashMap::new(),
+            markdown_cache_miss_count: std::cell::Cell::new(0),
+            markdown_fallback_cache: std::cell::RefCell::new(HashMap::new()),
             markdown_tokens: crate::markdown::MarkdownTokens::default(),
             markdown_tokens_generic: crate::markdown::MarkdownTokens::default(),
             markdown_cache_scene_version: u64::MAX,
+            markdown_cache_scene_instance: None,
             truncation_cache_scene_version: u64::MAX,
+            truncation_cache_scene_instance: None,
             configured_max_truncation_input_bytes: None,
             resize_reprime_last_at: None,
             resize_reprime_content_bytes: 0,
@@ -927,10 +995,14 @@ impl Compositor {
             token_map: HashMap::new(),
             markdown_primer: crate::markdown::MarkdownPrimer::new(),
             node_key_cache: HashMap::new(),
+            markdown_cache_miss_count: std::cell::Cell::new(0),
+            markdown_fallback_cache: std::cell::RefCell::new(HashMap::new()),
             markdown_tokens: crate::markdown::MarkdownTokens::default(),
             markdown_tokens_generic: crate::markdown::MarkdownTokens::default(),
             markdown_cache_scene_version: u64::MAX,
+            markdown_cache_scene_instance: None,
             truncation_cache_scene_version: u64::MAX,
+            truncation_cache_scene_instance: None,
             configured_max_truncation_input_bytes: None,
             resize_reprime_last_at: None,
             resize_reprime_content_bytes: 0,
@@ -1236,6 +1308,7 @@ impl Compositor {
         // re-parses all nodes with the updated tokens, even if scene.version
         // has not changed since the last prime.
         self.markdown_cache_scene_version = u64::MAX;
+        self.markdown_cache_scene_instance = None;
 
         // Clear the truncation cache: a token-map change can alter font metrics
         // (monospace vs. sans-serif substitution, heading-scale changes) which
@@ -1245,6 +1318,7 @@ impl Compositor {
             rasterizer.truncation_cache.clear();
         }
         self.truncation_cache_scene_version = u64::MAX;
+        self.truncation_cache_scene_instance = None;
 
         self.token_map = map;
         // Token-substitution failures in ensure_icon_texture are tied to the
@@ -1355,14 +1429,41 @@ impl Compositor {
             .unwrap_or(0)
     }
 
+    /// Cumulative markdown-cache-miss count on the render path (hud-u4lq2). See
+    /// [`Self::markdown_cache_miss_count`]'s field doc for what a nonzero,
+    /// growing count means. Currently consumed only by
+    /// `renderer::tests::reused_compositor_across_scenes_lands_markdown_primer_hud_u4lq2`
+    /// and its sibling baseline test; `#[allow(dead_code)]` covers the non-test
+    /// build (the field itself keeps incrementing regardless, for log-visible
+    /// `tracing::warn!` observability at the call site in `text.rs`).
+    #[allow(dead_code)]
+    pub(crate) fn markdown_cache_miss_count(&self) -> u64 {
+        self.markdown_cache_miss_count.get()
+    }
+
     pub fn prime_markdown_cache(&mut self, scene: &SceneGraph) {
         use tze_hud_scene::types::NodeData;
 
-        // Skip if the scene has not changed since we last primed.
-        if scene.version == self.markdown_cache_scene_version {
+        // Skip if the scene has not changed since we last primed. Checks the
+        // scene INSTANCE identity alongside the version number (hud-u4lq2):
+        // `version` restarts at 0 for every newly constructed `SceneGraph`, so
+        // comparing it alone cannot tell "the same scene, unchanged" apart from
+        // "a different scene instance that happens to have reached the same
+        // version number" (a `Compositor` reused across independently
+        // constructed `SceneGraph`s — e.g. scenario-style benchmarks/tests —
+        // hits this). A mismatched instance always forces a re-prime.
+        if self.markdown_cache_scene_instance == Some(scene.instance_id)
+            && scene.version == self.markdown_cache_scene_version
+        {
             return;
         }
         self.markdown_cache_scene_version = scene.version;
+        self.markdown_cache_scene_instance = Some(scene.instance_id);
+        // A fresh commit-time prime is about to rebuild the authoritative
+        // snapshot for every live node — any entries parked in the fallback
+        // self-heal cache (hud-u4lq2) are superseded now, so drop them rather
+        // than let them shadow stale content or grow unbounded.
+        self.markdown_fallback_cache.borrow_mut().clear();
 
         // Snapshot the current cache once so we can decide, per node, whether
         // its content still needs parsing.  Already-cached entries are carried
@@ -1420,9 +1521,12 @@ impl Compositor {
         // content (inline for small payloads, on the background thread for large
         // ones) with each job's own scoped tokens, atomically swaps in the new
         // snapshot, and evicts dead entries implicitly (the new snapshot is
-        // exactly the live set).  Gated on scene.version so a late background
-        // result never clobbers a newer one.
-        self.markdown_primer.prime(jobs, scene.version);
+        // exactly the live set).  Ordering against a late background result is
+        // handled by the primer's own internal epoch (hud-u4lq2) — it no longer
+        // takes `scene.version`, which is only monotonic within one `SceneGraph`
+        // instance's lifetime and previously caused legitimate results to be
+        // silently dropped when a `Compositor` was reused across scenes.
+        self.markdown_primer.prime(jobs);
     }
 
     /// Load the current markdown parse-cache snapshot lock-free (hud-33qo7).
@@ -1465,8 +1569,13 @@ impl Compositor {
     /// settles (scene.version stops changing), the last geometry is primed on
     /// the next frame after the interval elapses.
     pub fn prime_truncation_cache(&mut self, scene: &SceneGraph) {
-        // Skip if the scene has not changed since we last primed.
-        if scene.version == self.truncation_cache_scene_version {
+        // Skip if the scene has not changed since we last primed. Checks the
+        // scene INSTANCE identity alongside the version number (hud-u4lq2) —
+        // see `Compositor::markdown_cache_scene_instance`'s doc for why
+        // `scene.version` alone is not a reliable "unchanged" signal across
+        // independently-constructed `SceneGraph`s sharing one `Compositor`.
+        let same_instance = self.truncation_cache_scene_instance == Some(scene.instance_id);
+        if same_instance && scene.version == self.truncation_cache_scene_version {
             return;
         }
 
@@ -1501,8 +1610,11 @@ impl Compositor {
         // The cadence gate is bypassed when the sentinel is `u64::MAX` (a forced
         // re-prime requested by `set_token_map` or initialisation) so that token/
         // font-metric changes are always reflected immediately regardless of resize
-        // cadence.
-        let forced_prime = self.truncation_cache_scene_version == u64::MAX;
+        // cadence. Also bypassed on a scene-instance mismatch (hud-u4lq2): a
+        // brand-new `SceneGraph` handed to a reused `Compositor` must never be
+        // treated as "mid-drag on the same scene" just because its version
+        // number happens to fall inside the debounce window.
+        let forced_prime = self.truncation_cache_scene_version == u64::MAX || !same_instance;
         let interval_ms = adaptive_reprime_interval_ms(self.resize_reprime_content_bytes);
         if !forced_prime && should_defer_reprime(self.resize_reprime_last_at, interval_ms) {
             // Within the debounce window: defer, do not update the sentinel.
@@ -1548,6 +1660,7 @@ impl Compositor {
 
         // Record the version and timestamp now that priming will proceed.
         self.truncation_cache_scene_version = scene.version;
+        self.truncation_cache_scene_instance = Some(scene.instance_id);
         self.resize_reprime_last_at = Some(std::time::Instant::now());
 
         // Resolve the resize font clamp range BEFORE the &mut text_rasterizer
