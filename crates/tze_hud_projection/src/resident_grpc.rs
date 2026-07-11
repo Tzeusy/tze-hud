@@ -1828,7 +1828,10 @@ fn portal_markdown_with_spans(
     timestamps: TimestampGranularity,
 ) -> (String, Vec<TranscriptTurnSpan>) {
     let mut result = String::new();
-    let mut turn_spans: Vec<TranscriptTurnSpan> = Vec::new();
+    // At most one span per visible transcript unit (the OUTPUT window shifts each
+    // turn's body spans into content coordinates); pre-size to that bound.
+    let mut turn_spans: Vec<TranscriptTurnSpan> =
+        Vec::with_capacity(state.visible_transcript.len());
     let title = state.display_name.as_deref().unwrap_or("Projected session");
     push_line(&mut result, &format!("**{title}**"));
     push_line(
@@ -2809,7 +2812,8 @@ fn turn_attribution_color_runs(
     system_color: proto::Rgba,
     content_len: usize,
 ) -> Vec<proto::TextColorRunProto> {
-    let mut runs = Vec::new();
+    // At most one run per span (assistant turns are skipped); pre-size to the bound.
+    let mut runs = Vec::with_capacity(spans.len());
     for span in spans {
         if !turn_uses_system_attribution(span.output_kind) {
             continue;
