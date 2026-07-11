@@ -7,10 +7,10 @@ pilot, bounded by the existing lease orphan/grace lifecycle.
 
 ## 1. Contract and review
 
-- [ ] 1.1 Validate this OpenSpec change with `openspec validate portal-disconnect-resume-ux --strict`
-- [ ] 1.2 Confirm doctrine alignment: "graceful degradation is not a bug", "arrival time ≠ presentation time", "visual identity is modular" (CLAUDE.md, `about/heart-and-soul`)
-- [ ] 1.3 Confirm the delta adds no new transport, no portal-specific disconnect RPC, and no scene-graph transcript history (disconnect rides the existing primary session stream / orphan-lease path)
-- [ ] 1.4 Confirm staleness is bounded by the existing lease grace, not a second timer authority
+- [x] 1.1 Validate this OpenSpec change with `openspec validate portal-disconnect-resume-ux --strict` (passes: "Change 'portal-disconnect-resume-ux' is valid", openspec 1.3.1)
+- [x] 1.2 Confirm doctrine alignment: "graceful degradation is not a bug", "arrival time ≠ presentation time", "visual identity is modular" (CLAUDE.md, `about/heart-and-soul`)
+- [x] 1.3 Confirm the delta adds no new transport, no portal-specific disconnect RPC, and no scene-graph transcript history (disconnect rides the existing primary session stream / orphan-lease path)
+- [x] 1.4 Confirm staleness is bounded by the existing lease grace, not a second timer authority
 
 ## 2. Disconnect presentation (raw-tile pilot)
 
@@ -22,7 +22,7 @@ pilot, bounded by the existing lease orphan/grace lifecycle.
 ## 3. Degradation contract
 
 - [x] 3.1 Wire the degraded threshold (liveness gap) to the existing `ProjectionLifecycleState::Degraded`/`HudUnavailable` transition and `mark_hud_disconnected` bookkeeping
-- [ ] 3.2 Bound the degraded window by lease grace; remove the surface on grace expiry via the existing orphan path (scene+authority contract headless-covered by `disconnected_portal_surface_removed_on_grace_expiry_yields_no_further_state` in `crates/tze_hud_runtime/src/portal_projection_driver.rs`: a portal held disconnected until lease grace has its tile removed by `SceneGraph::expire_leases` and then produces no further `ProjectedPortalState`. Production trigger that drives liveness-gap → `mark_hud_disconnected` → scene orphan → `expire_projection` is wired separately by hud-5i16d)
+- [x] 3.2 Bound the degraded window by lease grace; remove the surface on grace expiry via the existing orphan path (scene+authority contract headless-covered by `disconnected_portal_surface_removed_on_grace_expiry_yields_no_further_state` in `crates/tze_hud_runtime/src/portal_projection_driver.rs`: a portal held disconnected until lease grace has its tile removed by `SceneGraph::expire_leases` and then produces no further `ProjectedPortalState`. Production trigger that drives liveness-gap → `mark_hud_disconnected` → scene orphan → `expire_projection` is wired by hud-5i16d, PR #973, merged; the #1102 lease-grace reaper closes the production removal loop)
 - [x] 3.3 Keep degraded-transition presentation timing runtime-owned; clock-domain typed metadata only
 
 ## 4. Reconnect and resume presentation
@@ -54,17 +54,24 @@ Wave-2 of epic `hud-wse80` (sub-epic `hud-3jxfr`) supplies the trigger wiring; t
   `connection_degraded`. Clean detach does not. **Follow-ups:** per-session resident gRPC
   bidi stream-end detection is `hud-b2llg`; the in-process forced repaint that makes the
   flip *visible* on a pure drop is `hud-h3mvo` (see 6.2).
-- [ ] 6.2 Visible degraded treatment (the viewer side of 2.1/2.3) is **partially landed**.
-  (b) is now done: **confirmed P1** `hud-h3mvo` shipped via **PR #978** (merged) — a pure
-  portal drop with no subsequent publish now forces a one-shot degraded repaint in
-  `drain_inner` (flag set on the disconnect transition, re-rendered under the scene lock
-  after the due-loop), so the tile dims within one frame instead of keeping live colors
-  indefinitely; regression-locked by `pure_drop_forces_degraded_repaint_without_subsequent_publish`.
-  (a) remains the only open gap: the token-styled geometry badge replacing the zero-width
-  stale sentinel — bead `hud-jgf41` (P2), which did NOT ship (it over-scoped into a
-  proto/scene-graph node-type change and was left as blocked local WIP, no PR). The badge
-  will ride the same forced-repaint path once it lands. Until `hud-jgf41` lands the dim is
-  perceivable on a drop but the dedicated badge affordance is not.
+- [x] 6.2 Visible degraded treatment (the viewer side of 2.1/2.3) is **landed**.
+  (b) `hud-h3mvo` shipped via **PR #978** (merged) — a pure portal drop with no subsequent
+  publish forces a one-shot degraded repaint in `drain_inner` (flag set on the disconnect
+  transition, re-rendered under the scene lock after the due-loop), so the tile dims within
+  one frame instead of keeping live colors indefinitely; regression-locked by
+  `pure_drop_forces_degraded_repaint_without_subsequent_publish`.
+  (a) the token-styled stale treatment is now merged: **PR #878** (`hud-cgpfo`,
+  token-driven disconnect/stale degraded treatment on the raw-tile pilot) plus **PR #1083**
+  (`hud-g1ena.7`, distinct connecting-vs-degraded render treatment) supply the token-driven
+  transcript dim + the `⊘ disconnected — stream stale` marker line
+  (`PORTAL_DISCONNECT_MARKER_LINE`, `crates/tze_hud_projection/src/resident_grpc.rs`) carried
+  as a token-driven sentinel color run (`stale_marker_color`, no literal color; locked by
+  `degraded_state_emits_stale_marker_color_run`) and clearing the accent under redaction
+  (`resident_grpc.rs` "redacted lifecycle must clear the accent"). The orphan-path
+  `TileVisualHint::DisconnectionBadge` (`crates/tze_hud_scene/src/graph/leases.rs`,
+  `.../lease/orphan.rs`) marks the tile within one frame. The dedicated geometry-badge scene
+  node-type reframe (`hud-jgf41`) is subsumed by this marker+dim treatment; the spec's
+  "disconnect affordance / stale marker" requirement is satisfied by merged code.
 - [x] 6.3 Grace-expiry removal + resume verification (covers 3.2 headlessly, complements
   the already-done 4.6): `hud-xlx1r` (PR #974, merged) adds the grace-expiry-removal and
   disconnect→resume integration tests (see the §3.2/§5.1 test notes above).
@@ -81,3 +88,31 @@ badge — `hud-h3mvo` repaint is now merged via PR #978). 5.1/6.4 live evidence 
 the trigger wiring (6.1), forced-repaint visibility (`hud-h3mvo`), headless grace/resume
 proofs (6.3), and the live disconnect→resume capture are all in. The spec delta is sound and
 unchanged. (hud-jgf41 is the sole remaining blocker before archive.)
+
+## 7. Closeout (2026-07-11, hud-hpuzp)
+
+All gates satisfied — change verified, synced, and archived:
+
+- **1.1 validate** passes (`openspec validate portal-disconnect-resume-ux --strict` →
+  "Change 'portal-disconnect-resume-ux' is valid", openspec 1.3.1).
+- **Trigger + degradation** (§3.1/3.2, §6.1): production degrade trigger `hud-5i16d` (PR #973)
+  + lease-grace reaper `hud-i429x` (**PR #1102**) bound and remove the degraded window on the
+  orphan path; `mark_hud_disconnected`/`record_hud_connection` bookkeeping in
+  `crates/tze_hud_projection/src/authority.rs`.
+- **Visible degraded treatment** (§2.1/2.3, §6.2): token-driven stale marker + dim (**PR #878**,
+  **PR #1083**), forced repaint (`hud-h3mvo`, **PR #978**), `DisconnectionBadge` orphan hint —
+  the last §6 gap is closed; no requirement is unmet.
+- **Reconnect/resume** (§4.*): `record_hud_connection` clears the stale latch; `coalesce_key`
+  in-place continuation + `logical_unit_id` idempotency; fresh-lease-after-grace via
+  `SceneGraph::lease_is_active` (`hud-pk9pz`, PR #886); #1098 snapshot parity across the
+  disconnect boundary.
+- **5.1 live evidence** re-recorded on-device (autonomous Windows VM, resident-gRPC
+  first-class `PortalSurface` path) at
+  `docs/evidence/text-stream-portals/liveverify-disconnect-resume-20260711/` (**PR #1124**,
+  `hud-om69w`): baseline→stale→ungraceful-drop→SessionResume-within-grace→cleanup, checks 1–6
+  PASS with #1098 `portal_surfaces[].lifecycle` parity (A/B/C exactly once + D on resume); the
+  pixel-level render treatment stays headless-verified (check 7 DEFERRED — host capture limits
+  on the software-GPU VM), consistent with the §5.1(b) fidelity caveat.
+
+Synced the 3 ADDED + 1 MODIFIED requirements into
+`openspec/specs/text-stream-portals/spec.md` and archived the change dir.
