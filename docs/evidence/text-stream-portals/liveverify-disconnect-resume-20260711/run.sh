@@ -22,9 +22,12 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 : "${TZE_HUD_GRPC_TARGET:?set TZE_HUD_GRPC_TARGET=<vm-ip>:50051}"
 : "${TZE_HUD_PSK:?set TZE_HUD_PSK to the resident gRPC PSK}"
 
+# NB: agent-id defaults to agent-alpha in the driver — the config-registered
+# agent that is granted tile capabilities on the deployed host. Override via
+# AGENT_ID only if the target host registers a different agent.
 python3 "$HERE/disconnect_resume_driver.py" \
   --target "$TZE_HUD_GRPC_TARGET" \
-  --agent-id liveverify-disc-resume \
+  --agent-id "${AGENT_ID:-agent-alpha}" \
   --tab-width "${SCENE_W:-1280}" --tab-height "${SCENE_H:-800}" \
   --detect-wait-s "${DETECT_WAIT_S:-20}" \
   --settle-s "${SETTLE_S:-3}" \
