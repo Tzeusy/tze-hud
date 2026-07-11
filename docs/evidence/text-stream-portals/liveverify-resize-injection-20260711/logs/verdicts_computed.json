@@ -37,6 +37,7 @@
         "dh": 0.0
       }
     },
+    "members_scaled": false,
     "pass": false
   },
   "check2_republish_rewrap": {
@@ -67,7 +68,9 @@
         "h": 34.0
       }
     },
-    "pass": true
+    "bounds_stable": true,
+    "resize_applied": false,
+    "pass": "n/a (no resize to persist)"
   },
   "check3_keyboard_resize": {
     "frame_dw": 0.0,

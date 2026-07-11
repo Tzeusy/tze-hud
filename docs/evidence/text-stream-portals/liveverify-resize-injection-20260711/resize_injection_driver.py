@@ -521,15 +521,25 @@ def compute_verdicts(base, pre_move, after_move, ptr, ptr_rep, persist, kbd, kbd
         "pass": bool(abs(_delta(pm, mv, "x") or 0) > 5.0 or abs(_delta(pm, mv, "y") or 0) > 5.0),
     }
 
-    # Check 1: pointer resize grew the frame + members (vs pristine baseline).
+    # Check 1: pointer resize grew the frame AND scaled the members (vs pristine
+    # baseline). A whole-portal resize (commit_portal_group_resize) scales every
+    # group member, so require frame growth on BOTH axes AND that the scrollable
+    # panes + capture backstop each grew — a frame-width-only delta with static
+    # members is NOT a valid whole-portal resize (Codex P2).
     pf = ptr["tiles"].get("frame")
     dw, dh = _delta(bf, pf, "w"), _delta(bf, pf, "h")
+    members = {r: {"dw": _delta(base["tiles"].get(r), ptr["tiles"].get(r), "w"),
+                   "dh": _delta(base["tiles"].get(r), ptr["tiles"].get(r), "h")}
+               for r in ("frame", "input_scroll", "output_scroll", "capture_backstop")}
+    members_scaled = all(
+        (members[r]["dw"] or 0) > 0.0 and (members[r]["dh"] or 0) > 0.0
+        for r in ("input_scroll", "output_scroll", "capture_backstop")
+    )
+    resize_applied = bool(dw and dh and dw > 5.0 and dh > 5.0 and members_scaled)
     v["check1_pointer_resize"] = {
-        "frame_dw": dw, "frame_dh": dh,
-        "members": {r: {"dw": _delta(base["tiles"].get(r), ptr["tiles"].get(r), "w"),
-                        "dh": _delta(base["tiles"].get(r), ptr["tiles"].get(r), "h")}
-                    for r in ("frame", "input_scroll", "output_scroll", "capture_backstop")},
-        "pass": bool(dw and dw > 5.0),
+        "frame_dw": dw, "frame_dh": dh, "members": members,
+        "members_scaled": members_scaled,
+        "pass": resize_applied,
     }
 
     # Check 2: republish re-wrap — transcript node width tracks resized pane.
@@ -541,14 +551,21 @@ def compute_verdicts(base, pre_move, after_move, ptr, ptr_rep, persist, kbd, kbd
         "pass": bool(base_w and rep_w and rep_w > base_w + 5.0),
     }
 
-    # Check 4: persistence — no snap-back between republish and settle.
+    # Check 4: persistence — no snap-back between republish and settle. Only
+    # meaningful once a resize actually applied: unchanged pre/post bounds are
+    # trivially equal when the portal was never resized, so gate the verdict on
+    # the check-1 resize (Codex P2). "n/a" when there is no resized geometry to
+    # test for snap-back.
     pr_f = ptr_rep["tiles"].get("frame")
     ps_f = persist["tiles"].get("frame")
+    bounds_stable = bool(pr_f and ps_f and pr_f.get("bounds") == ps_f.get("bounds"))
     v["check4_persistence"] = {
         "frame_republish": (pr_f or {}).get("bounds"),
         "frame_after_settle": (ps_f or {}).get("bounds"),
         "resize_band_node_after_settle": persist.get("resize_hit_node"),
-        "pass": bool(pr_f and ps_f and pr_f.get("bounds") == ps_f.get("bounds")),
+        "bounds_stable": bounds_stable,
+        "resize_applied": resize_applied,
+        "pass": (resize_applied and bounds_stable) if resize_applied else "n/a (no resize to persist)",
     }
 
     # Check 3: keyboard resize (width grow) vs persist baseline.
