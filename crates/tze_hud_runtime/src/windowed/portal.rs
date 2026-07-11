@@ -1844,7 +1844,7 @@ impl WinitApp {
         // the geometry actually changes, so the compositor re-primes the
         // truncation cache at the new geometry (hud-ghhxa — spec §6b.3) without
         // churning at a clamped boundary.
-        let members = {
+        let (members, portal_ids) = {
             let Some(state) = spin_acquire(&self.state.shared_state, INTERACTION_LOCK_BUDGET)
             else {
                 return true; // hotkey consumed even if local update fails
@@ -1852,7 +1852,22 @@ impl WinitApp {
             let Some(mut scene) = spin_acquire(&state.scene, INTERACTION_LOCK_BUDGET) else {
                 return true;
             };
-            commit_portal_group_resize(&mut scene, &group, old_rect, snapshot)
+            let members = commit_portal_group_resize(&mut scene, &group, old_rect, snapshot);
+            // Resolve each member's declared portal-surface identity while the
+            // scene lock is already held (hud-s62vv): a bridged (first-class-
+            // surface) member has no in-process tile, so
+            // `push_geometry_snapshot_for_tile`'s plain tile-id reverse lookup
+            // alone cannot find its projection below. Only the (small) identity
+            // string is extracted — never the whole `SceneGraph`.
+            let portal_ids: std::collections::HashMap<tze_hud_scene::SceneId, String> = members
+                .iter()
+                .filter_map(|member| {
+                    scene
+                        .portal_surface(member.tile_id)
+                        .map(|s| (member.tile_id, s.identity.session_id.clone()))
+                })
+                .collect();
+            (members, portal_ids)
         };
 
         // Broadcast a geometry snapshot per constituent surface to gRPC
@@ -1871,7 +1886,11 @@ impl WinitApp {
             );
             self.state
                 .portal_projection_driver
-                .push_geometry_snapshot_for_tile(member.tile_id, member.snapshot);
+                .push_geometry_snapshot_for_tile(
+                    member.tile_id,
+                    member.snapshot,
+                    portal_ids.get(&member.tile_id).map(String::as_str),
+                );
             let r = member.snapshot.rect;
             member_bounds.push((
                 member.tile_id,

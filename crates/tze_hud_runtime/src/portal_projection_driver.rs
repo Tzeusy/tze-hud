@@ -862,6 +862,18 @@ impl InProcessPortalDriver {
     /// called so the geometry batch is visible to the drain loop via
     /// `projected_portal_state`.
     ///
+    /// A projection routed to [`PortalTransport::ResidentGrpcBridge`] is
+    /// materialised solely over the resident gRPC bridge and has no in-process
+    /// tile (`entry.tile_scene_id` stays `None` — the visible tile lives in the
+    /// wire session server's scene instead), so the reverse-lookup above cannot
+    /// find it. `bridged_portal_id_hint` — the resized tile's declared
+    /// `PortalSurface::identity.session_id`, read from the scene by the caller
+    /// while it already held the scene lock — is decoded back to a
+    /// `projection_id` via [`tze_hud_projection::projection_id_from_portal_id`]
+    /// as a fallback, so a bridged (first-class-surface) portal's resize still
+    /// reaches `session.latest_geometry` instead of leaving every subsequent
+    /// republish on the adapter's declared attach-time bounds (hud-s62vv).
+    ///
     /// Returns `true` if a matching session was found and the snapshot was
     /// accepted (sequence is strictly newer than any existing batch entry).
     /// Returns `false` if no session owns `tile_id` or the snapshot is stale.
@@ -869,6 +881,7 @@ impl InProcessPortalDriver {
         &mut self,
         tile_id: SceneId,
         snapshot: tze_hud_input::GeometrySnapshot,
+        bridged_portal_id_hint: Option<&str>,
     ) -> bool {
         // Reverse-lookup: find the projection_id whose drive entry owns this tile.
         let projection_id = self
@@ -876,7 +889,15 @@ impl InProcessPortalDriver {
             .entries
             .iter()
             .find(|(_, entry)| entry.tile_scene_id == Some(tile_id))
-            .map(|(id, _)| id.clone());
+            .map(|(id, _)| id.clone())
+            .or_else(|| {
+                let candidate =
+                    tze_hud_projection::projection_id_from_portal_id(bridged_portal_id_hint?)?;
+                self.drive
+                    .entries
+                    .contains_key(candidate)
+                    .then(|| candidate.to_string())
+            });
 
         let Some(projection_id) = projection_id else {
             // No portal session is attached to this tile — nothing to do.
@@ -3386,7 +3407,7 @@ mod tests {
             gesture_active: false,
             sequence: 1,
         };
-        let pushed = driver.push_geometry_snapshot_for_tile(tile_id, geo_snapshot);
+        let pushed = driver.push_geometry_snapshot_for_tile(tile_id, geo_snapshot, None);
         assert!(
             pushed,
             "push_geometry_snapshot_for_tile must return true for a known tile \
@@ -3446,6 +3467,131 @@ mod tests {
             "geometry_batch must be None after the drain consumed it — \
              removing consume_geometry_batch from the drain causes stale re-delivery"
         );
+    }
+
+    /// hud-s62vv regression: a bridged (first-class-surface) projection's
+    /// resize geometry must still reach `session.latest_geometry` even though it
+    /// has no in-process tile.
+    ///
+    /// Live finding (R1, discovered from hud-8agm0's post-#1129 re-verify): on
+    /// the resident-gRPC-bridged first-class-surface path, a whole-portal resize
+    /// scales the outer tile/frame correctly (#1129), but the ADAPTER's next
+    /// republish reverts the transcript wrap width and hit regions back to
+    /// declared attach-time bounds — the opposite of what
+    /// `adapter_republish_after_resize_keeps_transcript_wrapped_to_resized_pane`
+    /// (in `tze_hud_runtime::windowed::portal`) asserts for the in-process path.
+    ///
+    /// Root cause: `push_geometry_snapshot_for_tile`'s reverse-lookup only ever
+    /// matched `entry.tile_scene_id` — populated exclusively by the in-process
+    /// tile-creation path (`drain_inner`'s `CreatePortalTile` arm). A bridged
+    /// entry's `tile_scene_id` stays `None` for its whole lifetime (materialised
+    /// solely over the bridge; see `bridged_projection_materialises_via_bridge_
+    /// and_suppresses_direct_path`), so every resize on a bridged portal's real
+    /// (wire-created) tile was silently dropped: `ProjectionAuthority::
+    /// push_geometry_snapshot` was NEVER called, `session.latest_geometry` stayed
+    /// `None` forever, and `ProjectedPortalState::resized_bounds` (which
+    /// `ResidentGrpcPortalAdapter::bounds_for_state` / `local_bounds_for_state`
+    /// read on every republish) fell back to the adapter's static declared
+    /// `expanded_bounds`/`compact_bounds` config on every single render.
+    ///
+    /// This reproduces the LIVE flow ordering: attach a projection, route it to
+    /// `PortalTransport::ResidentGrpcBridge` (no in-process tile is ever
+    /// created), then push a geometry snapshot for the tile id the wire session
+    /// server actually created (as the windowed resize handlers now resolve via
+    /// the resized tile's declared `PortalSurface::identity.session_id`, read
+    /// from the scene while the caller already held the scene lock). Before the
+    /// fix, `push_geometry_snapshot_for_tile` had no `bridged_portal_id_hint`
+    /// parameter at all and the reverse-lookup unconditionally returned `false`
+    /// for this tile; after the fix it decodes the hint back to the attached
+    /// `projection_id` and the push succeeds.
+    #[test]
+    fn bridged_resize_geometry_reaches_latest_geometry_via_portal_surface_hint() {
+        use tze_hud_input::{GeometrySnapshot, PortalRect};
+        use tze_hud_projection::ProjectedPortalPolicy;
+        use tze_hud_scene::SceneId;
+
+        let mut driver = InProcessPortalDriver::new();
+
+        let proj = "proj-bridged-resize";
+        let _token = attach_and_get_token(&mut driver, proj);
+        driver.attach_projection(proj, Vec::new());
+        driver.set_projection_transport(proj, PortalTransport::ResidentGrpcBridge);
+
+        // A bridged projection never gets an in-process tile — confirm the
+        // precondition this regression depends on (mirrors
+        // `bridged_projection_materialises_via_bridge_and_suppresses_direct_path`).
+        assert!(
+            driver
+                .drive
+                .entries
+                .get(proj)
+                .expect("drive entry must exist after attach")
+                .tile_scene_id
+                .is_none(),
+            "precondition: a bridged projection must have no in-process tile"
+        );
+
+        // The tile id the wire session server actually created for this bridged
+        // portal's transcript surface. The windowed runtime never learns this via
+        // `entry.tile_scene_id` (it stays `None`) — only via the resized tile's
+        // own scene-declared portal-surface identity.
+        let wire_tile_id = SceneId::new();
+        let geo_snapshot = GeometrySnapshot {
+            portal_id_hash: 0,
+            rect: PortalRect {
+                x: 10.0,
+                y: 20.0,
+                width: 640.0,
+                height: 400.0,
+            },
+            gesture_active: false,
+            sequence: 1,
+        };
+
+        // Pre-fix behaviour: with no hint (or a stale/unrelated one), the tile is
+        // unresolvable and the push is correctly rejected — a resize must never
+        // be attributed to the wrong (or no) projection.
+        assert!(
+            !driver.push_geometry_snapshot_for_tile(wire_tile_id, geo_snapshot, None),
+            "a tile with no matching in-process entry and no portal-surface hint \
+             must not resolve to any projection"
+        );
+
+        // The fix: the resized tile's declared portal-surface identity (what the
+        // adapter stamps as `PortalIdentity::session_id` via
+        // `portal_id_for_projection`, RFC 0013 §7.2) decodes back to the attached
+        // `projection_id` and the push now succeeds.
+        let portal_id_hint = format!("text-stream://projection/{proj}");
+        assert!(
+            driver.push_geometry_snapshot_for_tile(
+                wire_tile_id,
+                geo_snapshot,
+                Some(&portal_id_hint)
+            ),
+            "push_geometry_snapshot_for_tile must resolve a bridged tile via its \
+             portal-surface identity hint — the producer wiring is broken (or was \
+             never extended to the bridged transport) if this fails"
+        );
+
+        // Consumer-side proof: `session.latest_geometry` (durable, unlike the
+        // transient `pending_geometry_batch`) now carries the resize, so
+        // `ProjectedPortalState::resized_bounds` — the exact field
+        // `ResidentGrpcPortalAdapter::bounds_for_state` /
+        // `local_bounds_for_state` read on every republish — reflects the new
+        // size instead of falling back to the adapter's static declared bounds.
+        let state = driver
+            .authority
+            .projected_portal_state(proj, &ProjectedPortalPolicy::permit_all())
+            .expect("session must exist");
+        let resized = state.resized_bounds.expect(
+            "resized_bounds must be Some after a bridged resize reaches \
+             session.latest_geometry — a None here reproduces hud-s62vv: every \
+             subsequent adapter republish would fall back to declared \
+             attach-time config bounds for both the transcript wrap width and \
+             every derived hit region (composer, resize band)",
+        );
+        assert_eq!(resized.width_px, 640);
+        assert_eq!(resized.height_px, 400);
     }
 
     /// hud-ttq97: verify that a drained `RenderPortal` update with a known
