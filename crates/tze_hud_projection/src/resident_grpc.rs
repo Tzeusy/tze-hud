@@ -1995,6 +1995,12 @@ fn portal_markdown_with_spans(
             // itself is unaffected either way — it is already a separate,
             // always-visible bottom-pinned overlay (hud-f6zfa) that never rode
             // this markdown blob.
+            //
+            // hud-ycurc: emit the input-status lines (pending HUD input count /
+            // last input feedback) HERE, before the composer status, so the
+            // composer status remains the trailing tail-anchored-safe line even
+            // when those fields are populated.
+            push_input_status_lines(&mut result, state);
             push_line(&mut result, "");
             if is_connection_degraded(state) {
                 // §2: clear live activity/typing/composer-ready signals on
@@ -2020,16 +2026,32 @@ fn portal_markdown_with_spans(
                 .map(|unit| unit.output_text.as_str())
                 .unwrap_or("compact projection affordance");
             push_line(&mut result, &clamp_one_line(preview, 160));
+            // Collapsed has no composer status line, so the input-status lines
+            // keep their trailing position after the compact preview (unchanged
+            // from before hud-ycurc).
+            push_input_status_lines(&mut result, state);
         }
     }
 
+    (truncate_utf8(result, MAX_PORTAL_MARKDOWN_BYTES), turn_spans)
+}
+
+/// Emit the ambient input-status lines — the pending-HUD-input count and the
+/// last composer-input feedback — when present.
+///
+/// hud-ycurc: these are pushed BEFORE the composer status line in the Expanded
+/// arm so the composer status stays the trailing, tail-anchored-safe line
+/// (hud-0e44r) even when these fields are populated. They previously trailed the
+/// whole blob after the presentation match, displacing the composer status from
+/// the guaranteed-visible tail. In the Collapsed arm (no composer status line)
+/// they follow the compact preview.
+fn push_input_status_lines(result: &mut String, state: &ProjectedPortalState) {
     if let Some(pending) = state.pending_input_count {
-        push_line(&mut result, &format!("pending HUD input: {pending}"));
+        push_line(result, &format!("pending HUD input: {pending}"));
     }
     if let Some(feedback) = &state.last_input_feedback {
-        push_line(&mut result, &composer_feedback_line(feedback));
+        push_line(result, &composer_feedback_line(feedback));
     }
-    (truncate_utf8(result, MAX_PORTAL_MARKDOWN_BYTES), turn_spans)
 }
 
 /// Human-legible one-line status for the last composer submission.
@@ -4892,12 +4914,63 @@ mod tests {
             "composer status line must render AFTER every INPUT-history entry so it \
              is the tail-anchored-safe last line: {md}"
         );
-        // And it must be the trailing content overall (this fixture carries no
-        // `pending_input_count` / `last_input_feedback`, the only two lines that
-        // can legitimately follow it) — no other line follows it.
+        // And it must be the trailing content overall — no other line follows
+        // it. Since hud-ycurc the input-status lines (`pending_input_count` /
+        // `last_input_feedback`) are emitted BEFORE the composer status, so
+        // nothing legitimately follows it in the Expanded arm (see
+        // `composer_status_line_stays_last_with_pending_input_and_feedback`).
         assert!(
             md.trim_end().ends_with("composer: ready"),
             "composer status line must be the LAST line of the rendered markdown: {md}"
+        );
+    }
+
+    /// hud-ycurc regression: the composer status line must remain the LAST line
+    /// of the Expanded arm even when `pending_input_count` and
+    /// `last_input_feedback` are populated. Before this fix those lines were
+    /// emitted after the presentation match — i.e. AFTER the composer status —
+    /// so they became the `TailAnchored` truncation-safe tail instead of the
+    /// composer status, weakening hud-0e44r's always-visible-composer guarantee.
+    #[test]
+    fn composer_status_line_stays_last_with_pending_input_and_feedback() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+
+        let mut state = make_expanded_interaction_state("portal-input-status");
+        state.visible_transcript = vec![transcript_unit_text(
+            1,
+            OutputKind::Assistant,
+            "agent says hi",
+        )];
+        state.pending_input_count = Some(3);
+        state.last_input_feedback = Some(PortalInputFeedback {
+            projection_id: "portal-input-status".to_string(),
+            input_id: "input-1".to_string(),
+            feedback_state: PortalInputFeedbackState::Accepted,
+            error_code: None,
+            pending_input_count: 0,
+            pending_input_bytes: 0,
+            status_summary: String::new(),
+        });
+
+        let md = adapter.render_portal_markdown(&state, 0);
+
+        // Both input-status lines render...
+        let pending_pos = md
+            .find("pending HUD input: 3")
+            .expect("pending-input line rendered");
+        let composer_pos = md
+            .find("composer: ready")
+            .expect("composer status line rendered");
+        // ...BEFORE the composer status line...
+        assert!(
+            pending_pos < composer_pos,
+            "input-status lines must precede the composer status line: {md}"
+        );
+        // ...and the composer status is still the final line.
+        assert!(
+            md.trim_end().ends_with("composer: ready"),
+            "composer status line must be the LAST line even with pending/feedback: {md}"
         );
     }
 
