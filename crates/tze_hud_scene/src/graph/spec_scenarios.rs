@@ -731,7 +731,14 @@ fn cross_namespace_tile_access_denied() {
 }
 
 // ─ Struct size budgets (spec line 307, 311) ───────────────────────────────
-// Tile < 200 bytes, Node < 150 bytes
+// Tile < 200 bytes, Node < 160 bytes
+//
+// hud-yfj8u: the Node budget was raised 150 → 160 when the additive
+// `layout: NodeLayout` field (vertical-flow layout mode) grew `Node` from 144 to
+// 152 bytes — one enum byte plus 8-aligned padding, as `Node` sat exactly on an
+// 8-byte boundary. 64 nodes/tile ≈ 9.9 KB structural overhead (still ~the RFC
+// 0001 §8/§10 ~9.8 KB target). See §Struct Overhead Budgets in the scene-graph
+// spec (amended in the portal-vertical-flow-layout change).
 
 #[test]
 fn tile_struct_size_under_200_bytes() {
@@ -748,8 +755,9 @@ fn node_struct_size_under_150_bytes() {
     use std::mem::size_of;
     let node_size = size_of::<Node>();
     assert!(
-        node_size < 150,
-        "Node struct is {node_size} bytes, must be < 150 bytes per RFC 0001 §8"
+        node_size < 160,
+        "Node struct is {node_size} bytes, must be < 160 bytes per RFC 0001 §8 \
+         (raised 150 → 160 for the additive NodeLayout field, hud-yfj8u)"
     );
 }
 
