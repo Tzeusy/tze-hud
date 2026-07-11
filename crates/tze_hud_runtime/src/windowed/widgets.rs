@@ -27,6 +27,71 @@ use crate::widget_hover::{
 /// `Some(text)` supplies non-chat composers with their own hint copy.
 const COMPOSER_DEFAULT_PLACEHOLDER: &str = "Type a message…";
 
+/// Window-space anchor rect for the OS IME candidate window, in physical pixels
+/// (hud-hxhnt finding 3). `x`/`y` is the caret's top-left; `height` is the caret
+/// line height. Width is a fixed 1px (the caret is a thin vertical bar).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct ImeCaretAnchor {
+    pub(super) x: f32,
+    pub(super) y: f32,
+    pub(super) height: f32,
+}
+
+/// Compute the IME candidate-window anchor for a composer caret (hud-hxhnt
+/// finding 3), given the node's window-space region and the compositor-published
+/// shaped layout. Pure geometry so it is unit-testable without a live window.
+///
+/// - `region_{x,y,w,h}` — the composer node's window-space bounds (tile origin +
+///   tile-local HitRegion bounds).
+/// - `content_inset` — the composer's interior text inset (`portal.spacing.content_inset_px`).
+/// - `layout` — the FRESH published `ComposerVisualLayout` (caller filters on
+///   `text_len`); `None` when none is available yet.
+/// - `cursor_byte` — the caret's raw-draft byte offset.
+///
+/// With a fresh layout the caret x is the shaped `x_at_cursor` (offset by the
+/// inset) and, when the layout carries input-box geometry (multi-line profile),
+/// the vertical position is the caret's visual row within that box. Without a
+/// layout (first post-focus frame, or a single-line profile before its layout is
+/// published) the anchor falls back to the node interior — still near the caret,
+/// never the window origin. The x is clamped into the node interior so a long
+/// draft cannot push the anchor outside the composer region.
+pub(super) fn composer_ime_caret_anchor(
+    region_x: f32,
+    region_y: f32,
+    region_w: f32,
+    region_h: f32,
+    content_inset: f32,
+    layout: Option<&tze_hud_input::ComposerVisualLayout>,
+    cursor_byte: usize,
+) -> ImeCaretAnchor {
+    let (caret_x, caret_top, caret_h) = match layout {
+        Some(l) => {
+            let x = content_inset + l.x_at_cursor(cursor_byte);
+            let (top, h) = match l.input_box {
+                Some(bx) => {
+                    let row = l.line_of(cursor_byte).unwrap_or(0);
+                    (bx.row0_top + row as f32 * bx.line_height, bx.line_height)
+                }
+                // Single-line / no box geometry: caret spans the interior.
+                None => (content_inset, (region_h - content_inset * 2.0).max(1.0)),
+            };
+            (x, top, h)
+        }
+        None => (
+            content_inset,
+            (region_h - content_inset).max(0.0),
+            content_inset.max(1.0),
+        ),
+    };
+
+    let caret_x = caret_x.clamp(content_inset, (region_w - content_inset).max(content_inset));
+    ImeCaretAnchor {
+        x: region_x + caret_x,
+        y: region_y + caret_top,
+        height: caret_h.max(1.0),
+    }
+}
+
 /// Resolve a composer's placeholder hint from its `HitRegionNode` override
 /// (as reported by `composer_draft_snapshot`), falling back to
 /// [`COMPOSER_DEFAULT_PLACEHOLDER`] when unset.
@@ -82,7 +147,95 @@ impl WinitApp {
             if let Some(window) = &self.state.window {
                 window.request_redraw();
             }
+            // The caret may have moved; re-anchor the OS IME candidate window to
+            // it so CJK/other input methods track the caret (hud-hxhnt finding 3).
+            self.update_composer_ime_cursor_area();
         }
+    }
+
+    /// Anchor the OS IME candidate window to the shaped composer caret position
+    /// (hud-hxhnt finding 3).
+    ///
+    /// `set_ime_allowed(true)` is set at composer focus (see
+    /// [`super::lifecycle::focus_window_for_text_input`]) but `set_ime_cursor_area`
+    /// was never called, so CJK/accented candidate windows floated at the window
+    /// origin instead of following the caret. This re-anchors the IME area on
+    /// every composer caret move. Position-only: `Ime::Preedit` composition stays
+    /// v1-reserved per the input-model spec — this only tells the OS *where* to
+    /// place the candidate window, not how to render preedit.
+    ///
+    /// Geometry is single-authority: the caret x, visual row, and input-box come
+    /// from the compositor-published `composer_visual_layout` (the same slot the
+    /// pointer hit-test and vertical caret movement read), never re-derived here.
+    /// When no fresh layout is published yet (e.g. the first frame after focus, or
+    /// a single-line profile before its layout is published) the area is anchored
+    /// to the composer node's interior as a safe fallback — still near the caret,
+    /// never the window origin. Best-effort: a momentarily-contended scene lock
+    /// skips this update and the next caret move refreshes it.
+    pub(super) fn update_composer_ime_cursor_area(&self) {
+        let Some(window) = self.state.window.as_ref() else {
+            return;
+        };
+        let Some((text, cursor_byte, _, _, node_id, _)) =
+            self.state.input_processor.composer_draft_snapshot()
+        else {
+            return;
+        };
+        let Some(tile_id) = self.composer_focused_tile_id() else {
+            return;
+        };
+
+        // Resolve the composer node's window-space region: tile origin + the
+        // node's tile-local HitRegion bounds (the inverse of the pointer path's
+        // `tile_local_pointer_xy`). Scene lock is best-effort — skip on contention.
+        let Ok(state) = self.state.shared_state.try_lock() else {
+            return;
+        };
+        let Ok(scene) = state.scene.try_lock() else {
+            return;
+        };
+        let Some(tile) = scene.tiles.get(&tile_id) else {
+            return;
+        };
+        let Some(node) = scene.nodes.get(&node_id) else {
+            return;
+        };
+        let tze_hud_scene::NodeData::HitRegion(hr) = &node.data else {
+            return;
+        };
+        let region_x = tile.bounds.x + hr.bounds.x;
+        let region_y = tile.bounds.y + hr.bounds.y;
+        let region_w = hr.bounds.width.max(1.0);
+        let region_h = hr.bounds.height.max(1.0);
+        drop(scene);
+        drop(state);
+
+        let content_inset =
+            tze_hud_config::resolve_portal_tokens(&self.state.global_tokens).content_inset_px;
+
+        // Prefer the shaped caret geometry from the published layout; fall back to
+        // the node interior when no fresh layout exists.
+        let layout = self
+            .state
+            .composer_visual_layout
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .filter(|l| l.text_len == text.len() && !l.lines.is_empty());
+
+        let anchor = composer_ime_caret_anchor(
+            region_x,
+            region_y,
+            region_w,
+            region_h,
+            content_inset,
+            layout.as_ref(),
+            cursor_byte,
+        );
+        window.set_ime_cursor_area(
+            winit::dpi::PhysicalPosition::new(anchor.x, anchor.y),
+            winit::dpi::PhysicalSize::new(1.0_f32, anchor.height),
+        );
     }
 
     /// Clear the local composer echo (called on blur, submit, cancel).
@@ -466,6 +619,90 @@ mod tests {
     #[test]
     fn resolve_composer_placeholder_empty_string_opts_out() {
         assert_eq!(resolve_composer_placeholder(Some(String::new())), None);
+    }
+
+    // ─── composer_ime_caret_anchor (hud-hxhnt finding 3) ──────────────────
+
+    /// With NO published layout the IME anchor falls back to the node interior
+    /// (region origin + inset), NOT the window origin — the whole point of the
+    /// fix (a candidate window must never float at (0,0)).
+    #[test]
+    fn ime_anchor_falls_back_to_node_interior_without_layout() {
+        let a = composer_ime_caret_anchor(100.0, 200.0, 400.0, 40.0, 8.0, None, 3);
+        assert_eq!(a.x, 108.0, "x = region_x + inset");
+        assert_eq!(a.y, 232.0, "y = region_y + (region_h - inset)");
+        assert!(a.height >= 1.0);
+    }
+
+    /// A single-line-style layout (glyph_x, no input_box) anchors the caret at
+    /// the SHAPED x for the cursor byte, offset by the content inset.
+    #[test]
+    fn ime_anchor_uses_shaped_caret_x_single_line() {
+        let layout = tze_hud_input::ComposerVisualLayout {
+            lines: vec![tze_hud_input::ComposerVisualLine {
+                start_byte: 0,
+                end_byte: 3,
+                // 'a','b','c' glyph boundaries + trailing width sentinel.
+                glyph_x: vec![(0, 0.0), (1, 10.0), (2, 20.0), (3, 30.0)],
+            }],
+            text_len: 3,
+            input_box: None,
+        };
+        // Caret before byte 2 → shaped x 20.0; + inset 8 → 28; + region_x 100 → 128.
+        let a = composer_ime_caret_anchor(100.0, 200.0, 400.0, 40.0, 8.0, Some(&layout), 2);
+        assert_eq!(a.x, 128.0);
+        assert_eq!(a.y, 208.0, "single-line caret top = region_y + inset");
+    }
+
+    /// A multi-line layout with input-box geometry anchors the caret at its
+    /// VISUAL ROW (row0_top + row*line_height) so the candidate window tracks the
+    /// correct wrapped line.
+    #[test]
+    fn ime_anchor_uses_visual_row_multi_line() {
+        let line0 = tze_hud_input::ComposerVisualLine {
+            start_byte: 0,
+            end_byte: 3,
+            glyph_x: vec![(0, 0.0), (1, 10.0), (2, 20.0), (3, 30.0)],
+        };
+        let line1 = tze_hud_input::ComposerVisualLine {
+            start_byte: 3,
+            end_byte: 6,
+            glyph_x: vec![(3, 0.0), (4, 10.0), (5, 20.0), (6, 30.0)],
+        };
+        let layout = tze_hud_input::ComposerVisualLayout {
+            lines: vec![line0, line1],
+            text_len: 6,
+            input_box: Some(tze_hud_input::ComposerInputBoxGeometry {
+                box_top: 0.0,
+                box_height: 40.0,
+                row0_top: 4.0,
+                line_height: 18.0,
+                first_visible_row: 0,
+                visible_rows: 2,
+            }),
+        };
+        // Cursor at byte 4 → row 1; y = region_y + row0_top + 1*line_height.
+        let a = composer_ime_caret_anchor(100.0, 200.0, 400.0, 60.0, 8.0, Some(&layout), 4);
+        assert_eq!(a.y, 200.0 + 4.0 + 18.0);
+        assert_eq!(a.height, 18.0, "caret height = row line_height");
+    }
+
+    /// The caret x is clamped into the node interior so a long draft (shaped x
+    /// past the region) cannot push the IME anchor outside the composer.
+    #[test]
+    fn ime_anchor_clamps_x_into_region() {
+        let layout = tze_hud_input::ComposerVisualLayout {
+            lines: vec![tze_hud_input::ComposerVisualLine {
+                start_byte: 0,
+                end_byte: 1,
+                glyph_x: vec![(0, 0.0), (1, 9999.0)],
+            }],
+            text_len: 1,
+            input_box: None,
+        };
+        let a = composer_ime_caret_anchor(100.0, 200.0, 400.0, 40.0, 8.0, Some(&layout), 1);
+        // region_w 400, inset 8 → max x = region_x + (400 - 8) = 492.
+        assert_eq!(a.x, 492.0);
     }
 
     #[test]
