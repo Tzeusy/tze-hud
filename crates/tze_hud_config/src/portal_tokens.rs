@@ -1455,6 +1455,10 @@ const PORTAL_TOKEN_DEFAULT_STRINGS: &[(&str, &str)] = &[
         defaults::TRANSCRIPT_FONT_SIZE,
     ),
     (
+        PORTAL_TOKEN_TRANSCRIPT_SYSTEM_COLOR,
+        defaults::TRANSCRIPT_SYSTEM_COLOR,
+    ),
+    (
         PORTAL_TOKEN_TRANSCRIPT_DIM_TEXT_COLOR,
         defaults::TRANSCRIPT_DIM_TEXT_COLOR,
     ),
@@ -2530,24 +2534,167 @@ mod tests {
 
     // ── Resolved string map (handshake delivery, hud-16um0) ───────────────
 
-    /// Coverage tripwire: the string-map table must pair every field the
-    /// resolver reads. If a token is added to `resolve_portal_tokens` without a
-    /// `PORTAL_TOKEN_DEFAULT_STRINGS` entry, this count check fails and forces
-    /// the table (and thus the handshake payload) to be updated.
+    /// Coverage tripwire: the string-map table must pair every field
+    /// `PortalPartTokens` has.
+    ///
+    /// hud-tcukq: the previous version of this test compared
+    /// `PORTAL_TOKEN_DEFAULT_STRINGS.len()` against a hardcoded `EXPECTED_KEYS`
+    /// magic number. That number was set to whatever the table's length
+    /// happened to be at the time it was written — it does NOT derive from
+    /// `PortalPartTokens` itself, so it cannot detect a NEW field being added
+    /// to the struct without a corresponding table entry: the table's `.len()`
+    /// just keeps matching its own stale count. This is exactly what happened
+    /// in PR #1152 (`transcript_system_color`, hud-26869): the struct gained a
+    /// new field (60 total), `resolve_portal_tokens` resolved it, but
+    /// `PORTAL_TOKEN_DEFAULT_STRINGS` was never updated (stuck at 59) — and
+    /// this "coverage" test kept passing because 59 == 59.
+    ///
+    /// Fix: destructure `PortalPartTokens` BY NAME with no `..` rest pattern.
+    /// Every field must be listed or the crate fails to COMPILE (E0027,
+    /// "pattern does not mention field `x`") the moment a new field is added
+    /// — a build-time guarantee, not a runtime count that can silently go
+    /// stale. `field_refs`' length is then a direct, compiler-verified count
+    /// of the fields just destructured (not a hand-typed literal), so
+    /// asserting the table's length against it is a real coverage check.
     #[test]
     fn resolve_portal_token_strings_covers_every_key() {
-        // Number of distinct portal token keys resolved by resolve_portal_tokens.
-        const EXPECTED_KEYS: usize = 59;
+        let PortalPartTokens {
+            frame_background,
+            frame_opacity,
+            frame_border_color,
+            header_text_color,
+            header_font_size_px,
+            composer_background,
+            composer_text_color,
+            composer_font_size_px,
+            composer_at_capacity_color,
+            transcript_background,
+            transcript_text_color,
+            transcript_font_size_px,
+            transcript_system_color,
+            transcript_dim_text_color,
+            transcript_dim_background,
+            stale_marker_color,
+            disconnect_badge_color,
+            disconnect_badge_width_px,
+            unread_indicator_color,
+            awaiting_reply_color,
+            empty_state_color,
+            connecting_marker_color,
+            activity_cue_color,
+            streaming_cursor_color,
+            delivery_inflight_color,
+            delivery_delivered_color,
+            delivery_failed_color,
+            timestamp_color,
+            timestamp_granularity,
+            lifecycle_active_color,
+            lifecycle_attached_color,
+            lifecycle_attention_color,
+            lifecycle_inactive_color,
+            lifecycle_accent_width_px,
+            divider_color,
+            unread_divider_color,
+            collapsed_background,
+            collapsed_text_color,
+            collapsed_font_size_px,
+            transition_in_ms,
+            transition_out_ms,
+            window_min_width_px,
+            window_min_height_px,
+            window_resize_step_px,
+            window_resize_affordance_px,
+            scroll_indicator_color,
+            scroll_indicator_width_px,
+            scroll_indicator_min_height_px,
+            composer_caret_color,
+            composer_selection_color,
+            composer_placeholder_color,
+            focus_ring_color,
+            focus_ring_width_px,
+            resize_grip_color,
+            resize_grip_hover_color,
+            resize_grip_size_px,
+            content_inset_px,
+            header_height_px,
+            section_gap_px,
+            transcript_max_measure_px,
+        } = PortalPartTokens::default();
+        let field_refs: &[&dyn std::any::Any] = &[
+            &frame_background,
+            &frame_opacity,
+            &frame_border_color,
+            &header_text_color,
+            &header_font_size_px,
+            &composer_background,
+            &composer_text_color,
+            &composer_font_size_px,
+            &composer_at_capacity_color,
+            &transcript_background,
+            &transcript_text_color,
+            &transcript_font_size_px,
+            &transcript_system_color,
+            &transcript_dim_text_color,
+            &transcript_dim_background,
+            &stale_marker_color,
+            &disconnect_badge_color,
+            &disconnect_badge_width_px,
+            &unread_indicator_color,
+            &awaiting_reply_color,
+            &empty_state_color,
+            &connecting_marker_color,
+            &activity_cue_color,
+            &streaming_cursor_color,
+            &delivery_inflight_color,
+            &delivery_delivered_color,
+            &delivery_failed_color,
+            &timestamp_color,
+            &timestamp_granularity,
+            &lifecycle_active_color,
+            &lifecycle_attached_color,
+            &lifecycle_attention_color,
+            &lifecycle_inactive_color,
+            &lifecycle_accent_width_px,
+            &divider_color,
+            &unread_divider_color,
+            &collapsed_background,
+            &collapsed_text_color,
+            &collapsed_font_size_px,
+            &transition_in_ms,
+            &transition_out_ms,
+            &window_min_width_px,
+            &window_min_height_px,
+            &window_resize_step_px,
+            &window_resize_affordance_px,
+            &scroll_indicator_color,
+            &scroll_indicator_width_px,
+            &scroll_indicator_min_height_px,
+            &composer_caret_color,
+            &composer_selection_color,
+            &composer_placeholder_color,
+            &focus_ring_color,
+            &focus_ring_width_px,
+            &resize_grip_color,
+            &resize_grip_hover_color,
+            &resize_grip_size_px,
+            &content_inset_px,
+            &header_height_px,
+            &section_gap_px,
+            &transcript_max_measure_px,
+        ];
         assert_eq!(
             PORTAL_TOKEN_DEFAULT_STRINGS.len(),
-            EXPECTED_KEYS,
-            "PORTAL_TOKEN_DEFAULT_STRINGS must contain one entry per resolved portal \
-             token; update it (and the Python mirror + drift-guard) when tokens change"
+            field_refs.len(),
+            "PORTAL_TOKEN_DEFAULT_STRINGS must contain one entry per PortalPartTokens \
+             field (currently {} fields, derived above from an exhaustive destructure \
+             that fails to compile if a field is missing); update the table (and the \
+             Python mirror + drift-guard) when tokens change",
+            field_refs.len(),
         );
         let resolved = resolve_portal_token_strings(&empty_map());
         assert_eq!(
             resolved.len(),
-            EXPECTED_KEYS,
+            field_refs.len(),
             "no duplicate keys in the table"
         );
     }
