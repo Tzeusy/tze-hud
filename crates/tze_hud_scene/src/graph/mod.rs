@@ -16,6 +16,20 @@ fn default_clock() -> Arc<dyn Clock> {
     Arc::new(SystemClock::new())
 }
 
+/// Process-wide counter handing out unique [`SceneGraph::instance_id`] values
+/// (hud-u4lq2).
+static NEXT_SCENE_INSTANCE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Allocate a fresh, process-unique scene instance id.
+///
+/// Used both by [`SceneGraph::new_with_clock`] and as the serde default for
+/// [`SceneGraph::instance_id`] (a deserialized/replayed graph is a DIFFERENT
+/// live instance from whatever produced the snapshot, so it gets its own id
+/// rather than carrying one over the wire).
+fn next_scene_instance_id() -> u64 {
+    NEXT_SCENE_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The root scene graph.
 ///
 /// Time-dependent operations (lease grant, tab creation timestamps, expiry
@@ -29,6 +43,24 @@ pub struct SceneGraph {
     /// deserialization.
     #[serde(skip, default = "default_clock")]
     clock: Arc<dyn Clock>,
+    /// Process-unique identity of THIS in-memory `SceneGraph` object, distinct
+    /// from [`Self::version`] (hud-u4lq2).
+    ///
+    /// `version` is a per-instance mutation counter that restarts at 0 for
+    /// every new `SceneGraph` — it is NOT a reliable "have I already seen this
+    /// exact scene" signal across different instances, because two unrelated
+    /// `SceneGraph`s can easily reach the identical `version` number (e.g. the
+    /// same setup sequence run twice). A long-lived `Compositor` that gets
+    /// handed a DIFFERENT `SceneGraph` (a fresh instance, not just a mutation of
+    /// the one it already saw) needs a signal that changes on EVERY new
+    /// instance regardless of its `version` value, so a stale "already primed"
+    /// guard (e.g. `Compositor::markdown_cache_scene_version`) cannot silently
+    /// skip priming for the new instance forever. Skipped during serialization
+    /// (a deserialized/replayed graph is a distinct live instance, not a
+    /// continuation of whatever produced the snapshot) — restored via a fresh
+    /// process-unique id on deserialize, same as a freshly constructed graph.
+    #[serde(skip, default = "next_scene_instance_id")]
+    pub instance_id: u64,
     /// All tabs, keyed by ID.
     pub tabs: HashMap<SceneId, Tab>,
     /// The currently active tab.
@@ -168,6 +200,7 @@ impl SceneGraph {
     pub fn new_with_clock(width: f32, height: f32, clock: Arc<dyn Clock>) -> Self {
         Self {
             clock,
+            instance_id: next_scene_instance_id(),
             tabs: HashMap::new(),
             active_tab: None,
             tiles: HashMap::new(),

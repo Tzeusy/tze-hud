@@ -811,19 +811,56 @@ const INLINE_PARSE_BYTE_THRESHOLD: usize = 4096;
 ///   *complete* snapshot; the reader `load()`s an [`Arc`] to one whole snapshot.
 ///   It sees either the old or the new cache, never a half-populated map.
 /// - **No stale clobber.** Each store is guarded by a monotonically increasing
-///   scene version ([`Self::published_version`]).  A late background result for
-///   an older scene version is dropped rather than overwriting a newer snapshot.
+///   internal epoch ([`Self::published_epoch`]).  A late background result for
+///   an older dispatch is dropped rather than overwriting a newer snapshot.
 /// - **Liveness fallback.** If the background parse has not completed when a
 ///   frame renders, the render path's existing cache-miss branch parses that one
 ///   node inline (non-lossy), so a racing frame is always correct — just not
 ///   zero-cost for that single frame until the swap lands.
+///
+/// # hud-u4lq2: why the ordering token is NOT `SceneGraph::version`
+///
+/// Earlier versions of this type gated the stale-clobber guard on the
+/// caller-supplied `scene.version` directly. That is broken: `SceneGraph::version`
+/// is only guaranteed monotonically increasing across the lifetime of ONE
+/// `SceneGraph` instance — it restarts at 0 for every newly constructed
+/// `SceneGraph`. A `Compositor` (and therefore its one long-lived
+/// `MarkdownPrimer`) that gets reused across multiple, independently
+/// constructed `SceneGraph`s — e.g. a benchmark/test loop that builds a fresh
+/// scene per scenario iteration while reusing one `Compositor`, such as
+/// `scroll_reshape_bench_hud991cj` — can dispatch a legitimate prime for a NEW
+/// scene whose `version` is *lower* than the value already recorded from a
+/// PRIOR scene. Gating on that raw number then makes `publish_if_newer` treat
+/// the new scene's correctly-parsed background result as "stale" and silently,
+/// PERMANENTLY drop it: the cache never gains an entry for that content's key,
+/// so every subsequent frame's `collect_text_items_from_node` lookup misses and
+/// pays a full synchronous re-parse forever (the documented-as-rare inline
+/// fallback in `renderer/text.rs`), matching the exact symptom reported in
+/// hud-u4lq2 (confirmed via `publish_if_newer` instrumentation: the dispatch for
+/// the 64KiB scenario carried `version=4` while `published_version` was already
+/// `5` from the prior scenario, so `4 < 5` unconditionally dropped it).
+///
+/// The fix: `MarkdownPrimer` now stamps every [`Self::prime`]/[`Self::reset`]
+/// dispatch with its OWN internally generated, ever-increasing epoch
+/// ([`Self::next_epoch`]) instead of trusting the caller's scene-relative
+/// number. An epoch depends only on call order on this primer, so it can never
+/// go backwards regardless of how many different `SceneGraph` instances share
+/// it over its lifetime.
 pub struct MarkdownPrimer {
     /// The current cache snapshot, swapped atomically.  Readers `load()` it
     /// lock-free; the commit thread and the background worker `store()` it.
     cache: Arc<arc_swap::ArcSwap<MarkdownCache>>,
-    /// Highest scene version for which a snapshot has been published.  Guards
-    /// against a late background result clobbering a newer snapshot.
-    published_version: Arc<std::sync::atomic::AtomicU64>,
+    /// Highest internal epoch for which a snapshot has been published. Guards
+    /// against a late background result clobbering a newer snapshot. See the
+    /// hud-u4lq2 note on [`MarkdownPrimer`] for why this is an
+    /// internally-generated epoch rather than the caller's scene version.
+    published_epoch: Arc<std::sync::atomic::AtomicU64>,
+    /// Source of the next epoch handed out by [`Self::prime`]/[`Self::reset`].
+    /// Bumped once per dispatch, before the work is queued/performed, so
+    /// ordering reflects dispatch order (not completion order) — the same
+    /// property the old scene-version-based scheme relied on, but without
+    /// depending on the caller's numbering being globally monotonic.
+    next_epoch: Arc<std::sync::atomic::AtomicU64>,
     /// Channel to the background parse thread.  `None` only after [`Self::new`]
     /// fails to spawn the thread (then everything falls back to inline parsing).
     tx: Option<std::sync::mpsc::Sender<PrimeRequest>>,
@@ -835,11 +872,11 @@ pub struct MarkdownPrimer {
 struct PrimeRequest {
     /// Snapshot to rebuild from (carry-forward source for already-parsed entries).
     base: Arc<MarkdownCache>,
-    /// Complete live job set for this scene version.  Each job carries its own
+    /// Complete live job set for this dispatch. Each job carries its own
     /// scoped token set (hud-3ryie), so the rebuild needs no ambient tokens.
     jobs: Vec<PrimeJob>,
-    /// Scene version this rebuild targets (store is gated on it).
-    scene_version: u64,
+    /// Internally-generated epoch this rebuild targets (store is gated on it).
+    epoch: u64,
 }
 
 impl Default for MarkdownPrimer {
@@ -852,11 +889,12 @@ impl MarkdownPrimer {
     /// Create a primer with an empty cache and a running background parse thread.
     pub fn new() -> Self {
         let cache = Arc::new(arc_swap::ArcSwap::from_pointee(MarkdownCache::new()));
-        let published_version = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let published_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let next_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let (tx, rx) = std::sync::mpsc::channel::<PrimeRequest>();
 
         let worker_cache = Arc::clone(&cache);
-        let worker_version = Arc::clone(&published_version);
+        let worker_epoch = Arc::clone(&published_epoch);
         let worker = std::thread::Builder::new()
             .name("md-prime".to_string())
             .spawn(move || {
@@ -865,19 +903,15 @@ impl MarkdownPrimer {
                 // meantime (stale-clobber guard).
                 while let Ok(req) = rx.recv() {
                     let next = MarkdownCache::rebuild_from(&req.base, &req.jobs);
-                    publish_if_newer(
-                        &worker_cache,
-                        &worker_version,
-                        Arc::new(next),
-                        req.scene_version,
-                    );
+                    publish_if_newer(&worker_cache, &worker_epoch, Arc::new(next), req.epoch);
                 }
             })
             .ok();
 
         Self {
             cache,
-            published_version,
+            published_epoch,
+            next_epoch,
             tx: tx_if_worker_spawned(tx, &worker),
             worker,
         }
@@ -895,8 +929,8 @@ impl MarkdownPrimer {
     }
 
     /// Prime the cache for `jobs` (the complete live `TextMarkdownNode` set for
-    /// `scene_version`), parsing any missing content off the commit thread when
-    /// it is large.
+    /// the current scene state), parsing any missing content off the commit
+    /// thread when it is large.
     ///
     /// Behaviour:
     /// - If nothing is missing and the live set already matches the current
@@ -908,7 +942,16 @@ impl MarkdownPrimer {
     /// - Otherwise the rebuild is dispatched to the background parse thread; the
     ///   render path's cache-miss fallback keeps frames correct until the swap
     ///   lands.
-    pub fn prime(&self, jobs: Vec<PrimeJob>, scene_version: u64) {
+    ///
+    /// Every call claims a fresh internal epoch up front (see the hud-u4lq2 note
+    /// on [`MarkdownPrimer`]) so the stale-clobber guard orders purely by this
+    /// primer's own call sequence, never by caller-supplied scene numbering.
+    pub fn prime(&self, jobs: Vec<PrimeJob>) {
+        let epoch = self
+            .next_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+
         let current = self.cache.load();
 
         // Compute the byte volume of content not yet present in the snapshot,
@@ -927,9 +970,9 @@ impl MarkdownPrimer {
 
         if exact_match {
             // Snapshot already correct for this live set — nothing to do.
-            // Still advance the published version so a later in-flight rebuild
-            // for an older version cannot clobber the current good snapshot.
-            bump_version_to(&self.published_version, scene_version);
+            // Still advance the published epoch so a later in-flight rebuild
+            // from an earlier dispatch cannot clobber the current good snapshot.
+            bump_version_to(&self.published_epoch, epoch);
             return;
         }
 
@@ -938,12 +981,7 @@ impl MarkdownPrimer {
         // a node disappearing or a tiny content edit.
         if missing_bytes <= INLINE_PARSE_BYTE_THRESHOLD || self.tx.is_none() {
             let next = MarkdownCache::rebuild_from(&current, &jobs);
-            publish_if_newer(
-                &self.cache,
-                &self.published_version,
-                Arc::new(next),
-                scene_version,
-            );
+            publish_if_newer(&self.cache, &self.published_epoch, Arc::new(next), epoch);
             return;
         }
 
@@ -952,7 +990,7 @@ impl MarkdownPrimer {
         let req = PrimeRequest {
             base: current.clone(),
             jobs,
-            scene_version,
+            epoch,
         };
         if let Some(tx) = &self.tx {
             if let Err(failed) = tx.send(req) {
@@ -962,14 +1000,14 @@ impl MarkdownPrimer {
                 let next = MarkdownCache::rebuild_from(&req.base, &req.jobs);
                 publish_if_newer(
                     &self.cache,
-                    &self.published_version,
+                    &self.published_epoch,
                     Arc::new(next),
-                    req.scene_version,
+                    req.epoch,
                 );
             }
         }
         // We deliberately do not block on completion.  The worker advances the
-        // published version on store; the render path falls back to inline parse
+        // published epoch on store; the render path falls back to inline parse
         // for any node not yet in the snapshot until the swap lands.
     }
 
@@ -980,17 +1018,17 @@ impl MarkdownPrimer {
     /// readers see a clean (cache-miss → inline-parse) state until the next
     /// prime lands.
     pub fn reset(&self) {
-        // Advance the published version so any in-flight background rebuild for
-        // the pre-reset scene cannot clobber this reset.
-        let v = self
-            .published_version
+        // Claim a fresh epoch so any in-flight background rebuild dispatched
+        // before this reset cannot clobber it.
+        let epoch = self
+            .next_epoch
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
         publish_if_newer(
             &self.cache,
-            &self.published_version,
+            &self.published_epoch,
             Arc::new(MarkdownCache::new()),
-            v,
+            epoch,
         );
     }
 
@@ -1027,30 +1065,37 @@ fn distinct_key_count(jobs: &[PrimeJob]) -> usize {
     keys.len()
 }
 
-/// Store `next` into `cache` iff `version` is newer than the last published
-/// version, then record `version` as published.
+/// Store `next` into `cache` iff `epoch` is newer than the last published
+/// epoch, then record `epoch` as published.
 ///
 /// This is the stale-clobber guard: a background rebuild that finishes after a
 /// newer snapshot has already been published is dropped instead of overwriting
 /// the newer data.  Uses a CAS loop so the commit thread and worker thread
 /// never lose a newer store to a race.
+///
+/// `epoch` must come from [`MarkdownPrimer`]'s own internally-generated
+/// [`MarkdownPrimer::next_epoch`] counter (see the hud-u4lq2 note on that
+/// type), never from caller-supplied scene numbering — the latter is only
+/// guaranteed monotonic within one `SceneGraph` instance's lifetime, and a
+/// `MarkdownPrimer` reused across instances would silently and permanently
+/// drop legitimate results once compared against a lower-numbered new scene.
 fn publish_if_newer(
     cache: &arc_swap::ArcSwap<MarkdownCache>,
     published: &std::sync::atomic::AtomicU64,
     next: Arc<MarkdownCache>,
-    version: u64,
+    epoch: u64,
 ) {
     use std::sync::atomic::Ordering;
     loop {
         let cur = published.load(Ordering::Acquire);
-        if version < cur {
+        if epoch < cur {
             // A newer snapshot already won — drop this stale rebuild.
             return;
         }
-        // Claim this version.  On success, publish.  `version == cur` is allowed
-        // (re-publish for the same version, e.g. removals-only after a parse) so
-        // the latest store for a version always wins.
-        match published.compare_exchange_weak(cur, version, Ordering::AcqRel, Ordering::Acquire) {
+        // Claim this epoch.  On success, publish.  `epoch == cur` is allowed
+        // (re-publish for the same epoch, e.g. removals-only after a parse) so
+        // the latest store for an epoch always wins.
+        match published.compare_exchange_weak(cur, epoch, Ordering::AcqRel, Ordering::Acquire) {
             Ok(_) => {
                 cache.store(next);
                 return;
@@ -1060,12 +1105,12 @@ fn publish_if_newer(
     }
 }
 
-/// Advance `published` to at least `version` without storing a new snapshot.
-fn bump_version_to(published: &std::sync::atomic::AtomicU64, version: u64) {
+/// Advance `published` to at least `epoch` without storing a new snapshot.
+fn bump_version_to(published: &std::sync::atomic::AtomicU64, epoch: u64) {
     use std::sync::atomic::Ordering;
     let mut cur = published.load(Ordering::Acquire);
-    while version > cur {
-        match published.compare_exchange_weak(cur, version, Ordering::AcqRel, Ordering::Acquire) {
+    while epoch > cur {
+        match published.compare_exchange_weak(cur, epoch, Ordering::AcqRel, Ordering::Acquire) {
             Ok(_) => return,
             Err(observed) => cur = observed,
         }
@@ -4123,7 +4168,7 @@ mod tests {
         let job = miss_job("**bold** text");
         let key = job.key;
 
-        primer.prime(vec![job], 1);
+        primer.prime(vec![job]);
 
         let snap = primer.load();
         let parsed = snap
@@ -4144,7 +4189,7 @@ mod tests {
         let job = miss_job(&big);
         let key = job.key;
 
-        primer.prime(vec![job], 1);
+        primer.prime(vec![job]);
 
         // The swap completes asynchronously; poll for it.
         let snap = wait_for_key(&primer, &key, 200);
@@ -4165,7 +4210,7 @@ mod tests {
         let key_a = job_a.key;
         let key_b = job_b.key;
 
-        primer.prime(vec![job_a.clone(), job_b], 1);
+        primer.prime(vec![job_a.clone(), job_b]);
         let snap = primer.load();
         assert!(snap.get_by_key(&key_a).is_some());
         assert!(snap.get_by_key(&key_b).is_some());
@@ -4178,7 +4223,7 @@ mod tests {
             content: None,
             tokens: Arc::new(MarkdownTokens::default()),
         };
-        primer.prime(vec![carry_a], 2);
+        primer.prime(vec![carry_a]);
         let snap = primer.load();
         assert!(
             snap.get_by_key(&key_a).is_some(),
@@ -4194,15 +4239,63 @@ mod tests {
     fn primer_reset_clears_snapshot() {
         let primer = MarkdownPrimer::new();
         let job = miss_job("# Heading");
-        primer.prime(vec![job], 1);
+        primer.prime(vec![job]);
         assert!(!primer.is_empty());
 
         primer.reset();
         assert!(primer.is_empty(), "reset must clear the snapshot");
     }
 
-    /// A stale background result for an older scene version must not clobber a
-    /// newer snapshot already published.  We exercise the guard directly via
+    /// hud-u4lq2 regression (primer-level): a `MarkdownPrimer` that has already
+    /// serviced many unrelated `prime()` dispatches (modeling a `Compositor`
+    /// reused across many prior scenes/content generations) must still land a
+    /// background-parsed snapshot for a brand-new large payload.
+    ///
+    /// Before the fix, `MarkdownPrimer::prime` trusted a caller-supplied
+    /// `scene_version: u64` as its stale-clobber ordering token
+    /// (`published_version`). That token is only meaningful if the caller's
+    /// numbering is globally monotonic across the primer's ENTIRE lifetime —
+    /// but callers legitimately reset their own numbering per `SceneGraph`
+    /// instance (`version` restarts at 0 for every new scene). A `Compositor`
+    /// reused across scenes (confirmed in `scroll_reshape_bench_hud991cj`)
+    /// could therefore dispatch a later, LOWER-numbered prime that
+    /// `publish_if_newer` would treat as stale and silently, permanently drop
+    /// — even though it was the most recent, correct dispatch.
+    ///
+    /// `prime()` no longer accepts a caller-supplied version at all (the API
+    /// changed as part of the fix): every dispatch claims a fresh internal
+    /// epoch from `MarkdownPrimer::next_epoch`, which can only ever increase.
+    /// This test proves that guarantee holds even after many prior dispatches.
+    #[test]
+    fn primer_lands_large_payload_after_many_prior_dispatches() {
+        let primer = MarkdownPrimer::new();
+
+        // Model many prior "scenes" worth of small (inline-path) dispatches —
+        // each one advances the primer's internal epoch, exactly as repeated
+        // commit-time primes would in a long-lived Compositor session.
+        for i in 0..50u32 {
+            primer.prime(vec![miss_job(&format!("prior scene {i}"))]);
+        }
+
+        // A brand-new large payload (background-thread path) must still land,
+        // not be dropped as "stale" relative to the prior dispatches.
+        let big = "# New Scene\n\n".to_string() + &"word **emphasis** ".repeat(2000);
+        assert!(big.len() > INLINE_PARSE_BYTE_THRESHOLD);
+        let job = miss_job(&big);
+        let key = job.key;
+        primer.prime(vec![job]);
+
+        let snap = wait_for_key(&primer, &key, 200);
+        let parsed = snap.get_by_key(&key).expect(
+            "large payload must land even after many prior prime() dispatches \
+                 -- hud-u4lq2 regression",
+        );
+        assert!(parsed.plain_text.contains("New Scene"));
+        assert!(parsed.plain_text.contains("emphasis"));
+    }
+
+    /// A stale background result for an older epoch must not clobber a newer
+    /// snapshot already published.  We exercise the guard directly via
     /// `publish_if_newer`.
     #[test]
     fn primer_stale_publish_does_not_clobber_newer() {
@@ -4210,14 +4303,14 @@ mod tests {
         let published = std::sync::atomic::AtomicU64::new(0);
         let tokens = MarkdownTokens::default();
 
-        // Publish version 5 with entry "new".
+        // Publish epoch 5 with entry "new".
         let mut newer = MarkdownCache::new();
         newer.prime("new", &tokens);
         let new_key = MarkdownCache::compute_key("new", &tokens);
         publish_if_newer(&cache, &published, Arc::new(newer), 5);
         assert!(cache.load().get_by_key(&new_key).is_some());
 
-        // A late version-3 rebuild (containing "old") must be dropped.
+        // A late epoch-3 rebuild (containing "old") must be dropped.
         let mut older = MarkdownCache::new();
         older.prime("old", &tokens);
         let old_key = MarkdownCache::compute_key("old", &tokens);
@@ -4244,7 +4337,7 @@ mod tests {
         // Seed an initial complete snapshot.
         let seed = miss_job("seed content");
         let seed_key = seed.key;
-        primer.prime(vec![seed], 1);
+        primer.prime(vec![seed]);
 
         let stop = Arc::new(AtomicBool::new(false));
         let reader_primer = Arc::clone(&primer);
@@ -4264,10 +4357,12 @@ mod tests {
             }
         });
 
-        // Hammer the primer with alternating live sets across versions.
+        // Hammer the primer with alternating live sets. Each `prime()` call
+        // claims a fresh, strictly-increasing internal epoch on its own
+        // (hud-u4lq2), so no caller-supplied version is needed here.
         for v in 2..200u64 {
             let content = format!("# Doc {v}\n\n{}", "body ".repeat(1000));
-            primer.prime(vec![miss_job(&content)], v);
+            primer.prime(vec![miss_job(&content)]);
         }
         stop.store(true, Ordering::Relaxed);
         reader.join().unwrap();
