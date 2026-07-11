@@ -426,10 +426,16 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
     while i < args.len() {
         match args[i].as_str() {
             "--help" | "-h" => {
+                // Same GUI-subsystem console fix as --print-attach-info
+                // (hud-b7c0m / hud-41q9t): bind stdout to the launching
+                // terminal before printing, else the help text is invisible
+                // on Windows. No-op elsewhere.
+                attach_parent_console();
                 print_help();
                 std::process::exit(0);
             }
             "--version" | "-V" => {
+                attach_parent_console();
                 print_version();
                 std::process::exit(0);
             }
@@ -1236,6 +1242,18 @@ mod tests {
             opts.print_attach_info,
             "--print-attach-info must set the flag"
         );
+    }
+
+    /// hud-41q9t: `--help`/`--version` now call `attach_parent_console()` before
+    /// printing, mirroring the `--print-attach-info` console fix from hud-b7c0m.
+    /// The two early-exit branches themselves call `std::process::exit` and
+    /// cannot be driven in-process, so this pins the one thing a unit test CAN
+    /// assert: the function is callable and a true no-op on this (non-Windows)
+    /// platform. The `#[cfg(windows)]` variant is covered by the windows-gnu
+    /// cross-target clippy/build gate instead.
+    #[test]
+    fn attach_parent_console_is_a_callable_noop_off_windows() {
+        attach_parent_console();
     }
 
     #[test]
