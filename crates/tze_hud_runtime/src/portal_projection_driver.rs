@@ -2212,21 +2212,25 @@ impl InProcessPortalDriver {
                 self.detach_projection(&proj_id);
                 continue;
             };
-            // In-transcript unread-divider liveness on a degraded repaint
-            // (hud-n95zc). This re-derivation reads `session.unread_output_count`
-            // fresh, which is a stale 0 whenever the portal's own prior due-loop
-            // drain already zeroed it (idle since, same premise the quiesce pass
-            // below relies on) — so `visible_unread_output_count` would read
-            // `Some(0)` and the divider would vanish from an otherwise still-live
-            // degraded repaint. Restore it from the last-materialised raw drained
-            // count the same way the quiesce pass does, mirroring
-            // `carry_drained_unread_count`'s ambient-count pattern for this field.
+            // Ambient + in-transcript unread liveness on a degraded repaint
+            // (hud-n95zc, hud-lylbz). This re-derivation reads
+            // `session.unread_output_count` fresh, which is a stale 0 whenever
+            // the portal's own prior due-loop drain already zeroed it (idle
+            // since, same premise the quiesce pass below relies on) — so both
+            // `unread_output_count` (the ambient "N unread" ticker) and
+            // `visible_unread_output_count` (the in-transcript divider) would
+            // read `Some(0)` and vanish from an otherwise still-live degraded
+            // repaint. Restore both from the last-materialised raw drained
+            // count the same way the quiesce pass does, via
+            // `carry_drained_unread_count`.
             if let Some(carried) = self
                 .drive
                 .entries
                 .get(&proj_id)
                 .map(|e| e.activity_cue_carried_unread)
             {
+                state.unread_output_count =
+                    carry_drained_unread_count(state.unread_output_count, carried);
                 state.visible_unread_output_count =
                     carry_drained_unread_count(state.visible_unread_output_count, carried);
             }
@@ -4624,6 +4628,171 @@ mod tests {
                     "the in-transcript unread divider must survive drain-then-render \
                      for a nonzero visible unread count; expected a \
                      `─── unread ───` marker, got content: {:?}",
+                    tm.content
+                );
+            }
+            other => panic!("expected TextMarkdown tile root, got {other:?}"),
+        }
+    }
+
+    /// Regression guard (hud-lylbz): the ambient unread-output-count indicator
+    /// must survive a forced degraded repaint that fires in the SAME
+    /// `drain_inner` cycle as the drain that produced it.
+    ///
+    /// hud-meqet carried `unread_output_count` forward across the due-loop's
+    /// own drain-then-render (see `drain_then_render_surfaces_live_unread_count`
+    /// above), and hud-n95zc later carried `visible_unread_output_count`
+    /// forward across the degraded-repaint pass too — but left the ambient
+    /// field out of that second fix. So when a connection drop lands between a
+    /// publish and the drain that consumes it, the due-loop drains the publish
+    /// (zeroing the session and painting the live count), then the
+    /// degraded-repaint pass — flagged before this cycle started — re-derives
+    /// state from the now-zeroed session and repaints the tile AGAIN, this
+    /// time reading a stale `Some(0)`. The final, visible tile paint is
+    /// whichever render happens last, so the ambient indicator is lost even
+    /// though the divider (hud-n95zc's field) survives. Fails before the fix
+    /// (final content omits "3 unread"), passes after.
+    #[test]
+    fn drain_then_degraded_repaint_same_cycle_preserves_ambient_unread_count() {
+        use tze_hud_projection::{AdapterGeometrySnapshot, AdapterPortalRect, ProjectionBounds};
+        use tze_hud_scene::NodeData;
+
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("test_degraded_unread"),
+            drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
+        };
+
+        let proj_id = "unread-degraded-proj";
+
+        // Attach.
+        let (attach_tx, mut attach_rx) =
+            tokio::sync::oneshot::channel::<Result<String, PortalOpRejection>>();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: proj_id.to_string(),
+            display_name: "Unread Degraded Projection".to_string(),
+            idempotency_key: None,
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
+            reply: attach_tx,
+        });
+        let owner_token = attach_rx
+            .try_recv()
+            .expect("reply must be sent synchronously")
+            .expect("Attach must be accepted");
+
+        // Publish three distinct (un-coalesced) outputs → unread_output_count = 3,
+        // queued as a due coalescer update that has NOT been drained yet.
+        for i in 0..3 {
+            let (pub_tx, mut pub_rx) =
+                tokio::sync::oneshot::channel::<Result<(), PortalOpRejection>>();
+            driver.dispatch_portal_op(PortalOp::PublishOutput {
+                projection_id: proj_id.to_string(),
+                owner_token: owner_token.clone(),
+                output_text: format!("line-{i}"),
+                logical_unit_id: None,
+                output_kind: None,
+                content_classification: None,
+                coalesce_key: None,
+                expects_reply: None,
+                reply: pub_tx,
+            });
+            pub_rx
+                .try_recv()
+                .expect("publish reply must be sent synchronously")
+                .expect("PublishOutput must be accepted");
+        }
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+        driver.authority_mut().push_geometry_snapshot(
+            proj_id,
+            AdapterGeometrySnapshot {
+                rect: AdapterPortalRect {
+                    x_px: 0,
+                    y_px: 0,
+                    width_px: 600,
+                    height_px: 200,
+                },
+                gesture_active: false,
+                sequence: 1,
+            },
+        );
+
+        // Latch the connection degraded BEFORE the drain that consumes the
+        // still-pending publish, so the forced degraded-repaint pass fires in
+        // the SAME `drain_inner` cycle as the due-loop drain — the production
+        // race hud-lylbz targets (a drop landing between a publish and the
+        // drain that consumes it).
+        assert!(
+            driver.mark_projection_disconnected_at(proj_id, 150),
+            "the drop must latch the entry disconnected and flag a degraded repaint"
+        );
+        assert!(
+            driver
+                .drive
+                .entries
+                .get(proj_id)
+                .expect("drive entry must exist after attach")
+                .needs_degraded_repaint,
+            "the drop must flag the entry for a forced degraded repaint"
+        );
+
+        // Single drain: the due-loop drains the pending publish (zeroing the
+        // session and painting "3 unread"), THEN — still within this call —
+        // the forced degraded-repaint pass re-derives state from the
+        // now-zeroed session and repaints the tile again.
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+
+        // Confirm the degraded pass actually fired in this cycle (one-shot
+        // flag consumed) — otherwise this test would pass vacuously without
+        // ever exercising the degraded-repaint carry-forward.
+        assert!(
+            !driver
+                .drive
+                .entries
+                .get(proj_id)
+                .expect("drive entry must still exist after drain")
+                .needs_degraded_repaint,
+            "the forced degraded repaint must have consumed its one-shot flag \
+             within this same drain cycle"
+        );
+
+        // The FINAL painted tile (post degraded-repaint, which runs last and
+        // wins) must still carry the live drained count — not the stale
+        // `Some(0)` the degraded pass would otherwise re-derive from the
+        // now-zeroed session.
+        let tile_id = driver
+            .drive
+            .entries
+            .get(proj_id)
+            .expect("drive entry must still exist after drain")
+            .tile_scene_id
+            .expect("drain must create a portal tile in the scene");
+        let root_id = scene
+            .tiles
+            .get(&tile_id)
+            .expect("portal tile must exist in scene")
+            .root_node
+            .expect("portal tile must have a painted root node");
+        match &scene.nodes.get(&root_id).unwrap().data {
+            NodeData::TextMarkdown(tm) => {
+                assert!(
+                    tm.content.contains("3 unread"),
+                    "the ambient unread indicator must survive a same-cycle \
+                     degraded repaint; expected a `3 unread` line, got content: {:?}",
                     tm.content
                 );
             }
