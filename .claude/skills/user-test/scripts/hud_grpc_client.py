@@ -121,16 +121,23 @@ def _blake3_digest_bytes(data: bytes) -> bytes:
     helper on the fly: that hid a slow (2s+ warm cache) crates.io network
     dependency behind a "pure Python" surface and broke offline. Fail fast with
     an actionable message instead.
+
+    Catches the broad ``ImportError`` rather than only ``ModuleNotFoundError``:
+    ``blake3`` is a compiled Rust extension, so a present-but-broken install
+    (binary/ABI mismatch, missing shared library, Windows DLL load failure)
+    raises a bare ``ImportError`` — which must produce the same actionable
+    message, not propagate raw.
     """
     try:
         import blake3  # type: ignore
-    except ModuleNotFoundError as exc:
+    except ImportError as exc:
         raise RuntimeError(
-            "BLAKE3 digest requires the 'blake3' Python package. "
-            "Install it with: pip install blake3  "
-            "(or run this script via 'uv run', which installs the PEP-723 "
-            "dependencies automatically). Required for avatar/image digest "
-            "verification."
+            "BLAKE3 digest requires a working 'blake3' Python package, but it is "
+            "missing or failed to load (it is a compiled extension, so a broken "
+            "wheel raises ImportError). Install it with: pip install blake3  "
+            "(add --force-reinstall if a broken wheel is already present, or run "
+            "this script via 'uv run', which installs the PEP-723 dependencies "
+            "automatically). Required for avatar/image digest verification."
         ) from exc
 
     return blake3.blake3(data).digest()
