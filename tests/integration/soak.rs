@@ -420,6 +420,7 @@ async fn update_tile_content(
                             proto::SetTileRootMutation {
                                 tile_id: tile_id_bytes,
                                 node: Some(proto::NodeProto {
+                                    layout: 0,
                                     id: vec![],
                                     data: Some(proto::node_proto::Data::SolidColor(
                                         proto::SolidColorNodeProto {

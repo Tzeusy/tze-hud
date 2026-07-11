@@ -819,6 +819,7 @@ async fn set_tile_text_via_grpc(
                             proto::SetTileRootMutation {
                                 tile_id: tile_id_bytes.to_vec(),
                                 node: Some(proto::NodeProto {
+                                    layout: 0,
                                     id: Vec::new(), // server assigns
                                     data: Some(proto::node_proto::Data::TextMarkdown(
                                         proto::TextMarkdownNodeProto {

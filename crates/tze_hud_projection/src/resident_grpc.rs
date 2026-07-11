@@ -1708,6 +1708,9 @@ impl ResidentGrpcPortalAdapter {
             // flat (hud-ga4md); keeping it empty preserves StateStream coalescing
             // (no per-node `AddNode` fan-out, hud-mzk74).
             children: vec![],
+            // Single blob node → Absolute layout (UNSPECIFIED, byte-compatible).
+            // A future per-turn split would set VERTICAL_FLOW here (hud-yfj8u).
+            layout: proto::NodeLayoutProto::Unspecified as i32,
         }
     }
 
