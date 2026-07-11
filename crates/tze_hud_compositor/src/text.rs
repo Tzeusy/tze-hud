@@ -475,6 +475,91 @@ pub(crate) fn composer_wrap_line_widths(
     buf.layout_runs().map(|run| run.line_w).collect()
 }
 
+/// Measure the rendered height (px) of markdown `content` wrapped to
+/// `wrap_width`, reproducing the SAME shaping the render path uses for a
+/// `TextMarkdownNode` — [`TextItem::from_text_markdown_cached`] +
+/// [`TextRasterizer::build_and_shape_buffer`]'s styled-run branch — rather
+/// than a second, independently-drifting reimplementation (hud-3xdlf).
+///
+/// Three things this deliberately does that [`composer_wrap_line_widths`]
+/// (the composer/plain-text measurement path) does not, because the render
+/// path itself does them for markdown:
+///
+/// 1. **Parses `content` first.** `content` is markdown SOURCE, but the render
+///    path shapes [`crate::markdown::ParsedMarkdown::plain_text`] — markdown
+///    syntax (`**`, `#`, `` ` ``, …) is stripped before shaping. Wrapping the
+///    raw source instead would wrap different text at different widths and
+///    produce a different line count.
+/// 2. **Applies per-span `size_scale`.** A heading run shapes at a genuinely
+///    larger font size and thus a taller line via glyphon's per-span
+///    `Attrs::metrics` (see [`styled_run_spans`]) — `composer_wrap_line_widths`
+///    only ever shapes at one uniform `font_size_px` for the whole buffer, so
+///    it cannot see this.
+/// 3. **Uses the token-resolved `parsed.line_height_multiplier`**, not the
+///    constant [`LINE_HEIGHT_MULTIPLIER`] (composer's own hardcoded metric,
+///    unrelated to `portal.transcript.*` / `typography.line_height.multiplier`
+///    tokens the markdown parse path resolves at parse time).
+///
+/// Because per-span metrics can make individual visual lines taller than the
+/// buffer's base line height, total height is NOT `line_count * line_height`
+/// (that formula assumes uniform lines, which no longer holds once a heading
+/// is present) — it is read back from glyphon's actual per-line layout via
+/// `LayoutRun::line_top` + `LayoutRun::line_height` on the last shaped line,
+/// which glyphon already computes as the max of that line's constituent
+/// spans' metrics. Floors to one base line's height when `content` produces no
+/// layout runs (e.g. empty content), matching `composer_wrap_line_widths`'
+/// documented empty-input behavior plus the `.max(1)` floor its callers apply.
+pub(crate) fn measure_markdown_content_height(
+    font_system: &mut FontSystem,
+    content: &str,
+    wrap_width: f32,
+    base_font_size_px: f32,
+    font_family: FontFamily,
+    markdown_tokens: &crate::markdown::MarkdownTokens,
+) -> f32 {
+    let parsed = crate::markdown::parse_markdown_subset(content, markdown_tokens);
+    let styled_runs = markdown_spans_to_styled_runs(&parsed.plain_text, &parsed.spans);
+
+    // Same font-size clamp `TextItem::from_text_markdown_cached` applies to
+    // `node.font_size_px`, so a caller passing an out-of-range size measures
+    // against the same clamped value the render path would actually shape.
+    let base_font_size_px = base_font_size_px.clamp(6.0, 200.0);
+    let lh_multiplier = parsed.line_height_multiplier;
+    let base_line_height = base_font_size_px * lh_multiplier;
+
+    let mut buf = Buffer::new(
+        font_system,
+        Metrics::new(base_font_size_px, base_line_height),
+    );
+    buf.set_size(font_system, Some(wrap_width.max(1.0)), None);
+    buf.set_wrap(font_system, WRAPPED_TEXT_WRAP);
+    let family = match font_family {
+        FontFamily::SystemSansSerif => Family::SansSerif,
+        FontFamily::SystemMonospace => Family::Monospace,
+        FontFamily::SystemSerif => Family::Serif,
+    };
+    // font_weight 400 matches `TextItem::from_text_markdown_cached`, which
+    // always sets it to 400 for the markdown-cached path (not
+    // token-configurable there either) — mirrored here for fidelity, not
+    // independently chosen.
+    let base_attrs = Attrs::new().family(family).weight(Weight(400));
+    let spans = styled_run_spans(
+        &parsed.plain_text,
+        &styled_runs,
+        base_attrs,
+        font_family,
+        base_font_size_px,
+        lh_multiplier,
+    );
+    buf.set_rich_text(font_system, spans, base_attrs, Shaping::Advanced);
+    buf.shape_until_scroll(font_system, false);
+
+    buf.layout_runs()
+        .last()
+        .map(|run| run.line_top + run.line_height)
+        .unwrap_or(base_line_height)
+}
+
 impl TextRasterizer {
     /// Create a text rasterizer targeting the given surface format.
     ///
@@ -2174,8 +2259,6 @@ impl TextItem {
             "from_text_markdown_cached called with pixel-bearing color_runs; \
              use from_text_markdown_node instead"
         );
-        use crate::markdown::StyledSpan;
-
         // PERF: Arc::clone is a refcount bump — no heap allocation or string copy.
         // This is the hot per-frame path: `parsed` lives in the MarkdownCache and
         // its `plain_text: Arc<str>` is shared across all frames for the same content.
@@ -2201,35 +2284,12 @@ impl TextItem {
         let w = (node.bounds.width - margin_x * 2.0).max(1.0);
         let h = (node.bounds.height - margin_y * 2.0).max(1.0);
 
-        // Convert ParsedMarkdown spans to StyledRunItems.
-        let styled_runs: Box<[StyledRunItem]> = parsed
-            .spans
-            .iter()
-            .filter_map(|span: &StyledSpan| {
-                let start = span.start_byte.min(text.len());
-                let end = span.end_byte.min(text.len());
-                if start >= end {
-                    return None;
-                }
-                if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
-                    return None;
-                }
-                let color = span.attr.color.map(rgba_to_srgb_u8);
-                let background_color = span.attr.background_color.map(rgba_to_srgb_u8);
-                Some(StyledRunItem {
-                    start_byte: start,
-                    end_byte: end,
-                    weight: span.attr.weight,
-                    italic: span.attr.italic,
-                    monospace: span.attr.monospace,
-                    color,
-                    background_color,
-                    size_scale: span.attr.size_scale,
-                    fill_line_width: false,
-                })
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
+        // Convert ParsedMarkdown spans to StyledRunItems — shared with the
+        // vertical-flow measurement seam (hud-3xdlf) via
+        // `markdown_spans_to_styled_runs` so a measured height is built from
+        // the identical run set the render path paints, not a second,
+        // independently-drifting reimplementation of this filter/clamp logic.
+        let styled_runs: Box<[StyledRunItem]> = markdown_spans_to_styled_runs(&text, &parsed.spans);
 
         TextItem {
             text,
@@ -2600,6 +2660,53 @@ pub(crate) fn color_run_spans<'t, 'a>(
     }
 
     spans
+}
+
+/// Convert [`crate::markdown::ParsedMarkdown::spans`] into render-ready
+/// [`StyledRunItem`]s against `text` (the parse's `plain_text`).
+///
+/// A span whose byte range is empty after clamping to `text.len()`, or whose
+/// start/end does not land on a UTF-8 char boundary, is dropped — exactly the
+/// filter [`TextItem::from_text_markdown_cached`] applies inline before
+/// hud-3xdlf factored it out here.
+///
+/// Shared by [`TextItem::from_text_markdown_cached`] (the render path) and
+/// [`measure_markdown_content_height`] (the vertical-flow measurement seam,
+/// hud-3xdlf) so both build the identical run set from the identical parse —
+/// a second, independently-drifting reimplementation of this filter/clamp/
+/// convert logic is exactly the "measured != painted" bug class this sharing
+/// exists to prevent.
+pub(crate) fn markdown_spans_to_styled_runs(
+    text: &str,
+    spans: &[crate::markdown::StyledSpan],
+) -> Box<[StyledRunItem]> {
+    spans
+        .iter()
+        .filter_map(|span| {
+            let start = span.start_byte.min(text.len());
+            let end = span.end_byte.min(text.len());
+            if start >= end {
+                return None;
+            }
+            if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+                return None;
+            }
+            let color = span.attr.color.map(rgba_to_srgb_u8);
+            let background_color = span.attr.background_color.map(rgba_to_srgb_u8);
+            Some(StyledRunItem {
+                start_byte: start,
+                end_byte: end,
+                weight: span.attr.weight,
+                italic: span.attr.italic,
+                monospace: span.attr.monospace,
+                color,
+                background_color,
+                size_scale: span.attr.size_scale,
+                fill_line_width: false,
+            })
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice()
 }
 
 /// Build `(text_slice, Attrs)` pairs for [`Buffer::set_rich_text`] from a set of

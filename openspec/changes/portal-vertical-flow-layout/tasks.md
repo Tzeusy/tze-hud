@@ -11,10 +11,26 @@
 - [x] 2.1 `crates/tze_hud_compositor/src/vertical_flow.rs`: pure geometry core
       (`stack_offsets` / `flow_total_height`).
 - [x] 2.2 Measurement bridge (`measure_child_height` / `resolve_vertical_flow`)
-      reusing `text::composer_wrap_line_widths`; token gap supplied by caller.
+      reusing `text::composer_wrap_line_widths` for plain-text children; token
+      gap supplied by caller.
 - [x] 2.3 Register `pub mod vertical_flow` in `lib.rs`.
 - [x] 2.4 Unit tests (pure math + CPU font measurement + full-resolve
       demonstration); run filtered, never the broad GPU suite.
+- [x] 2.5 hud-3xdlf (P1, Codex-found on PR #1161, confirmed by reviewer-1149):
+      `measure_child_height` originally measured markdown `TextMarkdownNode`
+      content the same way as plain text (raw source, uniform font size, the
+      `LINE_HEIGHT_MULTIPLIER` constant) — three real divergences from what
+      `TextItem::from_text_markdown_cached` actually paints (stripped-vs-raw
+      text, heading `size_scale`, token-resolved line-height). Fixed by adding
+      `FlowChild::markdown_tokens: Option<&MarkdownTokens>` and a markdown
+      branch that reproduces the render path's parse+shape via a shared helper
+      (`markdown_spans_to_styled_runs`, factored out of
+      `from_text_markdown_cached` so both build the identical run set) and
+      `measure_markdown_content_height`, reading total height back from
+      glyphon's actual per-line layout rather than a `line_count * constant`
+      product. 7 new markdown-focused unit tests (filtered, no GPU); verified
+      each precision assertion actually fails against a simulated pre-fix
+      implementation before restoring the real fix.
 
 ## 3. Follow-ups (out of scope here — separate beads)
 
