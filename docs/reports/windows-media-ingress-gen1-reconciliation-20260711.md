@@ -57,7 +57,7 @@ Two source-of-truth admission surfaces exist and agree:
 | # | Requirement | Status | Evidence (file:symbol) |
 |---|---|---|---|
 | 2 | Media Worker Pool | **SATISFIED (synthetic-source gen-1 scope)** | Gate: `media_admission.rs::evaluate` (`worker_pool_has_slot`, `CapabilityNotEnabled` short-circuit) — no pool spawn when disabled. Decode primitive `crates/tze_hud_runtime/src/gst_decode_pipeline.rs::GstDecodePipeline` (Drop → NULL state) exists behind the `MediaDecodePipeline` trait. Teardown reasons `media_ingress.rs::MediaCloseReason::{LeaseRevoked,CapabilityRevoked,OperatorMute,BudgetWatchdog,ScheduleExpired}` + pause triggers `MediaPauseTrigger::{OperatorRequest,SafeMode,PolicyQuietHours}`; frame-bounded stop at the compositor by `crates/tze_hud_compositor/src/renderer/video.rs::prune_terminal_video_surfaces` / `evict_video_frame_texture` (terminal-surface uploads rejected). Workers stay outside the frame loop (RFC 0014 model). **Scope note (by-design, not a gap):** the full GStreamer-decode → bounded-channel → compositor worker integration is not yet wired end-to-end; gen-1 deliberately drives the surface via the synthetic frame path (design.md §5). |
-| 3 | Decoded Frame Upload Contract | **SATISFIED** | Runtime-owned upload: `crates/tze_hud_compositor/src/renderer/video.rs::upload_video_frame` (RGBA8 `VideoFrame` → runtime `wgpu` texture; rejects terminal surfaces, degenerate dims, byte-count mismatch), `collect_video_frame_cmds` / `encode_video_frame_pass` render the latest accepted frame clipped to `resolve_zone_geometry`. Deterministic placeholder: `crates/tze_hud_compositor/src/video_surface.rs::VideoRenderState::Placeholder` (Admitted-before-first-frame and Closed/Revoked both map to placeholder); tests `video_surface.rs` (initial Placeholder; Closing/Revoked → dark placeholder). Missing-decode-dependency → v1 `VideoSurfaceMap` stub returns `Placeholder` unconditionally + admission fails with structured reason (`media.rs` `MEDIA_DISABLED`; `media_admission.rs` `TextureHeadroomLow`/`CodecUnsupported`). Synthetic producer: `video_surface.rs::SyntheticTestPipeline` / `gst_decode_pipeline.rs::new_from_test_src`. |
+| 3 | Decoded Frame Upload Contract | **SATISFIED in headless; live rendered-frame proof OUTSTANDING** | Runtime-owned upload: `crates/tze_hud_compositor/src/renderer/video.rs::upload_video_frame` (RGBA8 `VideoFrame` → runtime `wgpu` texture; rejects terminal surfaces, degenerate dims, byte-count mismatch), `collect_video_frame_cmds` / `encode_video_frame_pass` render the latest accepted frame clipped to `resolve_zone_geometry`. Deterministic placeholder: `crates/tze_hud_compositor/src/video_surface.rs::VideoRenderState::Placeholder` (Admitted-before-first-frame and Closed/Revoked both map to placeholder); tests `video_surface.rs` (initial Placeholder; Closing/Revoked → dark placeholder), synthetic-render pixel readback `crates/tze_hud_runtime/tests/pixel_readback.rs`. Synthetic producer: `video_surface.rs::SyntheticTestPipeline` / `gst_decode_pipeline.rs::new_from_test_src`. Missing-decode-dependency → v1 `VideoSurfaceMap` stub returns `Placeholder` unconditionally + admission fails with structured reason (`media.rs` `MEDIA_DISABLED`; `media_admission.rs` `TextureHeadroomLow`/`CodecUnsupported`). **The "decoded frame replaces placeholder" scenario is proven only in headless/synthetic tests.** On the live Windows lane the producer admitted a stream but presented **no frames** (`producer-soak-final-evidence.json`: `first_frame_time_ms=null`, `nonzero_frame_sample_count=0`) — because the live GStreamer decode → compositor path is not wired (Scope note #1). Live rendered-frame proof is a tracked carve-out, tied to the decode-path follow-on. |
 
 ### session-protocol (MODIFIED)
 
@@ -76,8 +76,8 @@ Two source-of-truth admission surfaces exist and agree:
 | # | Requirement | Status | Evidence (file:symbol) |
 |---|---|---|---|
 | 6 | Post-v1 Activation Boundary | **SATISFIED** | Default runtime media-disabled (`MediaIngressConfig` default). Activation requires enablement + approved zone + capability + classification + budget, all conjoined in `media.rs::media_open_rejection` and `media_admission.rs::evaluate`. |
-| 7 | Directional Transport Boundary | **SATISFIED** | One global stream: `media.rs::handle_media_ingress_open` `MediaPublishAdmission::GlobalLimit` (`st.media_ingress_active.is_some()`) + per-session `SESSION_STREAM_LIMIT`. Audio rejected: `media.rs` `has_audio_track` → `AUDIO_NOT_SUPPORTED`; bidirectional excluded (video-only track required, `has_video_track`). Test: `media_ingress_rejects_second_stream_wrong_zone_missing_classification_and_audio`, `media_ingress_limit_is_global_and_disconnect_releases_slot`. **Naming note:** wire reject code is `AUDIO_NOT_SUPPORTED`; spec scenario names `AUDIO_UNSUPPORTED` as an example. Rejection is deterministic; the requirement ("MUST reject … with a deterministic AUDIO_UNSUPPORTED admission reason") is met in substance, with a cosmetic string variance worth a doc-level note. |
-| 8 | Timing, Lease, and Budget Bounds | **SATISFIED** | Timing: `media.rs::media_open_rejection` calls `validate_timing_hints` (present/expiry bounds). Lease revoke → `subscriptions_cap.rs:231 close_active_media_ingress(MediaCloseReason::CapabilityRevoked)`; `media_ingress.rs::MediaSessionEvent::Revoke(LeaseRevoked)`. Budget: `media.rs` `declared_peak_kbps > MEDIA_INGRESS_PEAK_KBPS_BUDGET` → `BUDGET_EXCEEDED`; `media_ingress.rs::MediaCloseReason::BudgetWatchdog`. Frame-bounded stop at compositor (`renderer/video.rs::prune_terminal_video_surfaces`). Tests: `media_ingress.rs` revoke/pause suite (`test_terminal_revoked_rejects_all_events`, safe-mode/quiet-hours transitions). |
+| 7 | Directional Transport Boundary | **SATISFIED (audio reject code needs spec/code reconciliation)** | One global stream: `media.rs::handle_media_ingress_open` `MediaPublishAdmission::GlobalLimit` (`st.media_ingress_active.is_some()`) + per-session `SESSION_STREAM_LIMIT`. Audio rejected: `media.rs` `has_audio_track` → `AUDIO_NOT_SUPPORTED`; bidirectional excluded (video-only track required, `has_video_track`). Test: `media_ingress_rejects_second_stream_wrong_zone_missing_classification_and_audio`, `media_ingress_limit_is_global_and_disconnect_releases_slot`. **Spec/code divergence to resolve before sync:** the wire reject code + tests use `AUDIO_NOT_SUPPORTED`, but the delta-spec scenario mandates `AUDIO_UNSUPPORTED`. The rejection is deterministic and correct, but the string literally differs from the spec — this must be reconciled at archive/sync (amend the spec scenario wording to `AUDIO_NOT_SUPPORTED`, or file a code+test rename bead), not left divergent. |
+| 8 | Timing, Lease, and Budget Bounds | **PARTIAL — lease/budget/teardown SATISFIED; expired-frame-drop scenario OUTSTANDING** | Timing (admission): `media.rs::media_open_rejection` calls `validate_timing_hints` (present/expiry bounds). Lease revoke → `subscriptions_cap.rs:231 close_active_media_ingress(MediaCloseReason::CapabilityRevoked)`; `media_ingress.rs::MediaSessionEvent::Revoke(LeaseRevoked)`. Budget: `media.rs` `declared_peak_kbps > MEDIA_INGRESS_PEAK_KBPS_BUDGET` → `BUDGET_EXCEEDED`; `media_ingress.rs::MediaCloseReason::BudgetWatchdog`. Frame-bounded stop at compositor (`renderer/video.rs::prune_terminal_video_surfaces`). Tests: `media_ingress.rs` revoke/pause suite (`test_terminal_revoked_rejects_all_events`, safe-mode/quiet-hours). **Not yet satisfied:** the scenario "a media frame arrives after its expiry → MUST NOT replace the presented surface AND MUST record a dropped-frame reason" has no shipped runtime frame-path implementation or test — expiry is enforced at admission only, and no live per-frame decode/present path exists (Scope note #1). Tracked as a carve-out with the decode-path follow-on. |
 | 9 | Reconnect and Snapshot Behavior | **SATISFIED** | No implicit surface inheritance: `close_active_media_ingress` clears both `session.media_ingress` and global `st.media_ingress_active` + `clear_zone_for_publisher`; a reconnecting producer re-runs the full `media_open_rejection` gate (fresh admission, new `stream_epoch`). Test: `session_server/tests.rs::media_ingress_limit_is_global_and_disconnect_releases_slot`. |
 
 ### media-webrtc-privacy-operator-policy (MODIFIED)
@@ -94,13 +94,13 @@ Two source-of-truth admission surfaces exist and agree:
 
 | # | Requirement | Status | Evidence |
 |---|---|---|---|
-| 15 | Windows Media Validation Lanes | **SATISFIED (Lanes A+B); Lane C source-evidence only, bridge policy-gated** | Lane A (synthetic/headless): `session_server/tests.rs` media suite + `media_admission.rs` + `video_surface.rs` tests — admission, placeholder, second-stream, policy-denial, classification, revoke, disabled-gate, deferred-message, all machine-verifiable. Lane B (live Windows, self-owned/local source): merged PR #958 evidence — authenticated admit `stream_epoch=1`, 10-min record-only soak (`docs/evidence/media-ingress/hud-gog64.8-20260620/`) with first-frame/CPU/GPU/mem + no-leak drift, and `MEDIA_DISABLED` operator-disabled proof (`docs/evidence/media-ingress/hud-8dht5/`). Lane C (YouTube): official-embed **source evidence only**; raw-frame bridge into `MediaIngressOpen` is **not implemented** and is owner-policy-gated (`RAW_YOUTUBE_BRIDGE_DECISION="blocked_pending_policy_approval"`, `.claude/skills/user-test/scripts/windows_media_ingress_exemplar.py:52`). Report artifacts written under `docs/reports/` and `docs/evidence/` as required. |
+| 15 | Windows Media Validation Lanes | **Lane A SATISFIED; Lane B admission/soak-only (render OUTSTANDING); Lane C source-evidence only, bridge policy-gated** | Lane A (synthetic/headless): `session_server/tests.rs` media suite + `media_admission.rs` + `video_surface.rs` + `pixel_readback.rs` tests — admission, placeholder, clipping, teardown, second-stream, policy-denial, classification, revoke, reconnect gating, disabled-gate, deferred-message, all machine-verifiable. Lane B (live Windows, self-owned/local source): merged PR #958 evidence proves **authenticated admission** (`stream_epoch=1`, `selected_codec=VIDEO_H264_BASELINE`), **10-min record-only soak** (`docs/evidence/media-ingress/hud-gog64.8-20260620/`) with CPU/GPU/mem + no-leak drift, and **`MEDIA_DISABLED` operator-disabled proof** (`docs/evidence/media-ingress/hud-8dht5/`). **But the scenario clause "MUST show a self-owned/local video source rendered in the approved HUD media zone" and "first-frame time" are NOT met live:** the soak evidence records `first_frame_time_ms=null`, `nonzero_frame_sample_count=0` — the stream was admitted and held but never presented a frame (decode path unwired, Scope note #1). Lane B is therefore **admission + governance + soak proven, live rendered-frame proof outstanding**. Lane C (YouTube): official-embed **source evidence only**; raw-frame bridge into `MediaIngressOpen` is **not implemented** and is owner-policy-gated (`RAW_YOUTUBE_BRIDGE_DECISION="blocked_pending_policy_approval"`, `.claude/skills/user-test/scripts/windows_media_ingress_exemplar.py:52`). Report artifacts written under `docs/reports/` and `docs/evidence/` as required. |
 
 ### windows-media-ingress-exemplar (ADDED)
 
 | # | Requirement | Status | Evidence |
 |---|---|---|---|
-| 16 | Windows Media Ingress Exemplar Scope | **SATISFIED** | One video-only stream into runtime-owned `media-pip` on native Windows; no audio/multi-feed/mobile/glasses/bidirectional (enforced by admission gates above). Live-admitted on the Windows host (PR #958). |
+| 16 | Windows Media Ingress Exemplar Scope | **SATISFIED (admission); live render outstanding** | One video-only stream into runtime-owned `media-pip` on native Windows; no audio/multi-feed/mobile/glasses/bidirectional (enforced by admission gates above). Live-**admitted** on the Windows host (PR #958); the "resulting presentation MUST render in the approved content-layer media zone" clause is render-proven only in headless synthetic tests, not yet on the live lane (see Requirement 3/15). |
 | 17 | YouTube Source Evidence Boundary | **TRACKED BLOCKER (owner-gated, not a gap)** | Official-embed source evidence launched for `O0FGCxkHM-U`; prohibited paths (`yt-dlp`/download/direct-URL/cache) explicitly rejected by the exemplar harness. The approved Windows-only raw-frame bridge (frames enter HUD only via `MediaIngressOpen`) is **owner-policy-gated**: `RAW_YOUTUBE_BRIDGE_DECISION="blocked_pending_policy_approval"`. Scoping: `docs/evidence/media-ingress/youtube-bridge-scoping-20260620.md`. Beads `hud-o33hj`/`hud-d82p7`/`hud-s0pit` blocked; PRs #658/#659 OPEN+PARKED. |
 | 18 | Exemplar Demonstrates Operator Control | **SATISFIED** | Operator disable / safe mode / lease revoke remove media within one compositor frame and require fresh admission (no auto-resume): `media.rs` operator-disable precedence + `media_ingress.rs` pause-resume authority + compositor terminal prune. Live `MEDIA_DISABLED` proof (§Live evidence). |
 
@@ -177,18 +177,38 @@ stated gen-1 scope; none blocks archival:
 
 ## Verdict
 
-**ARCHIVABLE with the YouTube raw-frame-bridge items explicitly carved out as
-tracked blockers.**
+**ARCHIVABLE with THREE carve-outs explicitly tracked — one owner-policy-gated,
+two tied to the (deliberately deferred) live decode/render path.**
 
-- **Real gaps: 0.** All 18 requirements are satisfied for the wire-active,
-  self-owned/local-source exemplar. 16 fully satisfied; 1 (Requirement 12) is
-  model-complete with live single-viewer coverage; 1 (Requirement 17) is
-  owner-policy-gated.
-- The delta specs may be synced into `openspec/specs/` and the change archived,
-  provided the archive record notes that the YouTube raw-frame-bridge lane
-  (Requirement 17 / task 5.6) remains a **separate, owner-gated follow-on**
-  tracked by `hud-o33hj`/`hud-d82p7`/`hud-s0pit`/`hud-t1900`, and does not block
-  archival of the accepted one-stream Windows-only slice.
+Requirement scorecard (18 total):
+
+- **14 fully satisfied** (config, worker-pool gate, protocol messages, scene-graph,
+  activation boundary, reconnect, all five privacy/operator/attention/audit
+  requirements, validation Lane A, exemplar scope-admission, operator control).
+- **Requirement 12** (viewer ceiling) — model-complete, live single-viewer coverage.
+- **Carve-out A — owner-policy-gated (NOT an engineering gap):** Requirement 17 /
+  task 5.6, the YouTube raw-frame bridge (`RAW_YOUTUBE_BRIDGE_DECISION=
+  blocked_pending_policy_approval`; `hud-o33hj`/`hud-d82p7`/`hud-s0pit`/`hud-t1900`,
+  PRs #658/#659 parked).
+- **Carve-out B — live rendered-frame proof outstanding:** Requirement 3 (decoded
+  frame replaces placeholder) and Requirement 15/16's live-render clause are proven
+  only in headless synthetic tests; the live Windows lane admitted a stream but
+  rendered **no frames** (`first_frame_time_ms=null`, `nonzero_frame_sample_count=0`).
+  Root cause is the deliberately-deferred GStreamer-decode → compositor wiring
+  (design.md §5 ships gen-1 on the synthetic path). Tied to the decode-path follow-on.
+- **Carve-out C — expired-frame-drop scenario unimplemented:** Requirement 8's
+  "frame after expiry dropped + dropped-frame reason recorded" has no shipped
+  runtime frame-path code/test (same decode-path root cause).
+
+**Recommendation:** the admission/governance/policy/protocol layer of the exemplar
+is complete and the delta specs may be synced/archived, **provided** the archive
+record explicitly records carve-outs A/B/C as tracked follow-ons rather than
+silently treating the change as fully implemented. If the owner requires live
+rendered-frame proof (carve-out B) as a gen-1 acceptance bar, hold archival until
+the decode-path lane lands; otherwise archive-with-carve-outs is appropriate given
+the media lane's `hud-cvgvg` acceptance of #958 as the evidence of record. Also
+resolve the `AUDIO_NOT_SUPPORTED` vs `AUDIO_UNSUPPORTED` spec/code divergence
+(Requirement 7) at sync time.
 
 ## Recommended bead actions (for the COORDINATOR — this worker files nothing)
 
@@ -203,7 +223,15 @@ tracked blockers.**
    (it is not a gen-1 exemplar gap).
 4. **Keep `hud-o33hj`/`hud-d82p7`/`hud-s0pit`/`hud-t1900` blocked** and PRs
    #658/#659 parked pending the owner `RAW_YOUTUBE_BRIDGE_DECISION` call.
-5. **Optional low-priority hygiene bead:** align the wire reject code
-   `AUDIO_NOT_SUPPORTED` with the spec's `AUDIO_UNSUPPORTED` wording (or amend the
-   spec scenario), and note the long-hold `close_reason=SESSION_DISCONNECTED` vs
-   `AGENT_CLOSED` keepalive observation from the soak. Neither blocks archival.
+5. **File a decode-path / live-render follow-on bead (carve-outs B + C):** wire the
+   GStreamer decode → bounded-channel → compositor frame path so the live Windows
+   lane can prove a rendered frame (`first_frame_time_ms` non-null,
+   `nonzero_frame_sample_count > 0`) and implement + test the expired-frame-drop
+   scenario (Requirement 8). Decide whether this is a gen-1 acceptance bar or an
+   accepted gen-2 follow-on before archiving.
+6. **Resolve the audio reject-code divergence (Requirement 7) at sync time:** amend
+   the delta-spec scenario wording to `AUDIO_NOT_SUPPORTED` to match shipped code +
+   tests, or file a code/test rename bead. Do not sync the spec with the divergent
+   `AUDIO_UNSUPPORTED` string.
+7. **Optional hygiene:** note the long-hold `close_reason=SESSION_DISCONNECTED` vs
+   `AGENT_CLOSED` keepalive observation from the soak (non-blocking).
