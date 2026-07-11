@@ -426,17 +426,21 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
     while i < args.len() {
         match args[i].as_str() {
             "--help" | "-h" => {
-                // Same GUI-subsystem console fix as --print-attach-info
-                // (hud-b7c0m / hud-41q9t): bind stdout to the launching
-                // terminal before printing, else the help text is invisible
-                // on Windows. No-op elsewhere.
-                attach_parent_console();
+                // The console is already attached once at the top of `main`
+                // (hud-q2glv), so the help text reaches the launching terminal
+                // on Windows without a per-arm attach here.
                 print_help();
+                // `process::exit` skips destructors, so flush the buffered
+                // text first — matching the `--print-attach-info` pattern
+                // below (Gemini review on PR #1143).
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
                 std::process::exit(0);
             }
             "--version" | "-V" => {
-                attach_parent_console();
                 print_version();
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
                 std::process::exit(0);
             }
             "--print-attach-info" => {
@@ -674,6 +678,12 @@ fn parse_window_mode(s: &str) -> Result<WindowMode, String> {
 /// redirect (`tze_hud --print-attach-info > info.txt`) is preserved. It is a
 /// harmless no-op when there is no parent console (e.g. a double-click launch,
 /// which has no terminal to show the block on anyway).
+///
+/// Called ONCE at the very top of `main` (hud-q2glv). A single early attach
+/// covers every output path — `--help`/`--version`, `--print-attach-info`, the
+/// `tracing` log stream, and every startup `eprintln!` + `exit(1)` failure —
+/// so no per-path call is needed. It never `AllocConsole`s, so the double-click
+/// happy path shows no flashing console window.
 #[cfg(windows)]
 fn attach_parent_console() {
     // (DWORD)-1 — attach to the console of the parent process.
@@ -695,6 +705,50 @@ fn attach_parent_console() {
 #[cfg(not(windows))]
 #[inline]
 fn attach_parent_console() {}
+
+/// On Windows, ignore CTRL+C for the calling process (hud-q2glv, Codex P2 on
+/// PR #1143).
+///
+/// Before hoisting `attach_parent_console` to run unconditionally at the top
+/// of `main`, the console attach only ever happened on a fast-exit path
+/// (`--help`/`--version`/`--print-attach-info`), each immediately followed by
+/// `process::exit`, so the process was attached to the launching terminal's
+/// console for a negligible window. Now the long-running canonical runtime
+/// path attaches too and stays attached for the process's entire lifetime.
+/// Windows delivers CTRL_C_EVENT to every process sharing a console by
+/// default, and this binary installs no handler of its own — so an operator
+/// pressing Ctrl+C in that terminal for an unrelated reason (or out of habit)
+/// could kill the running HUD process, which never had this failure mode
+/// before (a GUI-subsystem process has no console at all by default, so it
+/// was never Ctrl+C-reachable in the first place).
+///
+/// `SetConsoleCtrlHandler(NULL, TRUE)` is the documented WinAPI idiom for
+/// "ignore CTRL+C input for the calling process" — it affects CTRL_C_EVENT
+/// only. CTRL_BREAK_EVENT, window-close, logoff, and shutdown console events
+/// are untouched and keep their OS default handling, so the process remains
+/// stoppable through those paths; this narrowly restores the pre-hud-q2glv
+/// invariant (immune to console Ctrl+C) rather than removing an existing
+/// shutdown mechanism (none existed).
+#[cfg(windows)]
+fn ignore_console_ctrl_c() {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetConsoleCtrlHandler(handler_routine: *const core::ffi::c_void, add: i32) -> i32;
+    }
+    // Safety: FFI call into kernel32 with a null handler routine and a
+    // constant `add` flag; touches no memory we own. A NULL `HandlerRoutine`
+    // with `Add = TRUE` is documented to mean "ignore CTRL+C input" rather
+    // than "install this callback," so no callback trampoline is needed.
+    unsafe {
+        let _ = SetConsoleCtrlHandler(core::ptr::null(), 1);
+    }
+}
+
+/// Non-Windows platforms never attach to a console in the first place, so
+/// there is nothing to shield from console control events.
+#[cfg(not(windows))]
+#[inline]
+fn ignore_console_ctrl_c() {}
 
 /// Compute the attach-info block for the current startup options (hud-b7c0m).
 ///
@@ -733,6 +787,27 @@ fn render_attach_info_block(opts: &StartupOptions) -> String {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Bind the standard handles to the launching terminal ONCE, before any
+    // output is produced (hud-q2glv). This is the GUI-subsystem console fix
+    // that hud-b7c0m/#1112 (--print-attach-info) and hud-41q9t/#1140
+    // (--help/--version) applied per-arm — hoisted to a single call here so it
+    // ALSO covers the paths those missed: every startup `eprintln!` +
+    // `exit(1)` failure (unknown flag, config/PSK/validation errors) and the
+    // `tracing` log stream, all of which were otherwise silently discarded on
+    // the Windows GUI-subsystem binary. Safe on the happy path: it attaches to
+    // an existing parent console (terminal launch) or no-ops when there is none
+    // (double-click) — it never AllocConsole's, so no console window flashes —
+    // and it preserves an explicit redirect (`tze_hud … > out.txt`). No-op off
+    // Windows. Because it runs before the per-arm/attach-info calls it made
+    // redundant were removed, those paths now rely on this single attach.
+    attach_parent_console();
+    // The attach above now covers the long-running canonical runtime path
+    // too, not just fast-exit paths — so the process stays attached to the
+    // launching terminal's console for its entire lifetime. Shield it from
+    // that console's Ctrl+C the same way a process with no console at all
+    // (the pre-hud-q2glv default) was always immune (Codex P2 on PR #1143).
+    ignore_console_ctrl_c();
+
     // Initialise structured logging. JSON if TZE_HUD_LOG_JSON=1.
     let log_json = std::env::var("TZE_HUD_LOG_JSON").as_deref() == Ok("1");
     if log_json {
@@ -764,10 +839,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // onboarding aid that works on any platform without a shell, so it must not
     // fail-closed on a missing/invalid config the way canonical startup does.
     if opts.print_attach_info {
-        // On Windows this is a GUI-subsystem binary with no console by default,
-        // so bind stdout to the launching terminal before printing, else the
-        // block is invisible (Codex P2, PR #1112). No-op elsewhere.
-        attach_parent_console();
+        // The console was attached once at the top of `main` (hud-q2glv), so on
+        // Windows this GUI-subsystem binary's block reaches the launching
+        // terminal (Codex P2, PR #1112) without a per-branch attach here.
         print!("{}", render_attach_info_block(&opts));
         // `process::exit` skips destructors, so flush the buffered block first.
         use std::io::Write;
@@ -1244,16 +1318,33 @@ mod tests {
         );
     }
 
-    /// hud-41q9t: `--help`/`--version` now call `attach_parent_console()` before
-    /// printing, mirroring the `--print-attach-info` console fix from hud-b7c0m.
-    /// The two early-exit branches themselves call `std::process::exit` and
-    /// cannot be driven in-process, so this pins the one thing a unit test CAN
-    /// assert: the function is callable and a true no-op on this (non-Windows)
-    /// platform. The `#[cfg(windows)]` variant is covered by the windows-gnu
-    /// cross-target clippy/build gate instead.
+    /// hud-q2glv: `main` calls `attach_parent_console()` once at startup so
+    /// every output path — `--help`/`--version`, `--print-attach-info`, tracing
+    /// logs, and startup `eprintln!` + `exit(1)` errors — reaches the launching
+    /// terminal on the Windows GUI-subsystem binary. That call site runs before
+    /// `std::process::exit` and drives real handles, so it cannot be exercised
+    /// in-process; this pins the one thing a unit test CAN assert: the function
+    /// is callable and a true no-op on this (non-Windows) platform. The
+    /// `#[cfg(windows)]` variant is covered by the windows-gnu cross-target
+    /// clippy/build gate instead.
     #[test]
     fn attach_parent_console_is_a_callable_noop_off_windows() {
         attach_parent_console();
+    }
+
+    /// hud-q2glv (Codex P2 on PR #1143): `main` also calls
+    /// `ignore_console_ctrl_c()` once at startup, right after
+    /// `attach_parent_console()`, so the now-always-attached long-running
+    /// process is not killed by a Ctrl+C its console receives for an
+    /// unrelated reason. The real `SetConsoleCtrlHandler` call drives a
+    /// process-global OS handler and cannot be meaningfully exercised
+    /// in-process; this pins the one thing a unit test CAN assert: the
+    /// function is callable and a true no-op on this (non-Windows) platform.
+    /// The `#[cfg(windows)]` variant is covered by the windows-gnu
+    /// cross-target clippy/build gate instead.
+    #[test]
+    fn ignore_console_ctrl_c_is_a_callable_noop_off_windows() {
+        ignore_console_ctrl_c();
     }
 
     #[test]
