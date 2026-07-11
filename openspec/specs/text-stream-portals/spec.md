@@ -926,14 +926,14 @@ Attention Defaults, §Portal Component Profile Styling, §Promotion Scope Bounda
 turn separators from hud-nx7yq.4 (`crates/tze_hud_projection/src/resident_grpc.rs`
 `visible_transcript_markdown_with`), `crates/tze_hud_projection/src/contract.rs`
 (`OutputKind`), PR #1149 / hud-ga4md (`NodeProto.children` materialization)
-Scope: v1
+Scope: v1-mandatory
 
 #### Scenario: adjacent turns are separated and role-attributed
 
 - **WHEN** an expanded portal renders a retained OUTPUT transcript window with more than one turn
 - **THEN** adjacent turns SHALL be separated by a token-styled turn divider
 - **AND** each non-assistant agent-side turn (tool, status, error, other) SHALL be presented in the distinct attribution token color rather than the base assistant transcript color
-- **AND** assistant-authored turns SHALL present in the base transcript text color
+- **AND** assistant-authored turns SHALL be presented in the base transcript text color
 
 #### Scenario: attribution derives from runtime output kind, not adapter content
 
