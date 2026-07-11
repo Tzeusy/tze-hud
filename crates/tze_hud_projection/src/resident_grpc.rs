@@ -376,6 +376,16 @@ pub struct PortalVisualTokens {
     pub transcript_dim_background: proto::Rgba,
     /// Color of the content-free stale/disconnect marker (ambient, not alarming).
     pub stale_marker_color: proto::Rgba,
+    /// Color of the visible disconnect badge (hud-jgf41): the left-edge
+    /// lifecycle-accent bar geometry, recolored while connection-degraded.
+    /// Driven by the redaction-independent `connection_degraded` flag, unlike
+    /// the lifecycle accent (which clears under redaction), so a restricted
+    /// viewer still sees the portal has dropped — geometry-only, no content or
+    /// identity disclosed. Source token: `portal.disconnect_badge.color`.
+    pub disconnect_badge_color: proto::Rgba,
+    /// Width (px) of the disconnect badge accent bar. Source token:
+    /// `portal.disconnect_badge.width_px`.
+    pub disconnect_badge_width_px: f32,
     /// Color of the ambient unread-output-count indicator (hud-meqet). Muted
     /// by design — a presence engine surfaces a quiet count, never a loud
     /// notification badge. Source token: `portal.unread_indicator.color`.
@@ -1173,12 +1183,28 @@ impl ResidentGrpcPortalAdapter {
         // the redaction-gated `status:` line. Emitted every render so the latest
         // lifecycle color coalesces; the markdown node keeps only its zero-length
         // lifecycle sentinel run, so the cached markdown path is untouched (#947).
-        let (accent_color, accent_width) = match state.lifecycle_state {
-            Some(lifecycle) => (
-                Some(lifecycle_accent_color(lifecycle, &self.visual_tokens)),
-                self.visual_tokens.lifecycle_accent_width_px,
-            ),
-            None => (None, 0.0),
+        //
+        // Disconnect badge (hud-jgf41): `is_connection_degraded` takes precedence
+        // over `lifecycle_state` here — and, unlike `lifecycle_state`, is NOT
+        // redaction-gated (`is_connection_degraded` docs: set by the authority
+        // from the session lifecycle, independent of redaction), so a restricted
+        // viewer still sees this same left-edge accent bar turn to the disconnect
+        // badge color while the portal is degraded. This reuses the existing
+        // `SetTileLifecycleAccent` overlay mechanism verbatim (no new mutation,
+        // no new scene-graph node type) — only the color/width source changes.
+        let (accent_color, accent_width) = if is_connection_degraded(state) {
+            (
+                Some(self.visual_tokens.disconnect_badge_color),
+                self.visual_tokens.disconnect_badge_width_px,
+            )
+        } else {
+            match state.lifecycle_state {
+                Some(lifecycle) => (
+                    Some(lifecycle_accent_color(lifecycle, &self.visual_tokens)),
+                    self.visual_tokens.lifecycle_accent_width_px,
+                ),
+                None => (None, 0.0),
+            }
         };
         mutations.push(proto::MutationProto {
             mutation: Some(proto::mutation_proto::Mutation::SetTileLifecycleAccent(
@@ -2735,6 +2761,13 @@ pub fn portal_visual_tokens_from_part_tokens(
             b: part.stale_marker_color.b,
             a: part.stale_marker_color.a,
         },
+        disconnect_badge_color: proto::Rgba {
+            r: part.disconnect_badge_color.r,
+            g: part.disconnect_badge_color.g,
+            b: part.disconnect_badge_color.b,
+            a: part.disconnect_badge_color.a,
+        },
+        disconnect_badge_width_px: part.disconnect_badge_width_px,
         unread_indicator_color: proto::Rgba {
             r: part.unread_indicator_color.r,
             g: part.unread_indicator_color.g,
@@ -3526,6 +3559,104 @@ mod tests {
         assert!(
             accent.color.is_none() && accent.width_px <= 0.0,
             "redacted lifecycle must clear the accent (no color / zero width)"
+        );
+    }
+
+    // ── Disconnect badge (hud-jgf41) ──────────────────────────────────────────
+
+    fn accent_of(
+        batch: &session_proto::MutationBatch,
+    ) -> Option<proto::SetTileLifecycleAccentMutation> {
+        batch.mutations.iter().find_map(|m| match &m.mutation {
+            Some(proto::mutation_proto::Mutation::SetTileLifecycleAccent(a)) => Some(a.clone()),
+            _ => None,
+        })
+    }
+
+    /// A connection-degraded portal presents the visible disconnect badge — the
+    /// left-edge lifecycle-accent bar recolored to `disconnect_badge_color` at
+    /// `disconnect_badge_width_px` — even when `lifecycle_state` is `None`
+    /// (redacted for a restricted viewer). `connection_degraded` is
+    /// redaction-independent, so the badge takes precedence and stays visible
+    /// (geometry-only: no transcript content or identity is disclosed by a
+    /// colored bar).
+    #[test]
+    fn degraded_state_shows_disconnect_badge_even_when_redacted() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let mut adapter = ResidentGrpcPortalAdapter::new(config);
+        adapter.record_created_tile(vec![0u8; 16]);
+        let tokens = adapter.visual_tokens().clone();
+
+        let mut state = make_expanded_interaction_state("portal-disconnect-badge");
+        state.connection_degraded = true;
+        // Simulate the authority's redaction gate: lifecycle_state cleared to
+        // None, exactly as it would be for a restricted viewer.
+        state.lifecycle_state = None;
+
+        let batch = adapter
+            .render_batch(&state, 0)
+            .expect("render_batch must succeed");
+        let accent = accent_of(&batch)
+            .expect("a degraded, redacted portal must still emit a disconnect badge accent");
+        assert_eq!(
+            accent.color.expect("disconnect badge must carry a color"),
+            tokens.disconnect_badge_color,
+            "degraded portal must show the disconnect badge color, not a cleared accent"
+        );
+        assert!(
+            (accent.width_px - tokens.disconnect_badge_width_px).abs() < 1e-4,
+            "disconnect badge width must come from the token (no literal dimension)"
+        );
+    }
+
+    /// When NOT connection-degraded, the accent computation is unaffected by
+    /// hud-jgf41 — the existing lifecycle-driven accent (and its redaction
+    /// gating) behaves exactly as before.
+    #[test]
+    fn live_state_falls_back_to_ordinary_lifecycle_accent() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let mut adapter = ResidentGrpcPortalAdapter::new(config);
+        adapter.record_created_tile(vec![0u8; 16]);
+        let tokens = adapter.visual_tokens().clone();
+
+        let mut state = make_expanded_interaction_state("portal-live-accent");
+        state.connection_degraded = false;
+        state.lifecycle_state = Some(ProjectionLifecycleState::Active);
+
+        let batch = adapter
+            .render_batch(&state, 0)
+            .expect("render_batch must succeed");
+        let accent = accent_of(&batch).expect("a live portal must emit a lifecycle accent");
+        assert_eq!(
+            accent.color.expect("live lifecycle must carry a color"),
+            tokens.lifecycle_active_color,
+            "non-degraded portal must use the ordinary lifecycle accent, not the disconnect badge"
+        );
+    }
+
+    /// Precedence: `connection_degraded` wins even if `lifecycle_state` is
+    /// simultaneously `Some(Active)` (a defensive edge case — the authority
+    /// should not produce this combination in practice, but the accent
+    /// computation must not silently show a "live" accent while disconnected).
+    #[test]
+    fn disconnect_badge_takes_precedence_over_a_conflicting_lifecycle_state() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let mut adapter = ResidentGrpcPortalAdapter::new(config);
+        adapter.record_created_tile(vec![0u8; 16]);
+        let tokens = adapter.visual_tokens().clone();
+
+        let mut state = make_expanded_interaction_state("portal-disconnect-precedence");
+        state.connection_degraded = true;
+        state.lifecycle_state = Some(ProjectionLifecycleState::Active);
+
+        let batch = adapter
+            .render_batch(&state, 0)
+            .expect("render_batch must succeed");
+        let accent = accent_of(&batch).expect("a degraded portal must emit an accent");
+        assert_eq!(
+            accent.color.expect("disconnect badge must carry a color"),
+            tokens.disconnect_badge_color,
+            "connection_degraded must take precedence over lifecycle_state"
         );
     }
 
