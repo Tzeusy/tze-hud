@@ -1907,6 +1907,23 @@ fn portal_id_for_projection(portal_surface: PortalSurfaceKind, projection_id: &s
     bounded_copy(portal_id, MAX_PORTAL_ID_BYTES)
 }
 
+/// Recover the `projection_id` encoded in a `PortalSurface`'s declared identity
+/// (`PortalIdentity::session_id`, populated from [`portal_id_for_projection`]),
+/// if it matches a known portal-surface kind's prefix scheme.
+///
+/// This is the inverse of [`portal_id_for_projection`], exposed so a caller that
+/// only has scene-declared portal-surface state (no direct session lookup — e.g.
+/// the windowed runtime resolving a resized tile back to its owning bridged
+/// projection, hud-s62vv) can recover the projection id without threading a
+/// session-id round trip through another channel. `MAX_PROJECTION_ID_BYTES` (128)
+/// plus every known prefix always fits under `MAX_PORTAL_ID_BYTES` (192), so
+/// `portal_id_for_projection` never truncates and this recovers the id exactly.
+pub fn projection_id_from_portal_id(portal_id: &str) -> Option<&str> {
+    portal_id
+        .strip_prefix("text-stream://projection/")
+        .filter(|id| !id.is_empty())
+}
+
 fn validate_pending_input_item(
     item: &PendingInputItem,
     bounds: &ProjectionBounds,
