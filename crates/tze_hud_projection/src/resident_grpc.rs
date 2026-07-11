@@ -1849,28 +1849,10 @@ fn portal_markdown_with(
                 push_line(&mut result, &body);
             }
             push_line(&mut result, "");
-            // §Viewer Reply Echo (two-pane INPUT/OUTPUT split): render the INPUT
-            // history — the viewer's own accepted replies — as a distinct band in
-            // the input region, held SEPARATELY from the OUTPUT transcript above.
-            // A viewer echo lands in `input_history` and never in
-            // `visible_transcript`, so a submission never grows the OUTPUT
-            // transcript nor moves its follow-tail scroll (the driver computes
-            // follow-tail from `visible_transcript` only). The band reuses the
-            // transcript's `---`-divider + ambient-timestamp treatment with NO
-            // unread divider (viewer turns are never unread). Under redaction
-            // `input_history` is emptied upstream, so the band + its label never
-            // render for a restricted viewer. Interim placement: this single
-            // markdown node renders the band adjacent to the composer status line;
-            // the promotion-era structured layout gives the INPUT pane its own
-            // part node (PORTAL_PART_KIND_COMPOSER / Phase-0 `input_scroll`).
-            if !state.input_history.is_empty() {
-                push_line(&mut result, PORTAL_INPUT_HISTORY_LABEL);
-                push_line(
-                    &mut result,
-                    &input_history_markdown(&state.input_history, timestamps),
-                );
-                push_line(&mut result, "");
-            }
+            // §Viewer Reply Echo top-anchors the composer above the INPUT
+            // history band ("beneath a top-anchored composer"); render the
+            // composer status line here, before the band, so the interim
+            // single-markdown-node layout matches that framing.
             if is_connection_degraded(state) {
                 // §2: clear live activity/typing/composer-ready signals on
                 // disconnect — the surface must not imply an active stream. The
@@ -1886,6 +1868,29 @@ fn portal_markdown_with(
                 push_line(&mut result, &composer_line);
             } else {
                 push_line(&mut result, "composer: unavailable");
+            }
+            // §Viewer Reply Echo (two-pane INPUT/OUTPUT split): render the INPUT
+            // history — the viewer's own accepted replies — as a distinct band in
+            // the input region, held SEPARATELY from the OUTPUT transcript above.
+            // A viewer echo lands in `input_history` and never in
+            // `visible_transcript`, so a submission never grows the OUTPUT
+            // transcript nor moves its follow-tail scroll (the driver computes
+            // follow-tail from `visible_transcript` only). The band reuses the
+            // transcript's `---`-divider + ambient-timestamp treatment with NO
+            // unread divider (viewer turns are never unread). Under redaction
+            // `input_history` is emptied upstream, so the band + its label never
+            // render for a restricted viewer. Interim placement: this single
+            // markdown node renders the band below the composer status line, top-
+            // anchoring the composer per §Viewer Reply Echo; the promotion-era
+            // structured layout gives the INPUT pane its own part node
+            // (PORTAL_PART_KIND_COMPOSER / Phase-0 `input_scroll`).
+            if !state.input_history.is_empty() {
+                push_line(&mut result, "");
+                push_line(&mut result, PORTAL_INPUT_HISTORY_LABEL);
+                push_line(
+                    &mut result,
+                    &input_history_markdown(&state.input_history, timestamps),
+                );
             }
         }
         ProjectedPortalPresentation::Collapsed => {
@@ -4229,8 +4234,10 @@ mod tests {
 
     /// §Viewer Reply Echo (two-pane INPUT/OUTPUT split): the INPUT history renders
     /// as a distinct labeled band held SEPARATELY from the OUTPUT transcript body —
-    /// the agent turn stays above, the viewer replies stack below their own label,
-    /// and the two never interleave into one combined sequence.
+    /// the agent turn stays above, the composer status line top-anchors above the
+    /// band per the requirement's "beneath a top-anchored composer" framing, the
+    /// viewer replies stack below their own label, and the two never interleave
+    /// into one combined sequence.
     #[test]
     fn portal_markdown_renders_input_band_separate_from_output_transcript() {
         let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
@@ -4255,20 +4262,29 @@ mod tests {
         let md = adapter.render_portal_markdown(&state, 0);
 
         assert!(md.contains("agent says hi"), "{md}");
+        assert!(md.contains("composer: ready"), "{md}");
         assert!(md.contains(PORTAL_INPUT_HISTORY_LABEL), "{md}");
         assert!(
             md.contains("viewer reply one") && md.contains("viewer reply two"),
             "{md}"
         );
-        // Ordering proves separation: the OUTPUT transcript body renders first,
-        // then the INPUT band label, then the viewer replies — no viewer text is
-        // interleaved into the agent transcript body.
+        // Ordering proves separation AND top-anchored placement: the OUTPUT
+        // transcript body renders first, then the composer status line (top-
+        // anchored above the INPUT band per §Viewer Reply Echo), then the INPUT
+        // band label, then the viewer replies — no viewer text is interleaved
+        // into the agent transcript body, and the composer never trails the band.
         let agent_pos = md.find("agent says hi").expect("agent turn rendered");
+        let composer_pos = md
+            .find("composer: ready")
+            .expect("composer status line rendered");
         let label_pos = md
             .find(PORTAL_INPUT_HISTORY_LABEL)
             .expect("input band label rendered");
         let viewer_pos = md.find("viewer reply one").expect("viewer reply rendered");
-        assert!(agent_pos < label_pos && label_pos < viewer_pos, "{md}");
+        assert!(
+            agent_pos < composer_pos && composer_pos < label_pos && label_pos < viewer_pos,
+            "{md}"
+        );
         // Viewer replies stack with a token-styled `---` turn divider between them.
         assert!(
             md.contains("viewer reply one\n---\nviewer reply two"),
