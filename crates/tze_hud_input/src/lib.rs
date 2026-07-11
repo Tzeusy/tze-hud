@@ -2105,6 +2105,7 @@ mod tests {
 
         let hr_node_id = SceneId::new();
         let hit_node = Node {
+            layout: Default::default(),
             id: hr_node_id,
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {
@@ -2407,6 +2408,7 @@ mod tests {
             .set_tile_root(
                 tile_a,
                 Node {
+                    layout: Default::default(),
                     id: node_a,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -2440,6 +2442,7 @@ mod tests {
             .set_tile_root(
                 tile_b,
                 Node {
+                    layout: Default::default(),
                     id: node_b,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -2939,6 +2942,7 @@ mod tests {
             .set_tile_root(
                 t1,
                 Node {
+                    layout: Default::default(),
                     id: n1,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -2966,6 +2970,7 @@ mod tests {
             .set_tile_root(
                 t2,
                 Node {
+                    layout: Default::default(),
                     id: n2,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -3210,6 +3215,7 @@ mod tests {
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id: node_id,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -3977,6 +3983,7 @@ mod tests {
         let composer_id = SceneId::new();
         let plain_id = SceneId::new();
         let composer_node = Node {
+            layout: Default::default(),
             id: composer_id,
             children: vec![plain_id],
             data: NodeData::HitRegion(HitRegionNode {
@@ -3990,6 +3997,7 @@ mod tests {
         };
         // Plain focusable node (bottom half of tile)
         let plain_node = Node {
+            layout: Default::default(),
             id: plain_id,
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {
@@ -4397,6 +4405,7 @@ mod tests {
         // Move the plain node to the root so it can be hit-tested directly.
         // Re-root the tile to the plain node so the pointer-down in its bounds hits it.
         let plain_node_for_root = Node {
+            layout: Default::default(),
             id: plain_id,
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {
@@ -4678,6 +4687,7 @@ mod tests {
         // Now click the plain node — focus moves to it, triggering on_focus_lost
         // internally in process_with_focus.
         let plain_node_for_root = Node {
+            layout: Default::default(),
             id: plain_id,
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {

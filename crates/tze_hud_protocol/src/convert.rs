@@ -188,6 +188,7 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
     };
 
     Some(Node {
+        layout: Default::default(),
         id,
         children: vec![],
         data,
@@ -2238,6 +2239,7 @@ mod tests {
     fn make_static_image_node(fit_mode: ImageFitMode) -> Node {
         let resource_id = ResourceId::of(b"4x4 test image resource");
         Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::StaticImage(StaticImageNode {
@@ -2306,6 +2308,7 @@ mod tests {
         // RS-4: Verify ResourceId (32 bytes) survives proto encode/decode as raw bytes.
         let resource_id = ResourceId::of(b"some unique resource bytes for testing");
         let node = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::StaticImage(StaticImageNode {
@@ -2848,6 +2851,7 @@ mod tests {
     #[test]
     fn hit_region_accepts_composer_input_round_trips_scene_to_proto() {
         let scene_node = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {

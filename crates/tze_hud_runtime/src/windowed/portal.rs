@@ -2389,6 +2389,7 @@ mod tests {
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id: composer_id,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -2567,6 +2568,7 @@ mod tests {
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id: composer_id,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -2685,6 +2687,7 @@ mod tests {
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id: composer_id,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -2936,6 +2939,7 @@ mod tests {
         scene.nodes.insert(
             composer_id,
             Node {
+                layout: Default::default(),
                 id: composer_id,
                 children: vec![control_id],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -2951,6 +2955,7 @@ mod tests {
         scene.nodes.insert(
             control_id,
             Node {
+                layout: Default::default(),
                 id: control_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -3157,6 +3162,7 @@ mod tests {
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id: node_id,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -3963,6 +3969,7 @@ mod tests {
         scene.nodes.insert(
             composer_id,
             Node {
+                layout: Default::default(),
                 id: composer_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -4130,6 +4137,7 @@ mod tests {
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id: composer_id,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -5442,6 +5450,7 @@ mod tests {
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id,
                     children: vec![],
                     data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -5718,6 +5727,7 @@ mod tests {
                 .set_tile_root(
                     tile_id,
                     Node {
+                        layout: Default::default(),
                         id: node_id,
                         children: vec![],
                         data: NodeData::HitRegion(HitRegionNode {
@@ -6308,6 +6318,7 @@ mod tests {
             .set_tile_root(
                 frame_id,
                 Node {
+                    layout: Default::default(),
                     id: frame_region_id,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -6585,6 +6596,7 @@ mod tests {
         scene.nodes.insert(
             text_id,
             Node {
+                layout: Default::default(),
                 id: text_id,
                 children: vec![],
                 data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -6708,6 +6720,7 @@ mod tests {
             (
                 id,
                 Node {
+                    layout: Default::default(),
                     id,
                     children: vec![],
                     data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -7294,6 +7307,7 @@ mod tests {
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id: composer_id,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {

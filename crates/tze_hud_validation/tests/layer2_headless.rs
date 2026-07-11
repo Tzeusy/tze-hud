@@ -58,6 +58,7 @@ fn solid_color_scene(w: f32, h: f32, color: Rgba) -> SceneGraph {
         .create_tile(tab, "agent.test", lease, Rect::new(0.0, 0.0, w, h), 0)
         .unwrap();
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::SolidColor(SolidColorNode {

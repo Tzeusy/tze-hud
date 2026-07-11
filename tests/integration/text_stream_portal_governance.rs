@@ -52,6 +52,7 @@ fn make_batch(namespace: &str, lease_id: SceneId, mutations: Vec<SceneMutation>)
 
 fn portal_root(transcript: &str) -> (Node, Vec<Node>) {
     let root = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::SolidColor(SolidColorNode {
@@ -61,6 +62,7 @@ fn portal_root(transcript: &str) -> (Node, Vec<Node>) {
         }),
     };
     let transcript_node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::TextMarkdown(TextMarkdownNode {

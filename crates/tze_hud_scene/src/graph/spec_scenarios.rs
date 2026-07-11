@@ -125,6 +125,7 @@ fn node_limit_64_per_tile_enforced() {
     // Add root node first, then chain children off the root.
     let root_id = SceneId::new();
     let root_node = Node {
+        layout: Default::default(),
         id: root_id,
         children: vec![],
         data: NodeData::SolidColor(SolidColorNode {
@@ -140,6 +141,7 @@ fn node_limit_64_per_tile_enforced() {
     // Add MAX_NODES_PER_TILE - 1 children off the root (total will be MAX_NODES_PER_TILE)
     for i in 1..MAX_NODES_PER_TILE {
         let child = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::SolidColor(SolidColorNode {
@@ -162,6 +164,7 @@ fn node_limit_64_per_tile_enforced() {
 
     // One more should be rejected
     let overflow_node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::SolidColor(SolidColorNode {
@@ -204,6 +207,7 @@ fn duplicate_node_id_rejected() {
 
     let node_id = SceneId::new();
     let node = Node {
+        layout: Default::default(),
         id: node_id,
         children: vec![],
         data: NodeData::SolidColor(SolidColorNode {
@@ -417,6 +421,7 @@ fn delete_tile_removes_tile_and_nodes() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: node_id,
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -672,6 +677,7 @@ fn text_markdown_content_limit_enforced() {
     // catches it. We check via validate_node_data if it exists, or directly.
     // For now, test that creating such content is flagged at the graph level.
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -863,6 +869,7 @@ fn all_25_test_scenes_pass_layer0_invariants() {
 fn all_v1_node_types_constructable() {
     // SolidColorNode
     let _ = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::SolidColor(SolidColorNode {
@@ -874,6 +881,7 @@ fn all_v1_node_types_constructable() {
 
     // TextMarkdownNode
     let _ = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -891,6 +899,7 @@ fn all_v1_node_types_constructable() {
 
     // HitRegionNode
     let _ = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::HitRegion(HitRegionNode {
@@ -907,6 +916,7 @@ fn all_v1_node_types_constructable() {
     use crate::types::ImageFitMode;
     use crate::types::StaticImageNode;
     let _ = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::StaticImage(StaticImageNode {
@@ -2719,6 +2729,7 @@ fn clear_widget_via_mutation_batch() {
 /// Helper: build a SolidColor node with explicit id and children list.
 fn solid_node(id: SceneId, children: Vec<SceneId>) -> Node {
     Node {
+        layout: Default::default(),
         id,
         children,
         data: NodeData::SolidColor(SolidColorNode {
@@ -2732,6 +2743,7 @@ fn solid_node(id: SceneId, children: Vec<SceneId>) -> Node {
 /// Helper: build a HitRegion node with explicit id and children list.
 fn hit_node(id: SceneId, children: Vec<SceneId>) -> Node {
     Node {
+        layout: Default::default(),
         id,
         children,
         data: NodeData::HitRegion(HitRegionNode {

@@ -298,6 +298,7 @@ pub fn handle_set_content(params: Value, scene: &mut SceneGraph) -> McpResult<Se
 
     let node_id = SceneId::new();
     let node = Node {
+        layout: Default::default(),
         id: node_id,
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {

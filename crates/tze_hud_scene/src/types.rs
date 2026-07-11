@@ -761,11 +761,43 @@ impl TileScrollConfig {
 
 // ─── Nodes ──────────────────────────────────────────────────────────────────
 
+/// How a node positions its direct children (hud-txkbh / hud-yfj8u).
+///
+/// `Absolute` (the default) is the pre-existing behavior: every child is drawn at
+/// its own explicit `bounds.y`, exactly as before this field existed — so an
+/// omitted or defaulted `layout` is byte-identical to the historical scene.
+///
+/// `VerticalFlow` asks the runtime to STACK the node's children vertically:
+/// measure each child's wrapped rendered height and position the next child
+/// directly below it plus a token-driven gap (see
+/// `tze_hud_compositor::vertical_flow`). It exists so a publisher that cannot
+/// measure wrapped text (the projection layer emitting one transcript node per
+/// conversational turn) can leave child `bounds.y` unset and have the runtime
+/// resolve the stack. Layout resolution runs in the runtime/compositor, never in
+/// the model (LLM-out-of-frame-loop). The per-turn transcript split that would
+/// drive this in production is gated on the Phase-1 Promotion Evidence Gate; the
+/// mode is additive and default-off so the raw-tile pilot is unaffected.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NodeLayout {
+    /// Children are positioned by their own explicit `bounds` (historical
+    /// behavior; the byte-compatible default).
+    #[default]
+    Absolute,
+    /// Children are stacked vertically by the runtime's vertical-flow resolver.
+    VerticalFlow,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Node {
     pub id: SceneId,
     pub children: Vec<SceneId>,
     pub data: NodeData,
+    /// How this node lays out its direct children. Defaults to
+    /// [`NodeLayout::Absolute`] (each child at its own `bounds.y`), so an
+    /// existing node with no explicit layout renders identically to before this
+    /// field existed. `#[serde(default)]` keeps older snapshots deserializable.
+    #[serde(default)]
+    pub layout: NodeLayout,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

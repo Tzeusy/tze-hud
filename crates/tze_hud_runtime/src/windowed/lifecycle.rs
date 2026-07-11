@@ -579,6 +579,7 @@ pub(super) fn seed_windowed_benchmark_scene(scene: &mut SceneGraph, width: u32, 
         };
         let root_id = SceneId::new();
         let node = Node {
+            layout: Default::default(),
             id: root_id,
             children: vec![],
             data: NodeData::SolidColor(SolidColorNode {
@@ -597,6 +598,7 @@ pub(super) fn seed_windowed_benchmark_scene(scene: &mut SceneGraph, width: u32, 
             continue;
         }
         let hit_region = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {

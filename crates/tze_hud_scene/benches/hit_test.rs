@@ -74,6 +74,7 @@ fn build_scene_grid(tile_count: usize) -> (SceneGraph, f32, f32) {
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id: node_id,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -148,6 +149,7 @@ fn build_chrome_scene(content_tile_count: usize) -> SceneGraph {
         .set_tile_root(
             chrome_tile,
             Node {
+                layout: Default::default(),
                 id: node_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -188,6 +190,7 @@ fn build_chrome_scene(content_tile_count: usize) -> SceneGraph {
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id: n_id,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {

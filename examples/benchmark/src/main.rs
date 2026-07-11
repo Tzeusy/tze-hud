@@ -221,6 +221,7 @@ mod headless_impl {
 
     fn benchmark_hit_region() -> Node {
         Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {
@@ -359,6 +360,7 @@ mod headless_impl {
                 {
                     let alpha = if i % 2 == 0 { 1.0f32 } else { 0.7f32 };
                     let node = Node {
+                        layout: Default::default(),
                         id: SceneId::new(),
                         children: vec![],
                         data: NodeData::SolidColor(SolidColorNode {
@@ -475,6 +477,7 @@ mod headless_impl {
                         (i + 1) as u32,
                     ) {
                         let node = Node {
+                            layout: Default::default(),
                             id: SceneId::new(),
                             children: vec![],
                             data: NodeData::SolidColor(SolidColorNode {
@@ -572,6 +575,7 @@ mod headless_impl {
                 {
                     let root_id = SceneId::new();
                     let node = Node {
+                        layout: Default::default(),
                         id: root_id,
                         children: vec![],
                         data: NodeData::SolidColor(SolidColorNode {
@@ -704,6 +708,7 @@ mod headless_impl {
                     if i == 0 {
                         let root_id = SceneId::new();
                         let node = Node {
+                            layout: Default::default(),
                             id: root_id,
                             children: vec![],
                             data: NodeData::SolidColor(SolidColorNode {
@@ -1026,6 +1031,7 @@ mod headless_impl {
                     if i == 0 {
                         let root_id = SceneId::new();
                         let node = Node {
+                            layout: Default::default(),
                             id: root_id,
                             children: vec![],
                             data: NodeData::SolidColor(SolidColorNode {
@@ -1236,6 +1242,7 @@ mod headless_impl {
                     if i == 0 {
                         let root_id = SceneId::new();
                         let node = Node {
+                            layout: Default::default(),
                             id: root_id,
                             children: vec![],
                             data: NodeData::SolidColor(SolidColorNode {

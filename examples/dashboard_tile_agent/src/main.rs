@@ -3402,6 +3402,7 @@ mod tests {
         // Build the 6-node tree using direct struct construction.
         let bg_id = tze_hud_scene::SceneId::new();
         let bg = Node {
+            layout: Default::default(),
             id: bg_id,
             children: vec![],
             data: NodeData::SolidColor(SolidColorNode {
@@ -3415,6 +3416,7 @@ mod tests {
             .expect("add bg");
 
         let header = Node {
+            layout: Default::default(),
             id: tze_hud_scene::SceneId::new(),
             children: vec![],
             data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -3434,6 +3436,7 @@ mod tests {
             .expect("add header");
 
         let body = Node {
+            layout: Default::default(),
             id: tze_hud_scene::SceneId::new(),
             children: vec![],
             data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -3453,6 +3456,7 @@ mod tests {
             .expect("add body");
 
         let refresh = Node {
+            layout: Default::default(),
             id: tze_hud_scene::SceneId::new(),
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {
@@ -3468,6 +3472,7 @@ mod tests {
             .expect("add refresh");
 
         let dismiss = Node {
+            layout: Default::default(),
             id: tze_hud_scene::SceneId::new(),
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {
@@ -5378,6 +5383,7 @@ mod tests {
 
         // ── Attempt a: set_tile_root_checked by intruder ──────────────────────
         let intruder_node = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::SolidColor(SolidColorNode {
@@ -5457,6 +5463,7 @@ mod tests {
 
         // ── Attempt a: dashboard agent sets root of other-agent's tile ────────
         let node_a = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::SolidColor(SolidColorNode {
@@ -5478,6 +5485,7 @@ mod tests {
         // ── Attempt b: dashboard agent adds a node to other-agent's tile ──────
         // Set a root on other_tile first so we can attempt AddNode.
         let other_root = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::SolidColor(SolidColorNode {
@@ -5491,6 +5499,7 @@ mod tests {
             .expect("other-agent must be able to set its own tile root");
 
         let node_b = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {

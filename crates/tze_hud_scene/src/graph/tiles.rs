@@ -571,6 +571,7 @@ impl SceneGraph {
         self.nodes.insert(
             node_id,
             Node {
+                layout: Default::default(),
                 id: node_id,
                 children: Vec::new(),
                 data: NodeData::HitRegion(region),

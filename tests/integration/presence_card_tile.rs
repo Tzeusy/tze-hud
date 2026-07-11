@@ -284,6 +284,7 @@ fn build_chip_content(elapsed_seconds: u64) -> String {
 /// Build the SolidColorNode (semi-transparent dark background, full tile bounds).
 fn make_bg_node() -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::SolidColor(SolidColorNode {
@@ -296,6 +297,7 @@ fn make_bg_node() -> Node {
 
 fn make_sheen_node() -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::SolidColor(SolidColorNode {
@@ -308,6 +310,7 @@ fn make_sheen_node() -> Node {
 
 fn make_accent_node(rgb: [u8; 3]) -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::SolidColor(SolidColorNode {
@@ -320,6 +323,7 @@ fn make_accent_node(rgb: [u8; 3]) -> Node {
 
 fn make_avatar_plate_node(rgb: [u8; 3]) -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::SolidColor(SolidColorNode {
@@ -338,6 +342,7 @@ fn make_avatar_plate_node(rgb: [u8; 3]) -> Node {
 /// Build the StaticImageNode avatar, scaled within the tinted plate.
 fn make_avatar_node(resource_id: tze_hud_scene::ResourceId) -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::StaticImage(StaticImageNode {
@@ -353,6 +358,7 @@ fn make_avatar_node(resource_id: tze_hud_scene::ResourceId) -> Node {
 
 fn make_eyebrow_node() -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -371,6 +377,7 @@ fn make_eyebrow_node() -> Node {
 
 fn make_name_node(agent_name: &str) -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -389,6 +396,7 @@ fn make_name_node(agent_name: &str) -> Node {
 
 fn make_status_node(elapsed_seconds: u64) -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -407,6 +415,7 @@ fn make_status_node(elapsed_seconds: u64) -> Node {
 
 fn make_chip_bg_node() -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::SolidColor(SolidColorNode {
@@ -419,6 +428,7 @@ fn make_chip_bg_node() -> Node {
 
 fn make_chip_text_node(elapsed_seconds: u64) -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -437,6 +447,7 @@ fn make_chip_text_node(elapsed_seconds: u64) -> Node {
 
 fn make_dismiss_bg_node() -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::SolidColor(SolidColorNode {
@@ -449,6 +460,7 @@ fn make_dismiss_bg_node() -> Node {
 
 fn make_dismiss_text_node() -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -467,6 +479,7 @@ fn make_dismiss_text_node() -> Node {
 
 fn make_dismiss_hit_region_node() -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::HitRegion(HitRegionNode {

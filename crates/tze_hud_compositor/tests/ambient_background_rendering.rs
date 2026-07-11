@@ -931,6 +931,7 @@ fn scene_with_static_image_tile(
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::StaticImage(StaticImageNode {

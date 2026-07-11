@@ -2317,6 +2317,7 @@ fn convert_text_markdown_node_overflow_scene_to_proto_roundtrip() {
     };
 
     let scene_node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {

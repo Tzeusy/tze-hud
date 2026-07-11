@@ -101,6 +101,7 @@ fn make_batch(
 /// For full multi-node tree tests see `presence_card_tile.rs`.
 fn make_card_root_node(_agent_name: &str) -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::SolidColor(SolidColorNode {

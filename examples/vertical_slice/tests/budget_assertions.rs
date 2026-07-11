@@ -211,6 +211,7 @@ async fn run_texture_upload_calibration_factor(runtime: &HeadlessRuntime) -> f64
             );
             if let Ok(tile_id) = tile_result {
                 let node = Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::SolidColor(SolidColorNode {
@@ -401,6 +402,7 @@ async fn test_input_to_local_ack_p99_within_budget() {
             .set_tile_root(
                 tile,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     data: NodeData::HitRegion(HitRegionNode {
                         bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
@@ -663,6 +665,7 @@ async fn test_hit_test_p99_within_budget() {
             .set_tile_root(
                 tile,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     data: NodeData::HitRegion(HitRegionNode {
                         bounds: Rect::new(0.0, 0.0, 400.0, 400.0),
@@ -984,6 +987,7 @@ async fn test_texture_upload_p99_within_budget() {
             w as u32,
         ) {
             let node = Node {
+                layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -1021,6 +1025,7 @@ async fn test_texture_upload_p99_within_budget() {
                 100 + i as u32,
             ) {
                 let node = Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::SolidColor(SolidColorNode {
@@ -1197,6 +1202,7 @@ async fn test_stage6_render_encode_p99_within_budget() {
                 .set_tile_root(
                     tile,
                     Node {
+                        layout: Default::default(),
                         id: SceneId::new(),
                         children: vec![],
                         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -1366,6 +1372,7 @@ async fn test_layer1_pixel_readback_tile_color() {
             .set_tile_root(
                 tile,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     data: NodeData::TextMarkdown(TextMarkdownNode {
                         content: "Layer 1 test".to_string(),
@@ -1444,6 +1451,7 @@ async fn test_layer1_pixel_readback_z_order() {
             .set_tile_root(
                 tile_a,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     data: NodeData::SolidColor(SolidColorNode {
                         bounds: Rect::new(0.0, 0.0, 300.0, 200.0),
@@ -1469,6 +1477,7 @@ async fn test_layer1_pixel_readback_z_order() {
             .set_tile_root(
                 tile_b,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     data: NodeData::SolidColor(SolidColorNode {
                         bounds: Rect::new(0.0, 0.0, 100.0, 100.0),

@@ -56,6 +56,7 @@ fn single_tile_scene(
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: node_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -99,6 +100,7 @@ fn add_chrome_tile(
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id: node_id,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -268,6 +270,7 @@ fn widget_passthrough_skips_to_agent_tile_below() {
         .set_tile_root(
             agent_tile,
             Node {
+                layout: Default::default(),
                 id: agent_node_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -351,6 +354,7 @@ fn passthrough_tile_skipped_reveals_tile_below() {
         .set_tile_root(
             low_tile,
             Node {
+                layout: Default::default(),
                 id: low_node_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -458,6 +462,7 @@ fn highest_z_tile_wins_in_overlap() {
         .set_tile_root(
             low_tile,
             Node {
+                layout: Default::default(),
                 id: low_node_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -475,6 +480,7 @@ fn highest_z_tile_wins_in_overlap() {
         .set_tile_root(
             high_tile,
             Node {
+                layout: Default::default(),
                 id: high_node_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -543,6 +549,7 @@ fn last_sibling_wins_in_reverse_tree_order() {
 
     // Both children overlap the same region (100,100, 200×100).
     let first_child = Node {
+        layout: Default::default(),
         id: first_child_id,
         children: vec![],
         data: NodeData::HitRegion(HitRegionNode {
@@ -554,6 +561,7 @@ fn last_sibling_wins_in_reverse_tree_order() {
         }),
     };
     let last_child = Node {
+        layout: Default::default(),
         id: last_child_id,
         children: vec![],
         data: NodeData::HitRegion(HitRegionNode {
@@ -565,6 +573,7 @@ fn last_sibling_wins_in_reverse_tree_order() {
         }),
     };
     let root = Node {
+        layout: Default::default(),
         id: root_id,
         children: vec![first_child_id, last_child_id],
         data: NodeData::SolidColor(SolidColorNode {
@@ -939,7 +948,7 @@ proptest! {
 
         for (tile_id, iid) in [(low_tile, "low"), (high_tile, "high")] {
             let node_id = SceneId::new();
-            scene.nodes.insert(node_id, Node {
+            scene.nodes.insert(node_id, Node { layout: Default::default(),
                 id: node_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {

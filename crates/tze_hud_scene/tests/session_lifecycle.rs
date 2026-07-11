@@ -101,6 +101,7 @@ impl TransitionLog {
 
 fn make_solid_node(bounds: Rect, color: Rgba) -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::SolidColor(SolidColorNode {

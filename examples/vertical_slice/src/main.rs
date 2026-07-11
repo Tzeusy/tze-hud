@@ -681,6 +681,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -721,6 +722,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id: node_id,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -1359,6 +1361,7 @@ mod tests {
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id: node_id,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {

@@ -177,6 +177,7 @@ async fn upload_icon_png(store: &ResourceStore, namespace: &str) -> ([u8; 32], R
 
 fn make_bg_node() -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::SolidColor(SolidColorNode {
@@ -195,6 +196,7 @@ fn make_bg_root_with_children(
     dismiss_id: SceneId,
 ) -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![icon_id, header_id, body_id, refresh_id, dismiss_id],
         data: NodeData::SolidColor(SolidColorNode {
@@ -207,6 +209,7 @@ fn make_bg_root_with_children(
 
 fn make_icon_node(resource_id: ResourceId) -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::StaticImage(StaticImageNode {
@@ -222,6 +225,7 @@ fn make_icon_node(resource_id: ResourceId) -> Node {
 
 fn make_header_node() -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -245,6 +249,7 @@ fn make_header_node() -> Node {
 
 fn make_body_node(content: &str) -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -268,6 +273,7 @@ fn make_body_node(content: &str) -> Node {
 
 fn make_refresh_node() -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::HitRegion(HitRegionNode {
@@ -286,6 +292,7 @@ fn make_refresh_node() -> Node {
 
 fn make_dismiss_node() -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::HitRegion(HitRegionNode {
@@ -731,6 +738,7 @@ fn disconnect_during_lifecycle_orphans_tile_with_badge() {
 
     // Minimal root (single SolidColor node — lifecycle focus, not node content).
     let root = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::SolidColor(SolidColorNode {
@@ -813,6 +821,7 @@ fn grace_period_expiry_removes_tile_after_disconnect() {
     let tile_id = create_result.created_ids[0];
 
     let root = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::SolidColor(SolidColorNode {
@@ -929,6 +938,7 @@ fn second_agent_cannot_mutate_dashboard_tile() {
             tile_id,
             parent_id: None,
             node: Node {
+                layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -997,6 +1007,7 @@ fn dashboard_agent_cannot_mutate_foreign_namespace_tile() {
         vec![SceneMutation::SetTileRoot {
             tile_id: other_tile_id,
             node: Node {
+                layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {

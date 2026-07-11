@@ -268,6 +268,7 @@ mod tests {
 
         let node_id = SceneId::new();
         let node = Node {
+            layout: Default::default(),
             id: node_id,
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {
