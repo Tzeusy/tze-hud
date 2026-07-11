@@ -1909,6 +1909,14 @@ fn portal_markdown_with_spans(
         push_line(&mut result, &format!("note: {status_text}"));
     }
 
+    // hud-c64bn: byte offset marking the start of the TAIL-CRITICAL content —
+    // the input-status lines and (Expanded only) the composer status line —
+    // that MUST survive the `MAX_PORTAL_MARKDOWN_BYTES` wire truncation
+    // below. Every arm of the match below sets this before the function
+    // reads it; the compiler enforces that definite-assignment property (an
+    // unhandled future arm is a compile error here, not a silent fallback).
+    let tail_start;
+
     match state.presentation {
         ProjectedPortalPresentation::Expanded => {
             push_line(&mut result, "");
@@ -1996,10 +2004,19 @@ fn portal_markdown_with_spans(
             // always-visible bottom-pinned overlay (hud-f6zfa) that never rode
             // this markdown blob.
             //
+            // "Trailing line" protects against the COMPOSITOR's TailAnchored
+            // viewport (keeps the tail under visual overflow) — but the WIRE-level
+            // `MAX_PORTAL_MARKDOWN_BYTES` truncation below has the OPPOSITE
+            // keep-policy (keeps the prefix), so trailing content is at HIGHER
+            // risk there, not lower (hud-c64bn, found during hud-rnc4x review).
+            // `tail_start` marks where the reservation below begins protecting
+            // this section from that wire-level cap too.
+            //
             // hud-ycurc: emit the input-status lines (pending HUD input count /
             // last input feedback) HERE, before the composer status, so the
             // composer status remains the trailing tail-anchored-safe line even
             // when those fields are populated.
+            tail_start = result.len();
             push_input_status_lines(&mut result, state);
             push_line(&mut result, "");
             if is_connection_degraded(state) {
@@ -2028,12 +2045,98 @@ fn portal_markdown_with_spans(
             push_line(&mut result, &clamp_one_line(preview, 160));
             // Collapsed has no composer status line, so the input-status lines
             // keep their trailing position after the compact preview (unchanged
-            // from before hud-ycurc).
+            // from before hud-ycurc). In practice Collapsed content never nears
+            // `MAX_PORTAL_MARKDOWN_BYTES` (the preview is clamped to 160 bytes
+            // and the input-status lines are similarly short-bounded, so the
+            // whole arm tops out at a few hundred bytes), but marking
+            // `tail_start` here costs nothing and keeps the reservation below
+            // uniform across both arms (hud-c64bn) rather than Expanded-only.
+            tail_start = result.len();
             push_input_status_lines(&mut result, state);
         }
     }
 
-    (truncate_utf8(result, MAX_PORTAL_MARKDOWN_BYTES), turn_spans)
+    // hud-c64bn: reserve the tail-critical content's byte length from the
+    // budget instead of truncating the whole assembled blob as one
+    // prefix-kept unit — see `apply_tail_reserved_truncation`'s doc comment
+    // for why.
+    let result = apply_tail_reserved_truncation(
+        result,
+        tail_start,
+        MAX_PORTAL_MARKDOWN_BYTES,
+        &mut turn_spans,
+    );
+
+    (result, turn_spans)
+}
+
+/// Apply the tail-reservation byte-budget policy (hud-c64bn) to `result`:
+/// bytes at or after `tail_start` are TAIL-CRITICAL content (composer status,
+/// input-status lines) that MUST survive verbatim, so only the HEAD
+/// (`result[..tail_start]`, the variable-length transcript/input-history
+/// portion) is truncated to make room. `turn_spans` (byte offsets into the
+/// head) are clamped/dropped to match.
+///
+/// This replaces truncating the whole assembled blob as one prefix-kept unit
+/// via `truncate_utf8(result, max_bytes)` (which kept `text[..cut]`) — the
+/// OPPOSITE keep-policy of the compositor's `TruncationViewport::TailAnchored`
+/// that motivates the tail-critical content being positioned last in the
+/// first place: under plain whole-blob prefix truncation, content placed
+/// last was at HIGHER risk from this wire-level cap, not lower, exactly
+/// inverting the guarantee `tail_start` is meant to provide.
+///
+/// No-op, and BYTE-IDENTICAL to the input, when `result.len() <= max_bytes`
+/// (the overwhelmingly common case) — `clamp_utf8`'s own `<= max_bytes` early
+/// return means this function's early return here preserves that exactly.
+///
+/// The tail is cloned out of `result` (not independently re-assembled) before
+/// truncation, so it captures whatever the caller's `push_line`/
+/// `push_input_status_lines` calls actually produced verbatim — including
+/// their own conditional-newline-joining behavior — with no risk of a second,
+/// independently-built "tail" string diverging in its own formatting.
+///
+/// `turn_spans`, which are byte offsets into the HEAD region only (computed
+/// before any tail-critical content existed), are clamped and dropped against
+/// `head_cut` — NOT against the final (post-splice) content length. The two
+/// differ once the cap engages (`final_len == head_cut + tail.len() >
+/// head_cut`), so clamping against the final length instead would let a span
+/// whose bytes were cut from the head survive pointing at whatever tail bytes
+/// now occupy that position — a real span-corruption bug this reservation
+/// would otherwise introduce. (The downstream `turn_attribution_color_runs`
+/// clamp against the caller's `content_len` stays as a harmless, now-
+/// redundant second guard.)
+///
+/// Degenerate policy: if `result[tail_start..]` (the tail) alone is `>=
+/// max_bytes`, `saturating_sub` floors the head budget at `0` — the head
+/// becomes empty and every span is dropped — and the tail is returned intact
+/// even though the total then exceeds `max_bytes`. This function never trims
+/// the tail itself: at the real call site, the composer/feedback lines it
+/// carries are already line-clamped at their construction sites
+/// (`composer_feedback_line`'s Rejected-reason fallback goes through
+/// `clamp_one_line(.., 160)`), so an over-budget tail is not reachable in
+/// practice there; if it ever were, exceeding the budget slightly is
+/// preferable to guessing which part of the tail-critical content to
+/// sacrifice.
+fn apply_tail_reserved_truncation(
+    mut result: String,
+    tail_start: usize,
+    max_bytes: usize,
+    turn_spans: &mut Vec<TranscriptTurnSpan>,
+) -> String {
+    if result.len() <= max_bytes {
+        return result;
+    }
+    let tail = result[tail_start..].to_string();
+    let head_budget = max_bytes.saturating_sub(tail.len());
+    let head_cut = clamp_utf8(&result[..tail_start], head_budget).len();
+    for span in turn_spans.iter_mut() {
+        span.start = span.start.min(head_cut);
+        span.end = span.end.min(head_cut);
+    }
+    turn_spans.retain(|span| span.start < span.end);
+    result.truncate(head_cut);
+    result.push_str(&tail);
+    result
 }
 
 /// Emit the ambient input-status lines — the pending-HUD-input count and the
@@ -2883,12 +2986,6 @@ fn clamp_utf8(text: &str, max_bytes: usize) -> &str {
         cut -= 1;
     }
     &text[..cut]
-}
-
-fn truncate_utf8(mut text: String, max_bytes: usize) -> String {
-    let cut = clamp_utf8(&text, max_bytes).len();
-    text.truncate(cut);
-    text
 }
 
 fn push_line(result: &mut String, line: &str) {
@@ -4980,6 +5077,254 @@ mod tests {
             md.trim_end().ends_with("composer: ready"),
             "composer status line must be the LAST line even with pending/feedback: {md}"
         );
+    }
+
+    // ── hud-c64bn: tail-reserved wire truncation ──────────────────────────────
+    //
+    // `apply_tail_reserved_truncation` is tested directly at the unit level
+    // (precise, deterministic — avoids fighting the full render pipeline's
+    // many ambient-line conditionals for an exact-string match) plus two
+    // integration-level tests through the real adapter to prove the
+    // end-to-end behavior that matters: composer/input-status survival when
+    // a transcript genuinely exceeds the 16KB cap, and span consistency
+    // under that same truncation.
+
+    #[test]
+    fn apply_tail_reserved_truncation_is_byte_identical_no_op_when_under_cap() {
+        let head = "head line one\nhead line two";
+        let tail = "\ntail-critical line";
+        let input = format!("{head}{tail}");
+        let tail_start = head.len();
+        let mut spans = vec![TranscriptTurnSpan {
+            start: 0,
+            end: 4,
+            output_kind: OutputKind::Tool,
+        }];
+        let spans_before = spans.clone();
+        let max_bytes = input.len() + 100; // comfortably under cap
+        let out = apply_tail_reserved_truncation(input.clone(), tail_start, max_bytes, &mut spans);
+        assert_eq!(
+            out, input,
+            "under-cap output must be byte-identical to input"
+        );
+        assert_eq!(spans, spans_before, "under-cap spans must be untouched");
+    }
+
+    #[test]
+    fn apply_tail_reserved_truncation_reserves_tail_and_truncates_only_head_when_over_cap() {
+        // 20-byte head, 10-byte tail, budget 15 -> head must shrink to 5 bytes
+        // (15 - 10), tail must survive completely unmodified.
+        let head = "01234567890123456789"; // 20 bytes
+        let tail = "TAIL123456"; // 10 bytes
+        let input = format!("{head}{tail}");
+        let tail_start = head.len();
+        let mut spans = vec![
+            // Fully within the surviving head (bytes [0, 5)) -> kept, unclamped.
+            TranscriptTurnSpan {
+                start: 0,
+                end: 3,
+                output_kind: OutputKind::Tool,
+            },
+            // Straddles the cut (starts before byte 5, ends after) -> clamped to [3, 5).
+            TranscriptTurnSpan {
+                start: 3,
+                end: 8,
+                output_kind: OutputKind::Status,
+            },
+            // Entirely beyond the cut -> dropped.
+            TranscriptTurnSpan {
+                start: 10,
+                end: 15,
+                output_kind: OutputKind::Error,
+            },
+        ];
+        let max_bytes = 15;
+        let out = apply_tail_reserved_truncation(input, tail_start, max_bytes, &mut spans);
+        assert_eq!(
+            out, "01234TAIL123456",
+            "head truncated to 5 bytes, tail verbatim"
+        );
+        assert!(
+            out.ends_with(tail),
+            "tail must be exact and at the end: {out}"
+        );
+        assert_eq!(
+            out.len(),
+            max_bytes,
+            "output must land exactly at the budget here"
+        );
+        assert_eq!(
+            spans,
+            vec![
+                TranscriptTurnSpan {
+                    start: 0,
+                    end: 3,
+                    output_kind: OutputKind::Tool,
+                },
+                TranscriptTurnSpan {
+                    start: 3,
+                    end: 5,
+                    output_kind: OutputKind::Status,
+                },
+            ],
+            "span straddling the cut clamped to head_cut, span beyond it dropped"
+        );
+    }
+
+    #[test]
+    fn apply_tail_reserved_truncation_degenerate_tail_alone_exceeds_budget_head_wins_nothing() {
+        let head = "some head content that would normally be kept";
+        let tail = "TAIL-CRITICAL-CONTENT-LONGER-THAN-BUDGET";
+        let input = format!("{head}{tail}");
+        let tail_start = head.len();
+        let mut spans = vec![TranscriptTurnSpan {
+            start: 0,
+            end: 5,
+            output_kind: OutputKind::Tool,
+        }];
+        // Budget smaller than the tail alone.
+        let max_bytes = tail.len() - 5;
+        let out = apply_tail_reserved_truncation(input, tail_start, max_bytes, &mut spans);
+        // Policy (hud-c64bn): tail wins outright, head is empty, total may
+        // exceed max_bytes rather than the tail itself being cut.
+        assert_eq!(out, tail, "tail must survive completely uncut, head empty");
+        assert!(
+            out.len() > max_bytes,
+            "degenerate case is allowed to exceed the budget: out.len()={} max_bytes={max_bytes}",
+            out.len()
+        );
+        assert!(
+            spans.is_empty(),
+            "every span must be dropped when the head is empty"
+        );
+    }
+
+    #[test]
+    fn portal_markdown_composer_and_input_status_survive_verbatim_when_transcript_exceeds_cap() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let mut state = make_expanded_interaction_state("portal-overcap");
+        // ~200 bytes/turn x 150 turns ~= 30KB, comfortably over the 16KB cap.
+        state.visible_transcript = (0..150)
+            .map(|i| {
+                transcript_unit_text(
+                    i,
+                    OutputKind::Assistant,
+                    &format!(
+                        "turn number {i} with enough padding text to make each turn roughly two \
+                         hundred bytes long so a few dozen of these blow well past the cap"
+                    ),
+                )
+            })
+            .collect();
+        state.pending_input_count = Some(7);
+        state.last_input_feedback = Some(PortalInputFeedback {
+            projection_id: "portal-overcap".to_string(),
+            input_id: "input-1".to_string(),
+            feedback_state: PortalInputFeedbackState::Accepted,
+            error_code: None,
+            pending_input_count: 0,
+            pending_input_bytes: 0,
+            status_summary: String::new(),
+        });
+
+        let md = adapter.render_portal_markdown(&state, 0);
+
+        assert!(
+            md.len() <= MAX_PORTAL_MARKDOWN_BYTES,
+            "output must respect the wire cap: {} > {MAX_PORTAL_MARKDOWN_BYTES}",
+            md.len()
+        );
+        // Sanity: the cap actually engaged for this fixture (otherwise this
+        // test would prove nothing about the truncation path). The head
+        // truncation is PREFIX-KEEPING (`clamp_utf8` keeps `text[..cut]`), so
+        // the EARLIEST turn survives and the LATEST turns are what get
+        // trimmed — the inverse of what a naive whole-blob TailAnchored
+        // reading might suggest.
+        assert!(
+            md.contains("turn number 0 "),
+            "earliest turn must survive prefix-keeping head truncation: {}",
+            md.len()
+        );
+        assert!(
+            !md.contains("turn number 149 "),
+            "fixture must be large enough that the LATEST turns are trimmed \
+             from the head: {}",
+            md.len()
+        );
+        // The tail-critical content must survive completely intact and in
+        // the correct relative order, exactly as under-cap.
+        let pending_pos = md
+            .find("pending HUD input: 7")
+            .expect("pending-input line must survive the wire cap verbatim");
+        let feedback_pos = md
+            .find("✓ sent")
+            .expect("feedback line must survive the wire cap verbatim");
+        let composer_pos = md
+            .find("composer: ready")
+            .expect("composer status line must survive the wire cap verbatim");
+        assert!(pending_pos < feedback_pos && feedback_pos < composer_pos);
+        assert!(
+            md.trim_end().ends_with("composer: ready"),
+            "composer status must still be the trailing line under the wire cap: {md}"
+        );
+    }
+
+    #[test]
+    fn portal_markdown_turn_spans_stay_within_bounds_when_transcript_exceeds_cap() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let mut state = make_expanded_interaction_state("portal-overcap-spans");
+        // Every turn is non-assistant (Tool), so every retained turn gets an
+        // attribution span (turn_uses_system_attribution) — maximizes the
+        // number of spans that could be corrupted by the truncation splice.
+        state.visible_transcript = (0..150)
+            .map(|i| {
+                transcript_unit_text(
+                    i,
+                    OutputKind::Tool,
+                    &format!(
+                        "tool output {i} with enough padding text to make each turn roughly two \
+                         hundred bytes long so a few dozen of these blow well past the cap"
+                    ),
+                )
+            })
+            .collect();
+
+        let (md, turn_spans) = portal_markdown_with_spans(
+            &state,
+            adapter.composer_display.as_ref(),
+            0,
+            adapter.visual_tokens.timestamp_granularity,
+        );
+
+        assert!(md.len() <= MAX_PORTAL_MARKDOWN_BYTES);
+        assert!(
+            !turn_spans.is_empty(),
+            "fixture must retain at least some attributed turns after truncation"
+        );
+        for span in &turn_spans {
+            assert!(
+                span.start < span.end,
+                "no degenerate/empty span must survive: {span:?}"
+            );
+            assert!(
+                span.end <= md.len(),
+                "span must not address bytes beyond the (possibly truncated) content: \
+                 span={span:?} content_len={}",
+                md.len()
+            );
+            // Every surviving span must still slice to valid UTF-8 and land
+            // inside the retained transcript body — not inside the
+            // tail-critical pending/feedback/composer content that was
+            // spliced on afterward.
+            let text = &md[span.start..span.end];
+            assert!(
+                text.contains("tool output"),
+                "span must still address real transcript text, not spliced tail content: \
+                 span={span:?} text={text:?}"
+            );
+        }
     }
 
     /// The INPUT band is absent when there is no INPUT history — including under
