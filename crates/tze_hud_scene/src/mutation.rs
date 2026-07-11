@@ -299,6 +299,19 @@ pub enum SceneMutation {
         tile_id: SceneId,
         region: Option<HitRegionNode>,
     },
+    /// Set (or clear) the tile's derived composer-STATUS text node (hud-0e44r).
+    ///
+    /// Coalescible StateStream, exactly like `SetTileComposerInteraction`: the
+    /// short "composer: ready/unavailable" status line (and, when present, the
+    /// INPUT-history band) is held as runtime overlay state and re-derived as a
+    /// text node with its OWN bounds after every transcript republish — so a long
+    /// INPUT history can never push it past the transcript's tail-anchored
+    /// Ellipsis window and hide it (§Viewer Reply Echo top-anchored composer
+    /// visibility). `node = None` clears it (redaction / non-interactive).
+    SetTileComposerStatus {
+        tile_id: SceneId,
+        node: Option<TextMarkdownNode>,
+    },
     // ── Portal surface (RFC 0013 §7.2 promotion; hud-tc153) ───────────────
     /// Declare or replace the first-class portal surface descriptor over a tile.
     ///
@@ -357,6 +370,7 @@ impl SceneMutation {
             SceneMutation::SetTileLifecycleAccent { .. } => "SetTileLifecycleAccent",
             SceneMutation::SetTileUnreadCount { .. } => "SetTileUnreadCount",
             SceneMutation::SetTileComposerInteraction { .. } => "SetTileComposerInteraction",
+            SceneMutation::SetTileComposerStatus { .. } => "SetTileComposerStatus",
             SceneMutation::SetPortalSurface { .. } => "SetPortalSurface",
             SceneMutation::UpdatePortalSurfaceState { .. } => "UpdatePortalSurfaceState",
         }
@@ -1041,6 +1055,21 @@ impl SceneGraph {
                         self.set_tile_composer_interaction_checked(*tile_id, r.clone(), namespace)?
                     }
                     None => self.clear_tile_composer_interaction_checked(*tile_id, namespace)?,
+                }
+                Ok(vec![])
+            }
+            // ── Composer status text node (hud-0e44r) ────────────────────
+            SceneMutation::SetTileComposerStatus { tile_id, node } => {
+                // Same checked path + coalescing rationale as
+                // SetTileComposerInteraction above: the derived text node is
+                // runtime overlay state, not a published element, so no
+                // `pending_touch_ids` — the co-travelling `PublishToTile`
+                // content mutation's repaint carries it.
+                match node {
+                    Some(n) => {
+                        self.set_tile_composer_status_checked(*tile_id, n.clone(), namespace)?
+                    }
+                    None => self.clear_tile_composer_status_checked(*tile_id, namespace)?,
                 }
                 Ok(vec![])
             }

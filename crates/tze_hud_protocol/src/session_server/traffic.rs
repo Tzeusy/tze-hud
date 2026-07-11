@@ -162,6 +162,14 @@ pub(super) fn classify_inbound_batch(batch: &MutationBatch) -> TrafficClass {
                 // enabled streaming portal off the coalescible path on the hottest
                 // path (hud-mzk74 / hud-iofav).
                 Mutation::SetTileComposerInteraction(_) => {}
+                // Composer-status text node — a coalescible content/state update,
+                // exactly like the composer interaction above (hud-0e44r). The
+                // runtime derives the text node from this overlay state and
+                // re-attaches it in its own bounds after each republish, so it must
+                // NOT mark the batch Transactional — otherwise moving the composer
+                // status out of the blob would reintroduce the per-republish
+                // coalescing regression it exists to avoid (hud-mzk74).
+                Mutation::SetTileComposerStatus(_) => {}
                 // Declaring/replacing the first-class portal surface is structural
                 // (identity + parts) — Transactional (RFC 0013 §7.2 promotion).
                 Mutation::SetPortalSurface(_) => return TrafficClass::Transactional,

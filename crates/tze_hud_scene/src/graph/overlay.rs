@@ -175,6 +175,32 @@ pub struct RuntimeOverlayState {
     /// Ephemeral: skipped during serialization.
     #[serde(skip, default)]
     pub tile_composer_nodes: HashMap<SceneId, SceneId>,
+    /// Per-tile derived composer-STATUS text node spec (hud-0e44r). Maps host tile
+    /// id → the `TextMarkdownNode` for the short "composer: ready/unavailable"
+    /// status line (and, when present, the INPUT-history band) that the bridged
+    /// portal used to bake into its single tail-anchored transcript blob.
+    ///
+    /// Held here (not inside the transcript node) so it survives the
+    /// `SetTileRoot`/`PublishToTile` republish that replaces the node tree, exactly
+    /// like [`tile_composer_interactions`](Self::tile_composer_interactions). The
+    /// derived node carries its OWN small bounds, so — unlike when it rode inside
+    /// the transcript blob — a long INPUT history can never push it past the
+    /// transcript's tail-anchored Ellipsis window and hide it (the §Viewer Reply
+    /// Echo "top-anchored composer" visibility property). Driven by the coalescible
+    /// StateStream [`SceneMutation::SetTileComposerStatus`] mutation.
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub tile_composer_status: HashMap<SceneId, TextMarkdownNode>,
+    /// The scene node id currently synthesized for each tile's composer-status
+    /// spec (hud-0e44r). Maps host tile id → the derived text node's id. Mirrors
+    /// [`tile_composer_nodes`](Self::tile_composer_nodes): a mapped node that no
+    /// longer exists (removed with the old root subtree on republish) is treated as
+    /// absent and rebuilt by [`SceneGraph::ensure_tile_composer_status_node`].
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub tile_composer_status_nodes: HashMap<SceneId, SceneId>,
     /// First-class text-stream portal surface descriptors, keyed by host tile id
     /// (RFC 0013 §7.2 promotion; hud-tc153).
     ///
@@ -603,6 +629,80 @@ impl SceneGraph {
         self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
         self.clear_tile_composer_interaction(tile_id);
         Ok(())
+    }
+
+    /// Set the tile's composer-STATUS text spec (hud-0e44r), re-deriving the
+    /// detached text node so the status line renders in its own bounds instead of
+    /// inside the tail-anchored transcript blob. Version-idempotent: bumps
+    /// `scene.version` only when the stored spec changes, mirroring
+    /// [`set_tile_composer_interaction`](Self::set_tile_composer_interaction).
+    pub fn set_tile_composer_status(
+        &mut self,
+        tile_id: SceneId,
+        node: TextMarkdownNode,
+    ) -> Result<(), ValidationError> {
+        if !self.tiles.contains_key(&tile_id) {
+            return Err(ValidationError::TileNotFound { id: tile_id });
+        }
+        let changed = self.overlay.tile_composer_status.get(&tile_id) != Some(&node);
+        if changed {
+            self.overlay.tile_composer_status.insert(tile_id, node);
+            // Force a rebuild: the current derived node (if any) was attached from
+            // the prior spec earlier in this same batch (the PublishToTile reattach
+            // runs before this mutation), exactly like the composer-interaction path.
+            self.detach_tile_composer_status_node(tile_id);
+        }
+        self.ensure_tile_composer_status_node(tile_id);
+        if changed {
+            self.version += 1;
+        }
+        Ok(())
+    }
+
+    /// Set the composer-status spec with a full lease + capability gate (checked
+    /// path) — mirrors
+    /// [`set_tile_composer_interaction_checked`](Self::set_tile_composer_interaction_checked)
+    /// so the in-process render-batch path cannot escape lease suspension (hud-a745w).
+    pub fn set_tile_composer_status_checked(
+        &mut self,
+        tile_id: SceneId,
+        node: TextMarkdownNode,
+        agent_namespace: &str,
+    ) -> Result<(), ValidationError> {
+        let lease_id = self.portal_tile_lease_checked(tile_id, agent_namespace)?;
+        self.require_active_lease(lease_id)?;
+        self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
+        self.set_tile_composer_status(tile_id, node)
+    }
+
+    /// Clear the tile's composer-status spec, detaching the derived text node
+    /// (no-op if unset). Redaction/disable transitions clear it exactly like
+    /// [`clear_tile_composer_interaction`](Self::clear_tile_composer_interaction).
+    pub fn clear_tile_composer_status(&mut self, tile_id: SceneId) {
+        if self.overlay.tile_composer_status.remove(&tile_id).is_some() {
+            self.detach_tile_composer_status_node(tile_id);
+            self.version += 1;
+        }
+    }
+
+    /// Clear the composer-status spec with a full lease + capability gate (checked
+    /// path) — the clear-side counterpart to
+    /// [`set_tile_composer_status_checked`](Self::set_tile_composer_status_checked).
+    pub fn clear_tile_composer_status_checked(
+        &mut self,
+        tile_id: SceneId,
+        agent_namespace: &str,
+    ) -> Result<(), ValidationError> {
+        let lease_id = self.portal_tile_lease_checked(tile_id, agent_namespace)?;
+        self.require_active_lease(lease_id)?;
+        self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
+        self.clear_tile_composer_status(tile_id);
+        Ok(())
+    }
+
+    /// Get the composer-status text spec for a tile, if any.
+    pub fn tile_composer_status(&self, tile_id: SceneId) -> Option<&TextMarkdownNode> {
+        self.overlay.tile_composer_status.get(&tile_id)
     }
 
     /// Get the composer interaction hit-region spec for a tile, if any.

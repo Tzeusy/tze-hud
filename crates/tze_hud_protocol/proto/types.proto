@@ -250,6 +250,7 @@ message MutationProto {
     UpdatePortalSurfaceStateMutation update_portal_surface_state = 15;
     SetTileUnreadCountMutation  set_tile_unread_count  = 16;
     SetTileComposerInteractionMutation set_tile_composer_interaction = 17;
+    SetTileComposerStatusMutation set_tile_composer_status = 18;
   }
 }
 
@@ -280,6 +281,28 @@ message MutationProto {
 message SetTileComposerInteractionMutation {
   bytes tile_id = 1;                // 16-byte SceneId of the target tile
   HitRegionNodeProto composer = 2;  // Composer hit-region spec; absent = clear (interaction disabled)
+}
+
+// Set (or clear) the derived composer-STATUS text node a bridged portal renders
+// in its own bounds (hud-0e44r).
+//
+// This is a *coalescible StateStream* tile-update, exactly like
+// SetTileComposerInteractionMutation: the short "composer: ready/unavailable"
+// status line (and, when present, the INPUT-history band) is held as runtime
+// overlay state keyed by `tile_id`, and the runtime derives/re-attaches a
+// TextMarkdown scene node from it after every transcript republish — never a
+// per-republish `AddNode` (which would flip the batch Transactional, hud-mzk74).
+//
+// Rendering it as its OWN node (with its own bounds), instead of baking it into
+// the single tail-anchored transcript blob, is what keeps a long INPUT history
+// from pushing the composer status past the transcript's tail-anchored Ellipsis
+// window and hiding it (§Viewer Reply Echo "top-anchored composer" visibility).
+//
+// Absent `status` clears it (redaction / interaction disabled) — the derived text
+// node is detached, mirroring the composer-interaction absent-composer clear.
+message SetTileComposerStatusMutation {
+  bytes tile_id = 1;                    // 16-byte SceneId of the target tile
+  TextMarkdownNodeProto status = 2;     // Composer-status text spec; absent = clear
 }
 
 // Set (or clear) the ambient unread-output count a tile's jump-to-latest pill

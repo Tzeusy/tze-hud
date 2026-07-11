@@ -1240,6 +1240,43 @@ impl ResidentGrpcPortalAdapter {
             )),
         });
 
+        // Composer STATUS text node (hud-0e44r): the status line materialized as
+        // its OWN coalescible derived node instead of baked into the tail-anchored
+        // transcript blob, so a long INPUT history can never hide it. `None`
+        // (Collapsed) CLEARS the derived node, mirroring the composer hit region's
+        // absent-composer clear. Overflow = Clip so it is never subject to the
+        // transcript's at-tail Ellipsis truncation. Exact strip geometry is a
+        // design-tunable detail (owner tunes live on hardware); correctness only
+        // requires it to render in its OWN bounds outside the transcript window.
+        let composer_status = composer_status_line(state, self.composer_display.as_ref()).map(
+            |text| {
+                let full = self.local_bounds_for_state(state);
+                let line_h = (self.visual_tokens.composer_font_size_px * 1.4).max(1.0);
+                proto::TextMarkdownNodeProto {
+                    content: text,
+                    bounds: Some(proto::Rect {
+                        x: 0.0,
+                        y: (full.height - line_h).max(0.0),
+                        width: full.width,
+                        height: line_h.min(full.height.max(1.0)),
+                    }),
+                    font_size_px: self.visual_tokens.composer_font_size_px,
+                    color: Some(self.visual_tokens.composer_text_color),
+                    background: Some(self.visual_tokens.composer_background),
+                    color_runs: Vec::new(),
+                    overflow: proto::TextOverflowProto::Clip as i32,
+                }
+            },
+        );
+        mutations.push(proto::MutationProto {
+            mutation: Some(proto::mutation_proto::Mutation::SetTileComposerStatus(
+                proto::SetTileComposerStatusMutation {
+                    tile_id: tile_id.clone(),
+                    status: composer_status,
+                },
+            )),
+        });
+
         // Ambient unread-output count for the jump-to-latest pill badge
         // (hud-hwk2m, portal-chat-grade-affordances §Jump-to-Latest Affordance).
         // A coalescible StateStream tile-update carrying the runtime-owned unread
@@ -1736,7 +1773,12 @@ fn portal_markdown(
 /// (portal-chat-grade-affordances §Ambient Per-Turn Timestamps, hud-g1ena.4).
 fn portal_markdown_with(
     state: &ProjectedPortalState,
-    composer_display: Option<&ComposerDisplayState>,
+    // Retained for signature stability across the render/shim/test call sites.
+    // Unused since hud-0e44r moved the composer STATUS line out of this single
+    // blob into its own derived node (`composer_status_line` +
+    // `SetTileComposerStatus`); the draft glyphs were never in this blob (the
+    // bottom strip owns them, hud-f6zfa).
+    _composer_display: Option<&ComposerDisplayState>,
     now_wall_us: u64,
     timestamps: TimestampGranularity,
 ) -> String {
@@ -1849,26 +1891,19 @@ fn portal_markdown_with(
                 push_line(&mut result, &body);
             }
             push_line(&mut result, "");
-            // §Viewer Reply Echo top-anchors the composer above the INPUT
-            // history band ("beneath a top-anchored composer"); render the
-            // composer status line here, before the band, so the interim
-            // single-markdown-node layout matches that framing.
-            if is_connection_degraded(state) {
-                // §2: clear live activity/typing/composer-ready signals on
-                // disconnect — the surface must not imply an active stream. The
-                // authority also forces `interaction_enabled = false` when
-                // degraded; this is the redundant presentation-layer guard.
-                push_line(&mut result, "composer: unavailable");
-            } else if state.interaction_enabled {
-                // Render composer region with draft text + caret (§4.1).
-                // Local-first: no remote roundtrip — reads from adapter's cached
-                // ComposerDisplayState which is updated by consume_draft_batch /
-                // apply_draft_notification on every delivered notification.
-                let composer_line = composer_line(composer_display, state.interaction_enabled);
-                push_line(&mut result, &composer_line);
-            } else {
-                push_line(&mut result, "composer: unavailable");
-            }
+            // §Viewer Reply Echo top-anchors the composer above the INPUT history
+            // band ("beneath a top-anchored composer"). The composer STATUS line is
+            // NO LONGER pushed into this single blob (hud-0e44r): baked in here it
+            // rode the transcript node's tail-anchored Ellipsis truncation, so a
+            // long INPUT history below it pushed it out of the visible window and
+            // hid it — defeating the top-anchoring. It is now materialized as its
+            // OWN derived text node (its own bounds) via the coalescible
+            // `SetTileComposerStatus` overlay mutation emitted by `render_batch`
+            // (see `composer_status_line`), so it stays visible regardless of INPUT
+            // history length. The INPUT band below is intentionally left in this
+            // node: its tail-anchoring IS the spec-mandated "bounded, newest-fit
+            // window" for the input region (newest viewer replies visible) — that
+            // was never the bug.
             // §Viewer Reply Echo (two-pane INPUT/OUTPUT split): render the INPUT
             // history — the viewer's own accepted replies — as a distinct band in
             // the input region, held SEPARATELY from the OUTPUT transcript above.
@@ -1992,6 +2027,30 @@ fn composer_line(
     } else {
         "composer: composing".to_string()
     }
+}
+
+/// The composer STATUS line to materialize as its own derived text node
+/// (hud-0e44r), moved out of the tail-anchored transcript blob so a long INPUT
+/// history can never hide it. Returns `None` for a Collapsed portal (no composer
+/// region) — the caller then CLEARS the derived node.
+///
+/// Mirrors the exact string logic `portal_markdown_with` used to inline: a
+/// degraded/disconnected surface reads "composer: unavailable" (§2 — never imply
+/// an active stream), otherwise the live [`composer_line`] status (which itself
+/// returns "composer: unavailable" when interaction is disabled). The string
+/// carries no draft glyphs and no transcript content, so it is redaction-safe —
+/// the same ambient status the single-blob layout showed for a restricted viewer.
+fn composer_status_line(
+    state: &ProjectedPortalState,
+    composer_display: Option<&ComposerDisplayState>,
+) -> Option<String> {
+    if state.presentation != ProjectedPortalPresentation::Expanded {
+        return None;
+    }
+    if is_connection_degraded(state) {
+        return Some("composer: unavailable".to_string());
+    }
+    Some(composer_line(composer_display, state.interaction_enabled))
 }
 
 /// Build a `TextColorRunProto` for the disconnect/stale marker.
@@ -2920,6 +2979,18 @@ mod tests {
         })
     }
 
+    /// Borrow the composer-status text node the batch's `SetTileComposerStatus`
+    /// mutation carries, if it SET one (`None` when the mutation is a clear or
+    /// absent) (hud-0e44r).
+    fn set_tile_composer_status_of(
+        batch: &session_proto::MutationBatch,
+    ) -> Option<&proto::TextMarkdownNodeProto> {
+        batch.mutations.iter().find_map(|m| match &m.mutation {
+            Some(M::SetTileComposerStatus(stcs)) => stcs.status.as_ref(),
+            _ => None,
+        })
+    }
+
     /// Borrow the bounds of the surface's declared part of the given kind
     /// (panics if absent — the caller asserts presence by kind).
     fn part_of(
@@ -3638,18 +3709,19 @@ mod tests {
             .render_batch(&state, 0)
             .expect("render_batch must succeed with interaction_enabled");
 
-        // Should be 5 mutations: PublishToTile, UpdateTileInputMode,
+        // Should be 6 mutations: PublishToTile, UpdateTileInputMode,
         // SetTileLifecycleAccent (always emitted, hud-m48i0),
         // SetTileComposerInteraction (composer hit region, hud-iofav),
+        // SetTileComposerStatus (composer status text node, hud-0e44r),
         // SetTileUnreadCount (always emitted last, hud-hwk2m). `render_batch` is the
         // pure raw-tile escape hatch — it emits NO first-class surface mutation
         // (those are added only by `render_batch_with_surface`, hud-rpm9s).
         assert_eq!(
             batch.mutations.len(),
-            5,
+            6,
             "interaction_enabled=true must produce PublishToTile + UpdateTileInputMode + \
              SetTileLifecycleAccent + SetTileComposerInteraction (composer hit region) + \
-             SetTileUnreadCount"
+             SetTileComposerStatus (composer status node) + SetTileUnreadCount"
         );
         // Crucially, NO structural AddNode — the composer rides coalescible overlay
         // state so an interaction-enabled streaming publish stays StateStream.
@@ -3827,18 +3899,21 @@ mod tests {
             .render_batch(&state, 0)
             .expect("render_batch must succeed");
 
-        // Should be 5 mutations: PublishToTile + UpdateTileInputMode +
+        // Should be 6 mutations: PublishToTile + UpdateTileInputMode +
         // SetTileLifecycleAccent (always emitted, hud-m48i0) +
         // SetTileComposerInteraction (a CLEAR — absent composer, hud-iofav) +
+        // SetTileComposerStatus (still SET to "composer: unavailable" — an Expanded
+        // portal always shows a composer status line, hud-0e44r) +
         // SetTileUnreadCount (always emitted, hud-hwk2m). No AddNode (interaction
         // disabled) and no first-class surface mutation (`render_batch` is the pure
         // raw-tile escape hatch, hud-rpm9s).
         assert_eq!(
             batch.mutations.len(),
-            5,
-            "interaction_enabled=false must produce exactly 5 mutations \
+            6,
+            "interaction_enabled=false must produce exactly 6 mutations \
              (PublishToTile + UpdateTileInputMode + SetTileLifecycleAccent + \
-              SetTileComposerInteraction(clear) + SetTileUnreadCount, no AddNode)"
+              SetTileComposerInteraction(clear) + SetTileComposerStatus(unavailable) + \
+              SetTileUnreadCount, no AddNode)"
         );
         assert!(
             !batch.mutations.iter().any(|m| matches!(
@@ -4262,34 +4337,41 @@ mod tests {
         let md = adapter.render_portal_markdown(&state, 0);
 
         assert!(md.contains("agent says hi"), "{md}");
-        assert!(md.contains("composer: ready"), "{md}");
         assert!(md.contains(PORTAL_INPUT_HISTORY_LABEL), "{md}");
         assert!(
             md.contains("viewer reply one") && md.contains("viewer reply two"),
             "{md}"
         );
-        // Ordering proves separation AND top-anchored placement: the OUTPUT
-        // transcript body renders first, then the composer status line (top-
-        // anchored above the INPUT band per §Viewer Reply Echo), then the INPUT
-        // band label, then the viewer replies — no viewer text is interleaved
-        // into the agent transcript body, and the composer never trails the band.
+        // The composer status line is NO LONGER in this blob (hud-0e44r): it moved
+        // to its own derived node so a long INPUT history can't tail-truncate it.
+        assert!(
+            !md.contains("composer: ready"),
+            "composer status moved out of the transcript blob (hud-0e44r): {md}"
+        );
+        // Ordering proves the OUTPUT transcript stays separate from and above the
+        // INPUT band — no viewer text interleaves into the agent transcript body.
         let agent_pos = md.find("agent says hi").expect("agent turn rendered");
-        let composer_pos = md
-            .find("composer: ready")
-            .expect("composer status line rendered");
         let label_pos = md
             .find(PORTAL_INPUT_HISTORY_LABEL)
             .expect("input band label rendered");
         let viewer_pos = md.find("viewer reply one").expect("viewer reply rendered");
-        assert!(
-            agent_pos < composer_pos && composer_pos < label_pos && label_pos < viewer_pos,
-            "{md}"
-        );
+        assert!(agent_pos < label_pos && label_pos < viewer_pos, "{md}");
         // Viewer replies stack with a token-styled `---` turn divider between them.
         assert!(
             md.contains("viewer reply one\n---\nviewer reply two"),
             "{md}"
         );
+
+        // The composer status is materialized separately as a coalescible
+        // SetTileComposerStatus mutation carrying its own bounded text node.
+        let mut adapter = ResidentGrpcPortalAdapter::new(ResidentGrpcPortalConfig::new(vec![
+            0u8;
+            16
+        ]));
+        adapter.record_created_tile(vec![0u8; 16]);
+        let batch = adapter.render_batch(&state, 0).expect("render_batch");
+        let status = set_tile_composer_status_of(&batch).expect("composer status mutation present");
+        assert_eq!(status.content, "composer: ready", "status node carries the affordance");
     }
 
     /// The INPUT band is absent when there is no INPUT history — including under
@@ -5147,13 +5229,18 @@ mod tests {
         // guard must take precedence.
         state.interaction_enabled = true;
 
+        // The composer status line no longer rides the transcript blob (hud-0e44r);
+        // it is materialized as its own derived node. The blob must not carry it…
         let markdown = portal_markdown(&state, None, 0);
         assert!(
-            !markdown.contains("composer: ready"),
-            "§2: degraded portal must not imply an active composer stream"
+            !markdown.contains("composer: ready") && !markdown.contains("composer: unavailable"),
+            "composer status moved out of the transcript blob (hud-0e44r): {markdown}"
         );
-        assert!(
-            markdown.contains("composer: unavailable"),
+        // …and the derived status content reads "unavailable" for a degraded portal
+        // (§2: never imply an active composer stream).
+        assert_eq!(
+            composer_status_line(&state, None).as_deref(),
+            Some("composer: unavailable"),
             "§2: degraded portal must show composer as unavailable"
         );
     }
@@ -5187,11 +5274,18 @@ mod tests {
             !markdown.contains('▌'),
             "caret glyph must not appear in the markdown (bottom strip owns it): {markdown}"
         );
-        // A content-free composer affordance is still present so the surface
-        // reflects that the composer is active.
+        // The status affordance is no longer in the blob (hud-0e44r) — it is the
+        // derived composer-status node — but it is still a content-free status
+        // string reflecting the active composer, with no draft glyphs.
         assert!(
-            markdown.contains("composer: composing"),
-            "composer status affordance should be present: {markdown}"
+            !markdown.contains("composer: composing"),
+            "composer status moved out of the transcript blob (hud-0e44r): {markdown}"
+        );
+        let status = composer_status_line(&state, Some(&display)).expect("expanded has a status");
+        assert_eq!(status, "composer: composing");
+        assert!(
+            !status.contains("hello world draft") && !status.contains('▌'),
+            "status affordance must carry no draft glyphs: {status}"
         );
     }
 
@@ -5218,9 +5312,12 @@ mod tests {
             !markdown.contains('▌'),
             "caret glyph must not appear in the markdown: {markdown}"
         );
+        // The at-capacity marker rides the derived composer-status node now
+        // (hud-0e44r), not the transcript blob, but stays text-visible.
+        let status = composer_status_line(&state, Some(&display)).expect("expanded has a status");
         assert!(
-            markdown.contains("[!]"),
-            "at-capacity must remain text-visible on the status line: {markdown}"
+            status.contains("[!]"),
+            "at-capacity must remain text-visible on the status line: {status}"
         );
     }
 

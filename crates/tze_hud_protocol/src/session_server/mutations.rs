@@ -480,6 +480,31 @@ fn convert_proto_mutations(
                     }
                 }
             }
+            Some(crate::proto::mutation_proto::Mutation::SetTileComposerStatus(stcs)) => {
+                match bytes_to_scene_id(&stcs.tile_id) {
+                    Ok(tile_id) => {
+                        // Absent status = clear (redaction / interaction disabled),
+                        // mirroring the composer-interaction absent-composer clear.
+                        let node = stcs
+                            .status
+                            .as_ref()
+                            .map(convert::proto_text_markdown_to_scene);
+                        scene_mutations
+                            .push(SceneMutation::SetTileComposerStatus { tile_id, node });
+                        // No `pending_touch_ids`: the derived text node is runtime
+                        // overlay state, not a published element (mirrors
+                        // SetTileComposerInteraction). The present-gate redraw is
+                        // armed by the version bump in `set/clear_tile_composer_status`.
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = stcs.tile_id.len(),
+                            "SetTileComposerStatus{log_suffix}: invalid tile_id length \
+                             (expected 16 bytes); mutation skipped — SDK bug or wire corruption"
+                        );
+                    }
+                }
+            }
             Some(crate::proto::mutation_proto::Mutation::SetPortalSurface(sps)) => {
                 match bytes_to_scene_id(&sps.tile_id) {
                     Ok(tile_id) => {

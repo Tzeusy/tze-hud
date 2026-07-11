@@ -70,6 +70,50 @@ pub fn proto_hit_region_to_scene(hr: &proto::HitRegionNodeProto) -> HitRegionNod
     }
 }
 
+/// Convert a protobuf `TextMarkdownNodeProto` to a scene [`TextMarkdownNode`].
+///
+/// Standalone counterpart to the inline decode in [`proto_node_to_scene`], used
+/// by the `SetTileComposerStatus` overlay apply path (hud-0e44r) where only a
+/// bare text spec (no wrapping `NodeProto`) crosses the wire. Same defaults:
+/// missing color → white, non-positive font size → 16px, monospace only for a
+/// literal full-span content.
+pub fn proto_text_markdown_to_scene(tm: &proto::TextMarkdownNodeProto) -> TextMarkdownNode {
+    let color = tm
+        .color
+        .as_ref()
+        .map(proto_rgba_to_scene)
+        .unwrap_or(Rgba::WHITE);
+    let bg = tm.background.as_ref().map(proto_rgba_to_scene);
+    let bounds = tm
+        .bounds
+        .as_ref()
+        .map(proto_rect_to_scene)
+        .unwrap_or(Rect::new(0.0, 0.0, 100.0, 100.0));
+    let color_runs = proto_color_runs_to_scene(&tm.color_runs);
+    let font_family =
+        if proto_text_markdown_uses_literal_full_span(&tm.content, color, &color_runs) {
+            FontFamily::SystemMonospace
+        } else {
+            FontFamily::SystemSansSerif
+        };
+    let overflow = proto_text_overflow_to_scene(tm.overflow);
+    TextMarkdownNode {
+        content: tm.content.clone(),
+        bounds,
+        font_size_px: if tm.font_size_px > 0.0 {
+            tm.font_size_px
+        } else {
+            16.0
+        },
+        font_family,
+        color,
+        background: bg,
+        alignment: TextAlign::Start,
+        overflow,
+        color_runs,
+    }
+}
+
 /// Convert a protobuf NodeProto to a scene Node.
 pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
     let id = if n.id.is_empty() {
@@ -1650,6 +1694,37 @@ pub fn apply_portal_render_batch_to_scene(
                             tracing::warn!(
                                 ?e,
                                 "portal in-process apply: ClearTileComposerInteraction failed"
+                            );
+                        }
+                    }
+                }
+            }
+            Some(Mutation::SetTileComposerStatus(stcs)) => {
+                // Composer-status text node (hud-0e44r). `status = None` clears it
+                // (redaction / interaction disabled). Same overlay + checked-lease
+                // + coalescing rationale as SetTileComposerInteraction above: the
+                // runtime stores the spec and derives/re-attaches the text node in
+                // its OWN bounds after each republish, so it never rides a
+                // per-republish `AddNode` (hud-mzk74) and a long INPUT history can't
+                // hide it under the transcript's tail truncation.
+                match stcs.status.as_ref() {
+                    Some(tm) => {
+                        let node = proto_text_markdown_to_scene(tm);
+                        if let Err(e) =
+                            scene.set_tile_composer_status_checked(tile_id, node, namespace)
+                        {
+                            tracing::warn!(
+                                ?e,
+                                "portal in-process apply: SetTileComposerStatus failed"
+                            );
+                        }
+                    }
+                    None => {
+                        if let Err(e) = scene.clear_tile_composer_status_checked(tile_id, namespace)
+                        {
+                            tracing::warn!(
+                                ?e,
+                                "portal in-process apply: ClearTileComposerStatus failed"
                             );
                         }
                     }

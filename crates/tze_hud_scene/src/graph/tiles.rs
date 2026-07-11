@@ -460,6 +460,10 @@ impl SceneGraph {
         // coalescible StateStream on the hottest path (streaming transcript with an
         // interactive composer, hud-mzk74 / hud-iofav).
         self.ensure_tile_composer_node(tile_id);
+        // Same coalescible reattach for the derived composer-STATUS text node
+        // (hud-0e44r): the old-root subtree removal wiped it, so re-derive it in
+        // its own bounds here rather than requiring a per-republish AddNode.
+        self.ensure_tile_composer_status_node(tile_id);
 
         self.version += 1;
         Ok(())
@@ -541,6 +545,76 @@ impl SceneGraph {
         };
         self.nodes.remove(&node_id);
         self.hit_region_states.remove(&node_id);
+        if let Some(root_id) = self.tiles.get(&tile_id).and_then(|t| t.root_node) {
+            if let Some(root) = self.nodes.get_mut(&root_id) {
+                root.children.retain(|c| *c != node_id);
+            }
+        }
+    }
+
+    /// Reconcile the tile's derived composer-STATUS text node to its stored spec
+    /// (hud-0e44r). Exact structural mirror of
+    /// [`ensure_tile_composer_node`](Self::ensure_tile_composer_node) for a
+    /// `TextMarkdown` node instead of a `HitRegion`: idempotent, detaches a
+    /// stale/missing derived node, and (when a spec and a root both exist)
+    /// synthesizes a fresh text node and attaches it under the current root.
+    /// Called after each root replacement ([`set_tile_root_impl`](Self::set_tile_root_impl))
+    /// and by the `SetTileComposerStatus` apply path.
+    ///
+    /// The node carries its OWN small bounds (from the spec), so the transcript
+    /// node's tail-anchored Ellipsis truncation cannot hide it — the whole point
+    /// of moving the composer status line out of the single blob.
+    pub(crate) fn ensure_tile_composer_status_node(&mut self, tile_id: SceneId) {
+        let Some(node) = self.overlay.tile_composer_status.get(&tile_id).cloned() else {
+            self.detach_tile_composer_status_node(tile_id);
+            return;
+        };
+        let Some(root_id) = self.tiles.get(&tile_id).and_then(|t| t.root_node) else {
+            self.detach_tile_composer_status_node(tile_id);
+            return;
+        };
+
+        // Fast path: current derived node still valid (present + parented by the
+        // current root) — the second call in a batch (the SetTileComposerStatus
+        // mutation, after the PublishToTile reattach) is a no-op when unchanged.
+        if let Some(&current) = self.overlay.tile_composer_status_nodes.get(&tile_id) {
+            let valid = self.nodes.contains_key(&current)
+                && self
+                    .nodes
+                    .get(&root_id)
+                    .is_some_and(|rn| rn.children.contains(&current));
+            if valid {
+                return;
+            }
+            self.detach_tile_composer_status_node(tile_id);
+        }
+
+        let node_id = SceneId::new();
+        self.nodes.insert(
+            node_id,
+            Node {
+                id: node_id,
+                children: Vec::new(),
+                data: NodeData::TextMarkdown(node),
+            },
+        );
+        if let Some(root) = self.nodes.get_mut(&root_id) {
+            root.children.push(node_id);
+        }
+        self.overlay
+            .tile_composer_status_nodes
+            .insert(tile_id, node_id);
+    }
+
+    /// Detach and drop the tile's derived composer-status text node, if any
+    /// (hud-0e44r). Mirror of
+    /// [`detach_tile_composer_node`](Self::detach_tile_composer_node) without the
+    /// hit-region local-state map (a text node has none).
+    pub(crate) fn detach_tile_composer_status_node(&mut self, tile_id: SceneId) {
+        let Some(node_id) = self.overlay.tile_composer_status_nodes.remove(&tile_id) else {
+            return;
+        };
+        self.nodes.remove(&node_id);
         if let Some(root_id) = self.tiles.get(&tile_id).and_then(|t| t.root_node) {
             if let Some(root) = self.nodes.get_mut(&root_id) {
                 root.children.retain(|c| *c != node_id);
