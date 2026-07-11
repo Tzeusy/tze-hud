@@ -943,6 +943,45 @@ impl ComposerDraft {
         EditOutcome::Mutated
     }
 
+    /// Select the entire draft (Ctrl+A): anchor at start, cursor at end, so the
+    /// whole buffer is highlighted and a subsequent copy/cut/insert acts on all
+    /// of it. Returns `Unchanged` for an empty draft or when the whole buffer is
+    /// already selected (idempotent — no spurious redraw/notification).
+    ///
+    /// Spec: §"Local-First Composer Draft Editing" — selection (keyboard).
+    pub fn select_all(&mut self) -> EditOutcome {
+        let end = self.text.len();
+        if end == 0 || (self.selection_anchor == 0 && self.cursor == end) {
+            return EditOutcome::Unchanged;
+        }
+        self.selection_anchor = 0;
+        self.cursor = end;
+        self.bump_sequence();
+        EditOutcome::Mutated
+    }
+
+    /// The currently selected text (`""` when there is no active selection).
+    ///
+    /// Used by the runtime clipboard-write path (Ctrl+C / Ctrl+X) to snapshot the
+    /// selection BEFORE a cut mutates the buffer. Selection offsets are always on
+    /// char boundaries (maintained by every selection mutator), so the slice never
+    /// panics.
+    pub fn selected_text(&self) -> &str {
+        let sel = self.selection();
+        &self.text[sel.start..sel.end]
+    }
+
+    /// Cut (Ctrl+X): remove the active selection from the buffer, leaving the
+    /// caret collapsed at the deletion point. Returns `Unchanged` when there is
+    /// no selection (nothing to cut). The caller is responsible for having copied
+    /// [`Self::selected_text`] to the OS clipboard first.
+    pub fn cut(&mut self) -> EditOutcome {
+        if self.suspended {
+            return EditOutcome::Suspended;
+        }
+        self.delete_selection()
+    }
+
     /// Clamp `byte` to `text.len()` and snap DOWN to the nearest char boundary.
     fn snap_byte(&self, byte: usize) -> usize {
         let mut b = byte.min(self.text.len());
@@ -1976,13 +2015,40 @@ impl ComposerDraftManager {
                     (true, None)
                 }
             }
-            "KeyV" if ctrl => {
+            "KeyV" if ctrl && !alt => {
                 // Ctrl+V (paste shortcut): consume the KeyDown so it is never
                 // forwarded to the agent as a raw KeyDownEvent while a composer
                 // is focused.  The actual paste content arrives separately via
                 // `route_character` (dispatch_character_event reads the
                 // clipboard and fires a RawCharacterEvent immediately after the
                 // KeyDown — hud-083az).
+                (true, None)
+            }
+            "KeyA" if ctrl && !alt => {
+                // Ctrl+A: select the whole draft. Pure local selection change —
+                // no clipboard involvement — so it is handled entirely here.
+                let o = draft.select_all();
+                if o == EditOutcome::Mutated {
+                    self.scheduler.push_notification(draft.snapshot());
+                }
+                (true, None)
+            }
+            "KeyC" if ctrl && !alt => {
+                // Ctrl+C: copy. The OS clipboard write lives in the runtime layer
+                // (this crate has no clipboard access); the runtime snapshots
+                // `selected_text()` before calling us. We only CONSUME the
+                // KeyDown so it never leaks to the agent, and never mutate the
+                // draft (copy is non-destructive).
+                (true, None)
+            }
+            "KeyX" if ctrl && !alt => {
+                // Ctrl+X: cut. The runtime has already copied `selected_text()`
+                // to the clipboard; here we remove the selection locally. A cut
+                // with no selection is a consumed no-op.
+                let o = draft.cut();
+                if matches!(o, EditOutcome::Mutated | EditOutcome::AtCapacity) {
+                    self.scheduler.push_notification(draft.snapshot());
+                }
                 (true, None)
             }
             _ => {
@@ -2902,6 +2968,131 @@ mod tests {
             snap.cursor, 3,
             "cursor must advance after the inserted space"
         );
+    }
+
+    /// Ctrl+A selects the whole draft (spec: selection by keyboard); consumed.
+    #[test]
+    fn manager_ctrl_a_selects_all() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+        for c in ["h", "e", "l", "l", "o"] {
+            mgr.route_character(c);
+        }
+        // Cursor is at end (5); move somewhere else to prove select-all resets both ends.
+        mgr.route_key_down("Home", "Home", false, false, false);
+
+        let (consumed, batch) = mgr.route_key_down("KeyA", "a", false, true, false);
+        assert!(consumed, "Ctrl+A must be consumed by the draft manager");
+        assert!(batch.is_none(), "Ctrl+A is a coalesced selection change");
+
+        let draft = mgr.draft().expect("draft active");
+        assert_eq!(draft.selection_anchor(), 0);
+        assert_eq!(draft.cursor(), 5);
+        assert!(draft.has_selection());
+        assert_eq!(draft.selected_text(), "hello");
+    }
+
+    /// Ctrl+A on an empty draft is a consumed no-op (no selection, no notification).
+    #[test]
+    fn manager_ctrl_a_empty_is_noop() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+        let (consumed, batch) = mgr.route_key_down("KeyA", "a", false, true, false);
+        assert!(consumed, "Ctrl+A must still be consumed on an empty draft");
+        assert!(batch.is_none());
+        assert!(!mgr.draft().unwrap().has_selection());
+    }
+
+    /// Ctrl+C is consumed but never mutates the draft (copy is non-destructive);
+    /// the clipboard write itself lives in the runtime layer.
+    #[test]
+    fn manager_ctrl_c_consumes_without_mutation() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+        for c in ["h", "i"] {
+            mgr.route_character(c);
+        }
+        mgr.route_key_down("KeyA", "a", false, true, false); // select "hi"
+        let seq_before = mgr.draft().unwrap().sequence();
+
+        let (consumed, batch) = mgr.route_key_down("KeyC", "c", false, true, false);
+        assert!(
+            consumed,
+            "Ctrl+C must be consumed so it never reaches the agent"
+        );
+        assert!(batch.is_none());
+        let draft = mgr.draft().unwrap();
+        assert_eq!(draft.text(), "hi", "copy must not change the draft text");
+        assert_eq!(
+            draft.sequence(),
+            seq_before,
+            "copy must not bump the mutation sequence"
+        );
+        assert!(draft.has_selection(), "copy leaves the selection intact");
+    }
+
+    /// Ctrl+X cuts the active selection: text shrinks, caret collapses, consumed.
+    #[test]
+    fn manager_ctrl_x_cuts_selection() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+        for c in ["a", "b", "c", "d"] {
+            mgr.route_character(c);
+        }
+        // Select the first two chars: Home, then Shift+Right twice.
+        mgr.route_key_down("Home", "Home", false, false, false);
+        mgr.route_key_down("ArrowRight", "ArrowRight", true, false, false);
+        mgr.route_key_down("ArrowRight", "ArrowRight", true, false, false);
+        assert_eq!(mgr.draft().unwrap().selected_text(), "ab");
+
+        let (consumed, batch) = mgr.route_key_down("KeyX", "x", false, true, false);
+        assert!(consumed, "Ctrl+X must be consumed by the draft manager");
+        assert!(batch.is_none(), "cut routes through coalesced draft state");
+
+        let flush = mgr.try_flush().expect("cut mutation flushes");
+        let snap = flush.latest.as_ref().unwrap();
+        assert_eq!(snap.text, "cd", "cut removes the selected range");
+        assert_eq!(snap.cursor, 0, "caret collapses to the cut point");
+    }
+
+    /// Ctrl+X with no selection is a consumed no-op (nothing to cut).
+    #[test]
+    fn manager_ctrl_x_no_selection_is_noop() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+        for c in ["x", "y"] {
+            mgr.route_character(c);
+        }
+        let (consumed, batch) = mgr.route_key_down("KeyX", "x", false, true, false);
+        assert!(consumed, "Ctrl+X is consumed even with nothing selected");
+        assert!(batch.is_none());
+        assert_eq!(
+            mgr.draft().unwrap().text(),
+            "xy",
+            "no selection → no change"
+        );
+    }
+
+    /// Ctrl+Alt+A/C/X are NOT treated as editing shortcuts (AltGr guard): they
+    /// fall through unconsumed so composed characters still reach the draft.
+    #[test]
+    fn manager_ctrl_alt_shortcuts_not_consumed() {
+        let mut mgr = ComposerDraftManager::new();
+        let node_id = tze_hud_scene::SceneId::new();
+        mgr.on_focus_gained(node_id, false);
+        mgr.route_character("z");
+        for kc in ["KeyA", "KeyC", "KeyX"] {
+            let (consumed, _) = mgr.route_key_down(kc, "", false, true, true);
+            assert!(
+                !consumed,
+                "{kc} with Ctrl+Alt must not be consumed as a composer shortcut"
+            );
+        }
     }
 
     /// Enter key submits the draft and emits a clear notification.
