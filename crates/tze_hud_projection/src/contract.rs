@@ -996,6 +996,17 @@ pub struct ProjectedPortalState {
     #[serde(default)]
     pub visible_transcript: Vec<TranscriptUnit>,
     pub visible_transcript_bytes: usize,
+    /// The viewer's own accepted submissions — the INPUT history — held and
+    /// projected SEPARATELY from `visible_transcript` (the OUTPUT/agent
+    /// transcript). Per §Viewer Reply Echo the portal maintains two distinct,
+    /// separately-bounded streams: a viewer echo lands here and never in
+    /// `visible_transcript`, so a submission never grows `visible_transcript_bytes`
+    /// nor moves the OUTPUT transcript's follow-tail scroll. Kind-distinct
+    /// (`OutputKind::Viewer`), never unread, and redaction-gated identically to
+    /// `visible_transcript` (emptied for a viewer whose clearance redacts the
+    /// transcript). Bounded newest-fit on the append side.
+    #[serde(default)]
+    pub input_history: Vec<TranscriptUnit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unread_output_count: Option<usize>,
     /// Count of unread agent-authored outputs that survive this viewer's

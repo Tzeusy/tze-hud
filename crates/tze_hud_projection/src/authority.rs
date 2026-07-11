@@ -49,6 +49,14 @@ struct ProjectionSession {
     reconnect: ReconnectBookkeeping,
     retained_transcript: VecDeque<TranscriptUnit>,
     retained_transcript_bytes: usize,
+    /// The viewer's own accepted submissions (the INPUT history), held as a
+    /// separately-bounded stream apart from `retained_transcript` (the
+    /// OUTPUT/agent transcript) per §Viewer Reply Echo's two-pane INPUT/OUTPUT
+    /// split. A viewer echo is appended here — never into `retained_transcript`
+    /// — so a submission cannot grow the OUTPUT transcript or move its
+    /// follow-tail scroll. Bounded newest-fit; the oldest turns evict first.
+    input_history: VecDeque<TranscriptUnit>,
+    input_history_bytes: usize,
     next_transcript_sequence: u64,
     unread_output_count: usize,
     portal_rate_window_started_at_wall_us: u64,
@@ -189,6 +197,16 @@ impl ProjectionAuthority {
         self.sessions.get(projection_id).map(|session| {
             visible_transcript_window(session, self.bounds.max_visible_transcript_bytes)
         })
+    }
+
+    /// The session's bounded INPUT history — the viewer's own accepted
+    /// submissions (`OutputKind::Viewer`), held separately from the OUTPUT/agent
+    /// transcript per §Viewer Reply Echo's two-pane split. The stream is already
+    /// bounded newest-fit on the append side, so the whole thing is the window.
+    pub fn input_history_window(&self, projection_id: &str) -> Option<Vec<TranscriptUnit>> {
+        self.sessions
+            .get(projection_id)
+            .map(|session| session.input_history.iter().cloned().collect())
     }
 
     /// Materialize the bounded text-stream portal state for a projected
@@ -772,6 +790,8 @@ impl ProjectionAuthority {
                 reconnect: ReconnectBookkeeping::default(),
                 retained_transcript: VecDeque::new(),
                 retained_transcript_bytes: 0,
+                input_history: VecDeque::new(),
+                input_history_bytes: 0,
                 next_transcript_sequence: 0,
                 unread_output_count: 0,
                 portal_rate_window_started_at_wall_us: 0,
@@ -1062,38 +1082,22 @@ impl ProjectionAuthority {
             ),
             Err(code) => Err(code),
         };
-        // On success, echo the viewer's text into the transcript via the same
-        // append path used by `handle_publish_output`.
-        let max_retained_transcript_bytes = self.bounds.max_retained_transcript_bytes;
-        let max_visible_transcript_bytes = self.bounds.max_visible_transcript_bytes;
-        let max_portal_updates_per_second = self.bounds.max_portal_updates_per_second;
+        // On success, echo the viewer's text into the INPUT history — a
+        // separately-bounded stream held apart from the OUTPUT/agent transcript
+        // (§Viewer Reply Echo, two-pane INPUT/OUTPUT split). The echo NEVER
+        // enters `retained_transcript`, so an accepted submission cannot grow
+        // `visible_transcript_bytes` or move the OUTPUT transcript's follow-tail
+        // scroll; it still flags `portal_update_pending` so the input band
+        // re-renders on the next drain even though unread stays at zero.
+        let max_input_history_bytes = self.bounds.max_visible_transcript_bytes;
         let cadence_append = if result.is_ok() {
             self.sessions.get_mut(projection_id).map(|session| {
-                let viewer_request = PublishOutputRequest {
-                    envelope: OperationEnvelope {
-                        operation: ProjectionOperation::PublishOutput,
-                        projection_id: projection_id.to_string(),
-                        request_id: "viewer-echo".to_string(),
-                        client_timestamp_wall_us: submitted_at_wall_us,
-                    },
-                    owner_token: String::new(),
-                    output_text: submission_text,
-                    output_kind: OutputKind::Viewer,
-                    content_classification,
-                    logical_unit_id: None,
-                    coalesce_key: None,
-                    // A viewer's own echoed reply is never itself a pending
-                    // question — this is what clears the awaiting-reply cue
-                    // once the viewer responds (hud-jip0k).
-                    expects_reply: false,
-                };
-                let sequence = append_transcript_unit(
+                let sequence = append_input_history_unit(
                     session,
-                    &viewer_request,
+                    submission_text,
+                    content_classification,
                     submitted_at_wall_us,
-                    max_retained_transcript_bytes,
-                    max_visible_transcript_bytes,
-                    max_portal_updates_per_second,
+                    max_input_history_bytes,
                 );
                 (projection_id.to_string(), sequence, submitted_at_wall_us)
             })
@@ -1742,6 +1746,22 @@ fn projected_portal_state(
         .iter()
         .map(TranscriptUnit::byte_len)
         .sum();
+    // INPUT history (§Viewer Reply Echo, two-pane INPUT/OUTPUT split): the
+    // viewer's own accepted submissions, projected SEPARATELY from
+    // `visible_transcript` (the OUTPUT/agent transcript). Gated + per-turn
+    // clearance-filtered identically to the OUTPUT transcript so it redacts the
+    // same way; already bounded newest-fit on the append side, so the whole
+    // stream is the visible window.
+    let input_history: Vec<TranscriptUnit> = if transcript_visible {
+        session
+            .input_history
+            .iter()
+            .filter(|unit| policy.permits(unit.content_classification))
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
     // Clearance-corrected unread count for the in-transcript unread divider
     // (hud-g1ena.2): of the last-N non-viewer retained units (the unread suffix,
     // N = session.unread_output_count), how many survive THIS viewer's clearance
@@ -1833,6 +1853,7 @@ fn projected_portal_state(
             .flatten(),
         visible_transcript,
         visible_transcript_bytes,
+        input_history,
         unread_output_count: unread_visible.then_some(session.unread_output_count),
         visible_unread_output_count: unread_visible.then_some(visible_unread_output_count),
         pending_input_count: pending_visible.then_some(pending_input_count),
@@ -2026,6 +2047,65 @@ fn append_transcript_unit(
     } else {
         session.portal_update_pending = true;
     }
+    session.next_transcript_sequence - 1
+}
+
+/// Append a runtime-authored viewer echo into the session's INPUT history — the
+/// separately-bounded stream of the viewer's own accepted submissions, held
+/// apart from the OUTPUT/agent `retained_transcript` (§Viewer Reply Echo,
+/// two-pane INPUT/OUTPUT split). Returns the coalescer sequence the caller
+/// records for the drain, exactly like [`append_transcript_unit`].
+///
+/// Unlike the OUTPUT append, this NEVER touches `retained_transcript`,
+/// `retained_transcript_bytes`, or `unread_output_count`: a viewer echo is the
+/// viewer's own already-seen text, so it must not grow the OUTPUT transcript,
+/// move its follow-tail scroll, or raise unread/attention. It DOES flag
+/// `portal_update_pending` so the echo drains + re-renders (the input band
+/// updates) even though `unread_output_count` stays at zero — the same
+/// `take_due_portal_update` `unread==0 && !pending` early-return the OUTPUT
+/// viewer branch guards.
+///
+/// The INPUT history is a bounded newest-fit window capped at
+/// `max_input_history_bytes`; the oldest turns evict first, with a single-unit
+/// floor so the newest submission is always retained even if it alone exceeds
+/// the cap (mirrors [`prune_retained_transcript`]).
+fn append_input_history_unit(
+    session: &mut ProjectionSession,
+    text: String,
+    content_classification: ContentClassification,
+    server_timestamp_wall_us: u64,
+    max_input_history_bytes: usize,
+) -> u64 {
+    let unit = TranscriptUnit {
+        sequence: session.next_transcript_sequence,
+        output_text: text,
+        // Kind-distinct viewer turn (§Viewer Reply Echo): authored by the
+        // runtime at submit time, never forgeable by an adapter.
+        output_kind: OutputKind::Viewer,
+        content_classification,
+        logical_unit_id: None,
+        coalesce_key: None,
+        // A viewer's own echoed reply is never itself a pending question — this
+        // is what clears the awaiting-reply cue once the viewer responds
+        // (hud-jip0k).
+        expects_reply: false,
+        appended_at_wall_us: server_timestamp_wall_us,
+    };
+    session.next_transcript_sequence += 1;
+    session.input_history_bytes += unit.byte_len();
+    session.input_history.push_back(unit);
+    while session.input_history_bytes > max_input_history_bytes && session.input_history.len() > 1 {
+        let Some(evicted) = session.input_history.pop_front() else {
+            break;
+        };
+        session.input_history_bytes = session
+            .input_history_bytes
+            .saturating_sub(evicted.byte_len());
+    }
+    // Viewer echoes never raise unread/attention, but must still drain so the
+    // input band re-renders: flag pending to dodge the `take_due_portal_update`
+    // `unread==0 && !pending` early return (mirrors the OUTPUT viewer branch).
+    session.portal_update_pending = true;
     session.next_transcript_sequence - 1
 }
 

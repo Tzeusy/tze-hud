@@ -1579,11 +1579,31 @@ fn drain_and_emit_portal_updates(
             // embedded newlines (e.g. multiline assistant outputs, coalesced updates).
             // Using `.lines().count().max(1)` per unit avoids underestimating
             // new_content_height_px when units span multiple lines.
-            let total_lines: usize = update
+            //
+            // §Viewer Reply Echo (two-pane INPUT/OUTPUT split): when Expanded,
+            // `portal_markdown_with` renders the INPUT band (label +
+            // `input_history` units + trailing blank) into the SAME single-node
+            // markdown as the OUTPUT transcript above — Collapsed never renders
+            // it. Omitting it here would undercount `new_content_height_px`
+            // whenever a viewer has reply history, breaking scroll clamp /
+            // follow-tail for long INPUT history.
+            let mut total_lines: usize = update
                 .visible_transcript
                 .iter()
                 .map(|unit| unit.output_text.lines().count().max(1))
                 .sum();
+            if matches!(
+                state.presentation,
+                tze_hud_projection::ProjectedPortalPresentation::Expanded
+            ) && !state.input_history.is_empty()
+            {
+                total_lines += 2; // input-history label line + trailing blank
+                total_lines += state
+                    .input_history
+                    .iter()
+                    .map(|unit| unit.output_text.lines().count().max(1))
+                    .sum::<usize>();
+            }
             let new_content_height_px = total_lines as f32 * line_height_px;
             // Viewport height: prefer the live geometry snapshot (most accurate after
             // a resize), fall back to the adapter's configured bounds for the current
@@ -2477,6 +2497,161 @@ mod tests {
         assert!(
             scene.tile_follow_tail_at_tail(tile_id),
             "spec §3.2: tile must remain at-tail in scene after advance"
+        );
+    }
+
+    /// Regression guard (codex P2, hud-y4pzu PR #1131 review): this drain site's
+    /// `total_lines` count must include `input_history` units, not just
+    /// `update.visible_transcript`. `portal_markdown_with` paints the INPUT band
+    /// into the SAME single-node markdown as the OUTPUT transcript whenever the
+    /// portal is Expanded and `input_history` is non-empty, so a height count
+    /// that only sees `visible_transcript` undercounts `new_content_height_px`.
+    ///
+    /// Mirrors `drain_append_geometry_at_tail_tile_advances_scroll_offset`'s
+    /// viewport-sizing strategy but drives the discrepancy directly: the OUTPUT
+    /// transcript grows by exactly one line between the two drains, while ten
+    /// viewer replies land in `input_history` in between via
+    /// `submit_portal_input` (never `retained_transcript`). If the height count
+    /// only sees the OUTPUT delta, the follow-tail clamp advances by about one
+    /// line; counting the INPUT band too advances it by well over five lines.
+    #[test]
+    fn drain_append_geometry_includes_input_history_band() {
+        use tze_hud_input::InputProcessor;
+        use tze_hud_projection::{
+            AdapterGeometrySnapshot, AdapterPortalRect, ContentClassification,
+            PortalInputSubmission,
+        };
+        use tze_hud_scene::{Capability, Rect, SceneGraph};
+
+        let mut authority = ProjectionAuthority::new(ProjectionBounds {
+            max_portal_updates_per_second: 100,
+            ..ProjectionBounds::default()
+        })
+        .unwrap();
+        let mut drive = PortalDriveState::new();
+
+        let token_a = attach_projection(&mut authority, "proj-a");
+        drive.attach_adapter("proj-a", Vec::new());
+
+        let font_size_px = drive
+            .adapter_mut("proj-a")
+            .unwrap()
+            .visual_tokens()
+            .transcript_font_size_px;
+        let line_height_px = font_size_px * PORTAL_LINE_HEIGHT_MULTIPLIER;
+        let viewport_h = (1.0 * line_height_px).ceil() as i32;
+
+        authority.push_geometry_snapshot(
+            "proj-a",
+            AdapterGeometrySnapshot {
+                rect: AdapterPortalRect {
+                    x_px: 0,
+                    y_px: 0,
+                    width_px: 600,
+                    height_px: viewport_h,
+                },
+                gesture_active: false,
+                sequence: 1,
+            },
+        );
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "portal-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "portal-agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 600.0, viewport_h as f32),
+                1,
+            )
+            .unwrap();
+        scene
+            .register_tile_scroll_config(
+                tile_id,
+                tze_hud_scene::TileScrollConfig {
+                    scrollable_x: false,
+                    scrollable_y: true,
+                    content_width: None,
+                    content_height: None,
+                },
+            )
+            .unwrap();
+
+        let mut processor = InputProcessor::new();
+
+        // First publish → CreatePortalTile (no tile yet).
+        publish_output(&mut authority, "proj-a", &token_a, "line-0", 20);
+        let _ = drain_and_emit_portal_updates(&mut authority, &mut drive, 20);
+
+        let fake_tile: Vec<u8> = tile_id.to_bytes_le().to_vec();
+        drive
+            .adapter_mut("proj-a")
+            .unwrap()
+            .record_created_tile(fake_tile);
+
+        // Prime the scroll state so the tile starts at-tail.
+        processor.notify_tile_content_appended(
+            tile_id,
+            1.0 * line_height_px,
+            viewport_h as f32,
+            line_height_px,
+            &mut scene,
+        );
+        assert!(
+            scene.tile_follow_tail_at_tail(tile_id),
+            "tile must start at-tail"
+        );
+
+        // Ten viewer replies land in `input_history` between the two drains.
+        // `submit_portal_input` flags `portal_update_pending` but never registers
+        // a coalescer entry by itself — it rides in on the next OUTPUT append
+        // below, exactly as a production composer submission does.
+        for i in 0..10_u64 {
+            let feedback = authority.submit_portal_input(
+                "proj-a",
+                PortalInputSubmission {
+                    input_id: format!("input-{i}"),
+                    submission_text: format!("viewer reply {i}"),
+                    submitted_at_wall_us: 25 + i,
+                    expires_at_wall_us: None,
+                    content_classification: ContentClassification::Private,
+                },
+            );
+            assert!(feedback.error_code.is_none(), "input {i} must be accepted");
+        }
+
+        // One more short OUTPUT line makes the projection due again. The OUTPUT
+        // delta alone is exactly one line.
+        let ts_drain = PORTAL_UPDATE_RATE_WINDOW_WALL_US + 25;
+        publish_output(&mut authority, "proj-a", &token_a, "line-1", ts_drain);
+        let drain = drain_and_emit_portal_updates(&mut authority, &mut drive, ts_drain);
+        assert_eq!(drain.len(), 1, "drain must produce one record");
+
+        let g = drain[0]
+            .append_geometry
+            .expect("RenderPortal must carry append_geometry");
+
+        processor.notify_tile_content_appended(
+            tile_id,
+            g.new_content_height_px,
+            g.viewport_height_px,
+            g.line_height_px,
+            &mut scene,
+        );
+
+        let (_, offset_y) = scene.tile_scroll_offset_local(tile_id);
+        assert!(
+            offset_y > 5.0 * line_height_px,
+            "follow-tail offset {offset_y} (line height {line_height_px}) must \
+             reflect the ten-reply INPUT band, not just the one-line OUTPUT \
+             delta — this drain site's height accounting is not counting \
+             `input_history`, so long INPUT history cannot be scrolled to"
         );
     }
 

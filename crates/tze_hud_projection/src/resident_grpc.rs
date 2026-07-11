@@ -72,6 +72,15 @@ const PORTAL_CONNECTING_LINE: &str = "◌ Connecting… — waiting for the sess
 /// the other Phase-1 single-node markers).
 const PORTAL_UNREAD_DIVIDER_LINE: &str = "─── unread ───";
 
+/// Header label for the INPUT-history band (§Viewer Reply Echo, two-pane
+/// INPUT/OUTPUT split). Marks the viewer's own accepted replies (the viewer-echo
+/// stack) as a region distinct from the OUTPUT/agent transcript above it, so the
+/// two panes never read as one combined stream. Quiet + ambient (no `!`/⚠); the
+/// band renders only when `input_history` is non-empty, and `input_history` is
+/// emptied upstream under redaction, so the label never leaks for a restricted
+/// viewer.
+const PORTAL_INPUT_HISTORY_LABEL: &str = "─── your replies ───";
+
 /// Ambient header activity marker (portal-chat-grade-affordances §Agent Activity
 /// and Streaming Cue, hud-g1ena.5) shown while the owning adapter is actively
 /// appending to the transcript. A compact typing-style indicator — quiet ellipsis
@@ -1840,6 +1849,28 @@ fn portal_markdown_with(
                 push_line(&mut result, &body);
             }
             push_line(&mut result, "");
+            // §Viewer Reply Echo (two-pane INPUT/OUTPUT split): render the INPUT
+            // history — the viewer's own accepted replies — as a distinct band in
+            // the input region, held SEPARATELY from the OUTPUT transcript above.
+            // A viewer echo lands in `input_history` and never in
+            // `visible_transcript`, so a submission never grows the OUTPUT
+            // transcript nor moves its follow-tail scroll (the driver computes
+            // follow-tail from `visible_transcript` only). The band reuses the
+            // transcript's `---`-divider + ambient-timestamp treatment with NO
+            // unread divider (viewer turns are never unread). Under redaction
+            // `input_history` is emptied upstream, so the band + its label never
+            // render for a restricted viewer. Interim placement: this single
+            // markdown node renders the band adjacent to the composer status line;
+            // the promotion-era structured layout gives the INPUT pane its own
+            // part node (PORTAL_PART_KIND_COMPOSER / Phase-0 `input_scroll`).
+            if !state.input_history.is_empty() {
+                push_line(&mut result, PORTAL_INPUT_HISTORY_LABEL);
+                push_line(
+                    &mut result,
+                    &input_history_markdown(&state.input_history, timestamps),
+                );
+                push_line(&mut result, "");
+            }
             if is_connection_degraded(state) {
                 // §2: clear live activity/typing/composer-ready signals on
                 // disconnect — the surface must not imply an active stream. The
@@ -2581,6 +2612,16 @@ fn visible_transcript_markdown_with(
     result
 }
 
+/// Render the INPUT-history band: the viewer's own accepted replies (the
+/// viewer-echo stack), stacked with token-styled `---` turn dividers per
+/// §Viewer Reply Echo (two-pane INPUT/OUTPUT split). Reuses
+/// `visible_transcript_markdown_with` for the same divider + ambient-timestamp
+/// treatment, but never carries an unread divider — viewer turns are the
+/// viewer's own already-seen text and are never unread.
+fn input_history_markdown(units: &[TranscriptUnit], timestamps: TimestampGranularity) -> String {
+    visible_transcript_markdown_with(units, None, timestamps)
+}
+
 fn clamp_one_line(text: &str, max_bytes: usize) -> String {
     clamp_utf8(text.lines().next().unwrap_or_default(), max_bytes).to_string()
 }
@@ -2848,6 +2889,7 @@ mod tests {
             status_text: None,
             visible_transcript: vec![],
             visible_transcript_bytes: 0,
+            input_history: vec![],
             unread_output_count: None,
             visible_unread_output_count: None,
             pending_input_count: None,
@@ -4183,6 +4225,70 @@ mod tests {
         state.visible_transcript = vec![transcript_unit(1, OutputKind::Viewer, false)];
         state.visible_unread_output_count = Some(3);
         assert_eq!(unread_divider_boundary(&state), None);
+    }
+
+    /// §Viewer Reply Echo (two-pane INPUT/OUTPUT split): the INPUT history renders
+    /// as a distinct labeled band held SEPARATELY from the OUTPUT transcript body —
+    /// the agent turn stays above, the viewer replies stack below their own label,
+    /// and the two never interleave into one combined sequence.
+    #[test]
+    fn portal_markdown_renders_input_band_separate_from_output_transcript() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+
+        let mut state = make_expanded_interaction_state("portal-two-pane");
+        state.visible_transcript = vec![transcript_unit_text(
+            1,
+            OutputKind::Assistant,
+            "agent says hi",
+        )];
+        state.visible_transcript_bytes = state
+            .visible_transcript
+            .iter()
+            .map(|u| u.output_text.len())
+            .sum();
+        state.input_history = vec![
+            transcript_unit_text(2, OutputKind::Viewer, "viewer reply one"),
+            transcript_unit_text(3, OutputKind::Viewer, "viewer reply two"),
+        ];
+
+        let md = adapter.render_portal_markdown(&state, 0);
+
+        assert!(md.contains("agent says hi"), "{md}");
+        assert!(md.contains(PORTAL_INPUT_HISTORY_LABEL), "{md}");
+        assert!(
+            md.contains("viewer reply one") && md.contains("viewer reply two"),
+            "{md}"
+        );
+        // Ordering proves separation: the OUTPUT transcript body renders first,
+        // then the INPUT band label, then the viewer replies — no viewer text is
+        // interleaved into the agent transcript body.
+        let agent_pos = md.find("agent says hi").expect("agent turn rendered");
+        let label_pos = md
+            .find(PORTAL_INPUT_HISTORY_LABEL)
+            .expect("input band label rendered");
+        let viewer_pos = md.find("viewer reply one").expect("viewer reply rendered");
+        assert!(agent_pos < label_pos && label_pos < viewer_pos, "{md}");
+        // Viewer replies stack with a token-styled `---` turn divider between them.
+        assert!(
+            md.contains("viewer reply one\n---\nviewer reply two"),
+            "{md}"
+        );
+    }
+
+    /// The INPUT band is absent when there is no INPUT history — including under
+    /// redaction, where `input_history` is emptied upstream exactly like
+    /// `visible_transcript`, so neither the label nor any viewer reply renders.
+    #[test]
+    fn portal_markdown_input_band_absent_when_input_history_empty() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let mut state = make_expanded_interaction_state("portal-empty-input");
+        state.visible_transcript =
+            vec![transcript_unit_text(1, OutputKind::Assistant, "agent only")];
+        // input_history defaults empty (as it would under redaction).
+        let md = adapter.render_portal_markdown(&state, 0);
+        assert!(!md.contains(PORTAL_INPUT_HISTORY_LABEL), "{md}");
     }
 
     /// The divider marker line is inserted before the boundary turn, distinct
