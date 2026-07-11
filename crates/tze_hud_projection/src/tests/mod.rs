@@ -1019,7 +1019,7 @@ fn portal_composer_submission_is_transactional_bounded_inbox_feedback() {
 }
 
 #[test]
-fn accepted_portal_input_echoes_viewer_unit_into_transcript() {
+fn accepted_portal_input_echoes_viewer_unit_into_input_history() {
     let mut authority = ProjectionAuthority::default();
     attach(&mut authority, "projection-a");
 
@@ -1036,21 +1036,32 @@ fn accepted_portal_input_echoes_viewer_unit_into_transcript() {
         .take_due_portal_update("projection-a", 31)
         .expect("projection exists")
         .expect("portal update must be drainable after viewer submit");
-    // The viewer echo is the viewer's own already-seen text: it appears in the
-    // transcript WITHOUT raising unread (text-stream-portals "Viewer Reply Echo" —
-    // SHALL NOT increment the unread-output count or escalate attention).
+    // §Viewer Reply Echo two-pane split: the echo lands in the INPUT history, NOT
+    // the OUTPUT transcript — so the drained OUTPUT window stays empty and its
+    // byte count does not grow (no follow-tail scroll movement), while the echo
+    // still drains WITHOUT raising unread (the viewer's own already-seen text).
     assert_eq!(
         update.unread_output_count, 0,
         "viewer echo must not raise unread (Viewer Reply Echo / ambient-attention doctrine)"
     );
-    assert_eq!(
-        update.visible_transcript.len(),
-        1,
-        "submit_portal_input echoes viewer text into the transcript"
+    assert!(
+        update.visible_transcript.is_empty(),
+        "viewer echo must NOT enter the OUTPUT transcript"
     );
-    let viewer_unit = &update.visible_transcript[0];
-    assert_eq!(viewer_unit.output_kind, OutputKind::Viewer);
-    assert_eq!(viewer_unit.output_text, "ok");
+    assert_eq!(
+        update.visible_transcript_bytes, 0,
+        "a viewer echo must not grow OUTPUT transcript bytes (no follow-tail scroll move)"
+    );
+    let input_history = authority
+        .input_history_window("projection-a")
+        .expect("projection exists");
+    assert_eq!(
+        input_history.len(),
+        1,
+        "submit_portal_input echoes viewer text into the INPUT history"
+    );
+    assert_eq!(input_history[0].output_kind, OutputKind::Viewer);
+    assert_eq!(input_history[0].output_text, "ok");
 }
 
 /// hud-hwk2m end-to-end: the jump-to-latest pill's ambient unread badge reaches a
@@ -1180,7 +1191,9 @@ fn rate_limited_viewer_echo_is_drained_and_stays_unread_zero() {
     assert_eq!(feedback.feedback_state, PortalInputFeedbackState::Accepted);
 
     // The rate-limited viewer echo must still drain (not be stranded) and must
-    // not raise unread.
+    // not raise unread. §Viewer Reply Echo two-pane split: it lands in the INPUT
+    // history, never the OUTPUT transcript — so the drained OUTPUT window carries
+    // only the earlier agent turn and no viewer unit.
     let update = authority
         .take_due_portal_update("projection-a", 30)
         .unwrap()
@@ -1190,11 +1203,19 @@ fn rate_limited_viewer_echo_is_drained_and_stays_unread_zero() {
         "viewer echo must not raise unread even when rate-limited"
     );
     assert!(
-        update
+        !update
             .visible_transcript
             .iter()
+            .any(|u| u.output_kind == OutputKind::Viewer),
+        "the viewer echo must NOT appear in the OUTPUT transcript"
+    );
+    assert!(
+        authority
+            .input_history_window("projection-a")
+            .expect("projection exists")
+            .iter()
             .any(|u| u.output_kind == OutputKind::Viewer && u.output_text == "ok"),
-        "the viewer echo must appear in the drained transcript"
+        "the viewer echo must appear in the INPUT history"
     );
 }
 
@@ -1254,11 +1275,17 @@ fn acknowledged_portal_input_schedules_state_render_without_output() {
         .take_due_portal_update("projection-a", 42)
         .expect("projection exists")
         .expect("ack state update must be drainable");
-    // No new output since the previous drain; viewer echo was already counted there.
+    // No new output since the previous drain; the viewer echo never counted.
     assert_eq!(update.unread_output_count, 0);
-    // The viewer echo unit stays in the retained window; the ack does not clear it.
-    assert_eq!(update.visible_transcript.len(), 1);
-    assert_eq!(update.visible_transcript[0].output_kind, OutputKind::Viewer);
+    // §Viewer Reply Echo two-pane split: the echo lives in the INPUT history, not
+    // the OUTPUT transcript (which stays empty — no agent output in this test);
+    // the ack does not clear the echo.
+    assert!(update.visible_transcript.is_empty());
+    let input_history = authority
+        .input_history_window("projection-a")
+        .expect("projection exists");
+    assert_eq!(input_history.len(), 1);
+    assert_eq!(input_history[0].output_kind, OutputKind::Viewer);
 }
 
 #[test]
@@ -1546,7 +1573,7 @@ fn expects_reply_round_trips_from_publish_output_to_projected_portal_state() {
 /// carrying the submitted text and the submission timestamp, making the
 /// conversation visible on both sides of the portal surface.
 #[test]
-fn submit_portal_input_echoes_viewer_text_into_transcript() {
+fn submit_portal_input_echoes_viewer_text_into_input_history() {
     let mut authority = ProjectionAuthority::default();
     attach(&mut authority, "projection-a");
 
@@ -1564,15 +1591,24 @@ fn submit_portal_input_echoes_viewer_text_into_transcript() {
         "submission must be accepted"
     );
 
-    let transcript = authority
-        .visible_transcript_window("projection-a")
+    // §Viewer Reply Echo two-pane split: the echo lands in the INPUT history and
+    // never in the OUTPUT transcript.
+    assert!(
+        authority
+            .visible_transcript_window("projection-a")
+            .expect("projection must exist")
+            .is_empty(),
+        "viewer echo must NOT enter the OUTPUT transcript"
+    );
+    let input_history = authority
+        .input_history_window("projection-a")
         .expect("projection must exist");
     assert_eq!(
-        transcript.len(),
+        input_history.len(),
         1,
-        "accepted submit must echo exactly one viewer unit into the transcript"
+        "accepted submit must echo exactly one viewer unit into the INPUT history"
     );
-    let unit = &transcript[0];
+    let unit = &input_history[0];
     assert_eq!(
         unit.output_kind,
         OutputKind::Viewer,
@@ -1585,6 +1621,114 @@ fn submit_portal_input_echoes_viewer_text_into_transcript() {
     assert_eq!(
         unit.appended_at_wall_us, 50,
         "viewer unit timestamp must match submitted_at_wall_us"
+    );
+}
+
+/// §Viewer Reply Echo two-pane split: the INPUT history is a separately-bounded
+/// newest-fit window — the oldest viewer turns evict once the cap is exceeded,
+/// exactly as the OUTPUT transcript is bounded, so INPUT growth never has to
+/// borrow OUTPUT's budget.
+#[test]
+fn input_history_is_bounded_newest_fit_evicting_oldest() {
+    let mut authority = ProjectionAuthority::new(ProjectionBounds {
+        // The INPUT-history cap reuses `max_visible_transcript_bytes`; a small cap
+        // forces eviction after a few 5-byte turns.
+        max_visible_transcript_bytes: 10,
+        ..ProjectionBounds::default()
+    })
+    .unwrap();
+    attach(&mut authority, "projection-a");
+
+    for (id, text) in [("i1", "aaaaa"), ("i2", "bbbbb"), ("i3", "ccccc")] {
+        assert_eq!(
+            authority
+                .submit_portal_input("projection-a", portal_submission(id, text))
+                .feedback_state,
+            PortalInputFeedbackState::Accepted,
+        );
+    }
+
+    let history = authority
+        .input_history_window("projection-a")
+        .expect("projection exists");
+    assert_eq!(
+        history
+            .iter()
+            .map(|u| u.output_text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["bbbbb", "ccccc"],
+        "INPUT history keeps a bounded newest-fit window, evicting the oldest turn"
+    );
+}
+
+/// §Viewer Reply Echo two-pane split + reconnect parity (#1098): both
+/// separately-bounded streams (OUTPUT transcript + INPUT history) live in the
+/// projection session, so an ungraceful drop + reconnect-within-grace preserves
+/// both — the viewer's replies are not lost across a session bounce, and they
+/// still never leak into the OUTPUT transcript.
+#[test]
+fn input_history_and_output_transcript_survive_reconnect() {
+    let mut authority = ProjectionAuthority::default();
+    let owner_token = attach(&mut authority, "projection-a");
+    authority
+        .record_hud_connection("projection-a", connection_metadata(&["modify_own_tiles"]))
+        .unwrap();
+
+    // Agent output → OUTPUT transcript; viewer reply → INPUT history.
+    assert!(
+        authority
+            .handle_publish_output(
+                output_request("projection-a", &owner_token, "req-1"),
+                "caller-a",
+                20,
+            )
+            .accepted
+    );
+    assert_eq!(
+        authority
+            .submit_portal_input("projection-a", portal_submission("input-1", "hi"))
+            .feedback_state,
+        PortalInputFeedbackState::Accepted,
+    );
+
+    // Ungraceful drop, then reconnect within grace (the session is not dropped).
+    authority.mark_hud_disconnected("projection-a", 30).unwrap();
+    authority
+        .record_hud_connection(
+            "projection-a",
+            HudConnectionMetadata {
+                connection_id: "connection-2".to_string(),
+                authenticated_session_id: "runtime-session-2".to_string(),
+                granted_capabilities: vec!["modify_own_tiles".to_string()],
+                connected_at_wall_us: 40,
+                last_reconnect_wall_us: 40,
+            },
+        )
+        .unwrap();
+
+    let state = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .expect("portal state materializes");
+    assert!(
+        state
+            .visible_transcript
+            .iter()
+            .any(|u| u.output_kind == OutputKind::Assistant),
+        "OUTPUT transcript survives reconnect"
+    );
+    assert!(
+        state
+            .input_history
+            .iter()
+            .any(|u| u.output_kind == OutputKind::Viewer && u.output_text == "hi"),
+        "INPUT history survives reconnect"
+    );
+    assert!(
+        !state
+            .visible_transcript
+            .iter()
+            .any(|u| u.output_kind == OutputKind::Viewer),
+        "viewer echo never leaks into the OUTPUT transcript across reconnect"
     );
 }
 
