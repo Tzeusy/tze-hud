@@ -567,7 +567,11 @@ pub(super) struct PortalGroup {
 
 /// Return true when `inner` lies within `outer`, allowing a small epsilon so
 /// sub-pixel rounding at pane edges does not drop a legitimate member.
-fn rect_contains(outer: &tze_hud_scene::Rect, inner: &tze_hud_scene::Rect, eps: f32) -> bool {
+pub(super) fn rect_contains(
+    outer: &tze_hud_scene::Rect,
+    inner: &tze_hud_scene::Rect,
+    eps: f32,
+) -> bool {
     inner.x >= outer.x - eps
         && inner.y >= outer.y - eps
         && inner.x + inner.width <= outer.x + outer.width + eps
@@ -946,10 +950,15 @@ fn translate_portal_group_on_drag(
 /// Drives `PortalResizeState` through the pointer-down / pointer-move / pointer-up
 /// lifecycle for resize affordances (§6b.1 pointer resize scenario).
 ///
-/// On **PointerDown**: performs a hit-test against the focused portal's resize
-/// affordances.  If the pointer lands on an affordance, starts the gesture and
-/// returns a [`PortalResizePointerOutcome`] with the initial snapshot so the
-/// caller can apply local bounds and broadcast the geometry event.
+/// On **PointerDown**: resolves the portal from the tile UNDER THE POINTER
+/// (falling back to the focused tile only when the pointer is over no tile) and
+/// hit-tests its resize affordances.  Resolving from the pointer rather than the
+/// focused tile is deliberate: the initiating click-to-focus moves focus onto
+/// the non-scrollable frame under the affordance corner, so a focus-gated resize
+/// never starts under real OS pointer input (hud-yno2r).  If the pointer lands on
+/// an affordance, starts the gesture and returns a [`PortalResizePointerOutcome`]
+/// with the initial snapshot so the caller can apply local bounds and broadcast
+/// the geometry event.
 ///
 /// On **PointerMove**: if a gesture is active for `device_id`, computes the new
 /// intermediate rect and applies it to the scene immediately (local-first).
@@ -957,8 +966,8 @@ fn translate_portal_group_on_drag(
 /// On **PointerUp**: ends the gesture, applies the final clamped rect, and
 /// returns an outcome the caller must broadcast.
 ///
-/// Returns `None` when there is nothing to do (no portal focused, pointer
-/// outside affordances, no gesture active, or lock contention).
+/// Returns `None` when there is nothing to do (no portal under the pointer,
+/// pointer outside affordances, no gesture active, or lock contention).
 ///
 /// ## Gesture authority
 ///
@@ -984,11 +993,6 @@ pub(super) fn apply_portal_resize_pointer_event(
     let device_id = pointer_event.device_id;
     let x = pointer_event.x;
     let y = pointer_event.y;
-
-    // Resolve the focused portal tile for this tab (only portal tiles accept
-    // pointer-affordance resize, same gate as hotkey resize).
-    let tab_id = active_tab?;
-    let focused_tile_id = focus_manager.current_owner(tab_id).tile_id()?;
 
     // Build the clamping bounds for a whole-portal rect owned by `anchor_lease`.
     let resize_bounds_for_lease =
@@ -1022,12 +1026,40 @@ pub(super) fn apply_portal_resize_pointer_event(
 
     match pointer_event.kind {
         PointerEventKind::Down => {
-            // Only scrollable (portal) tiles accept resize affordances — same
-            // gate as hotkey resize; keeps the drag shield / frame from acting
-            // as the resize target.
-            scene.tile_scroll_config(focused_tile_id)?;
+            // Resolve the portal from the tile UNDER THE POINTER, not the
+            // *focused* tile. The resize affordance sits on the frame's
+            // bottom-right corner — a non-scrollable tile — and the very same
+            // pointer-down first runs click-to-focus (`process_with_focus` in
+            // `enqueue_pointer_event`), which moves keyboard focus onto that
+            // frame tile before this handler runs. Gating the gesture on the
+            // *focused* tile being scrollable therefore made whole-portal
+            // resize inert under real OS pointer input: the focus the gate
+            // required had already been pulled off the scrollable pane by the
+            // initiating click (hud-yno2r). Mirror the whole-portal move path
+            // (`translate_portal_group_on_drag`), which resolves the group from
+            // the tile under the pointer and gates portal-ness across the whole
+            // group rather than the focused tile. Fall back to the focused tile
+            // only when the pointer is not over any tile (e.g. injected events
+            // in tests that pre-seed focus without a hittable frame).
+            let seed_tile_id = match scene.hit_test(x, y) {
+                HitResult::NodeHit { tile_id, .. } | HitResult::TileHit { tile_id } => {
+                    Some(tile_id)
+                }
+                _ => active_tab.and_then(|tab| focus_manager.current_owner(tab).tile_id()),
+            }?;
             // Resolve the whole portal; the affordance strip lives on the frame.
-            let group = resolve_portal_group(scene, focused_tile_id)?;
+            let group = resolve_portal_group(scene, seed_tile_id)?;
+            // Portal-ness gate: the resolved group must contain at least one
+            // scrollable constituent surface (same check as the move path).
+            // This keeps a plain widget / zone from acting as a resize target
+            // without requiring the *focused* tile to be the scrollable one.
+            if !group
+                .member_ids
+                .iter()
+                .any(|id| scene.tile_scroll_config(*id).is_some())
+            {
+                return None;
+            }
             let old_rect = group.portal_rect;
             let edge: ResizeEdge = hit_affordance(x, y, &old_rect, tokens.affordance_px)?;
 
@@ -2242,8 +2274,6 @@ mod tests {
                 &snapshot,
                 700.0,
                 300.0,
-                None,
-                &FocusManager::new(),
                 PortalWindowTokens::default(),
             ),
             "PointerDown on a drag handle must spin-acquire so the drag state can start under contention"
@@ -2252,7 +2282,7 @@ mod tests {
 
     #[test]
     fn pointer_down_on_resize_affordance_requests_guaranteed_feedback_from_snapshot_gate() {
-        let (scene, tab_id, _tile_id, fm) = portal_scene_with_focus();
+        let (scene, _tab_id, _tile_id, _fm) = portal_scene_with_focus();
         let snapshot = crate::pipeline::HitTestSnapshot::from_scene(&scene);
 
         assert!(
@@ -2260,11 +2290,36 @@ mod tests {
                 &snapshot,
                 496.0,
                 250.0,
-                Some(tab_id),
-                &fm,
                 PortalWindowTokens::default(),
             ),
             "PointerDown on a portal resize affordance must spin-acquire so the resize gesture can start under contention"
+        );
+    }
+
+    /// hud-yno2r: the pre-lock guaranteed-feedback predicate must also fire when
+    /// the pointer is on the resize corner of a NON-scrollable portal *frame*
+    /// that contains scrollable panes — the first-class / multi-surface layout.
+    /// Before the fix this keyed off the focused tile being scrollable, so a
+    /// frame-corner Down fell back to a one-shot `try_lock` and could be dropped
+    /// under scene-lock contention, leaving the new resize path intermittently
+    /// inert.
+    #[test]
+    fn pointer_down_on_multi_surface_frame_corner_requests_guaranteed_feedback() {
+        let (scene, _tab_id, _frame_id, _transcript_id, _composer_id, _shield_id, _fm) =
+            multi_surface_portal_scene();
+        let snapshot = crate::pipeline::HitTestSnapshot::from_scene(&scene);
+
+        // Frame is (100,100,400,300) → bottom-right corner (500,400); (498,398)
+        // sits in the affordance band. The frame itself is NOT scrollable.
+        assert!(
+            pointer_down_starts_guaranteed_feedback_gesture(
+                &snapshot,
+                498.0,
+                398.0,
+                PortalWindowTokens::default(),
+            ),
+            "PointerDown on a multi-surface portal frame's resize corner must spin-acquire \
+             even though the frame tile is not itself scrollable (hud-yno2r)"
         );
     }
 
@@ -2278,8 +2333,6 @@ mod tests {
                 &snapshot,
                 320.0,
                 420.0,
-                scene.active_tab,
-                &FocusManager::new(),
                 PortalWindowTokens::default(),
             ),
             "ordinary content PointerDown must stay on the single try_lock path to preserve click-to-focus latency"
@@ -6054,6 +6107,244 @@ mod tests {
             display_h,
             tokens,
         );
+    }
+
+    /// hud-yno2r regression (deterministic): whole-portal pointer resize must
+    /// start from the frame's bottom-right affordance even when keyboard focus
+    /// is NOT on a scrollable pane.
+    ///
+    /// On the live OS-pointer path the initiating click-to-focus moves focus
+    /// onto the (non-scrollable) frame tile under the resize corner *before* the
+    /// resize handler runs. The old gate required the *focused* tile to be
+    /// scrollable (`scene.tile_scroll_config(focused_tile_id)?`), so the very
+    /// click that started the gesture also disqualified it — resize was inert
+    /// (Δw=Δh=0) while whole-portal move (which resolves the group from the tile
+    /// under the pointer) kept working. This test pins focus to the frame — the
+    /// exact post-click-to-focus state — and asserts the gesture still starts and
+    /// grows every member. The prior test
+    /// (`pointer_affordance_resize_scales_whole_portal_from_frame`) pre-focused
+    /// the scrollable composer and so never exercised this focus state.
+    #[test]
+    fn pointer_resize_starts_from_frame_corner_regardless_of_focused_pane() {
+        let (mut scene, tab_id, frame_id, transcript_id, composer_id, _shield_id, mut fm) =
+            multi_surface_portal_scene();
+
+        // Emulate the live post-click-to-focus state: the pointer-down on the
+        // bottom-right resize corner lands on the frame tile, so click-to-focus
+        // has already moved keyboard focus OFF the scrollable composer and ONTO
+        // the non-scrollable frame. The old focus-gated resize returned early
+        // here (frame has no scroll config).
+        fm.request_focus(
+            FocusRequest {
+                tile_id: frame_id,
+                node_id: None,
+                steal: true,
+                requesting_namespace: "portal-agent".to_string(),
+            },
+            tab_id,
+            &scene,
+        );
+        assert_eq!(
+            fm.current_owner(tab_id).tile_id(),
+            Some(frame_id),
+            "focus must be on the non-scrollable frame for this regression"
+        );
+        assert!(
+            scene.tile_scroll_config(frame_id).is_none(),
+            "the frame must be non-scrollable — the condition the old gate failed on"
+        );
+
+        let mut states: std::collections::HashMap<tze_hud_scene::SceneId, PortalResizeState> =
+            std::collections::HashMap::new();
+        let tokens = PortalWindowTokens::default();
+        let (display_w, display_h) = (1920.0_f32, 1080.0_f32);
+
+        let read = |scene: &tze_hud_scene::graph::SceneGraph, id: tze_hud_scene::SceneId| {
+            scene.tiles.get(&id).unwrap().bounds
+        };
+        let frame_before = read(&scene, frame_id);
+        let composer_before = read(&scene, composer_id);
+        let transcript_before = read(&scene, transcript_id);
+
+        // PointerDown on the frame's bottom-right corner affordance. The frame is
+        // (100,100,400,300) → corner (500,400); (498,398) sits within the band.
+        let down = PointerEvent {
+            x: 498.0,
+            y: 398.0,
+            kind: PointerEventKind::Down,
+            device_id: 0,
+            timestamp: None,
+        };
+        let out_down = apply_portal_resize_pointer_event(
+            &down,
+            &mut states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+            tokens,
+        );
+        assert!(
+            out_down.is_some(),
+            "pointer-down on the frame resize affordance must start a whole-portal \
+             gesture even when focus is on the non-scrollable frame (hud-yno2r)"
+        );
+
+        // PointerMove outward to grow the portal.
+        let mv = PointerEvent {
+            x: 570.0,
+            y: 470.0,
+            kind: PointerEventKind::Move,
+            device_id: 0,
+            timestamp: None,
+        };
+        let out_move = apply_portal_resize_pointer_event(
+            &mv,
+            &mut states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+            tokens,
+        )
+        .expect("pointer-move must update the whole portal");
+
+        let member_ids: Vec<_> = out_move.members.iter().map(|m| m.tile_id).collect();
+        assert!(
+            member_ids.contains(&frame_id)
+                && member_ids.contains(&composer_id)
+                && member_ids.contains(&transcript_id),
+            "whole-portal resize members must include the frame and both panes"
+        );
+
+        let frame_after = read(&scene, frame_id);
+        let composer_after = read(&scene, composer_id);
+        let transcript_after = read(&scene, transcript_id);
+        assert!(
+            frame_after.width > frame_before.width && frame_after.height > frame_before.height,
+            "pointer resize must grow the frame"
+        );
+        assert!(
+            composer_after.width > composer_before.width,
+            "the composer pane must scale with the portal"
+        );
+        assert!(
+            transcript_after.width > transcript_before.width,
+            "the transcript pane must scale with the portal"
+        );
+        assert!(
+            approx_tuple(
+                rel_to_frame(composer_before, frame_before),
+                rel_to_frame(composer_after, frame_after)
+            ),
+            "the composer must keep its relative layout within the portal"
+        );
+
+        // End the gesture cleanly.
+        let up = PointerEvent {
+            x: 570.0,
+            y: 470.0,
+            kind: PointerEventKind::Up,
+            device_id: 0,
+            timestamp: None,
+        };
+        apply_portal_resize_pointer_event(
+            &up,
+            &mut states,
+            Some(tab_id),
+            &fm,
+            &mut scene,
+            display_w,
+            display_h,
+            tokens,
+        );
+    }
+
+    /// hud-yno2r regression (end-to-end): drive the *full* pointer pipeline
+    /// (`WinitApp::enqueue_pointer_event`) so click-to-focus and the resize
+    /// handler run in their real order on one pointer-down — the coverage the
+    /// live OS-injection sweep found was missing.
+    ///
+    /// The frame carries a focusable region, so the corner pointer-down moves
+    /// keyboard focus onto the (non-scrollable) frame — reproducing the live
+    /// state where the initiating click disqualified the old focus-gated resize.
+    /// A subsequent move must then grow the whole portal. Under the old gate the
+    /// gesture never started, so the move found nothing to update and the frame
+    /// stayed put.
+    #[test]
+    fn enqueue_pointer_corner_drag_resizes_whole_portal_after_click_to_focus() {
+        use tze_hud_scene::types::{HitRegionNode, Node, NodeData};
+        use tze_hud_scene::{Rect, SceneId};
+
+        let (mut scene, tab_id, frame_id, _transcript_id, composer_id, _shield_id, fm) =
+            multi_surface_portal_scene();
+
+        // Make the frame focusable so the corner-click moves focus onto it (the
+        // live click-to-focus behaviour). Focus starts on the composer (set by
+        // the scene helper); the corner-down must pull it to the frame.
+        let frame_region_id = SceneId::new();
+        scene
+            .set_tile_root(
+                frame_id,
+                Node {
+                    id: frame_region_id,
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+                        interaction_id: "portal-frame-focus".to_string(),
+                        accepts_focus: true,
+                        accepts_pointer: true,
+                        ..Default::default()
+                    }),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            fm.current_owner(tab_id).tile_id(),
+            Some(composer_id),
+            "focus must start on the scrollable composer pane"
+        );
+
+        let (mut app, _rx) = make_windowed_keyboard_test_app(scene, fm, InputProcessor::new());
+
+        let read = |app: &WinitApp, id: tze_hud_scene::SceneId| {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let scene = shared.scene.try_lock().unwrap();
+            scene.tiles.get(&id).unwrap().bounds
+        };
+        let frame_before = read(&app, frame_id);
+
+        // PointerDown on the frame's bottom-right resize corner (500,400 corner;
+        // 498,398 within the band). This ONE event runs click-to-focus (moving
+        // focus composer → frame) and THEN the resize handler, in the real order.
+        app.state.cursor_x = 498.0;
+        app.state.cursor_y = 398.0;
+        app.enqueue_pointer_event(PointerEventKind::Down);
+
+        assert_eq!(
+            app.state.focus_manager.current_owner(tab_id).tile_id(),
+            Some(frame_id),
+            "the corner click-to-focus must move focus onto the non-scrollable frame — \
+             the exact state that made the old focus-gated resize inert"
+        );
+
+        // PointerMove outward: the active gesture must grow the whole portal.
+        app.state.cursor_x = 570.0;
+        app.state.cursor_y = 470.0;
+        app.enqueue_pointer_event(PointerEventKind::Move);
+
+        let frame_after = read(&app, frame_id);
+        assert!(
+            frame_after.width > frame_before.width && frame_after.height > frame_before.height,
+            "dragging the frame corner must grow the whole portal even though \
+             click-to-focus moved focus off the scrollable pane (hud-yno2r)"
+        );
+
+        // Release the gesture.
+        app.enqueue_pointer_event(PointerEventKind::Up);
     }
 
     /// Grow the whole portal group that owns `frame_id` to `new_rect`, mirroring

@@ -7,8 +7,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
 
 use tze_hud_input::{
-    DragPhase, FocusManager, PointerEvent, PointerEventKind, PortalRect, PortalWindowTokens,
-    hit_affordance,
+    DragPhase, PointerEvent, PointerEventKind, PortalRect, PortalWindowTokens, hit_affordance,
 };
 use tze_hud_scene::HitResult;
 use tze_hud_scene::graph::SceneGraph;
@@ -304,29 +303,49 @@ pub(super) fn spin_acquire_recording<'a, T>(
     guard
 }
 
+/// Decide whether an initiating `PointerDown` should acquire the scene lock with
+/// the bounded interactive-feedback spin ([`spin_acquire`]) instead of a one-shot
+/// `try_lock`, so a drag-move or resize gesture reliably starts even while the
+/// compositor or an adapter briefly holds the scene lock.
+///
+/// Returns true for a runtime chrome drag handle (whole-portal move) and for a
+/// portal frame's resize affordance.
+///
+/// The resize case MUST mirror [`super::portal::apply_portal_resize_pointer_event`]'s
+/// pointer-down path (hud-yno2r): the gesture is resolved from the tile UNDER THE
+/// POINTER — not the focused tile — and starts for a portal *frame*: the topmost
+/// hit tile that is itself scrollable (raw-tile portal) OR that spatially
+/// contains a scrollable same-namespace constituent surface (the non-scrollable
+/// frame of a first-class / multi-surface portal). Keying this off the focused
+/// tile — as it once did — dropped the initiating Down to a one-shot `try_lock`
+/// in exactly the frame-corner state resize now supports, making resize
+/// intermittently inert under scene-lock contention.
+///
+/// It runs against the lock-free [`crate::pipeline::HitTestSnapshot`], which
+/// carries no lease/group data, so it approximates `resolve_portal_group`'s
+/// lease-scoped membership with same-namespace spatial containment. A rare false
+/// positive only costs a bounded spin; a false negative would reintroduce the
+/// dropped-feedback bug, so the check deliberately biases toward inclusion.
 pub(super) fn pointer_down_starts_guaranteed_feedback_gesture(
     snapshot: &crate::pipeline::HitTestSnapshot,
     x: f32,
     y: f32,
-    active_tab: Option<tze_hud_scene::SceneId>,
-    focus_manager: &FocusManager,
     portal_tokens: PortalWindowTokens,
 ) -> bool {
     if snapshot.hit_test_drag_handle(x, y) {
         return true;
     }
 
-    let Some(tab_id) = active_tab else {
-        return false;
-    };
-    let Some(focused_tile_id) = focus_manager.current_owner(tab_id).tile_id() else {
-        return false;
-    };
-
     let Some(tile) = snapshot.hit_test(x, y) else {
         return false;
     };
-    if tile.tile_id_bytes != focused_tile_id.to_bytes_le() || !tile.has_scroll_config {
+    let is_portal_frame = tile.has_scroll_config
+        || snapshot.tiles.iter().any(|other| {
+            other.has_scroll_config
+                && other.namespace == tile.namespace
+                && super::portal::rect_contains(&tile.bounds, &other.bounds, 1.0)
+        });
+    if !is_portal_frame {
         return false;
     }
 
@@ -1041,13 +1060,6 @@ impl WinitApp {
         let initiating_down_needs_guaranteed_feedback =
             pointer_event.kind == PointerEventKind::Down && {
                 let snapshot = self.state.pipeline.hit_test_snapshot.load();
-                let active_tab = self
-                    .state
-                    .active_tab_mirror
-                    .lock()
-                    .map(|guard| *guard)
-                    .ok()
-                    .flatten();
                 let portal_part = tze_hud_config::resolve_portal_tokens(&self.state.global_tokens);
                 let portal_tokens = PortalWindowTokens {
                     min_width_px: portal_part.window_min_width_px,
@@ -1059,8 +1071,6 @@ impl WinitApp {
                     &snapshot,
                     pointer_event.x,
                     pointer_event.y,
-                    active_tab,
-                    &self.state.focus_manager,
                     portal_tokens,
                 )
             };
