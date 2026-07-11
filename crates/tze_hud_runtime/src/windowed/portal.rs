@@ -567,7 +567,11 @@ pub(super) struct PortalGroup {
 
 /// Return true when `inner` lies within `outer`, allowing a small epsilon so
 /// sub-pixel rounding at pane edges does not drop a legitimate member.
-fn rect_contains(outer: &tze_hud_scene::Rect, inner: &tze_hud_scene::Rect, eps: f32) -> bool {
+pub(super) fn rect_contains(
+    outer: &tze_hud_scene::Rect,
+    inner: &tze_hud_scene::Rect,
+    eps: f32,
+) -> bool {
     inner.x >= outer.x - eps
         && inner.y >= outer.y - eps
         && inner.x + inner.width <= outer.x + outer.width + eps
@@ -2270,8 +2274,6 @@ mod tests {
                 &snapshot,
                 700.0,
                 300.0,
-                None,
-                &FocusManager::new(),
                 PortalWindowTokens::default(),
             ),
             "PointerDown on a drag handle must spin-acquire so the drag state can start under contention"
@@ -2280,7 +2282,7 @@ mod tests {
 
     #[test]
     fn pointer_down_on_resize_affordance_requests_guaranteed_feedback_from_snapshot_gate() {
-        let (scene, tab_id, _tile_id, fm) = portal_scene_with_focus();
+        let (scene, _tab_id, _tile_id, _fm) = portal_scene_with_focus();
         let snapshot = crate::pipeline::HitTestSnapshot::from_scene(&scene);
 
         assert!(
@@ -2288,11 +2290,36 @@ mod tests {
                 &snapshot,
                 496.0,
                 250.0,
-                Some(tab_id),
-                &fm,
                 PortalWindowTokens::default(),
             ),
             "PointerDown on a portal resize affordance must spin-acquire so the resize gesture can start under contention"
+        );
+    }
+
+    /// hud-yno2r: the pre-lock guaranteed-feedback predicate must also fire when
+    /// the pointer is on the resize corner of a NON-scrollable portal *frame*
+    /// that contains scrollable panes — the first-class / multi-surface layout.
+    /// Before the fix this keyed off the focused tile being scrollable, so a
+    /// frame-corner Down fell back to a one-shot `try_lock` and could be dropped
+    /// under scene-lock contention, leaving the new resize path intermittently
+    /// inert.
+    #[test]
+    fn pointer_down_on_multi_surface_frame_corner_requests_guaranteed_feedback() {
+        let (scene, _tab_id, _frame_id, _transcript_id, _composer_id, _shield_id, _fm) =
+            multi_surface_portal_scene();
+        let snapshot = crate::pipeline::HitTestSnapshot::from_scene(&scene);
+
+        // Frame is (100,100,400,300) → bottom-right corner (500,400); (498,398)
+        // sits in the affordance band. The frame itself is NOT scrollable.
+        assert!(
+            pointer_down_starts_guaranteed_feedback_gesture(
+                &snapshot,
+                498.0,
+                398.0,
+                PortalWindowTokens::default(),
+            ),
+            "PointerDown on a multi-surface portal frame's resize corner must spin-acquire \
+             even though the frame tile is not itself scrollable (hud-yno2r)"
         );
     }
 
@@ -2306,8 +2333,6 @@ mod tests {
                 &snapshot,
                 320.0,
                 420.0,
-                scene.active_tab,
-                &FocusManager::new(),
                 PortalWindowTokens::default(),
             ),
             "ordinary content PointerDown must stay on the single try_lock path to preserve click-to-focus latency"
