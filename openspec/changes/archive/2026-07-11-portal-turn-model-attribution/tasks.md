@@ -4,7 +4,8 @@
 
 - [x] 1.1 Author delta: Conversational Turn Model and Per-Turn Role Attribution
 - [x] 1.2 `openspec validate portal-turn-model-attribution --strict` passes
-- [ ] 1.3 Commit + push (bead hud-26869 branch → PR)
+- [x] 1.3 Commit + push (bead hud-26869 branch → PR) — PR #1152, merged
+      2026-07-11T16:06:39Z
 
 ## 2. Implementation (bead hud-26869)
 
@@ -25,9 +26,17 @@
 
 ## 3. Closeout
 
-- [ ] 3.1 File follow-up: compositor vertical-flow layout capability +
+- [x] 3.1 File follow-up: compositor vertical-flow layout capability +
       true per-turn scene-node transcript (blocked-on-layout), so a future
-      promotion can satisfy this contract structurally.
-- [ ] 3.2 Sync + archive per hud-hpuzp convention once implementation merges.
+      promotion can satisfy this contract structurally. — filed as hud-txkbh
+      ("Compositor vertical-flow layout for portal per-turn scene nodes").
+- [x] 3.2 Sync + archive per hud-hpuzp convention once implementation merges.
+      — hud-u3gy2: delta synced into
+      `openspec/specs/text-stream-portals/spec.md`, change archived to
+      `openspec/changes/archive/2026-07-11-portal-turn-model-attribution/`,
+      `openspec validate --strict` passes.
 - [ ] 3.3 Live re-verify on reference Windows overlay (attribution colors read
-      distinctly; separators intact) — hardware-gated.
+      distinctly; separators intact) — hardware-gated, deferred (no reference
+      Windows hardware available to this worker); left open for a future
+      live-verify pass, consistent with other hardware-gated deferrals in this
+      spec area (e.g. hud-hpuzp's disconnect-resume check 7).
