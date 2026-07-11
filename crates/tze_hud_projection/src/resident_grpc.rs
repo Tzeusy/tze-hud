@@ -1874,11 +1874,49 @@ fn portal_markdown_with(
                 }
                 push_line(&mut result, &body);
             }
+            // §Viewer Reply Echo (two-pane INPUT/OUTPUT split): render the INPUT
+            // history — the viewer's own accepted replies — as a distinct band in
+            // the input region, held SEPARATELY from the OUTPUT transcript above.
+            // A viewer echo lands in `input_history` and never in
+            // `visible_transcript`, so a submission never grows the OUTPUT
+            // transcript nor moves its follow-tail scroll (the driver computes
+            // follow-tail from `visible_transcript` only). The band reuses the
+            // transcript's `---`-divider + ambient-timestamp treatment with NO
+            // unread divider (viewer turns are never unread). Under redaction
+            // `input_history` is emptied upstream, so the band + its label never
+            // render for a restricted viewer. The promotion-era structured layout
+            // gives the INPUT pane its own part node (PORTAL_PART_KIND_COMPOSER /
+            // Phase-0 `input_scroll`, hud-ga4md).
+            if !state.input_history.is_empty() {
+                push_line(&mut result, "");
+                push_line(&mut result, PORTAL_INPUT_HISTORY_LABEL);
+                push_line(
+                    &mut result,
+                    &input_history_markdown(&state.input_history, timestamps),
+                );
+            }
+            // hud-0e44r: the composer status line is rendered LAST — after the
+            // INPUT-history band, not before it. §Viewer Reply Echo frames the
+            // composer as top-anchored "above" the INPUT band, and #1142 matched
+            // that framing by rendering it first; but this whole Expanded arm is
+            // still ONE `TextMarkdownNode` (the legacy single-part portal path,
+            // `node_gets_transcript_treatment` returns `true` whenever
+            // `part_index` is `None`), so the ENTIRE composed blob gets
+            // `TruncationViewport::TailAnchored` under overflow. Positioned above
+            // the band, a long `input_history` pushed the composer line out of the
+            // truncation window — the exact defect #1142 introduced. A
+            // `TailAnchored` viewport keeps the TAIL of an overflowing blob
+            // visible, so the trailing line is the one line guaranteed to survive
+            // truncation: putting the composer status last makes it that line,
+            // while the INPUT-history band (now the truncatable middle) trims
+            // from its own top under overflow instead. This trades the exact
+            // visual "composer above the band" framing for guaranteed visibility
+            // until the composer gets its own independently-bounded part node
+            // (hud-ga4md, blocked-by hud-26869); the live interactive composer
+            // itself is unaffected either way — it is already a separate,
+            // always-visible bottom-pinned overlay (hud-f6zfa) that never rode
+            // this markdown blob.
             push_line(&mut result, "");
-            // §Viewer Reply Echo top-anchors the composer above the INPUT
-            // history band ("beneath a top-anchored composer"); render the
-            // composer status line here, before the band, so the interim
-            // single-markdown-node layout matches that framing.
             if is_connection_degraded(state) {
                 // §2: clear live activity/typing/composer-ready signals on
                 // disconnect — the surface must not imply an active stream. The
@@ -1894,29 +1932,6 @@ fn portal_markdown_with(
                 push_line(&mut result, &composer_line);
             } else {
                 push_line(&mut result, "composer: unavailable");
-            }
-            // §Viewer Reply Echo (two-pane INPUT/OUTPUT split): render the INPUT
-            // history — the viewer's own accepted replies — as a distinct band in
-            // the input region, held SEPARATELY from the OUTPUT transcript above.
-            // A viewer echo lands in `input_history` and never in
-            // `visible_transcript`, so a submission never grows the OUTPUT
-            // transcript nor moves its follow-tail scroll (the driver computes
-            // follow-tail from `visible_transcript` only). The band reuses the
-            // transcript's `---`-divider + ambient-timestamp treatment with NO
-            // unread divider (viewer turns are never unread). Under redaction
-            // `input_history` is emptied upstream, so the band + its label never
-            // render for a restricted viewer. Interim placement: this single
-            // markdown node renders the band below the composer status line, top-
-            // anchoring the composer per §Viewer Reply Echo; the promotion-era
-            // structured layout gives the INPUT pane its own part node
-            // (PORTAL_PART_KIND_COMPOSER / Phase-0 `input_scroll`).
-            if !state.input_history.is_empty() {
-                push_line(&mut result, "");
-                push_line(&mut result, PORTAL_INPUT_HISTORY_LABEL);
-                push_line(
-                    &mut result,
-                    &input_history_markdown(&state.input_history, timestamps),
-                );
             }
         }
         ProjectedPortalPresentation::Collapsed => {
@@ -4365,10 +4380,12 @@ mod tests {
 
     /// §Viewer Reply Echo (two-pane INPUT/OUTPUT split): the INPUT history renders
     /// as a distinct labeled band held SEPARATELY from the OUTPUT transcript body —
-    /// the agent turn stays above, the composer status line top-anchors above the
-    /// band per the requirement's "beneath a top-anchored composer" framing, the
-    /// viewer replies stack below their own label, and the two never interleave
-    /// into one combined sequence.
+    /// the agent turn stays above, the viewer replies stack below their own label,
+    /// and the two never interleave into one combined sequence. The composer
+    /// status line renders LAST, after the band (hud-0e44r): this whole Expanded
+    /// arm is one `TailAnchored` markdown blob, so the trailing line is the one
+    /// line guaranteed to survive truncation when `input_history` overflows the
+    /// tile — see the render-site comment for the full rationale.
     #[test]
     fn portal_markdown_renders_input_band_separate_from_output_transcript() {
         let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
@@ -4399,27 +4416,88 @@ mod tests {
             md.contains("viewer reply one") && md.contains("viewer reply two"),
             "{md}"
         );
-        // Ordering proves separation AND top-anchored placement: the OUTPUT
-        // transcript body renders first, then the composer status line (top-
-        // anchored above the INPUT band per §Viewer Reply Echo), then the INPUT
-        // band label, then the viewer replies — no viewer text is interleaved
-        // into the agent transcript body, and the composer never trails the band.
+        // Ordering proves separation AND tail-anchored placement: the OUTPUT
+        // transcript body renders first, then the INPUT band label, then the
+        // viewer replies, then the composer status line LAST — no viewer text is
+        // interleaved into the agent transcript body, and the composer always
+        // trails the band so it survives TailAnchored truncation (hud-0e44r).
         let agent_pos = md.find("agent says hi").expect("agent turn rendered");
-        let composer_pos = md
-            .find("composer: ready")
-            .expect("composer status line rendered");
         let label_pos = md
             .find(PORTAL_INPUT_HISTORY_LABEL)
             .expect("input band label rendered");
         let viewer_pos = md.find("viewer reply one").expect("viewer reply rendered");
+        let composer_pos = md
+            .find("composer: ready")
+            .expect("composer status line rendered");
         assert!(
-            agent_pos < composer_pos && composer_pos < label_pos && label_pos < viewer_pos,
+            agent_pos < label_pos && label_pos < viewer_pos && viewer_pos < composer_pos,
             "{md}"
         );
         // Viewer replies stack with a token-styled `---` turn divider between them.
         assert!(
             md.contains("viewer reply one\n---\nviewer reply two"),
             "{md}"
+        );
+    }
+
+    /// hud-0e44r regression: the composer status line must stay visible (the
+    /// LAST line of the Expanded arm, hence the `TailAnchored` truncation-safe
+    /// tail) no matter how much `input_history` precedes it. Before this fix the
+    /// composer status rendered BEFORE the INPUT-history band, so a long history
+    /// pushed it past the compositor's `TruncationViewport::TailAnchored` window
+    /// on an overflowing tile. This test can't drive the GPU truncation directly
+    /// (no compositor here), but it asserts the structural invariant that makes
+    /// truncation-safety possible: the composer status line is always the LAST
+    /// line emitted, strictly after every INPUT-history entry, regardless of how
+    /// many entries there are.
+    #[test]
+    fn composer_status_line_stays_last_under_large_input_history() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+
+        let mut state = make_expanded_interaction_state("portal-overflow");
+        state.visible_transcript = vec![transcript_unit_text(
+            1,
+            OutputKind::Assistant,
+            "agent says hi",
+        )];
+        state.visible_transcript_bytes = state
+            .visible_transcript
+            .iter()
+            .map(|u| u.output_text.len())
+            .sum();
+        // A large INPUT-history band — enough entries that, before hud-0e44r,
+        // the composer status line (positioned BEFORE the band) would have been
+        // pushed far outside any tail-anchored truncation window.
+        state.input_history = (0..100)
+            .map(|i| {
+                transcript_unit_text(
+                    100 + i,
+                    OutputKind::Viewer,
+                    &format!("viewer reply number {i} with some padding text"),
+                )
+            })
+            .collect();
+
+        let md = adapter.render_portal_markdown(&state, 0);
+
+        let last_history_pos = md
+            .rfind("viewer reply number 99")
+            .expect("last input-history entry rendered");
+        let composer_pos = md
+            .find("composer: ready")
+            .expect("composer status line rendered");
+        assert!(
+            composer_pos > last_history_pos,
+            "composer status line must render AFTER every INPUT-history entry so it \
+             is the tail-anchored-safe last line: {md}"
+        );
+        // And it must be the trailing content overall (this fixture carries no
+        // `pending_input_count` / `last_input_feedback`, the only two lines that
+        // can legitimately follow it) — no other line follows it.
+        assert!(
+            md.trim_end().ends_with("composer: ready"),
+            "composer status line must be the LAST line of the rendered markdown: {md}"
         );
     }
 
