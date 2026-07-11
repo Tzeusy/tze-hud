@@ -1336,13 +1336,31 @@ impl super::Compositor {
                     // Whatever caused the primer's authoritative snapshot to
                     // miss this key, we must not re-pay the full parse cost
                     // every single frame — see `Compositor::markdown_fallback_cache`.
-                    if let Some(parsed) = self.markdown_fallback_cache.borrow().get(&content_key) {
-                        TextItem::from_text_markdown_cached(
-                            tm,
-                            tile.bounds.x - scroll_x,
-                            tile.bounds.y - scroll_y,
-                            parsed,
-                        )
+                    // Scope the immutable `Ref` to this block so it is
+                    // dropped before the `else` branch below might need
+                    // `borrow_mut()`.  The scrutinee of `if let ... else`
+                    // has its temporary lifetime extended to the end of the
+                    // WHOLE if/else (not just the `then` arm) — leaving the
+                    // `.borrow()` call directly in the `if let` condition
+                    // would keep the `Ref` alive into the `else` arm and
+                    // panic with `already borrowed: BorrowMutError` on
+                    // every genuine fallback-cache miss. Confirmed via a
+                    // standalone repro during hud-u4lq2 review.
+                    let cache_hit = {
+                        self.markdown_fallback_cache
+                            .borrow()
+                            .get(&content_key)
+                            .map(|parsed| {
+                                TextItem::from_text_markdown_cached(
+                                    tm,
+                                    tile.bounds.x - scroll_x,
+                                    tile.bounds.y - scroll_y,
+                                    parsed,
+                                )
+                            })
+                    };
+                    if let Some(item) = cache_hit {
+                        item
                     } else {
                         let parsed = crate::markdown::parse_markdown_subset(&tm.content, md_tokens);
                         let item = TextItem::from_text_markdown_cached(
