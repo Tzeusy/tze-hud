@@ -684,6 +684,7 @@ async fn set_tile_root_text(
                                             overflow: 0, // Unspecified = proto3 default
                                         },
                                     )),
+                                    children: vec![],
                                 }),
                             },
                         )),

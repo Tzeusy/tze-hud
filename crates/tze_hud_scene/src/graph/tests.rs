@@ -5103,3 +5103,188 @@ fn test_lifecycle_accent_checked_rejected_while_orphaned_then_applies_after_grac
         "the degraded-grace repaint accent must apply after reconnect"
     );
 }
+
+// ── Inline subtree materialization: set_tile_root_tree (hud-ga4md) ───────────
+
+#[cfg(test)]
+mod inline_subtree_materialization {
+    use super::*;
+
+    /// (scene, tile_id) with a lease carrying CreateTiles + ModifyOwnTiles.
+    fn scene_with_tile() -> (SceneGraph, SceneId) {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 400.0, 300.0),
+                1,
+            )
+            .unwrap();
+        (scene, tile_id)
+    }
+
+    fn text_node(id: SceneId, children: Vec<SceneId>, content: &str) -> Node {
+        Node {
+            id,
+            children,
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: content.to_string(),
+                bounds: Rect::new(0.0, 0.0, 100.0, 20.0),
+                font_size_px: 16.0,
+                font_family: FontFamily::SystemSansSerif,
+                color: Rgba::WHITE,
+                background: None,
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Ellipsis,
+                color_runs: Box::default(),
+            }),
+        }
+    }
+
+    fn hit_node(id: SceneId) -> Node {
+        Node {
+            id,
+            children: vec![],
+            data: NodeData::HitRegion(HitRegionNode {
+                bounds: Rect::new(0.0, 0.0, 50.0, 20.0),
+                interaction_id: "child-hit".to_string(),
+                accepts_focus: true,
+                accepts_pointer: true,
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn materializes_full_subtree_atomically() {
+        let (mut scene, tile_id) = scene_with_tile();
+        let root_id = SceneId::new();
+        let child_a = SceneId::new();
+        let child_b = SceneId::new();
+        let grandchild = SceneId::new();
+
+        // root → [a → [grandchild(hit)], b]
+        let root = text_node(root_id, vec![child_a, child_b], "root");
+        let descendants = vec![
+            text_node(child_a, vec![grandchild], "a"),
+            hit_node(grandchild),
+            text_node(child_b, vec![], "b"),
+        ];
+
+        scene
+            .set_tile_root_tree(tile_id, root, descendants)
+            .expect("subtree materializes");
+
+        // Every node is in the flat map and reachable.
+        assert_eq!(scene.node_count(), 4, "root + 3 descendants all inserted");
+        for id in [root_id, child_a, child_b, grandchild] {
+            assert!(scene.nodes.contains_key(&id), "{id:?} materialized");
+        }
+        // Tile root points at the subtree root.
+        assert_eq!(scene.tiles.get(&tile_id).unwrap().root_node, Some(root_id));
+        // Parent→child links preserved.
+        assert_eq!(scene.nodes[&root_id].children, vec![child_a, child_b]);
+        assert_eq!(scene.nodes[&child_a].children, vec![grandchild]);
+        // Descendant hit-region got its local input state (registered per-node).
+        assert!(
+            scene.hit_region_states.contains_key(&grandchild),
+            "descendant HitRegion must get local state, not just the root"
+        );
+    }
+
+    #[test]
+    fn empty_descendants_equals_flat_set_tile_root() {
+        let (mut scene, tile_id) = scene_with_tile();
+        let root_id = SceneId::new();
+        scene
+            .set_tile_root_tree(tile_id, text_node(root_id, vec![], "flat"), vec![])
+            .expect("flat root");
+        assert_eq!(scene.node_count(), 1);
+        assert_eq!(scene.tiles.get(&tile_id).unwrap().root_node, Some(root_id));
+    }
+
+    #[test]
+    fn republish_replaces_whole_subtree() {
+        let (mut scene, tile_id) = scene_with_tile();
+        let r1 = SceneId::new();
+        let c1 = SceneId::new();
+        scene
+            .set_tile_root_tree(
+                tile_id,
+                text_node(r1, vec![c1], "root1"),
+                vec![text_node(c1, vec![], "c1")],
+            )
+            .unwrap();
+        assert_eq!(scene.node_count(), 2);
+
+        // Republish with a fresh subtree — the old one is fully removed.
+        let r2 = SceneId::new();
+        let c2 = SceneId::new();
+        let c3 = SceneId::new();
+        scene
+            .set_tile_root_tree(
+                tile_id,
+                text_node(r2, vec![c2, c3], "root2"),
+                vec![text_node(c2, vec![], "c2"), text_node(c3, vec![], "c3")],
+            )
+            .unwrap();
+        assert_eq!(
+            scene.node_count(),
+            3,
+            "old subtree removed, new one present"
+        );
+        for old in [r1, c1] {
+            assert!(!scene.nodes.contains_key(&old), "{old:?} should be gone");
+        }
+        for new in [r2, c2, c3] {
+            assert!(scene.nodes.contains_key(&new));
+        }
+    }
+
+    #[test]
+    fn oversized_subtree_rejected_atomically() {
+        let (mut scene, tile_id) = scene_with_tile();
+        let root_id = SceneId::new();
+        // Root + (MAX_NODES_PER_TILE) descendants = MAX+1 > limit.
+        let child_ids: Vec<SceneId> = (0..crate::graph::MAX_NODES_PER_TILE)
+            .map(|_| SceneId::new())
+            .collect();
+        let root = text_node(root_id, child_ids.clone(), "root");
+        let descendants: Vec<Node> = child_ids
+            .iter()
+            .map(|id| text_node(*id, vec![], "c"))
+            .collect();
+
+        let err = scene
+            .set_tile_root_tree(tile_id, root, descendants)
+            .expect_err("must exceed per-tile node limit");
+        assert!(matches!(err, ValidationError::NodeCountExceeded { .. }));
+        // Atomic: nothing from the rejected subtree was inserted.
+        assert_eq!(scene.node_count(), 0);
+        assert!(!scene.nodes.contains_key(&root_id));
+        assert_eq!(scene.tiles.get(&tile_id).unwrap().root_node, None);
+    }
+
+    #[test]
+    fn duplicate_descendant_id_rejected_atomically() {
+        let (mut scene, tile_id) = scene_with_tile();
+        let root_id = SceneId::new();
+        let dup = SceneId::new();
+        // Two descendants share `dup` → DuplicateId, whole subtree rejected.
+        let root = text_node(root_id, vec![dup], "root");
+        let descendants = vec![text_node(dup, vec![], "x"), text_node(dup, vec![], "y")];
+        let err = scene
+            .set_tile_root_tree(tile_id, root, descendants)
+            .expect_err("duplicate descendant id must be rejected");
+        assert!(matches!(err, ValidationError::DuplicateId { .. }));
+        assert_eq!(scene.node_count(), 0, "no partial materialization");
+    }
+}

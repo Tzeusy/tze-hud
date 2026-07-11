@@ -382,6 +382,7 @@ fn content_update_set_tile_root_accepted() {
     let set_root_mutation = SceneMutation::SetTileRoot {
         tile_id,
         node: new_bg.clone(),
+        descendants: vec![],
     };
 
     // Verify the batch has exactly 1 SetTileRoot mutation before applying.
@@ -511,6 +512,7 @@ fn content_update_time_progression() {
                 SceneMutation::SetTileRoot {
                     tile_id,
                     node: new_bg,
+                    descendants: vec![],
                 },
                 SceneMutation::AddNode {
                     tile_id,
@@ -633,6 +635,7 @@ fn set_tile_root_replaces_old_nodes() {
             SceneMutation::SetTileRoot {
                 tile_id,
                 node: new_bg,
+                descendants: vec![],
             },
             SceneMutation::AddNode {
                 tile_id,
@@ -731,6 +734,7 @@ fn set_tile_root_is_namespace_isolated() {
             SceneMutation::SetTileRoot {
                 tile_id: tile_ids[0],
                 node: alpha_bg,
+                descendants: vec![],
             },
             SceneMutation::AddNode {
                 tile_id: tile_ids[0],
@@ -759,6 +763,7 @@ fn set_tile_root_is_namespace_isolated() {
         vec![SceneMutation::SetTileRoot {
             tile_id: tile_ids[1], // beta's tile
             node: intruder_node,
+            descendants: vec![],
         }],
     );
     let intruder_result = scene.apply_batch(&intruder_batch);
@@ -833,6 +838,7 @@ async fn set_tile_text_via_grpc(
                                             overflow: 0, // Unspecified = proto3 default
                                         },
                                     )),
+                                    children: vec![],
                                 }),
                             },
                         )),

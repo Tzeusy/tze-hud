@@ -194,6 +194,44 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
     })
 }
 
+/// Recursively convert a `NodeProto` (with optional inline `children`,
+/// hud-ga4md) into a FLAT list of scene [`Node`]s, ROOT FIRST, with every
+/// node's `children` field populated with its direct children's assigned
+/// [`SceneId`]s.
+///
+/// The scene graph stores nodes in a flat id→node map where each node
+/// references its children by id, so the natural materialization payload for an
+/// inline subtree is this flat list: element `[0]` is the root and every other
+/// element is a descendant (any depth). Feed it to
+/// [`SceneGraph::set_tile_root_tree`]/[`SceneGraph::set_tile_root_tree_checked`],
+/// which insert the whole subtree atomically as one mutation.
+///
+/// A childless `NodeProto` yields a single-element `Vec` whose sole node is
+/// exactly what [`proto_node_to_scene`] returns — so existing flat publishers
+/// stay byte-for-byte identical. Returns `None` only if the ROOT proto has no
+/// decodable `data`; an individual child that fails to decode (missing `data`
+/// or malformed resource id) is skipped rather than collapsing the whole tree,
+/// mirroring [`proto_node_to_scene`]'s per-node `Option` semantics.
+pub fn proto_node_tree_to_scene(n: &proto::NodeProto) -> Option<Vec<Node>> {
+    // Shallow-convert this node first (children field left empty by
+    // proto_node_to_scene); its id is assigned here and referenced by the parent.
+    let mut root = proto_node_to_scene(n)?;
+    let mut flat: Vec<Node> = Vec::new();
+    for child_proto in &n.children {
+        if let Some(sub) = proto_node_tree_to_scene(child_proto) {
+            // `sub` is non-empty by construction (root always present), so [0] is
+            // the child's root — link the parent to it and splice the child's
+            // whole flattened subtree into ours.
+            root.children.push(sub[0].id);
+            flat.extend(sub);
+        }
+    }
+    let mut out = Vec::with_capacity(1 + flat.len());
+    out.push(root);
+    out.extend(flat);
+    Some(out)
+}
+
 /// Convert the `oneof data` from an `UpdateNodeContentMutation` proto to a
 /// scene `NodeData`.  Returns `None` if the variant is missing or malformed.
 pub fn proto_update_node_content_data_to_scene(
@@ -781,7 +819,35 @@ pub fn scene_node_to_proto(n: &Node) -> proto::NodeProto {
     proto::NodeProto {
         id: n.id.to_bytes_le().to_vec(),
         data,
+        // Flat scene->proto: a bare scene `Node` carries only child SceneId refs,
+        // which cannot be resolved to child structs without the graph, so the
+        // inline-children field is left empty (hud-ga4md). Use
+        // [`scene_node_tree_to_proto`] with a node lookup to emit a nested subtree.
+        children: vec![],
     }
+}
+
+/// Convert a scene `Node` and its descendants into a nested `NodeProto` with
+/// inline `children` (hud-ga4md) — the reverse of [`proto_node_tree_to_scene`].
+///
+/// `root.children` are resolved against `lookup` (a flat id→node map, e.g. a
+/// `SceneGraph`'s node map) and emitted recursively as `NodeProto.children`. A
+/// child id absent from `lookup` is skipped (a dangling ref never aborts the
+/// walk). A leaf root (`children` empty) produces exactly what
+/// [`scene_node_to_proto`] returns, so round-tripping a flat node is
+/// byte-identical.
+pub fn scene_node_tree_to_proto(
+    root: &Node,
+    lookup: &std::collections::HashMap<SceneId, Node>,
+) -> proto::NodeProto {
+    let mut proto = scene_node_to_proto(root);
+    proto.children = root
+        .children
+        .iter()
+        .filter_map(|child_id| lookup.get(child_id))
+        .map(|child| scene_node_tree_to_proto(child, lookup))
+        .collect();
+    proto
 }
 
 /// Convert a scene ZonePublishRecord to a protobuf ZonePublishRecordProto.
@@ -1540,9 +1606,19 @@ pub fn apply_portal_render_batch_to_scene(
                 let Some(node_proto) = pt.node.as_ref() else {
                     continue;
                 };
-                match proto_node_to_scene(node_proto) {
-                    Some(node) => {
-                        if let Err(e) = scene.set_tile_root_checked(tile_id, node, namespace) {
+                // Materialize the whole inline subtree atomically (hud-ga4md): a
+                // multi-part portal body (transcript + head-anchored composer +
+                // INPUT band) arrives as one `NodeProto` with `children`, and the
+                // flat root-first list is set as the tile root in a single
+                // mutation — no per-part `AddNode` that would flip this batch
+                // Transactional and break republish coalescing (hud-mzk74). A
+                // childless node yields a one-element list = today's flat paint.
+                match proto_node_tree_to_scene(node_proto) {
+                    Some(mut nodes) => {
+                        let root = nodes.remove(0);
+                        if let Err(e) =
+                            scene.set_tile_root_tree_checked(tile_id, root, nodes, namespace)
+                        {
                             tracing::warn!(
                                 ?e,
                                 "portal in-process apply: SetTileRoot failed — content not painted"
@@ -2716,6 +2792,7 @@ mod tests {
                     accepts_composer_input: true,
                 },
             )),
+            children: vec![],
         };
         let scene_node = proto_node_to_scene(&proto_node)
             .expect("valid HitRegionNodeProto must convert to scene Node");
@@ -2812,6 +2889,7 @@ mod tests {
                     accepts_composer_input: false,
                 },
             )),
+            children: vec![],
         };
         let scene_node = proto_node_to_scene(&proto_node).unwrap();
         match &scene_node.data {
@@ -2822,6 +2900,118 @@ mod tests {
                 );
             }
             other => panic!("expected HitRegion, got {other:?}"),
+        }
+    }
+
+    // ── Inline NodeProto.children subtree round-trips (hud-ga4md) ─────────────
+
+    fn text_proto(id: &[u8], content: &str, children: Vec<proto::NodeProto>) -> proto::NodeProto {
+        proto::NodeProto {
+            id: id.to_vec(),
+            data: Some(proto::node_proto::Data::TextMarkdown(
+                proto::TextMarkdownNodeProto {
+                    content: content.to_string(),
+                    bounds: Some(proto::Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 100.0,
+                        height: 20.0,
+                    }),
+                    font_size_px: 16.0,
+                    color: None,
+                    background: None,
+                    color_runs: vec![],
+                    overflow: proto::TextOverflowProto::Unspecified as i32,
+                },
+            )),
+            children,
+        }
+    }
+
+    #[test]
+    fn empty_children_flat_conversion_matches_proto_node_to_scene() {
+        // Byte-compatibility guarantee: a childless NodeProto through the
+        // subtree converter yields exactly the single flat node the legacy
+        // scalar converter produces (same id, same data, empty children).
+        let p = text_proto(&SceneId::new().to_bytes_le(), "hello", vec![]);
+        let flat = proto_node_to_scene(&p).expect("flat convert");
+        let tree = proto_node_tree_to_scene(&p).expect("tree convert");
+        assert_eq!(tree.len(), 1, "childless proto → single-node list");
+        assert_eq!(tree[0].id, flat.id);
+        assert!(tree[0].children.is_empty());
+        assert_eq!(tree[0].data, flat.data);
+    }
+
+    #[test]
+    fn nested_children_flatten_root_first_with_linked_ids() {
+        // root → [a → [grandchild], b]
+        let gid = SceneId::new().to_bytes_le();
+        let aid = SceneId::new().to_bytes_le();
+        let bid = SceneId::new().to_bytes_le();
+        let rid = SceneId::new().to_bytes_le();
+        let grandchild = text_proto(&gid, "grandchild", vec![]);
+        let a = text_proto(&aid, "a", vec![grandchild]);
+        let b = text_proto(&bid, "b", vec![]);
+        let root = text_proto(&rid, "root", vec![a, b]);
+
+        let flat = proto_node_tree_to_scene(&root).expect("tree convert");
+        assert_eq!(flat.len(), 4, "root + a + grandchild + b");
+        // Root is element 0 and links to a and b (in wire order).
+        let root_scene = &flat[0];
+        assert_eq!(root_scene.id, SceneId::from_bytes_le(&rid).unwrap());
+        assert_eq!(
+            root_scene.children,
+            vec![
+                SceneId::from_bytes_le(&aid).unwrap(),
+                SceneId::from_bytes_le(&bid).unwrap()
+            ]
+        );
+        // `a` links to its grandchild.
+        let a_scene = flat
+            .iter()
+            .find(|n| n.id == SceneId::from_bytes_le(&aid).unwrap())
+            .expect("a present");
+        assert_eq!(
+            a_scene.children,
+            vec![SceneId::from_bytes_le(&gid).unwrap()]
+        );
+    }
+
+    #[test]
+    fn proto_scene_proto_round_trip_preserves_nested_children() {
+        // proto (with inline children) → flat scene subtree → nested proto.
+        // Explicit ids so encode/decode is a pure identity (no server assignment).
+        let gid = SceneId::new().to_bytes_le();
+        let aid = SceneId::new().to_bytes_le();
+        let bid = SceneId::new().to_bytes_le();
+        let rid = SceneId::new().to_bytes_le();
+        let orig = text_proto(
+            &rid,
+            "root",
+            vec![
+                text_proto(&aid, "a", vec![text_proto(&gid, "grandchild", vec![])]),
+                text_proto(&bid, "b", vec![]),
+            ],
+        );
+
+        let flat = proto_node_tree_to_scene(&orig).expect("tree convert");
+        let lookup: std::collections::HashMap<SceneId, Node> =
+            flat.iter().cloned().map(|n| (n.id, n)).collect();
+        let rebuilt = scene_node_tree_to_proto(&flat[0], &lookup);
+
+        // Structure survives: root id, two children, grandchild under first child.
+        assert_eq!(rebuilt.id, orig.id);
+        assert_eq!(rebuilt.children.len(), 2);
+        assert_eq!(rebuilt.children[0].id, aid.to_vec());
+        assert_eq!(rebuilt.children[1].id, bid.to_vec());
+        assert_eq!(rebuilt.children[0].children.len(), 1);
+        assert_eq!(rebuilt.children[0].children[0].id, gid.to_vec());
+        // Leaf content survives the whole trip.
+        match &rebuilt.children[0].children[0].data {
+            Some(proto::node_proto::Data::TextMarkdown(tm)) => {
+                assert_eq!(tm.content, "grandchild");
+            }
+            other => panic!("expected TextMarkdown grandchild, got {other:?}"),
         }
     }
 }

@@ -346,6 +346,7 @@ fn root_batch_for_tile(tile_id: SceneId, root: Node, children: Vec<Node>) -> Vec
     let mut mutations = vec![SceneMutation::SetTileRoot {
         tile_id,
         node: root.clone(),
+        descendants: vec![],
     }];
     mutations.extend(children.into_iter().map(|node| SceneMutation::AddNode {
         tile_id,

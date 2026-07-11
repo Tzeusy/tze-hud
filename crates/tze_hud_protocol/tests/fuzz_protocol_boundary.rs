@@ -186,6 +186,7 @@ fn proto_node_no_data_returns_none() {
     let n = NodeProto {
         id: vec![],
         data: None,
+        children: vec![],
     };
     assert_eq!(proto_node_to_scene(&n), None);
 }
@@ -208,6 +209,7 @@ fn proto_node_static_image_empty_resource_id_returns_none() {
                 height: 100.0,
             }),
         })),
+        children: vec![],
     };
     assert_eq!(proto_node_to_scene(&n), None);
 }
@@ -230,6 +232,7 @@ fn proto_node_static_image_malformed_resource_id_returns_none() {
                 height: 100.0,
             }),
         })),
+        children: vec![],
     };
     assert_eq!(proto_node_to_scene(&n), None);
 }
@@ -252,6 +255,7 @@ fn proto_node_static_image_valid_returns_some() {
                 height: 100.0,
             }),
         })),
+        children: vec![],
     };
     assert!(proto_node_to_scene(&n).is_some());
 }
@@ -271,6 +275,7 @@ fn proto_node_solid_color_no_bounds_returns_some() {
             bounds: None, // missing bounds
             radius: -1.0,
         })),
+        children: vec![],
     };
     // Conversion must not panic; it fills in a default.
     assert!(proto_node_to_scene(&n).is_some());
@@ -300,6 +305,7 @@ fn proto_node_text_zero_font_size_defaults_to_16() {
             color_runs: vec![],
             overflow: 0, // Unspecified → defaults to Ellipsis in scene
         })),
+        children: vec![],
     };
     let node = proto_node_to_scene(&n).expect("must produce a node");
     if let tze_hud_scene::types::NodeData::TextMarkdown(tm) = node.data {
@@ -752,6 +758,7 @@ proptest! {
                 fit_mode: 0,
                 bounds: Some(ProtoRect { x: 0.0, y: 0.0, width: w, height: h }),
             })),
+                    children: vec![],
         };
         // Must not panic.
         let _ = proto_node_to_scene(&n);

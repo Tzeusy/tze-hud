@@ -480,6 +480,7 @@ async fn do_content_update_with_host(
                 radius: -1.0, // -1.0 sentinel = no rounded corners
             },
         )),
+        children: vec![],
     };
 
     let icon_node = tze_hud_protocol::proto::NodeProto {
@@ -499,6 +500,7 @@ async fn do_content_update_with_host(
                 }),
             },
         )),
+        children: vec![],
     };
 
     let header_node = tze_hud_protocol::proto::NodeProto {
@@ -524,6 +526,7 @@ async fn do_content_update_with_host(
                 overflow: 0, // Unspecified = proto3 default
             },
         )),
+        children: vec![],
     };
 
     // Updated body node — content changes per cycle (tasks.md §6.1).
@@ -550,6 +553,7 @@ async fn do_content_update_with_host(
                 overflow: 0, // Unspecified = proto3 default
             },
         )),
+        children: vec![],
     };
 
     let refresh_node = tze_hud_protocol::proto::NodeProto {
@@ -570,6 +574,7 @@ async fn do_content_update_with_host(
                 accepts_composer_input: false,
             },
         )),
+        children: vec![],
     };
 
     let dismiss_node = tze_hud_protocol::proto::NodeProto {
@@ -590,6 +595,7 @@ async fn do_content_update_with_host(
                 accepts_composer_input: false,
             },
         )),
+        children: vec![],
     };
 
     // Content update batch: SetTileRoot (new bg) + 5× AddNode (children).
@@ -1625,6 +1631,7 @@ async fn create_tile_batch_with_host(
                 radius: -1.0, // -1.0 sentinel = no rounded corners
             },
         )),
+        children: vec![],
     };
 
     let icon_node = tze_hud_protocol::proto::NodeProto {
@@ -1644,6 +1651,7 @@ async fn create_tile_batch_with_host(
                 }),
             },
         )),
+        children: vec![],
     };
 
     let header_node = tze_hud_protocol::proto::NodeProto {
@@ -1669,6 +1677,7 @@ async fn create_tile_batch_with_host(
                 overflow: 0, // Unspecified = proto3 default
             },
         )),
+        children: vec![],
     };
 
     let body_node = tze_hud_protocol::proto::NodeProto {
@@ -1694,6 +1703,7 @@ async fn create_tile_batch_with_host(
                 overflow: 0, // Unspecified = proto3 default
             },
         )),
+        children: vec![],
     };
 
     let refresh_node = tze_hud_protocol::proto::NodeProto {
@@ -1714,6 +1724,7 @@ async fn create_tile_batch_with_host(
                 accepts_composer_input: false,
             },
         )),
+        children: vec![],
     };
 
     let dismiss_node = tze_hud_protocol::proto::NodeProto {
@@ -1734,6 +1745,7 @@ async fn create_tile_batch_with_host(
                 accepts_composer_input: false,
             },
         )),
+        children: vec![],
     };
 
     // Use the big-endian UUID bytes for parent_id in AddNodeMutation
@@ -2920,6 +2932,7 @@ mod tests {
                     radius: -1.0,
                 },
             )),
+            children: vec![],
         };
         let icon_node = tze_hud_protocol::proto::NodeProto {
             id: vec![],
@@ -2939,6 +2952,7 @@ mod tests {
                     }),
                 },
             )),
+            children: vec![],
         };
 
         let batch_b_id = uuid::Uuid::now_v7().as_bytes().to_vec();
@@ -3289,6 +3303,7 @@ mod tests {
                     radius: -1.0,
                 },
             )),
+            children: vec![],
         };
 
         tx.send(sp::ClientMessage {

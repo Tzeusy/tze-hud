@@ -1,21 +1,49 @@
 use super::SceneGraph;
 use crate::types::*;
+use std::collections::HashMap;
 
 impl SceneGraph {
     // ─── Node tree helpers ───────────────────────────────────────────────
 
-    pub(super) fn insert_node_tree(&mut self, node: &Node) {
-        // Insert children first (depth-first)
-        for child_id in &node.children {
-            // Children should already be in the node or will be added separately
-            // For the vertical slice, nodes are self-contained with their children
-            let _ = child_id;
+    /// Register the per-node side effects an inserted node owns: image-resource
+    /// ref counting and hit-region local input state. Centralized here (rather
+    /// than duplicated at each `insert_node_tree` call site) so every node of a
+    /// materialized subtree — root AND inline descendants (hud-ga4md) — is
+    /// treated identically. `remove_node_tree` unwinds both (dec ref + drop
+    /// hit-region state) symmetrically.
+    fn register_inserted_node(&mut self, node: &Node) {
+        match node.data {
+            NodeData::StaticImage(ref si) => self.inc_resource_ref(si.resource_id),
+            NodeData::HitRegion(_) => {
+                self.hit_region_states
+                    .insert(node.id, HitRegionLocalState::new(node.id));
+            }
+            _ => {}
         }
-        // Increment the resource ref count if this node references an image resource.
-        if let NodeData::StaticImage(ref si) = node.data {
-            self.inc_resource_ref(si.resource_id);
-        }
+    }
+
+    /// Materialize a node subtree into the flat node map (hud-ga4md).
+    ///
+    /// `node` is inserted, its side effects registered, and each SceneId in
+    /// `node.children` is looked up in `descendants` and materialized
+    /// recursively (depth-first). `descendants` is the flat id→node map of every
+    /// node BELOW some root (produced from the wire's inline `NodeProto.children`
+    /// by `convert::proto_node_tree_to_scene`).
+    ///
+    /// A child id absent from `descendants` is left as a dangling ref rather than
+    /// aborting — this preserves the legacy re-attach case where `node.children`
+    /// reference nodes ALREADY present in `self.nodes` (they are not re-inserted,
+    /// exactly as before this became recursive). For the common single-node
+    /// insert (`AddNode`, or a flat tile root), pass an empty map: no child is
+    /// materialized and behavior is byte-identical to the pre-subtree stub.
+    pub(super) fn insert_node_tree(&mut self, node: &Node, descendants: &HashMap<SceneId, Node>) {
+        self.register_inserted_node(node);
         self.nodes.insert(node.id, node.clone());
+        for child_id in &node.children {
+            if let Some(child) = descendants.get(child_id) {
+                self.insert_node_tree(child, descendants);
+            }
+        }
     }
 
     pub(crate) fn remove_node_tree(&mut self, node_id: SceneId) {

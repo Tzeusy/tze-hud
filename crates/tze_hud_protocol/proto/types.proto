@@ -43,6 +43,17 @@ message NodeProto {
     HitRegionNodeProto hit_region = 12;
     StaticImageNodeProto static_image = 13;
   }
+  // Inline child subtree (hud-ga4md). Recursive: each child MAY carry its own
+  // `children`. Empty (the default) = a flat single-node root — BYTE-COMPATIBLE
+  // with the pre-children wire, so existing publishers are unaffected. When a
+  // tile root arrives with inline children, the runtime materializes the whole
+  // subtree atomically as ONE mutation (`SetTileRoot`), so a multi-part portal
+  // body (transcript + head-anchored composer + INPUT band as separate nodes)
+  // rides a single coalescible StateStream update instead of a per-node `AddNode`
+  // fan-out that would flip the batch Transactional and break latest-wins
+  // coalescing on the hot transcript-republish path (hud-mzk74). Field 2 is
+  // stable and MUST NOT be renumbered.
+  repeated NodeProto children = 2;
 }
 
 message SolidColorNodeProto {

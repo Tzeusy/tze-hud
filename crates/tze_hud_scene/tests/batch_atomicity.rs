@@ -270,6 +270,7 @@ fn spec_post_mutation_cycle_detected() {
         vec![SceneMutation::SetTileRoot {
             tile_id,
             node: cyclic_node,
+            descendants: vec![],
         }],
     );
 
@@ -1080,7 +1081,14 @@ fn stage1_set_tile_root_with_expired_lease_rejected() {
         }),
     };
 
-    let batch = make_batch("agent", vec![SceneMutation::SetTileRoot { tile_id, node }]);
+    let batch = make_batch(
+        "agent",
+        vec![SceneMutation::SetTileRoot {
+            tile_id,
+            node,
+            descendants: vec![],
+        }],
+    );
     let result = scene.apply_batch(&batch);
 
     assert!(

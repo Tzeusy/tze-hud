@@ -198,6 +198,7 @@ fn roundtrip_node_proto_solid_color() {
             }),
             radius: 12.0,
         })),
+        children: vec![],
     };
     let decoded = round_trip(&orig);
     assert_eq!(orig.id, decoded.id);
@@ -238,6 +239,7 @@ fn roundtrip_node_proto_text_markdown() {
             color_runs: vec![],
             overflow: 0, // Unspecified = proto3 default
         })),
+        children: vec![],
     };
     let decoded = round_trip(&orig);
     match &decoded.data {
@@ -304,6 +306,7 @@ fn roundtrip_node_proto_text_markdown_with_color_runs() {
             ],
             overflow: 0, // Unspecified = proto3 default
         })),
+        children: vec![],
     };
 
     let decoded = round_trip(&orig);
@@ -399,6 +402,7 @@ fn roundtrip_node_proto_hit_region() {
             release_on_up: true,
             accepts_composer_input: false,
         })),
+        children: vec![],
     };
     let decoded = round_trip(&orig);
     match &decoded.data {
@@ -437,6 +441,7 @@ fn roundtrip_node_proto_static_image_all_fit_modes() {
                     height: 1080.0,
                 }),
             })),
+            children: vec![],
         };
         let decoded = round_trip(&orig);
         match &decoded.data {
@@ -2064,6 +2069,7 @@ fn roundtrip_text_markdown_node_proto_overflow_ellipsis() {
             color_runs: vec![],
             overflow: TextOverflowProto::Ellipsis as i32,
         })),
+        children: vec![],
     };
     let decoded = round_trip(&orig);
     match &decoded.data {
@@ -2103,6 +2109,7 @@ fn roundtrip_text_markdown_node_proto_overflow_clip() {
             color_runs: vec![],
             overflow: TextOverflowProto::Clip as i32,
         })),
+        children: vec![],
     };
     let decoded = round_trip(&orig);
     match &decoded.data {
@@ -2143,6 +2150,7 @@ fn roundtrip_text_markdown_node_proto_overflow_absent_defaults_to_unspecified() 
             color_runs: vec![],
             overflow: 0, // proto3 default = Unspecified
         })),
+        children: vec![],
     };
     let decoded = round_trip(&orig);
     match &decoded.data {
@@ -2185,6 +2193,7 @@ fn convert_text_markdown_node_overflow_ellipsis_proto_to_scene() {
             color_runs: vec![],
             overflow: TextOverflowProto::Ellipsis as i32,
         })),
+        children: vec![],
     };
 
     let scene_node = proto_node_to_scene(&node_proto)
@@ -2230,6 +2239,7 @@ fn convert_text_markdown_node_overflow_clip_proto_to_scene() {
             color_runs: vec![],
             overflow: TextOverflowProto::Clip as i32,
         })),
+        children: vec![],
     };
 
     let scene_node = proto_node_to_scene(&node_proto).expect("proto_node_to_scene must succeed");
@@ -2277,6 +2287,7 @@ fn convert_text_markdown_node_overflow_unspecified_defaults_to_ellipsis() {
             color_runs: vec![],
             overflow: 0, // TextOverflowProto::Unspecified — old wire compat
         })),
+        children: vec![],
     };
 
     let scene_node = proto_node_to_scene(&node_proto).expect("proto_node_to_scene must succeed");

@@ -75,19 +75,31 @@ impl SceneGraph {
                         });
                     }
                 }
-                crate::mutation::SceneMutation::SetTileRoot { tile_id, node } => {
-                    // SetTileRoot replaces the entire tree, so count new tree size
-                    let new_count = Self::fresh_batch_node_count(node);
-                    if new_count as u64 > budget.max_nodes_per_tile as u64 {
+                crate::mutation::SceneMutation::SetTileRoot {
+                    tile_id,
+                    node,
+                    descendants,
+                } => {
+                    // SetTileRoot replaces the entire tree, so count new tree size.
+                    // With an inline subtree (hud-ga4md) the root plus every fresh
+                    // descendant counts against the per-tile node budget.
+                    let new_count =
+                        Self::fresh_batch_node_count(node) as u64 + descendants.len() as u64;
+                    if new_count > budget.max_nodes_per_tile as u64 {
                         return Err(BudgetError {
                             resource: "nodes_per_tile".to_string(),
                             current: 0,
                             limit: budget.max_nodes_per_tile as u64,
-                            requested: new_count as u64,
+                            requested: new_count,
                         });
                     }
                     // Check texture bytes in new tree against the running projected total.
-                    let new_tex = Self::count_texture_bytes_in_node(node);
+                    // Sum the root and every inline descendant's texture bytes.
+                    let new_tex = Self::count_texture_bytes_in_node(node)
+                        + descendants
+                            .iter()
+                            .map(Self::count_texture_bytes_in_node)
+                            .sum::<u64>();
                     let old_tile_tex = self
                         .tiles
                         .get(tile_id)

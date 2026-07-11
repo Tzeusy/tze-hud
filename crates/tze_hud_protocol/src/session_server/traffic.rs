@@ -223,6 +223,41 @@ mod inbound_tests {
         );
     }
 
+    /// hud-ga4md: a `SetTileRoot`/`PublishToTile` carrying an inline multi-node
+    /// subtree (NodeProto.children) must stay StateStream. The whole point of
+    /// inline children is that a multi-part portal body arrives as ONE
+    /// coalescible mutation rather than a per-part `AddNode` fan-out — which
+    /// classify_inbound_batch marks Transactional (line 128) and would knock the
+    /// portal off the coalescible republish path (hud-mzk74). The children ride
+    /// INSIDE the node, so they are invisible to classification: the guard here
+    /// is that no new Transactional-forcing variant sneaks in.
+    #[test]
+    fn set_tile_root_with_inline_children_stays_state_stream() {
+        use crate::proto::{NodeProto, SetTileRootMutation};
+        let child = NodeProto {
+            id: vec![],
+            data: None,
+            children: vec![],
+        };
+        let root = NodeProto {
+            id: vec![],
+            data: None,
+            children: vec![child.clone(), child],
+        };
+        let b = batch(vec![
+            Mutation::PublishToTile(Default::default()),
+            Mutation::SetTileRoot(SetTileRootMutation {
+                tile_id: vec![0u8; 16],
+                node: Some(root),
+            }),
+        ]);
+        assert_eq!(
+            classify_inbound_batch(&b),
+            TrafficClass::StateStream,
+            "inline-subtree SetTileRoot must remain coalescible StateStream, never Transactional"
+        );
+    }
+
     /// A lifecycle-accent mutation on its own is a pure content update →
     /// StateStream (coalescible), never Transactional.
     #[test]

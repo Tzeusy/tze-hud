@@ -146,7 +146,11 @@ fn apply_set_tile_root(scene: &mut SceneGraph, tile_id: SceneId, namespace: &str
     let batch = MutationBatch {
         batch_id: SceneId::new(),
         agent_namespace: namespace.to_string(),
-        mutations: vec![SceneMutation::SetTileRoot { tile_id, node }],
+        mutations: vec![SceneMutation::SetTileRoot {
+            tile_id,
+            node,
+            descendants: vec![],
+        }],
         timing_hints: None,
         lease_id: None,
     };

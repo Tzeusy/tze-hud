@@ -501,6 +501,7 @@ fn apply_content_update_batch(
             SceneMutation::SetTileRoot {
                 tile_id,
                 node: new_bg,
+                descendants: vec![],
             },
         ],
     ))

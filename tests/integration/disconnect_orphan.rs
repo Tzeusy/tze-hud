@@ -164,6 +164,7 @@ fn setup_three_agent_scene() -> (SceneGraph, TestClock, SceneId, [SceneId; 3], [
             vec![SceneMutation::SetTileRoot {
                 tile_id: tile_ids[i],
                 node: root_node,
+                descendants: vec![],
             }],
         );
         let content_result = scene.apply_batch(&set_root);
@@ -376,6 +377,7 @@ fn mutations_rejected_from_orphaned_agent() {
         vec![SceneMutation::SetTileRoot {
             tile_id: tile_ids[2],
             node: updated_root,
+            descendants: vec![],
         }],
     );
 
@@ -446,6 +448,7 @@ fn orphaned_tile_content_frozen_at_last_committed_state() {
         vec![SceneMutation::SetTileRoot {
             tile_id: tile_ids[2],
             node: updated_root,
+            descendants: vec![],
         }],
     );
     let _ = scene.apply_batch(&mutation_batch);
@@ -494,6 +497,7 @@ fn active_agents_mutations_accepted_while_agent2_orphaned() {
         vec![SceneMutation::SetTileRoot {
             tile_id: tile_ids[1],
             node: updated_root_1,
+            descendants: vec![],
         }],
     );
     let result1 = scene.apply_batch(&batch1);
@@ -770,6 +774,7 @@ fn content_updates_resume_after_reconnect() {
         vec![SceneMutation::SetTileRoot {
             tile_id: tile_ids[2],
             node: updated_root,
+            descendants: vec![],
         }],
     );
     let result = scene.apply_batch(&mutation_batch);
@@ -883,6 +888,7 @@ fn agents_0_and_1_updates_continue_after_agent2_removal() {
         vec![SceneMutation::SetTileRoot {
             tile_id: tile_ids[0],
             node: updated_root0,
+            descendants: vec![],
         }],
     );
     let result0 = scene.apply_batch(&batch0);
@@ -899,6 +905,7 @@ fn agents_0_and_1_updates_continue_after_agent2_removal() {
         vec![SceneMutation::SetTileRoot {
             tile_id: tile_ids[1],
             node: updated_root1,
+            descendants: vec![],
         }],
     );
     let result1 = scene.apply_batch(&batch1);

@@ -348,7 +348,7 @@ impl SceneGraph {
     }
 
     pub fn set_tile_root(&mut self, tile_id: SceneId, node: Node) -> Result<(), ValidationError> {
-        self.set_tile_root_impl(tile_id, node, None)
+        self.set_tile_root_impl(tile_id, node, Vec::new(), None)
     }
 
     /// Set tile root with full capability and node-count enforcement.
@@ -358,13 +358,49 @@ impl SceneGraph {
         node: Node,
         agent_namespace: &str,
     ) -> Result<(), ValidationError> {
-        self.set_tile_root_impl(tile_id, node, Some(agent_namespace))
+        self.set_tile_root_impl(tile_id, node, Vec::new(), Some(agent_namespace))
+    }
+
+    /// Set a tile root together with an inline descendant subtree, materialized
+    /// atomically (hud-ga4md).
+    ///
+    /// `node` is the root; `descendants` is the flat list of every node below it
+    /// (any depth, root excluded), as produced by
+    /// `convert::proto_node_tree_to_scene`. The root's `children` (and each
+    /// descendant's `children`) reference the descendants by SceneId. The whole
+    /// subtree is validated and inserted in a single call — the point being that
+    /// a multi-node portal body arrives as ONE `SetTileRoot`/`PublishToTile`
+    /// mutation and stays coalescible StateStream, never a per-node `AddNode`
+    /// fan-out that would break republish latest-wins coalescing (hud-mzk74).
+    ///
+    /// Passing an empty `descendants` is exactly [`set_tile_root`](Self::set_tile_root).
+    pub fn set_tile_root_tree(
+        &mut self,
+        tile_id: SceneId,
+        node: Node,
+        descendants: Vec<Node>,
+    ) -> Result<(), ValidationError> {
+        self.set_tile_root_impl(tile_id, node, descendants, None)
+    }
+
+    /// Subtree-aware [`set_tile_root_checked`](Self::set_tile_root_checked):
+    /// enforces the lease + `ModifyOwnTiles` capability, then materializes the
+    /// root and its inline `descendants` atomically (hud-ga4md).
+    pub fn set_tile_root_tree_checked(
+        &mut self,
+        tile_id: SceneId,
+        node: Node,
+        descendants: Vec<Node>,
+        agent_namespace: &str,
+    ) -> Result<(), ValidationError> {
+        self.set_tile_root_impl(tile_id, node, descendants, Some(agent_namespace))
     }
 
     fn set_tile_root_impl(
         &mut self,
         tile_id: SceneId,
         node: Node,
+        descendants: Vec<Node>,
         agent_namespace: Option<&str>,
     ) -> Result<(), ValidationError> {
         if let Some(ns) = agent_namespace {
@@ -373,29 +409,48 @@ impl SceneGraph {
             self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
         }
 
-        // Check for duplicate node ID (scene-globally unique per RFC 0001 §2.1)
-        if self.nodes.contains_key(&node.id) {
-            return Err(ValidationError::DuplicateId { id: node.id });
+        // Validate the ENTIRE incoming subtree (root + inline descendants,
+        // hud-ga4md) BEFORE mutating anything, so an invalid subtree leaves the
+        // graph untouched (atomic materialization). `all_incoming` walks the root
+        // first, then every descendant.
+        let all_incoming = || std::iter::once(&node).chain(descendants.iter());
+
+        // Check for duplicate node IDs (scene-globally unique per RFC 0001 §2.1):
+        // no incoming id may already exist in the graph, and no two incoming
+        // nodes may share an id.
+        let mut seen_ids: std::collections::HashSet<SceneId> =
+            std::collections::HashSet::with_capacity(1 + descendants.len());
+        for n in all_incoming() {
+            if self.nodes.contains_key(&n.id) || !seen_ids.insert(n.id) {
+                return Err(ValidationError::DuplicateId { id: n.id });
+            }
         }
 
         // Validate node data constraints (e.g. TextMarkdownNode content size limit)
-        if let Some(err) = validate_text_markdown_node_data(&node.data) {
-            return Err(err);
+        // for every node in the subtree.
+        for n in all_incoming() {
+            if let Some(err) = validate_text_markdown_node_data(&n.data) {
+                return Err(err);
+            }
         }
 
-        // Enforce resource registration for agent-submitted StaticImageNode mutations.
-        // Same gate as add_node_to_tile_impl; see that function's comment for spec refs.
+        // Enforce resource registration for agent-submitted StaticImageNode
+        // mutations across the whole subtree. Same gate as add_node_to_tile_impl;
+        // see that function's comment for spec refs.
         if agent_namespace.is_some() {
-            if let NodeData::StaticImage(ref si) = node.data {
-                if !self.registered_resources.contains_key(&si.resource_id) {
-                    return Err(ValidationError::ResourceNotFound { id: si.resource_id });
+            for n in all_incoming() {
+                if let NodeData::StaticImage(ref si) = n.data {
+                    if !self.registered_resources.contains_key(&si.resource_id) {
+                        return Err(ValidationError::ResourceNotFound { id: si.resource_id });
+                    }
                 }
             }
         }
 
-        // Node count limit: SetTileRoot replaces the whole tree.
-        // Count nodes in the incoming tree (simple count; children are flat in our model).
-        let incoming_count = self.count_node_tree_deep(&node);
+        // Node count limit: SetTileRoot replaces the whole tree. `count_node_tree_deep`
+        // counts the root plus any children ALREADY in the graph (legacy re-attach);
+        // every fresh inline descendant adds one more (they are not yet in the graph).
+        let incoming_count = self.count_node_tree_deep(&node) + descendants.len();
         if incoming_count > MAX_NODES_PER_TILE {
             return Err(ValidationError::NodeCountExceeded {
                 tile_id,
@@ -420,14 +475,12 @@ impl SceneGraph {
 
         let node_id = node.id;
 
-        // Initialize hit region local state if applicable
-        if let NodeData::HitRegion(_) = &node.data {
-            self.hit_region_states
-                .insert(node_id, HitRegionLocalState::new(node_id));
-        }
-
-        // Insert the node and all children recursively
-        self.insert_node_tree(&node);
+        // Materialize the root and its inline descendants recursively. Per-node
+        // side effects (resource ref counts, hit-region local state) are
+        // registered inside insert_node_tree for every node in the subtree.
+        let descendant_map: std::collections::HashMap<SceneId, Node> =
+            descendants.into_iter().map(|n| (n.id, n)).collect();
+        self.insert_node_tree(&node, &descendant_map);
 
         // Set the new root on the tile
         let tile = self
@@ -643,13 +696,10 @@ impl SceneGraph {
             }
         }
 
-        // Track hit region state
-        if let NodeData::HitRegion(_) = &node.data {
-            self.hit_region_states
-                .insert(node_id, HitRegionLocalState::new(node_id));
-        }
-
-        self.insert_node_tree(&node);
+        // Insert the single node; per-node side effects (hit-region local state,
+        // image-resource ref count) are registered inside insert_node_tree. No
+        // inline descendants on this path — AddNode adds one node at a time.
+        self.insert_node_tree(&node, &std::collections::HashMap::new());
 
         // Node-bounds authority (hud-rpmwt): a portal render batch adds the
         // composer hit region as a separate `AddNode` after the transcript root,
