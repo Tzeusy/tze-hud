@@ -684,6 +684,23 @@ fn parse_window_mode(s: &str) -> Result<WindowMode, String> {
 /// `tracing` log stream, and every startup `eprintln!` + `exit(1)` failure —
 /// so no per-path call is needed. It never `AllocConsole`s, so the double-click
 /// happy path shows no flashing console window.
+///
+/// Empirically verified live on the hud-windows VM testhost (hud-xssgy):
+/// `AttachConsole` alone — with no `CONOUT$`/`CONIN$` reopen or `SetStdHandle`
+/// call, which the canonical hybrid console/GUI C/C++ pattern normally
+/// requires — is sufficient for Rust's `println!`/`eprintln!` here. A prior
+/// review flagged this as unconfirmed (PR #1112 only verified the FFI links
+/// compiled, not that output actually became visible). Live-tested `--version`,
+/// `--help`, and an invalid-flag error path from both a real interactive
+/// `cmd.exe` and `powershell.exe` session (no redirection) against this exact
+/// binary: all three printed correctly in both shells. An A/B negative control
+/// (same matrix, same binary, with this call's only production call site
+/// disabled) confirmed the output is silent without it — this call is the
+/// actual cause, not a coincidence of the test setup. The likely reason the
+/// classic C/C++ `freopen` step is unnecessary here: Rust's `Stdout`/`Stderr`
+/// resolve `GetStdHandle` lazily on first use (no CRT-buffered `FILE*` bound
+/// at process start), and that first use happens after this call already ran,
+/// by which point `GetStdHandle` resolves against the newly-attached console.
 #[cfg(windows)]
 fn attach_parent_console() {
     // (DWORD)-1 — attach to the console of the parent process.
