@@ -14,6 +14,9 @@
 #   windows-performance-budget — headless Windows benchmark + locked budget gate
 #   release-artifact-provenance-smoke — cross-build tze_hud.exe and verify uploaded checksum round-trip
 #   vocabulary-lint — scripts/check_canonical_vocabulary.sh
+#   user-test-python-suite — pytest over .claude/skills/user-test/{tests,scripts}/
+#     pure-Python suite (Rust<->Python token/geometry drift-guards); no GPU, no
+#     Windows, no live HUD runtime, no external network (hud-43z24)
 #   dev-mode-guard  — verifies dev-mode feature is NOT compiled into release binary
 #   v2-preview      — cargo check/clippy/test with --features v2_preview (gated state machines)
 #
@@ -627,6 +630,58 @@ jobs:
       - uses: actions/checkout@v5
       - name: Check canonical vocabulary
         run: bash scripts/check_canonical_vocabulary.sh --verbose
+
+  # ── User-test Python suite ──────────────────────────────────────────────────
+  #
+  # Runs the pure-Python unit tests under .claude/skills/user-test/{tests,scripts}/.
+  # These hold the Rust<->Python token/geometry drift-guards (e.g.
+  # test_text_stream_portal_exemplar.py::PortalTokenResolutionTests::
+  # test_python_defaults_mirror_rust_defaults) for the exemplar scripts that
+  # mirror crates/tze_hud_config/src/portal_tokens.rs. Previously this suite
+  # only ran interactively via the user-test skill, so the same-day hud-yu20f
+  # SPACING_HEADER_HEIGHT_PX 28->52 drift went undetected until a worker
+  # tripped over it (hud-43z24).
+  #
+  # Scope is limited to files verified hermetic by reading + running locally:
+  # no GPU, no Windows, no live HUD runtime, no external network.
+  #   - tests/test_text_stream_portal_exemplar.py (94 tests — primary drift-guard target)
+  #   - tests/test_presence_card_exemplar.py
+  #   - tests/test_windows_media_ingress_exemplar.py (binds an ephemeral
+  #     127.0.0.1 port for local HTTP-server tests — loopback only)
+  #   - tests/test_windows_media_resource_sampler.py (pure stdlib: builds
+  #     PowerShell/ssh command strings, never executes them)
+  #   - scripts/test_hud_grpc_client.py (needs the packages installed below;
+  #     without the `blake3` package it falls back to compiling a tiny cargo
+  #     helper on the fly — a hidden crates.io network dependency — so
+  #     installing the `blake3` wheel here keeps this job fully pip-hermetic)
+  #
+  # Excluded: scripts/stress_test_zones.py, publish_widget_batch.py,
+  # publish_zone_batch.py and the other *_exemplar.py scripts under scripts/ —
+  # these are live-HUD-runtime CLI tools (gRPC session against a running
+  # resident), not unit-test suites, and have no test_*.py counterpart here.
+
+  user-test-python-suite:
+    name: user-test python suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Python test dependencies
+        run: |
+          pip install --quiet \
+            "grpcio>=1.80.0" \
+            "protobuf>=6.31.1" \
+            "pillow>=11.0.0" \
+            "blake3>=1.0.0" \
+            "pytest>=8.0.0"
+      - name: Run pure-Python user-test suite
+        run: |
+          python3 -m pytest \
+            .claude/skills/user-test/tests/ \
+            .claude/skills/user-test/scripts/test_hud_grpc_client.py \
+            -q
 
   # ── Dev-mode guard ──────────────────────────────────────────────────────────
   #
