@@ -125,6 +125,17 @@ pub const PORTAL_TOKEN_TRANSCRIPT_BACKGROUND: &str = "portal.transcript.backgrou
 pub const PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR: &str = "portal.transcript.text_color";
 pub const PORTAL_TOKEN_TRANSCRIPT_FONT_SIZE: &str = "portal.transcript.font_size";
 
+/// Per-turn role-attribution color for non-assistant agent-side OUTPUT turns
+/// (tool / status / error / other), distinguishing them from the assistant's
+/// own conversational prose (which uses `portal.transcript.text_color`) within
+/// the same OUTPUT transcript (text-stream-portals §Conversational Turn Model
+/// and Per-Turn Role Attribution, hud-26869). Attribution is derived from each
+/// unit's runtime-assigned `OutputKind` and carried as a real `color_run` span
+/// over that turn's text — never a hardcoded compositor color. Ambient by
+/// design: a muted family-consistent hue that reads as "system/tool scaffolding"
+/// beside the brighter assistant text without escalating attention.
+pub const PORTAL_TOKEN_TRANSCRIPT_SYSTEM_COLOR: &str = "portal.transcript.system_color";
+
 // ── Transcript markdown-subset styling (Promotion P2, hud-8691s) ─────────────
 //
 // Portal-scoped canonical keys for the Phase-1 markdown subset the transcript
@@ -546,6 +557,12 @@ mod defaults {
     pub const TRANSCRIPT_BACKGROUND: &str = "#0A0D11";
     pub const TRANSCRIPT_TEXT_COLOR: &str = "#E6EFFA";
     pub const TRANSCRIPT_FONT_SIZE: &str = "16";
+    /// Per-turn role attribution for non-assistant agent-side turns (tool /
+    /// status / error / other). A cool slate — dimmer and bluer than the bright
+    /// assistant text (`TRANSCRIPT_TEXT_COLOR` #E6EFFA) so tool/system
+    /// scaffolding recedes behind the model's own prose, while staying in the
+    /// portal's cool ambient family (near the slate unread count / divider).
+    pub const TRANSCRIPT_SYSTEM_COLOR: &str = "#8A97AD";
 
     // Degraded / disconnect treatment (§2/§3). Dim text/background read as
     // "inactive" relative to the live transcript palette above; the stale
@@ -742,6 +759,11 @@ pub struct PortalPartTokens {
     pub transcript_background: Rgba,
     pub transcript_text_color: Rgba,
     pub transcript_font_size_px: f32,
+    /// Per-turn role-attribution color for non-assistant agent-side OUTPUT turns
+    /// (tool / status / error / other), distinct from `transcript_text_color`
+    /// used for the assistant's own conversational turns (text-stream-portals
+    /// §Conversational Turn Model and Per-Turn Role Attribution, hud-26869).
+    pub transcript_system_color: Rgba,
 
     // Degraded / disconnect treatment (portal-disconnect-resume-ux §2/§3).
     /// Dimmed transcript text shown while the portal is disconnected/stale.
@@ -923,6 +945,8 @@ impl Default for PortalPartTokens {
                 .expect("transcript text default is valid hex"),
             transcript_font_size_px: parse_numeric(defaults::TRANSCRIPT_FONT_SIZE)
                 .expect("transcript font size default is valid numeric"),
+            transcript_system_color: parse_color_hex(defaults::TRANSCRIPT_SYSTEM_COLOR)
+                .expect("transcript system-attribution default is valid hex"),
 
             transcript_dim_text_color: parse_color_hex(defaults::TRANSCRIPT_DIM_TEXT_COLOR)
                 .expect("transcript dim text default is valid hex"),
@@ -1184,6 +1208,10 @@ pub fn resolve_portal_tokens(token_map: &DesignTokenMap) -> PortalPartTokens {
         transcript_text_color: resolve_color!(
             PORTAL_TOKEN_TRANSCRIPT_TEXT_COLOR,
             defaults.transcript_text_color
+        ),
+        transcript_system_color: resolve_color!(
+            PORTAL_TOKEN_TRANSCRIPT_SYSTEM_COLOR,
+            defaults.transcript_system_color
         ),
         transcript_font_size_px: resolve_f32!(
             PORTAL_TOKEN_TRANSCRIPT_FONT_SIZE,
