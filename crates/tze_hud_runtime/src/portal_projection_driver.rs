@@ -1955,12 +1955,32 @@ impl InProcessPortalDriver {
                     // Count actual rendered lines across all visible units. A
                     // TranscriptUnit may contain embedded newlines, so we use
                     // `.lines().count().max(1)` per unit to avoid underestimation.
-                    let total_lines: usize = update
+                    //
+                    // §Viewer Reply Echo (two-pane INPUT/OUTPUT split): when
+                    // Expanded, `portal_markdown_with` renders the INPUT band
+                    // (label + `input_history` units + trailing blank) into the
+                    // SAME single-node markdown as the OUTPUT transcript above —
+                    // Collapsed never renders it. Omitting it here would undercount
+                    // `new_content_height_px` whenever a viewer has reply history,
+                    // breaking scroll clamp / follow-tail for long INPUT history.
+                    let mut total_lines: usize = update
                         .visible_transcript
                         .iter()
                         .map(|unit| unit.output_text.lines().count().max(1))
-                        .sum::<usize>()
-                        .max(1);
+                        .sum();
+                    if matches!(
+                        state.presentation,
+                        tze_hud_projection::ProjectedPortalPresentation::Expanded
+                    ) && !state.input_history.is_empty()
+                    {
+                        total_lines += 2; // input-history label line + trailing blank
+                        total_lines += state
+                            .input_history
+                            .iter()
+                            .map(|unit| unit.output_text.lines().count().max(1))
+                            .sum::<usize>();
+                    }
+                    let total_lines = total_lines.max(1);
 
                     let new_content_height_px = total_lines as f32 * line_height_px;
 
@@ -2599,7 +2619,8 @@ mod tests {
     use tze_hud_projection::{
         AcknowledgeInputRequest, AttachRequest, ContentClassification, GetPendingInputRequest,
         InputAckState, OperationEnvelope, OutputKind, PORTAL_UPDATE_RATE_WINDOW_WALL_US,
-        ProjectionBounds, ProjectionOperation, ProviderKind, PublishOutputRequest,
+        PortalInputFeedbackState, ProjectionBounds, ProjectionOperation, ProviderKind,
+        PublishOutputRequest,
     };
     use tze_hud_scene::SceneGraph;
 
@@ -2934,6 +2955,135 @@ mod tests {
             "the plumbed count must reflect the drained batch's unread output \
              (got {}), not a hardcoded zero",
             scene.tile_unread_count(tile_id)
+        );
+    }
+
+    /// Regression guard (codex P2, hud-y4pzu PR #1131 review): the RenderPortal
+    /// drain's append-geometry `total_lines` count must include `input_history`
+    /// units, not just `update.visible_transcript`. `portal_markdown_with` paints
+    /// the INPUT band into the SAME single-node markdown as the OUTPUT transcript
+    /// whenever the portal is Expanded and `input_history` is non-empty — so a
+    /// height count that only sees `visible_transcript` undercounts
+    /// `new_content_height_px`, and long INPUT history cannot be scrolled to via
+    /// the follow-tail clamp.
+    ///
+    /// Drives the discrepancy directly: the OUTPUT transcript grows by exactly
+    /// one short line between the two drains, but ten viewer replies land in
+    /// `input_history` in between. If the height count only sees the OUTPUT
+    /// delta, the follow-tail clamp advances by about one line; counting the
+    /// INPUT band too advances it by well over five lines.
+    #[test]
+    fn drain_render_portal_height_accounting_includes_input_history() {
+        use tze_hud_input::DraftNotificationBatch as ComposerBatch;
+        use tze_hud_projection::AdapterGeometrySnapshot;
+        use tze_hud_projection::AdapterPortalRect;
+
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
+            drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
+        };
+
+        let token = attach_and_get_token(&mut driver, "proj-input-height");
+        driver.attach_projection("proj-input-height", Vec::new());
+
+        let font_size_px = driver
+            .drive
+            .entries
+            .get("proj-input-height")
+            .unwrap()
+            .adapter
+            .visual_tokens()
+            .transcript_font_size_px;
+        let line_h = font_size_px * PORTAL_LINE_HEIGHT_MULTIPLIER;
+        let viewport_h = (1.0 * line_h).ceil();
+
+        driver.authority_mut().push_geometry_snapshot(
+            "proj-input-height",
+            AdapterGeometrySnapshot {
+                rect: AdapterPortalRect {
+                    x_px: 0,
+                    y_px: 0,
+                    width_px: 600,
+                    height_px: viewport_h as i32,
+                },
+                gesture_active: false,
+                sequence: 1,
+            },
+        );
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        // Drain 1 (CreatePortalTile).
+        publish(&mut driver, "proj-input-height", &token, "line-0", 100);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+
+        let tile_id = driver
+            .drive
+            .entries
+            .get("proj-input-height")
+            .expect("drive entry must exist")
+            .tile_scene_id
+            .expect("tile must be created after first drain");
+
+        let _ = scene.update_tile_bounds(
+            tile_id,
+            Rect::new(0.0, 0.0, 600.0, viewport_h),
+            PORTAL_DRIVER_NAMESPACE,
+        );
+
+        // Ten viewer replies land in `input_history` between the two drains.
+        // `submit_portal_input` flags `portal_update_pending` but never registers
+        // a coalescer entry by itself (only a PublishOutput append does that), so
+        // this alone does not make the projection due — it rides in on the next
+        // OUTPUT append below, exactly as production composer submissions do.
+        for i in 0..10_u64 {
+            let mut batch = ComposerBatch::new();
+            batch.record_submission(tze_hud_input::DraftSubmission {
+                text: format!("viewer reply {i}"),
+                sequence: i,
+            });
+            let feedback = driver
+                .submit_composer_batch_for_tile(
+                    tile_id,
+                    &batch,
+                    300 + i,
+                    None,
+                    ContentClassification::Private,
+                )
+                .expect("focused tile must map to the attached projection");
+            assert_eq!(feedback.feedback_state, PortalInputFeedbackState::Accepted);
+        }
+
+        // Drain 2 (RenderPortal): one more short OUTPUT line makes the projection
+        // due again. The OUTPUT delta alone is exactly one line.
+        let base_ts = PORTAL_UPDATE_RATE_WINDOW_WALL_US;
+        publish(
+            &mut driver,
+            "proj-input-height",
+            &token,
+            "line-1",
+            base_ts + 1,
+        );
+        let drain2_now_us = base_ts + PORTAL_UPDATE_RATE_WINDOW_WALL_US + 1;
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), drain2_now_us);
+
+        let (_, offset_y) = scene.tile_scroll_offset_local(tile_id);
+        assert!(
+            offset_y > 5.0 * line_h,
+            "follow-tail offset {offset_y} (line height {line_h}) must reflect the \
+             ten-reply INPUT band, not just the one-line OUTPUT delta — the \
+             RenderPortal drain's height accounting is not counting \
+             `input_history`, so long INPUT history cannot be scrolled to"
         );
     }
 
