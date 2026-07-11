@@ -72,6 +72,9 @@ PORTAL_TOKEN_TRANSCRIPT_MAX_MEASURE_PX = "portal.transcript.max_measure_px"
 
 PORTAL_TOKEN_STALE_MARKER_COLOR = "portal.stale_marker.color"
 
+PORTAL_TOKEN_DISCONNECT_BADGE_COLOR = "portal.disconnect_badge.color"
+PORTAL_TOKEN_DISCONNECT_BADGE_WIDTH_PX = "portal.disconnect_badge.width_px"
+
 PORTAL_TOKEN_UNREAD_INDICATOR_COLOR = "portal.unread_indicator.color"
 PORTAL_TOKEN_AWAITING_REPLY_COLOR = "portal.awaiting_reply.color"
 PORTAL_TOKEN_EMPTY_STATE_COLOR = "portal.empty_state.color"
@@ -147,6 +150,8 @@ _RUST_DEFAULTS: dict[str, str] = {
     "TRANSCRIPT_DIM_TEXT_COLOR": "#6B7689",
     "TRANSCRIPT_DIM_BACKGROUND": "#07090C",
     "STALE_MARKER_COLOR": "#B87333",
+    "DISCONNECT_BADGE_COLOR": "#B87333",
+    "DISCONNECT_BADGE_WIDTH_PX": "4",
     "UNREAD_INDICATOR_COLOR": "#6B7689",
     "AWAITING_REPLY_COLOR": "#7B85C4",
     "EMPTY_STATE_COLOR": "#5F8A78",
@@ -212,6 +217,8 @@ CANONICAL_DEFAULTS: dict[str, str] = {
     PORTAL_TOKEN_TRANSCRIPT_DIM_BACKGROUND: _RUST_DEFAULTS["TRANSCRIPT_DIM_BACKGROUND"],
     PORTAL_TOKEN_TRANSCRIPT_MAX_MEASURE_PX: _RUST_DEFAULTS["TRANSCRIPT_MAX_MEASURE_PX"],
     PORTAL_TOKEN_STALE_MARKER_COLOR: _RUST_DEFAULTS["STALE_MARKER_COLOR"],
+    PORTAL_TOKEN_DISCONNECT_BADGE_COLOR: _RUST_DEFAULTS["DISCONNECT_BADGE_COLOR"],
+    PORTAL_TOKEN_DISCONNECT_BADGE_WIDTH_PX: _RUST_DEFAULTS["DISCONNECT_BADGE_WIDTH_PX"],
     PORTAL_TOKEN_UNREAD_INDICATOR_COLOR: _RUST_DEFAULTS["UNREAD_INDICATOR_COLOR"],
     PORTAL_TOKEN_AWAITING_REPLY_COLOR: _RUST_DEFAULTS["AWAITING_REPLY_COLOR"],
     PORTAL_TOKEN_EMPTY_STATE_COLOR: _RUST_DEFAULTS["EMPTY_STATE_COLOR"],
@@ -334,6 +341,8 @@ class PortalPartTokens:
     transcript_max_measure_px: float
     # Ancillary
     stale_marker_color: Rgba
+    disconnect_badge_color: Rgba
+    disconnect_badge_width_px: float
     unread_indicator_color: Rgba
     awaiting_reply_color: Rgba
     empty_state_color: Rgba
@@ -436,6 +445,8 @@ def resolve_portal_tokens(overrides: Optional[dict[str, str]] = None) -> PortalP
         transcript_dim_background=_color(tm, PORTAL_TOKEN_TRANSCRIPT_DIM_BACKGROUND),
         transcript_max_measure_px=_px(tm, PORTAL_TOKEN_TRANSCRIPT_MAX_MEASURE_PX),
         stale_marker_color=_color(tm, PORTAL_TOKEN_STALE_MARKER_COLOR),
+        disconnect_badge_color=_color(tm, PORTAL_TOKEN_DISCONNECT_BADGE_COLOR),
+        disconnect_badge_width_px=_px(tm, PORTAL_TOKEN_DISCONNECT_BADGE_WIDTH_PX),
         unread_indicator_color=_color(tm, PORTAL_TOKEN_UNREAD_INDICATOR_COLOR),
         awaiting_reply_color=_color(tm, PORTAL_TOKEN_AWAITING_REPLY_COLOR),
         empty_state_color=_color(tm, PORTAL_TOKEN_EMPTY_STATE_COLOR),

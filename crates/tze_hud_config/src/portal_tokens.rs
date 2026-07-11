@@ -44,6 +44,8 @@
 //! | `portal.transcript.dim_text_color` | transcript body | dimmed text shown while disconnected/stale (RGBA hex) |
 //! | `portal.transcript.dim_background` | transcript body | dimmed backdrop shown while disconnected/stale (RGBA hex) |
 //! | `portal.stale_marker.color` | stale marker | content-free disconnect marker color (RGBA hex) |
+//! | `portal.disconnect_badge.color` | disconnect badge | visible geometry badge color shown while connection-degraded, redaction-independent (RGBA hex) |
+//! | `portal.disconnect_badge.width_px` | disconnect badge | disconnect badge accent-bar width in px |
 //! | `portal.unread_indicator.color` | unread indicator | ambient unread-output count color (RGBA hex) |
 //! | `portal.awaiting_reply.color` | awaiting-reply indicator | ambient question/awaiting-reply cue color (RGBA hex) |
 //! | `portal.connecting_marker.color` | connecting marker | never-connected connecting cue color, distinct from the degraded/stale marker (RGBA hex) |
@@ -172,6 +174,21 @@ pub const PORTAL_TOKEN_TRANSCRIPT_DIM_BACKGROUND: &str = "portal.transcript.dim_
 /// "ambient stale state" without escalating attention (spec: going stale does
 /// not self-escalate attention).
 pub const PORTAL_TOKEN_STALE_MARKER_COLOR: &str = "portal.stale_marker.color";
+
+/// Color of the visible disconnect badge (hud-jgf41): a small token-styled
+/// geometry affordance — the existing left-edge lifecycle-accent bar,
+/// recolored — shown while the portal is connection-degraded. Unlike the
+/// lifecycle accent (which clears under redaction because `lifecycle_state`
+/// is redaction-gated), this badge is driven by the redaction-independent
+/// `connection_degraded` flag, so a restricted viewer still sees that the
+/// portal has dropped (geometry-only; no content or identity disclosed).
+/// Shares the `STALE_MARKER_COLOR` hue by default so the geometry badge and
+/// the text marker read as the same ambient state.
+pub const PORTAL_TOKEN_DISCONNECT_BADGE_COLOR: &str = "portal.disconnect_badge.color";
+/// Width (px) of the disconnect badge. Geometry only, mirrors
+/// `PORTAL_TOKEN_LIFECYCLE_ACCENT_WIDTH_PX` since the badge reuses the same
+/// left-edge accent-bar rendering.
+pub const PORTAL_TOKEN_DISCONNECT_BADGE_WIDTH_PX: &str = "portal.disconnect_badge.width_px";
 
 /// Color of the ambient unread-output-count indicator (hud-meqet). A presence
 /// engine surfaces a quiet count, never a loud notification badge — this
@@ -537,6 +554,12 @@ mod defaults {
     pub const TRANSCRIPT_DIM_TEXT_COLOR: &str = "#6B7689";
     pub const TRANSCRIPT_DIM_BACKGROUND: &str = "#07090C";
     pub const STALE_MARKER_COLOR: &str = "#B87333";
+    /// Same hue as `STALE_MARKER_COLOR` — the geometry badge and the text
+    /// marker read as one ambient "stale" signal (hud-jgf41).
+    pub const DISCONNECT_BADGE_COLOR: &str = "#B87333";
+    /// Mirrors `LIFECYCLE_ACCENT_WIDTH_PX`: the badge reuses the same
+    /// left-edge accent-bar geometry.
+    pub const DISCONNECT_BADGE_WIDTH_PX: &str = "4";
     /// Muted slate — same ambient tone as `TRANSCRIPT_DIM_TEXT_COLOR` /
     /// `COMPOSER_PLACEHOLDER_COLOR` so the unread count reads as a quiet
     /// signal, not an alert.
@@ -727,6 +750,13 @@ pub struct PortalPartTokens {
     pub transcript_dim_background: Rgba,
     /// Color of the content-free stale/disconnect marker (ambient, not alarming).
     pub stale_marker_color: Rgba,
+    /// Color of the visible disconnect badge (hud-jgf41): a token-styled
+    /// geometry affordance shown while connection-degraded, driven by the
+    /// redaction-independent `connection_degraded` flag so it stays visible
+    /// for a restricted viewer (geometry-only).
+    pub disconnect_badge_color: Rgba,
+    /// Width (px) of the disconnect badge accent bar.
+    pub disconnect_badge_width_px: f32,
     /// Color of the ambient unread-output-count indicator (hud-meqet). Muted by
     /// design — a presence engine surfaces a quiet count, never a loud
     /// notification badge.
@@ -900,6 +930,10 @@ impl Default for PortalPartTokens {
                 .expect("transcript dim background default is valid hex"),
             stale_marker_color: parse_color_hex(defaults::STALE_MARKER_COLOR)
                 .expect("stale marker color default is valid hex"),
+            disconnect_badge_color: parse_color_hex(defaults::DISCONNECT_BADGE_COLOR)
+                .expect("disconnect badge color default is valid hex"),
+            disconnect_badge_width_px: parse_numeric(defaults::DISCONNECT_BADGE_WIDTH_PX)
+                .expect("disconnect badge width default is valid numeric"),
             unread_indicator_color: parse_color_hex(defaults::UNREAD_INDICATOR_COLOR)
                 .expect("unread indicator color default is valid hex"),
             awaiting_reply_color: parse_color_hex(defaults::AWAITING_REPLY_COLOR)
@@ -1168,6 +1202,14 @@ pub fn resolve_portal_tokens(token_map: &DesignTokenMap) -> PortalPartTokens {
             PORTAL_TOKEN_STALE_MARKER_COLOR,
             defaults.stale_marker_color
         ),
+        disconnect_badge_color: resolve_color!(
+            PORTAL_TOKEN_DISCONNECT_BADGE_COLOR,
+            defaults.disconnect_badge_color
+        ),
+        disconnect_badge_width_px: resolve_f32!(
+            PORTAL_TOKEN_DISCONNECT_BADGE_WIDTH_PX,
+            defaults.disconnect_badge_width_px
+        ),
         unread_indicator_color: resolve_color!(
             PORTAL_TOKEN_UNREAD_INDICATOR_COLOR,
             defaults.unread_indicator_color
@@ -1395,6 +1437,14 @@ const PORTAL_TOKEN_DEFAULT_STRINGS: &[(&str, &str)] = &[
     (
         PORTAL_TOKEN_STALE_MARKER_COLOR,
         defaults::STALE_MARKER_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_DISCONNECT_BADGE_COLOR,
+        defaults::DISCONNECT_BADGE_COLOR,
+    ),
+    (
+        PORTAL_TOKEN_DISCONNECT_BADGE_WIDTH_PX,
+        defaults::DISCONNECT_BADGE_WIDTH_PX,
     ),
     (
         PORTAL_TOKEN_UNREAD_INDICATOR_COLOR,
@@ -2459,7 +2509,7 @@ mod tests {
     #[test]
     fn resolve_portal_token_strings_covers_every_key() {
         // Number of distinct portal token keys resolved by resolve_portal_tokens.
-        const EXPECTED_KEYS: usize = 57;
+        const EXPECTED_KEYS: usize = 59;
         assert_eq!(
             PORTAL_TOKEN_DEFAULT_STRINGS.len(),
             EXPECTED_KEYS,
