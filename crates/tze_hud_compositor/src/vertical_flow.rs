@@ -26,7 +26,7 @@
 
 use glyphon::FontSystem;
 
-use crate::text::{composer_wrap_line_widths, LINE_HEIGHT_MULTIPLIER};
+use crate::text::{LINE_HEIGHT_MULTIPLIER, composer_wrap_line_widths};
 
 /// One child's inputs for vertical-flow height measurement.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -158,7 +158,10 @@ mod tests {
         //  child0 @ 0
         //  child1 @ 0 + 10 + 4 = 14
         //  child2 @ 14 + 20 + 4 = 38
-        assert_eq!(stack_offsets(&[10.0, 20.0, 5.0], 4.0, 0.0), vec![0.0, 14.0, 38.0]);
+        assert_eq!(
+            stack_offsets(&[10.0, 20.0, 5.0], 4.0, 0.0),
+            vec![0.0, 14.0, 38.0]
+        );
     }
 
     #[test]
@@ -169,7 +172,10 @@ mod tests {
     #[test]
     fn stack_offsets_clamps_negative_gap_and_height() {
         // Negative gap → 0; negative height → 0 contribution, offset still emitted.
-        assert_eq!(stack_offsets(&[10.0, -5.0, 7.0], -3.0, 0.0), vec![0.0, 10.0, 10.0]);
+        assert_eq!(
+            stack_offsets(&[10.0, -5.0, 7.0], -3.0, 0.0),
+            vec![0.0, 10.0, 10.0]
+        );
     }
 
     #[test]
@@ -193,7 +199,10 @@ mod tests {
         };
         let h = measure_child_height(&mut fs, &child);
         // floor of one line: 16 * 1.4 + 6 = 28.4
-        assert!((h - (16.0 * LINE_HEIGHT_MULTIPLIER + 6.0)).abs() < 1e-3, "got {h}");
+        assert!(
+            (h - (16.0 * LINE_HEIGHT_MULTIPLIER + 6.0)).abs() < 1e-3,
+            "got {h}"
+        );
     }
 
     #[test]
@@ -217,7 +226,10 @@ mod tests {
         );
         // Both are a whole number of lines tall (line_count * line_height, no padding).
         let line_height = 16.0 * LINE_HEIGHT_MULTIPLIER;
-        assert!((short / line_height).fract().abs() < 1e-3, "wide height not line-aligned: {short}");
+        assert!(
+            (short / line_height).fract().abs() < 1e-3,
+            "wide height not line-aligned: {short}"
+        );
     }
 
     // ── Full resolution (the demonstration) ───────────────────────────────────
@@ -226,9 +238,24 @@ mod tests {
     fn resolve_vertical_flow_stacks_children_without_overlap() {
         let mut fs = FontSystem::new();
         let children = [
-            FlowChild { content: "assistant turn one", wrap_width: 300.0, font_size_px: 16.0, vertical_padding: 4.0 },
-            FlowChild { content: "tool: ran a command\nand printed two lines", wrap_width: 300.0, font_size_px: 16.0, vertical_padding: 4.0 },
-            FlowChild { content: "assistant turn three", wrap_width: 300.0, font_size_px: 16.0, vertical_padding: 4.0 },
+            FlowChild {
+                content: "assistant turn one",
+                wrap_width: 300.0,
+                font_size_px: 16.0,
+                vertical_padding: 4.0,
+            },
+            FlowChild {
+                content: "tool: ran a command\nand printed two lines",
+                wrap_width: 300.0,
+                font_size_px: 16.0,
+                vertical_padding: 4.0,
+            },
+            FlowChild {
+                content: "assistant turn three",
+                wrap_width: 300.0,
+                font_size_px: 16.0,
+                vertical_padding: 4.0,
+            },
         ];
         let gap = 8.0;
         let layout = resolve_vertical_flow(&mut fs, &children, gap, 12.0);
@@ -250,7 +277,11 @@ mod tests {
         // Total height spans from the first offset to the bottom of the last child.
         let last_height = measure_child_height(&mut fs, &children[2]);
         let spanned = layout.offsets[2] + last_height - layout.offsets[0];
-        assert!((spanned - layout.total_height).abs() < 1e-3, "spanned={spanned} total={}", layout.total_height);
+        assert!(
+            (spanned - layout.total_height).abs() < 1e-3,
+            "spanned={spanned} total={}",
+            layout.total_height
+        );
     }
 
     #[test]
