@@ -38,5 +38,5 @@ source "$ENV_FILE"
   > "$OUT_FILE.raw" 2>&1
 
 # Strip ANSI/VT escape sequences (ConPTY control codes) for a readable transcript.
-sed -r 's/\x1B\[[0-9;?]*[a-zA-Z]//g; s/\x1B\][^\x07]*\x07//g' "$OUT_FILE.raw" | tr -d '\r' > "$OUT_FILE.txt"
+sed -E 's/\x1B\[[0-9;?]*[a-zA-Z]//g; s/\x1B\][^\x07]*\x07//g' "$OUT_FILE.raw" | tr -d '\r' > "$OUT_FILE.txt"
 echo "Wrote $OUT_FILE.raw and $OUT_FILE.txt"

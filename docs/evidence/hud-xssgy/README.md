@@ -42,8 +42,8 @@ cargo build --release --target x86_64-pc-windows-gnu -p tze_hud_app
 
 # 3) Deploy to a scratch dir that does NOT touch the production scheduled task:
 source /tmp/hud-xssgy-env.sh
-ssh -i ~/.ssh/hud-ssh-key admin-user@$TZE_HUD_TEST_HOST 'mkdir C:\tze_hud_test' 2>/dev/null || true
-scp -i ~/.ssh/hud-ssh-key target/x86_64-pc-windows-gnu/release/tze_hud.exe \
+ssh -o BatchMode=yes -o ConnectTimeout=10 -i ~/.ssh/hud-ssh-key admin-user@$TZE_HUD_TEST_HOST 'mkdir C:\tze_hud_test' 2>/dev/null || true
+scp -o BatchMode=yes -o ConnectTimeout=10 -i ~/.ssh/hud-ssh-key target/x86_64-pc-windows-gnu/release/tze_hud.exe \
   "hud-user@${TZE_HUD_TEST_HOST}:C:/tze_hud_test/tze_hud_test.exe"
 
 # 4) Run the matrix:
