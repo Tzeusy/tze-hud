@@ -54,6 +54,22 @@ message NodeProto {
   // coalescing on the hot transcript-republish path (hud-mzk74). Field 2 is
   // stable and MUST NOT be renumbered.
   repeated NodeProto children = 2;
+  // How this node positions its direct children (hud-yfj8u). UNSPECIFIED (the
+  // default, 0) = Absolute — each child drawn at its own explicit `bounds.y`,
+  // BYTE-COMPATIBLE with the pre-layout wire so existing publishers are
+  // unaffected. VERTICAL_FLOW asks the runtime to stack the children (measure
+  // each child's wrapped height and position the next below it plus a
+  // token-driven gap; see the vertical-flow layout engine). Field 3 is stable
+  // and MUST NOT be renumbered.
+  NodeLayoutProto layout = 3;
+}
+
+// How a NodeProto lays out its direct children (hud-yfj8u). Additive and
+// default-off: UNSPECIFIED maps to Absolute (historical behavior).
+enum NodeLayoutProto {
+  NODE_LAYOUT_PROTO_UNSPECIFIED   = 0;  // absent = Absolute (byte-compatible default)
+  NODE_LAYOUT_PROTO_ABSOLUTE      = 1;  // children positioned by their own bounds
+  NODE_LAYOUT_PROTO_VERTICAL_FLOW = 2;  // children stacked by the runtime flow resolver
 }
 
 message SolidColorNodeProto {

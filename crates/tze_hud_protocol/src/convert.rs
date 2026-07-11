@@ -188,11 +188,40 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
     };
 
     Some(Node {
-        layout: Default::default(),
+        layout: proto_node_layout_to_scene(n.layout),
         id,
         children: vec![],
         data,
     })
+}
+
+/// Map a `NodeLayoutProto` wire value to the scene [`NodeLayout`]. Unknown and
+/// UNSPECIFIED values coerce to `Absolute` (the byte-compatible default), so an
+/// old publisher that never sets the field renders exactly as before.
+pub fn proto_node_layout_to_scene(v: i32) -> NodeLayout {
+    let layout_proto = proto::NodeLayoutProto::try_from(v).unwrap_or_else(|_| {
+        tracing::warn!(
+            raw_value = v,
+            "unknown NodeLayoutProto wire value; defaulting to Unspecified (Absolute)"
+        );
+        proto::NodeLayoutProto::Unspecified
+    });
+    match layout_proto {
+        proto::NodeLayoutProto::VerticalFlow => NodeLayout::VerticalFlow,
+        proto::NodeLayoutProto::Absolute | proto::NodeLayoutProto::Unspecified => {
+            NodeLayout::Absolute
+        }
+    }
+}
+
+/// Map a scene [`NodeLayout`] to its `NodeLayoutProto` wire value. `Absolute`
+/// emits UNSPECIFIED (0) so a flat/absolute node stays byte-identical to the
+/// pre-layout wire.
+pub fn scene_node_layout_to_proto(layout: NodeLayout) -> i32 {
+    match layout {
+        NodeLayout::Absolute => proto::NodeLayoutProto::Unspecified as i32,
+        NodeLayout::VerticalFlow => proto::NodeLayoutProto::VerticalFlow as i32,
+    }
 }
 
 /// Recursively convert a `NodeProto` (with optional inline `children`,
@@ -825,6 +854,7 @@ pub fn scene_node_to_proto(n: &Node) -> proto::NodeProto {
         // inline-children field is left empty (hud-ga4md). Use
         // [`scene_node_tree_to_proto`] with a node lookup to emit a nested subtree.
         children: vec![],
+        layout: scene_node_layout_to_proto(n.layout),
     }
 }
 
@@ -2778,6 +2808,7 @@ mod tests {
     #[test]
     fn hit_region_proto_to_scene_carries_accepts_composer_input() {
         let proto_node = crate::proto::NodeProto {
+            layout: 0,
             id: Vec::new(),
             data: Some(crate::proto::node_proto::Data::HitRegion(
                 crate::proto::HitRegionNodeProto {
@@ -2881,6 +2912,7 @@ mod tests {
     #[test]
     fn hit_region_proto_accepts_composer_input_defaults_false() {
         let proto_node = crate::proto::NodeProto {
+            layout: 0,
             id: Vec::new(),
             data: Some(crate::proto::node_proto::Data::HitRegion(
                 crate::proto::HitRegionNodeProto {
@@ -2911,6 +2943,7 @@ mod tests {
 
     fn text_proto(id: &[u8], content: &str, children: Vec<proto::NodeProto>) -> proto::NodeProto {
         proto::NodeProto {
+            layout: 0,
             id: id.to_vec(),
             data: Some(proto::node_proto::Data::TextMarkdown(
                 proto::TextMarkdownNodeProto {
@@ -3017,5 +3050,51 @@ mod tests {
             }
             other => panic!("expected TextMarkdown grandchild, got {other:?}"),
         }
+    }
+
+    /// The additive `NodeLayout` field round-trips proto ↔ scene, with Absolute
+    /// re-emitting UNSPECIFIED (0) so a flat/absolute node stays byte-identical to
+    /// the pre-layout wire, and unknown wire values coercing to Absolute
+    /// (hud-yfj8u).
+    #[test]
+    fn node_layout_round_trips_proto_scene_proto() {
+        let rid = SceneId::new().to_bytes_le();
+        let mut node = text_proto(&rid, "flat", vec![]);
+
+        // An unset proto layout is Absolute, and re-emits as UNSPECIFIED (0).
+        assert_eq!(
+            node.layout, 0,
+            "text_proto builds an unset (Absolute) layout"
+        );
+        let scene_abs = proto_node_to_scene(&node).expect("convert");
+        assert_eq!(scene_abs.layout, NodeLayout::Absolute);
+        assert_eq!(
+            scene_node_to_proto(&scene_abs).layout,
+            0,
+            "Absolute re-emits UNSPECIFIED so the flat wire is byte-compatible"
+        );
+
+        // VERTICAL_FLOW survives proto → scene → proto.
+        node.layout = proto::NodeLayoutProto::VerticalFlow as i32;
+        let scene_flow = proto_node_to_scene(&node).expect("convert");
+        assert_eq!(scene_flow.layout, NodeLayout::VerticalFlow);
+        assert_eq!(
+            scene_node_to_proto(&scene_flow).layout,
+            proto::NodeLayoutProto::VerticalFlow as i32
+        );
+
+        // Explicit ABSOLUTE(1) also maps to scene Absolute.
+        node.layout = proto::NodeLayoutProto::Absolute as i32;
+        assert_eq!(
+            proto_node_to_scene(&node).expect("convert").layout,
+            NodeLayout::Absolute
+        );
+
+        // Unknown wire value coerces to Absolute rather than panicking.
+        node.layout = 999;
+        assert_eq!(
+            proto_node_to_scene(&node).expect("convert").layout,
+            NodeLayout::Absolute
+        );
     }
 }
