@@ -369,6 +369,16 @@ pub struct PortalVisualTokens {
     pub transcript_text_color: proto::Rgba,
     pub transcript_font_size_px: f32,
 
+    /// Per-turn role-attribution color for non-assistant agent-side OUTPUT turns
+    /// (tool / status / error / other), carried as a real `color_run` span over
+    /// each attributed turn's text so a viewer can tell the assistant's own
+    /// conversational prose (`transcript_text_color`) from tool/system
+    /// scaffolding within the same OUTPUT transcript (§Conversational Turn Model
+    /// and Per-Turn Role Attribution, hud-26869). Token-resolved, never a literal
+    /// color in the render path (§6.1). Derived from each unit's runtime-assigned
+    /// `OutputKind`, so an adapter cannot forge a turn's role.
+    pub transcript_system_color: proto::Rgba,
+
     // Degraded / disconnect treatment (portal-disconnect-resume-ux §2/§3).
     /// Dimmed transcript text shown while the portal is disconnected/stale.
     pub transcript_dim_text_color: proto::Rgba,
@@ -1536,7 +1546,7 @@ impl ResidentGrpcPortalAdapter {
             text_color = self.visual_tokens.transcript_dim_text_color;
             background_color = self.visual_tokens.transcript_dim_background;
         }
-        let content = portal_markdown_with(
+        let (content, turn_spans) = portal_markdown_with_spans(
             state,
             self.composer_display.as_ref(),
             now_wall_us,
@@ -1659,6 +1669,23 @@ impl ResidentGrpcPortalAdapter {
                             self.visual_tokens.timestamp_color,
                             self.visual_tokens.timestamp_granularity,
                         ));
+                        // Per-turn role attribution (§Conversational Turn Model
+                        // and Per-Turn Role Attribution, hud-26869): a REAL span
+                        // over each non-assistant agent-side turn's text
+                        // (tool/status/error/other), token-resolved from
+                        // `transcript_system_color` — the same `color_runs` span
+                        // mechanism as adapter ANSI runs, NOT a byte-0 sentinel.
+                        // Assistant turns emit no run and inherit the node's base
+                        // transcript color, so the model's own prose reads
+                        // distinctly from tool/system scaffolding. `turn_spans` is
+                        // empty under redaction (transcript emptied upstream) and
+                        // in the collapsed/empty presentations, so attribution
+                        // suppresses with the transcript.
+                        runs.extend(turn_attribution_color_runs(
+                            &turn_spans,
+                            self.visual_tokens.transcript_system_color,
+                            content_len,
+                        ));
                         runs
                     },
                     // Transcript panes use Ellipsis to engage the TruncationCache
@@ -1668,10 +1695,18 @@ impl ResidentGrpcPortalAdapter {
                     overflow: proto::TextOverflowProto::Ellipsis as i32,
                 },
             )),
-            // Phase-1 pilot still publishes the whole transcript as a single blob
-            // node; the inline multi-part body (transcript + head-anchored composer
-            // + INPUT band as separate children) is future promotion work (hud-26869,
-            // blocked on this NodeProto.children groundwork). Empty = flat (hud-ga4md).
+            // The transcript is published as a single node whose per-turn
+            // structure (dividers) and role attribution (per-turn color-run spans,
+            // hud-26869) ride the one coalescible `SetTileRoot` update. Splitting
+            // the transcript into one scene node PER TURN via inline
+            // `NodeProto.children` is deferred: PR #1149 (hud-ga4md) ships atomic
+            // subtree materialization, but the compositor has no vertical FLOW
+            // layout — every node paints at its own explicit `bounds.y` and the
+            // projection layer cannot measure wrapped turn heights, so per-turn
+            // child nodes would overlap. A true node split is gated on a compositor
+            // vertical-flow layout capability (follow-up) and on promotion. Empty =
+            // flat (hud-ga4md); keeping it empty preserves StateStream coalescing
+            // (no per-node `AddNode` fan-out, hud-mzk74).
             children: vec![],
         }
     }
@@ -1765,13 +1800,38 @@ fn portal_markdown(
 /// Render the portal body markdown, presenting ambient per-turn arrival
 /// timestamps per the profile-resolved `timestamps` granularity
 /// (portal-chat-grade-affordances §Ambient Per-Turn Timestamps, hud-g1ena.4).
+///
+/// Thin wrapper over [`portal_markdown_with_spans`] for callers that need only
+/// the rendered content (e.g. the drain-record markdown); the render path uses
+/// the spans variant to attribute turns by role.
 fn portal_markdown_with(
     state: &ProjectedPortalState,
     composer_display: Option<&ComposerDisplayState>,
     now_wall_us: u64,
     timestamps: TimestampGranularity,
 ) -> String {
+    portal_markdown_with_spans(state, composer_display, now_wall_us, timestamps).0
+}
+
+/// Render the portal body markdown and, for the expanded OUTPUT transcript,
+/// the per-turn text spans (absolute byte offsets into the returned content)
+/// tagged by `OutputKind`, so [`ResidentGrpcPortalAdapter::portal_node`] can emit
+/// per-turn role-attribution color runs (text-stream-portals §Conversational
+/// Turn Model and Per-Turn Role Attribution, hud-26869). Spans are populated
+/// only for the expanded, non-empty transcript body; the collapsed and empty
+/// presentations return none. The `String` half is byte-identical to the
+/// pre-spans `portal_markdown_with` output.
+fn portal_markdown_with_spans(
+    state: &ProjectedPortalState,
+    composer_display: Option<&ComposerDisplayState>,
+    now_wall_us: u64,
+    timestamps: TimestampGranularity,
+) -> (String, Vec<TranscriptTurnSpan>) {
     let mut result = String::new();
+    // At most one span per visible transcript unit (the OUTPUT window shifts each
+    // turn's body spans into content coordinates); pre-size to that bound.
+    let mut turn_spans: Vec<TranscriptTurnSpan> =
+        Vec::with_capacity(state.visible_transcript.len());
     let title = state.display_name.as_deref().unwrap_or("Projected session");
     push_line(&mut result, &format!("**{title}**"));
     push_line(
@@ -1869,7 +1929,7 @@ fn portal_markdown_with(
                 // `streaming_cursor_color` rides alongside via
                 // `streaming_cursor_color_runs`; `agent_activity_active` is the
                 // single gate for both the glyph and the sentinel run.
-                let mut body = visible_transcript_markdown_with(
+                let (mut body, body_spans) = visible_transcript_markdown_spans(
                     &state.visible_transcript,
                     unread_divider_boundary(state),
                     timestamps,
@@ -1877,7 +1937,21 @@ fn portal_markdown_with(
                 if agent_activity_active(state, now_wall_us) {
                     body.push_str(PORTAL_STREAMING_CURSOR_GLYPH);
                 }
+                // Absolute offset of `body`'s first byte within the assembled
+                // content: `push_line` prepends a '\n' when `result` is non-empty
+                // (always true here — the header/title lines precede the
+                // transcript), so the body begins one byte past the current tail.
+                // Shift the per-turn text spans into content coordinates so
+                // `portal_node` can attribute turns by role (hud-26869). The
+                // streaming-cursor glyph is appended after the last turn's text,
+                // so it never falls inside a turn span.
+                let body_offset = result.len() + usize::from(!result.is_empty());
                 push_line(&mut result, &body);
+                turn_spans.extend(body_spans.into_iter().map(|s| TranscriptTurnSpan {
+                    start: s.start + body_offset,
+                    end: s.end + body_offset,
+                    output_kind: s.output_kind,
+                }));
             }
             // §Viewer Reply Echo (two-pane INPUT/OUTPUT split): render the INPUT
             // history — the viewer's own accepted replies — as a distinct band in
@@ -1955,7 +2029,7 @@ fn portal_markdown_with(
     if let Some(feedback) = &state.last_input_feedback {
         push_line(&mut result, &composer_feedback_line(feedback));
     }
-    truncate_utf8(result, MAX_PORTAL_MARKDOWN_BYTES)
+    (truncate_utf8(result, MAX_PORTAL_MARKDOWN_BYTES), turn_spans)
 }
 
 /// Human-legible one-line status for the last composer submission.
@@ -2624,7 +2698,36 @@ fn visible_transcript_markdown_with(
     unread_boundary: Option<usize>,
     timestamps: TimestampGranularity,
 ) -> String {
+    visible_transcript_markdown_spans(units, unread_boundary, timestamps).0
+}
+
+/// Byte range (into a rendered transcript body string) of one turn's TEXT,
+/// tagged with the turn's runtime-assigned [`OutputKind`]. Produced alongside the
+/// body by [`visible_transcript_markdown_spans`] so [`ResidentGrpcPortalAdapter::portal_node`]
+/// can emit per-turn role-attribution color runs (text-stream-portals
+/// §Conversational Turn Model and Per-Turn Role Attribution, hud-26869) without
+/// re-deriving the separator / timestamp / unread-divider offsets. The range
+/// covers only the turn's own text — never the `---` separator, the timestamp
+/// prefix, or the unread-divider line that may precede it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TranscriptTurnSpan {
+    start: usize,
+    end: usize,
+    output_kind: OutputKind,
+}
+
+/// Body-rendering core shared by [`visible_transcript_markdown_with`]. Returns
+/// the rendered body plus, for each turn, the byte range of its text within the
+/// returned string and the turn's `OutputKind`, so callers can attribute turns
+/// by role. The `String` half is byte-identical to what the pre-spans
+/// `visible_transcript_markdown_with` produced — the spans are purely additive.
+fn visible_transcript_markdown_spans(
+    units: &[TranscriptUnit],
+    unread_boundary: Option<usize>,
+    timestamps: TimestampGranularity,
+) -> (String, Vec<TranscriptTurnSpan>) {
     let mut result = String::new();
+    let mut spans: Vec<TranscriptTurnSpan> = Vec::with_capacity(units.len());
     // Last arrival-minute bucket a stamp was emitted for, for Grouped coalescing.
     let mut last_stamped_minute: Option<u64> = None;
     for (index, unit) in units.iter().enumerate() {
@@ -2658,9 +2761,81 @@ fn visible_transcript_markdown_with(
             result.push_str(PORTAL_TIMESTAMP_SEPARATOR);
             last_stamped_minute = Some(minute_bucket);
         }
+        // Record the turn TEXT range for per-turn role attribution: the span
+        // starts at the current tail (after any separator/divider/timestamp) and
+        // ends after the clamped turn text, so attribution colors only the turn's
+        // own words (hud-26869).
+        let start = result.len();
         result.push_str(clamp_utf8(&unit.output_text, 4_096));
+        spans.push(TranscriptTurnSpan {
+            start,
+            end: result.len(),
+            output_kind: unit.output_kind,
+        });
     }
-    result
+    (result, spans)
+}
+
+/// Whether an OUTPUT turn of kind `kind` is rendered in the distinct
+/// role-attribution color (`transcript_system_color`) rather than the base
+/// assistant transcript color (text-stream-portals §Conversational Turn Model
+/// and Per-Turn Role Attribution, hud-26869).
+///
+/// `Assistant` is the model's own conversational prose (base color). `Tool`,
+/// `Status`, `Error`, and `Other` are agent-side scaffolding shown in the
+/// attribution color. `Viewer` never appears in the OUTPUT transcript — viewer
+/// turns live in the separately-bounded INPUT history (§Viewer Reply Echo) and
+/// are not attributed here — so it is treated as base-colored for totality. The
+/// exhaustive match forces a deliberate choice if `OutputKind` gains a variant.
+fn turn_uses_system_attribution(kind: OutputKind) -> bool {
+    match kind {
+        OutputKind::Assistant | OutputKind::Viewer => false,
+        OutputKind::Tool | OutputKind::Status | OutputKind::Error | OutputKind::Other => true,
+    }
+}
+
+/// Build per-turn role-attribution color runs (text-stream-portals
+/// §Conversational Turn Model and Per-Turn Role Attribution, hud-26869): one real
+/// `[start_byte, end_byte)` span per non-assistant agent-side turn, carrying the
+/// token-resolved `system_color`. Assistant turns emit no run and inherit the
+/// node's base transcript color, so the assistant's prose reads distinctly from
+/// tool/status/error/other scaffolding.
+///
+/// Ranges are clamped to `content_len` (the truncated node content) and dropped
+/// if they fall entirely past it, so an over-long transcript truncated to
+/// `MAX_PORTAL_MARKDOWN_BYTES` never emits a run addressing bytes the node does
+/// not carry. Empty when there are no attributed turns (all-assistant, or a
+/// redacted/empty/collapsed transcript that produced no spans), so attribution
+/// suppresses with the transcript.
+fn turn_attribution_color_runs(
+    spans: &[TranscriptTurnSpan],
+    system_color: proto::Rgba,
+    content_len: usize,
+) -> Vec<proto::TextColorRunProto> {
+    // At most one run per span (assistant turns are skipped); pre-size to the bound.
+    let mut runs = Vec::with_capacity(spans.len());
+    for span in spans {
+        if !turn_uses_system_attribution(span.output_kind) {
+            continue;
+        }
+        let start = span.start.min(content_len);
+        let end = span.end.min(content_len);
+        if start >= end {
+            // Fully clamped away by truncation, or an empty turn — no run.
+            continue;
+        }
+        let (Ok(start_byte), Ok(end_byte)) = (u32::try_from(start), u32::try_from(end)) else {
+            // Unreachable under the MAX_PORTAL_MARKDOWN_BYTES bound; drop rather
+            // than emit a wrong offset (mirrors streaming_cursor_color_runs).
+            continue;
+        };
+        runs.push(proto::TextColorRunProto {
+            start_byte,
+            end_byte,
+            color: Some(system_color),
+        });
+    }
+    runs
 }
 
 /// Render the INPUT-history band: the viewer's own accepted replies (the
@@ -2761,6 +2936,12 @@ pub fn portal_visual_tokens_from_part_tokens(
             g: part.transcript_text_color.g,
             b: part.transcript_text_color.b,
             a: part.transcript_text_color.a,
+        },
+        transcript_system_color: proto::Rgba {
+            r: part.transcript_system_color.r,
+            g: part.transcript_system_color.g,
+            b: part.transcript_system_color.b,
+            a: part.transcript_system_color.a,
         },
         transcript_font_size_px: part.transcript_font_size_px,
         transcript_dim_text_color: proto::Rgba {
@@ -4312,6 +4493,220 @@ mod tests {
             expects_reply: false,
             appended_at_wall_us: sequence,
         }
+    }
+
+    // ── Per-turn role attribution (§Conversational Turn Model, hud-26869) ──────
+
+    /// Find the byte offset of `needle` in `haystack`, or panic — used to locate a
+    /// turn's unique text within the assembled node content.
+    fn offset_of(haystack: &str, needle: &str) -> usize {
+        haystack
+            .find(needle)
+            .unwrap_or_else(|| panic!("content must contain turn text {needle:?}"))
+    }
+
+    /// Whether a run addresses exactly the byte range `[start, start+len)` with the
+    /// given color.
+    fn run_covers(
+        run: &proto::TextColorRunProto,
+        start: usize,
+        len: usize,
+        color: proto::Rgba,
+    ) -> bool {
+        run.start_byte as usize == start
+            && run.end_byte as usize == start + len
+            && run.color == Some(color)
+    }
+
+    /// `visible_transcript_markdown_spans` string output is byte-identical to
+    /// `visible_transcript_markdown_with`, and each span's `[start, end)` slices
+    /// out exactly that turn's text (separators/timestamps/divider excluded).
+    #[test]
+    fn transcript_spans_slice_each_turns_text_and_match_string() {
+        let units = vec![
+            transcript_unit_text(1, OutputKind::Assistant, "hello from the model"),
+            transcript_unit_text(2, OutputKind::Status, "connected to backend"),
+            transcript_unit_text(3, OutputKind::Tool, "ran grep, 4 hits"),
+        ];
+        let plain = visible_transcript_markdown_with(&units, None, TimestampGranularity::Off);
+        let (body, spans) =
+            visible_transcript_markdown_spans(&units, None, TimestampGranularity::Off);
+        assert_eq!(
+            body, plain,
+            "spans variant must not change the string output"
+        );
+        assert_eq!(spans.len(), units.len());
+        for (span, unit) in spans.iter().zip(units.iter()) {
+            assert_eq!(
+                &body[span.start..span.end],
+                unit.output_text,
+                "span must slice exactly the turn's own text"
+            );
+            assert_eq!(span.output_kind, unit.output_kind);
+        }
+    }
+
+    /// The role predicate: assistant (and the never-here viewer) use the base
+    /// color; tool/status/error/other use the attribution color.
+    #[test]
+    fn turn_uses_system_attribution_classifies_kinds() {
+        assert!(!turn_uses_system_attribution(OutputKind::Assistant));
+        assert!(!turn_uses_system_attribution(OutputKind::Viewer));
+        assert!(turn_uses_system_attribution(OutputKind::Tool));
+        assert!(turn_uses_system_attribution(OutputKind::Status));
+        assert!(turn_uses_system_attribution(OutputKind::Error));
+        assert!(turn_uses_system_attribution(OutputKind::Other));
+    }
+
+    /// `portal_node` emits a real attribution color-run span over each
+    /// non-assistant turn's text carrying the `transcript_system_color` token,
+    /// and NONE over the assistant turn (which inherits the base color). The base
+    /// node color stays the assistant transcript color, and the node stays a
+    /// single flat node (no per-turn child fan-out → coalescing preserved).
+    #[test]
+    fn portal_node_attributes_non_assistant_turns_with_token_span() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let system_color = adapter.visual_tokens().transcript_system_color;
+        let base_color = adapter.visual_tokens().transcript_text_color;
+
+        let mut state = make_expanded_interaction_state("portal-attribution");
+        state.visible_transcript = vec![
+            transcript_unit_text(1, OutputKind::Assistant, "ASSISTANT_PROSE_ZZ"),
+            transcript_unit_text(2, OutputKind::Status, "STATUS_LINE_ZZ"),
+            transcript_unit_text(3, OutputKind::Tool, "TOOL_OUTPUT_ZZ"),
+        ];
+
+        let node = adapter.portal_node(&state, vec![0u8; 16], 0);
+        assert!(
+            node.children.is_empty(),
+            "attribution must not split into child nodes"
+        );
+        let tm = text_markdown_node(&node);
+        assert_eq!(
+            tm.color,
+            Some(base_color),
+            "base node color stays assistant color"
+        );
+
+        let sys_runs: Vec<_> = tm
+            .color_runs
+            .iter()
+            .filter(|r| r.color == Some(system_color) && r.end_byte > r.start_byte)
+            .collect();
+        assert_eq!(
+            sys_runs.len(),
+            2,
+            "exactly the two non-assistant turns get an attribution span, got {sys_runs:?}"
+        );
+
+        let status_off = offset_of(&tm.content, "STATUS_LINE_ZZ");
+        let tool_off = offset_of(&tm.content, "TOOL_OUTPUT_ZZ");
+        assert!(
+            sys_runs.iter().any(|r| run_covers(
+                r,
+                status_off,
+                "STATUS_LINE_ZZ".len(),
+                system_color
+            )),
+            "status turn must be span-attributed with the system token"
+        );
+        assert!(
+            sys_runs
+                .iter()
+                .any(|r| run_covers(r, tool_off, "TOOL_OUTPUT_ZZ".len(), system_color)),
+            "tool turn must be span-attributed with the system token"
+        );
+
+        // The assistant turn's text must NOT be covered by any system-color run.
+        let assistant_off = offset_of(&tm.content, "ASSISTANT_PROSE_ZZ");
+        assert!(
+            !sys_runs.iter().any(|r| run_covers(
+                r,
+                assistant_off,
+                "ASSISTANT_PROSE_ZZ".len(),
+                system_color
+            )),
+            "assistant prose must inherit the base color, not the attribution span"
+        );
+    }
+
+    /// An all-assistant transcript produces no attribution spans (nothing to
+    /// distinguish), so the model's own prose is never over-decorated.
+    #[test]
+    fn portal_node_all_assistant_transcript_has_no_attribution_runs() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let system_color = adapter.visual_tokens().transcript_system_color;
+
+        let mut state = make_expanded_interaction_state("portal-attribution-none");
+        state.visible_transcript = vec![
+            transcript_unit_text(1, OutputKind::Assistant, "first turn"),
+            transcript_unit_text(2, OutputKind::Assistant, "second turn"),
+        ];
+        let node = adapter.portal_node(&state, vec![0u8; 16], 0);
+        let tm = text_markdown_node(&node);
+        assert!(
+            !tm.color_runs
+                .iter()
+                .any(|r| r.color == Some(system_color) && r.end_byte > r.start_byte),
+            "no attribution span for an all-assistant transcript"
+        );
+    }
+
+    /// An empty transcript (the redaction/empty case — the authority empties
+    /// `visible_transcript` under redaction) produces no attribution spans, so
+    /// attribution suppresses with the transcript.
+    #[test]
+    fn turn_attribution_absent_for_empty_transcript() {
+        let config = ResidentGrpcPortalConfig::new(vec![0u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let system_color = adapter.visual_tokens().transcript_system_color;
+
+        let mut state = make_expanded_interaction_state("portal-attribution-empty");
+        state.visible_transcript = vec![];
+        let node = adapter.portal_node(&state, vec![0u8; 16], 0);
+        let tm = text_markdown_node(&node);
+        assert!(
+            !tm.color_runs
+                .iter()
+                .any(|r| r.color == Some(system_color) && r.end_byte > r.start_byte),
+            "no attribution span when the transcript is empty"
+        );
+    }
+
+    /// `turn_attribution_color_runs` clamps spans to the (truncated) content
+    /// length: a span starting past `content_len` is dropped, and one straddling
+    /// the cut is trimmed to it, so a run never addresses bytes the node omits.
+    #[test]
+    fn turn_attribution_runs_clamp_to_content_len() {
+        let color = proto::Rgba {
+            r: 0.5,
+            g: 0.6,
+            b: 0.7,
+            a: 1.0,
+        };
+        let spans = vec![
+            TranscriptTurnSpan {
+                start: 0,
+                end: 20,
+                output_kind: OutputKind::Status,
+            },
+            TranscriptTurnSpan {
+                start: 30,
+                end: 40,
+                output_kind: OutputKind::Tool,
+            },
+        ];
+        // content_len=25 trims the first run to [0,25) and drops the second.
+        let runs = turn_attribution_color_runs(&spans, color, 25);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].start_byte, 0);
+        assert_eq!(runs[0].end_byte, 20);
+
+        let runs = turn_attribution_color_runs(&spans, color, 10);
+        assert_eq!(runs.len(), 1, "first trimmed to [0,10), second dropped");
+        assert_eq!(runs[0].end_byte, 10);
     }
 
     /// No unread content → no divider boundary. Covers both the redacted /
