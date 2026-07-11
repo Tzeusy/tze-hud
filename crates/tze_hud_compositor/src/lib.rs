@@ -28,6 +28,7 @@ pub mod pipeline;
 pub mod renderer;
 pub mod surface;
 pub mod text;
+pub mod vertical_flow;
 pub mod video_surface;
 pub mod widget;
 
