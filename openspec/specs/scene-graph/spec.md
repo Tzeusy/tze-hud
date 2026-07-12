@@ -5,9 +5,7 @@ Status: implemented
 The scene graph is the authoritative data model for tze_hud. It defines the scene as a pure data structure (no GPU dependency): the identity model (SceneId, ResourceId), the hierarchy (Scene → Tab → Tile → Node), all mutation operations and their validation pipeline, atomic batch semantics, hit-testing, the zone registry, snapshot serialization, and performance budgets. Every other subsystem (compositor, session protocol, lease governance, input) depends on this contract. Source: RFC 0001 (Scene Contract).
 
 Implementation: crates/tze_hud_scene/
-
 ## Requirements
-
 ### Requirement: SceneId Identity
 All live scene objects (tabs, tiles, nodes, leases, zones, sync groups) SHALL be identified by a `SceneId`, which MUST be a UUIDv7 (time-ordered). UUIDv7 is monotonically increasing by creation time, enabling sequence ordering and log correlation by UUID logical value. When serialized, SceneId MUST be encoded as a 16-byte little-endian binary representation (as returned by `Uuid::to_bytes_le`). Note: the LE wire encoding does not preserve byte-level lexicographic sort order; time ordering must be recovered by parsing the UUID, not by comparing raw wire bytes.
 Source: RFC 0001 §1.1, §4.1
@@ -517,8 +515,11 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Struct Overhead Budgets
-Per-tile struct overhead MUST be < 200 bytes (excluding texture data and nodes). Per-node struct overhead MUST be < 150 bytes (excluding content payloads). At maximum capacity (64 nodes per tile), total structural overhead per tile MUST be approximately 9.8 KB (tile struct + 64 node structs, content excluded).
-Source: RFC 0001 §8, §10
+Per-tile struct overhead MUST be < 200 bytes (excluding texture data and nodes). Per-node struct overhead MUST be < 160 bytes (excluding content payloads). At maximum capacity (64 nodes per tile), total structural overhead per tile MUST be approximately 9.9 KB (tile struct + 64 node structs, content excluded).
+
+The per-node budget was raised from 150 to 160 bytes (hud-yfj8u) when the additive `layout: NodeLayout` field — the vertical-flow layout mode governing how a node positions its children — grew `Node` from 144 to 152 bytes: one enum discriminant byte plus 8-aligned padding, because `Node` sat exactly on an 8-byte boundary with no reclaimable trailing padding. The field is additive and default (`NodeLayout::Absolute`) preserves the historical single-child-per-explicit-bounds layout, so the growth buys a real capability (runtime-resolved child stacking) at ~1.3% per-node overhead and a negligible ~0.1 KB per fully-loaded tile.
+
+Source: RFC 0001 §8, §10, hud-yfj8u (NodeLayout field)
 Scope: v1-mandatory
 
 #### Scenario: Tile struct size
@@ -527,9 +528,7 @@ Scope: v1-mandatory
 
 #### Scenario: Node struct size
 - **WHEN** `size_of::<Node>()` plus ID allocation is measured
-- **THEN** it MUST be less than 150 bytes
-
----
+- **THEN** it MUST be less than 160 bytes
 
 ### Requirement: Batch Rejection Response
 When a batch is rejected, the runtime MUST return a BatchRejected response containing the batch_id and a structured error. Validation errors MUST include: mutation_index (0-based), mutation_type, ValidationErrorCode, human-readable message, machine-readable context (JSON), and optional correction_hint (JSON). All error codes MUST be stable across minor versions.
@@ -595,3 +594,4 @@ Scope: post-v1
 #### Scenario: Effective geometry not in v1 snapshot
 - **WHEN** a scene snapshot is serialized in v1
 - **THEN** the snapshot MUST include active zone publications but MUST NOT include effective_geometry data
+
