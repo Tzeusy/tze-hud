@@ -914,6 +914,29 @@ pub(super) fn resolve_tile_spacing_tokens(
     }
 }
 
+/// Historical default for the inter-child vertical-flow gap, mirroring
+/// `tze_hud_config` `defaults::SPACING_SECTION_GAP_PX` ("8"). Kept as a literal
+/// so an absent token reproduces the shared portal-chrome default (the handshake
+/// `PortalPartTokens::section_gap_px`), matching how the other tile-spacing
+/// fallbacks mirror their config defaults.
+const SECTION_GAP_DEFAULT_PX: f32 = 8.0;
+
+/// Resolve the inter-child vertical-flow gap (px) from the compositor token map
+/// (hud-pd9bp): the `portal.spacing.section_gap_px` handshake token
+/// (`PortalPartTokens::section_gap_px`), used as the gap between stacked
+/// `NodeLayout::VerticalFlow` children. Missing, unparseable, non-finite, or
+/// negative values fall back to [`SECTION_GAP_DEFAULT_PX`]. Unlike the
+/// compositor-local `TileSpacingTokens`, this is a SHARED portal-chrome token, so
+/// it resolves directly from the token map rather than joining that struct.
+#[inline]
+pub(super) fn resolve_section_gap_px(token_map: &HashMap<String, String>) -> f32 {
+    token_map
+        .get("portal.spacing.section_gap_px")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(SECTION_GAP_DEFAULT_PX)
+}
+
 #[inline]
 pub(super) fn notification_dismiss_bounds(
     x: f32,
@@ -1342,6 +1365,45 @@ pub(super) fn emit_drag_highlight_border(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Vertical-flow gap token (hud-pd9bp) ───────────────────────────────────
+
+    fn token_map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn resolve_section_gap_px_defaults_when_absent() {
+        assert_eq!(
+            resolve_section_gap_px(&token_map(&[])),
+            SECTION_GAP_DEFAULT_PX
+        );
+        assert_eq!(resolve_section_gap_px(&token_map(&[])), 8.0);
+    }
+
+    #[test]
+    fn resolve_section_gap_px_uses_override_token() {
+        let tm = token_map(&[("portal.spacing.section_gap_px", "14.5")]);
+        assert_eq!(resolve_section_gap_px(&tm), 14.5);
+        // Zero (flush) is permitted.
+        let tm0 = token_map(&[("portal.spacing.section_gap_px", "0")]);
+        assert_eq!(resolve_section_gap_px(&tm0), 0.0);
+    }
+
+    #[test]
+    fn resolve_section_gap_px_falls_back_on_malformed_or_negative() {
+        for bad in ["notanumber", "-4", "NaN", "inf", ""] {
+            let tm = token_map(&[("portal.spacing.section_gap_px", bad)]);
+            assert_eq!(
+                resolve_section_gap_px(&tm),
+                SECTION_GAP_DEFAULT_PX,
+                "malformed/negative override {bad:?} must fall back to the default"
+            );
+        }
+    }
 
     /// The jump-to-latest pill FILL must render the same intended color whether it
     /// comes from the built-in default or from an explicitly-set token carrying the

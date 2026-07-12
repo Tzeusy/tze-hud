@@ -44,8 +44,8 @@ use super::image_cache::{
 use super::token_colors::{
     ComposerOverlayTokens, ComposerVerticalAnchor, TILE_BG_DEFAULT, TILE_BG_STATIC_IMAGE,
     TILE_BG_TEXT_MARKDOWN, linear_to_srgb, resolve_composer_overlay_tokens,
-    resolve_focus_ring_tokens, resolve_resize_grip_tokens, resolve_tile_bg_token,
-    resolve_tile_spacing_tokens, resolve_viewer_echo_tokens, srgb_to_linear,
+    resolve_focus_ring_tokens, resolve_resize_grip_tokens, resolve_section_gap_px,
+    resolve_tile_bg_token, resolve_tile_spacing_tokens, resolve_viewer_echo_tokens, srgb_to_linear,
 };
 
 // The composer's content inset (historically the `COMPOSER_TEXT_MARGIN = 6.0`
@@ -1729,6 +1729,50 @@ impl Compositor {
         }
     }
 
+    /// Resolve the per-frame vertical-flow layout (hud-pd9bp): for every
+    /// `NodeLayout::VerticalFlow` node in the scene, stack its children and store
+    /// each child's resolved tile-local `y` in [`Self::tile_flow_offsets`], which
+    /// the `&self` geometry sites (`render_node`, the text-collect walks, and the
+    /// ellipsis-prime twin) read to substitute the resolved `y` for the child's
+    /// own `bounds.y`.
+    ///
+    /// Mirrors [`Self::prime_viewer_echo_layout`]: measuring wrapped child heights
+    /// needs a `&mut FontSystem` the `&self` geometry sites cannot reach, so it
+    /// runs once per frame BEFORE the geometry and text passes.
+    ///
+    /// Behavior-preserving early-out: a scene with no `VerticalFlow` node clears
+    /// the map and returns WITHOUT constructing a `FontSystem`, so the all-Absolute
+    /// hot path (every production scene today) pays only a cheap scan and every
+    /// geometry site falls back to `bounds.y` — byte-identical to before this
+    /// capability existed, including the ellipsis truncation-cache geometry.
+    pub(crate) fn prime_vertical_flow_layout(&mut self, scene: &SceneGraph) {
+        self.tile_flow_offsets.clear();
+        if !scene
+            .nodes
+            .values()
+            .any(|node| node.layout == NodeLayout::VerticalFlow)
+        {
+            return;
+        }
+        let gap = resolve_section_gap_px(&self.token_map);
+        // The render rasterizer's `FontSystem` is private to `TextRasterizer`
+        // (crate-root `text.rs`, owned by the measurement seam / hud-ysyis), so
+        // measure against the bundled base fonts here. Exact for the base family;
+        // reflecting agent-uploaded fonts in flow heights is a fidelity follow-up.
+        // Only reached when a `VerticalFlow` node actually exists.
+        let mut font_system = crate::fonts::bundled_font_system();
+        // hud-ysyis added a trailing `&MarkdownTokens` so the resolver measures
+        // markdown / attributed transcript turns exactly as the render path shapes
+        // them. Pass the renderer's resolved portal markdown token set — the same
+        // one the markdown render constructors consume for these nodes.
+        self.tile_flow_offsets = crate::vertical_flow::resolve_tile_flow_offsets(
+            &mut font_system,
+            &scene.nodes,
+            gap,
+            &self.markdown_tokens,
+        );
+    }
+
     /// Collect kind-distinct `TextItem`s for the runtime-authored viewer reply
     /// echo (hud-nx7yq.3), as a single wrapped block bottom-aligned to the top of
     /// the LIVE composer input box — newest reply nearest the composer. Anchoring
@@ -1998,6 +2042,17 @@ impl Compositor {
             Some(n) => n,
             None => return,
         };
+        // hud-pd9bp: a child of a `NodeLayout::VerticalFlow` node takes its
+        // runtime-resolved stacked y (from `prime_vertical_flow_layout`) in place
+        // of its own `bounds.y`. Absent from the map — every node in an Absolute
+        // scene — yields its own `bounds.y`, so the substitutions below are
+        // byte-identical there. Only the Y ORIGIN is affected; width/height/x are
+        // untouched.
+        let effective_y = self
+            .tile_flow_offsets
+            .get(&node_id)
+            .copied()
+            .unwrap_or_else(|| node.data.bounds().y);
         let (scroll_x, scroll_y) = self.display_tile_scroll_offset(scene, tile.id);
         // §6.3 fade: the whole tile (backdrop + content backgrounds + text) must
         // fade as one unit. `tile_background_color` and `collect_text_items`
@@ -2013,7 +2068,7 @@ impl Compositor {
                         tile,
                         Rect::new(
                             tile.bounds.x + sc.bounds.x - scroll_x,
-                            tile.bounds.y + sc.bounds.y - scroll_y,
+                            tile.bounds.y + effective_y - scroll_y,
                             sc.bounds.width,
                             sc.bounds.height,
                         ),
@@ -2034,7 +2089,7 @@ impl Compositor {
                             tile,
                             Rect::new(
                                 tile.bounds.x + tm.bounds.x - scroll_x,
-                                tile.bounds.y + tm.bounds.y - scroll_y,
+                                tile.bounds.y + effective_y - scroll_y,
                                 tm.bounds.width,
                                 tm.bounds.height,
                             ),
@@ -2109,7 +2164,7 @@ impl Compositor {
                                     let panel_x =
                                         tile.bounds.x + tm.bounds.x + panel_margin_x - scroll_x;
                                     let panel_y =
-                                        tile.bounds.y + tm.bounds.y + panel_y_offset - scroll_y;
+                                        tile.bounds.y + effective_y + panel_y_offset - scroll_y;
                                     let panel_w = (tm.bounds.width - panel_margin_x * 2.0).max(0.0);
                                     if panel_w > 0.0 && panel_height > 0.0 {
                                         Self::append_clipped_rect_vertices(
@@ -2153,7 +2208,7 @@ impl Compositor {
                                     parsed.plain_text.as_ref(),
                                     &parsed.thematic_breaks,
                                     tile.bounds.x + tm.bounds.x - scroll_x,
-                                    tile.bounds.y + tm.bounds.y - scroll_y,
+                                    tile.bounds.y + effective_y - scroll_y,
                                     tm.bounds.width,
                                     line_height,
                                     thickness,
@@ -2179,7 +2234,7 @@ impl Compositor {
                         tile,
                         Rect::new(
                             tile.bounds.x + tm.bounds.x - scroll_x,
-                            tile.bounds.y + tm.bounds.y - scroll_y,
+                            tile.bounds.y + effective_y - scroll_y,
                             tm.bounds.width,
                             tm.bounds.height,
                         ),
@@ -2202,7 +2257,7 @@ impl Compositor {
                             tile,
                             Rect::new(
                                 tile.bounds.x + tm.bounds.x + text_margin - scroll_x,
-                                tile.bounds.y + tm.bounds.y + text_margin - scroll_y,
+                                tile.bounds.y + effective_y + text_margin - scroll_y,
                                 tm.bounds.width - text_margin * 2.0,
                                 (tm.font_size_px * 1.2).min(tm.bounds.height - text_margin * 2.0),
                             ),
@@ -2247,7 +2302,7 @@ impl Compositor {
                         tile,
                         Rect::new(
                             tile.bounds.x + hr.bounds.x - scroll_x,
-                            tile.bounds.y + hr.bounds.y - scroll_y,
+                            tile.bounds.y + effective_y - scroll_y,
                             hr.bounds.width,
                             hr.bounds.height,
                         ),
@@ -2271,7 +2326,7 @@ impl Compositor {
                     let (dx, dy, dw, dh, uv_rect) = compute_fit_mode(
                         img.fit_mode,
                         tile.bounds.x + img.bounds.x - scroll_x,
-                        tile.bounds.y + img.bounds.y - scroll_y,
+                        tile.bounds.y + effective_y - scroll_y,
                         img.bounds.width,
                         img.bounds.height,
                         entry.width,
@@ -2300,7 +2355,7 @@ impl Compositor {
                         tile,
                         Rect::new(
                             tile.bounds.x + img.bounds.x - scroll_x,
-                            tile.bounds.y + img.bounds.y - scroll_y,
+                            tile.bounds.y + effective_y - scroll_y,
                             img.bounds.width,
                             img.bounds.height,
                         ),
@@ -2320,7 +2375,7 @@ impl Compositor {
                             tile,
                             Rect::new(
                                 tile.bounds.x + img.bounds.x + margin - scroll_x,
-                                tile.bounds.y + img.bounds.y + margin - scroll_y,
+                                tile.bounds.y + effective_y + margin - scroll_y,
                                 img.bounds.width - margin * 2.0,
                                 img.bounds.height - margin * 2.0,
                             ),

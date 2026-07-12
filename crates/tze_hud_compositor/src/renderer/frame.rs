@@ -117,6 +117,9 @@ impl Compositor {
         // entry boundary (hud-hsc1t). Idempotent with the pre-text-pass prime;
         // no-op when the store is empty.
         self.prime_viewer_echo_layout(scene);
+        // hud-pd9bp: resolve vertical-flow child offsets once per frame,
+        // before the geometry + text passes read them. No-op for Absolute scenes.
+        self.prime_vertical_flow_layout(scene);
 
         let mut vertices: Vec<RectVertex> = Vec::new();
         let mut textured_cmds: Vec<TexturedDrawCmd> = Vec::new();
@@ -1121,6 +1124,9 @@ impl Compositor {
         // Measure the viewer-echo history wrap once per frame, before the
         // text pass reads the line count for bottom-alignment (hud-pncm3).
         self.prime_viewer_echo_layout(scene);
+        // hud-pd9bp: resolve vertical-flow child offsets once per frame,
+        // before the geometry + text passes read them. No-op for Absolute scenes.
+        self.prime_vertical_flow_layout(scene);
         // Text is content — rendered above geometry rectangles but below chrome.
         let text_items_chrome: Vec<TextItem> = if self.text_rasterizer.is_some() {
             self.collect_text_items(scene, sw, sh)
