@@ -67,20 +67,6 @@ ignore = [
     # Action: Remove when winit's wayland stack updates quick-xml to >=0.41.
     { id = "RUSTSEC-2026-0194", reason = "Only remaining instance is build-time wayland-scanner proc-macro (via winit 0.30) parsing trusted vendored protocol XML. Direct workspace dep already bumped to 0.41. Remove when winit updates its wayland stack." },
     { id = "RUSTSEC-2026-0195", reason = "Only remaining instance is build-time wayland-scanner proc-macro (via winit 0.30) parsing trusted vendored protocol XML. Direct workspace dep already bumped to 0.41. Remove when winit updates its wayland stack." },
-    # RUSTSEC-2026-0206: `rustybuzz` is unmaintained (maintainer statement,
-    # harfbuzz/rustybuzz#166); successor is `harfrust`. Two transitive
-    # versions are pinned in our tree: rustybuzz@0.14.1 via cosmic-text ←
-    # glyphon ← tze_hud_compositor (the glyphon 0.8.x → wgpu 24.x → Rust 1.88
-    # co-pin, same chain as the paste/ttf-parser waivers above), and
-    # rustybuzz@0.20.1 via usvg/resvg 0.47 ← tze_hud_compositor. No safe
-    # upgrade exists at either pin: cosmic-text has not migrated to harfrust,
-    # and bumping usvg/resvg independently would fragment the font-shaping
-    # stack from glyphon's. Unmaintained-class advisory, not a vulnerability —
-    # no CVE, no known exploit; rustybuzz continues to function correctly for
-    # our text-shaping usage.
-    # Action: remove when cosmic-text (glyphon chain) and usvg/resvg both
-    # migrate to harfrust. Tracked in hud-b0r5e.
-    { id = "RUSTSEC-2026-0206", reason = "Unmaintained (not a vulnerability), successor is harfrust. Two transitive pins: rustybuzz@0.14.1 via cosmic-text←glyphon (same co-pin chain as the paste/ttf-parser waivers) and rustybuzz@0.20.1 via usvg/resvg←tze_hud_compositor. No safe upgrade until both upstreams migrate to harfrust. Tracked in hud-b0r5e." },
 ]
 
 # ─── Licenses ────────────────────────────────────────────────────────────────
