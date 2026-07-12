@@ -115,6 +115,7 @@ Capabilities and limits vs tzehouse:
 
 Use these files when the matching workflow section below calls for them:
 
+- Target resolution + gates: [scripts/tzehouse_env.sh](scripts/tzehouse_env.sh) (tzehouse resolve/self-heal/PSK/MCP gate), [scripts/hud_vm_env.sh](scripts/hud_vm_env.sh) (autonomous VM), [scripts/portal_trial.sh](scripts/portal_trial.sh) (one-command portal connectivity trial)
 - Deployment and setup: [scripts/deploy_windows_hud.sh](scripts/deploy_windows_hud.sh), [scripts/windows_setup_hud_automation.ps1](scripts/windows_setup_hud_automation.ps1), [scripts/d18_validation.sh](scripts/d18_validation.sh), [subskills/portal-hud-deploy/scripts/deploy_portal_hud.sh](subskills/portal-hud-deploy/scripts/deploy_portal_hud.sh)
 - Batch publishers and broad zone fixtures: [scripts/publish_zone_batch.py](scripts/publish_zone_batch.py), [scripts/publish_widget_batch.py](scripts/publish_widget_batch.py), [scripts/all-zones-test.json](scripts/all-zones-test.json), [scripts/widget-cleanup.json](scripts/widget-cleanup.json)
 - Widget fixtures: [scripts/gauge_cycle_test.json](scripts/gauge_cycle_test.json), [scripts/progress-bar-step.json](scripts/progress-bar-step.json), [scripts/progress-bar-color-sweep.json](scripts/progress-bar-color-sweep.json), [scripts/progress-bar-rapidfire-100-5s.json](scripts/progress-bar-rapidfire-100-5s.json), [scripts/status-indicator-enum-cycle-test.json](scripts/status-indicator-enum-cycle-test.json), [scripts/status-indicator-theme-cycle-test.json](scripts/status-indicator-theme-cycle-test.json), [scripts/status-indicator-label-update-test.json](scripts/status-indicator-label-update-test.json), [scripts/status-indicator-validation-test.json](scripts/status-indicator-validation-test.json), [scripts/status-indicator-contention-test.json](scripts/status-indicator-contention-test.json), [scripts/status-indicator-theme-status-matrix-test.json](scripts/status-indicator-theme-status-matrix-test.json)
@@ -144,15 +145,44 @@ scenarios live in `references/`. Load the one matching the task:
 
 ### Step 0: SSH Connectivity Gate
 
-**First resolve the real host, users, and key.** Tracked files carry scrubbed
-placeholders (`windows-host.example` / `hud-user` / `admin-user` /
-`~/.ssh/hud-ssh-key`); the real values differ per target and live in the
-git-ignored private doc `docs/operations/private/tzehouse-windows.local.md`.
-Read it before running the gate. For the VM, use `hud_vm_env.sh` (above); for
-tzehouse, read the real file user, admin user, key, and host from that private
-doc — never inline them into this tracked file (AGENTS.md placeholder contract).
-Note tzehouse's default shell is **cmd.exe** (not PowerShell) — don't chain with
-`;`; invoke `powershell -Command` explicitly when you need it.
+**Deterministic path (preferred):** both standing targets have a canonical
+resolve-and-self-heal helper — run it instead of hand-discovering anything:
+
+```bash
+# tzehouse (human-in-loop screen): SSH gates both users, detects/kills a
+# wrong-config instance (e.g. loopback-bound benchmark leftover), relaunches
+# TzeHudOverlay, recovers the PSK live from the task XML, gates MCP initialize.
+eval "$(.claude/skills/user-test/scripts/tzehouse_env.sh)"
+# -> TZE_HUD_TEST_HOST, WIN_HOST, WIN_FILE_USER, WIN_ADMIN_USER, HUD_SSH_KEY,
+#    HUD_MCP_URL, HUD_GRPC_TARGET, HUD_PSK, MCP_TEST_PSK, TZE_HUD_PSK,
+#    TZE_HUD_MCP_RESIDENT_PRINCIPAL
+
+# hud-windows VM (autonomous): see "Autonomous testhost" above
+eval "$(.claude/skills/user-test/scripts/hud_vm_env.sh)"
+```
+
+`tzehouse_env.sh` reads identity from the git-ignored
+`.claude/skills/user-test/target.env` (see `.gitignore`; template fields:
+`TZEHOUSE_HOST`, `TZEHOUSE_FILE_USER`, `TZEHOUSE_ADMIN_USER`,
+`TZEHOUSE_SSH_KEY`). The PSK is never stored in any file — it is recovered
+live from the `TzeHudOverlay` task definition each run.
+
+For a one-command text-stream-portal connectivity trial (env + gates + attach
++ greeting + long-poll with auto-ack), run
+`scripts/portal_trial.sh [--target tzehouse|vm] [--detach-after]`; it leaves
+the projection attached for an LLM session to take over with
+`.claude/skills/hud-projection/scripts/portal_client.py` (exit 3 = gates all
+passed but no operator input arrived within the poll budget).
+
+**Manual fallback:** resolve the real host, users, and key by hand. Tracked
+files carry scrubbed placeholders (`windows-host.example` / `hud-user` /
+`admin-user` / `~/.ssh/hud-ssh-key`); the real values differ per target and
+live in the git-ignored private doc
+`docs/operations/private/tzehouse-windows.local.md`. Read it before running
+the gate — never inline real values into this tracked file (AGENTS.md
+placeholder contract). Note tzehouse's default shell is **cmd.exe** (not
+PowerShell) — don't chain with `;`; invoke `powershell -Command` explicitly
+when you need it.
 
 Verify key auth for **both** users (Linux), substituting the resolved values:
 
