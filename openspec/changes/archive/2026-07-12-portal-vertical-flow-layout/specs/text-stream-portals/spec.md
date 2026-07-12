@@ -23,6 +23,17 @@ font family, and the default line-height multiplier (that render path has no
 access to a resolved token set either, by the same offset-pinning constraint),
 not the parsed/token-resolved measurement used for the common case (hud-ysyis).
 
+Per-frame vertical-flow height measurement MUST consume the commit-time cached
+parsed representation the render path already uses (the cached styled runs keyed
+by content identity, per the Markdown Parsing Outside the Frame Loop requirement)
+— it MUST NOT re-parse markdown on the frame path, and a flowed node whose
+content has not changed MUST incur zero per-frame parse cost. This capability
+therefore operates WITHIN Markdown Parsing Outside the Frame Loop, not as an
+exception to it. In the raw-tile pilot no node carries `VerticalFlow`, so the
+per-frame flow-resolution pass early-outs and performs no measurement — and thus
+no parsing — at all; the cached-measurement contract binds the promotion-gated
+per-turn split that will make `VerticalFlow` nodes live.
+
 Vertical-flow layout resolution SHALL run in the runtime/compositor and MUST NOT
 require the owning model or adapter to compute child positions — consistent with
 the doctrine that the model drives the scene while the runtime composits
