@@ -45,6 +45,17 @@ ignore = [
     # Action: Remove when the glyphon/wgpu chain is bumped (wgpu 28+, Rust
     # 1.92+ MSRV) and cosmic-text's font stack moves off ttf-parser.
     { id = "RUSTSEC-2026-0192", reason = "Unmaintained ttf-parser via cosmic-text/fontdb←glyphon, pinned by the glyphon→wgpu→Rust 1.88 co-pin (same chain as the paste waiver). Parses locally-installed system fonts only. Remove with the wgpu 28+ MSRV bump." },
+    # RUSTSEC-2026-0206: `rustybuzz` is unmaintained (advisory landed
+    # 2026-07-12). Transitive chains: rustybuzz@0.14.1 ← cosmic-text@0.12.1 ←
+    # glyphon (the same glyphon 0.8.x → wgpu 24.x → Rust 1.88 co-pin as the
+    # paste and ttf-parser waivers above) and rustybuzz@0.20.1 ← usvg ←
+    # resvg@0.47. No safe upgrade exists at either pin; the ecosystem
+    # migration target (harfrust/skrifa) has not been adopted by cosmic-text
+    # or resvg at our versions. Risk: text shaping of locally-installed fonts
+    # and bundled SVG rendering only — no untrusted-font ingestion path.
+    # Action: Remove when the wgpu 28+/Rust 1.92+ MSRV bump lands with a
+    # cosmic-text off rustybuzz AND resvg ships off rustybuzz (hud-qrmw1).
+    { id = "RUSTSEC-2026-0206", reason = "Unmaintained rustybuzz via cosmic-text←glyphon (wgpu→Rust 1.88 co-pin, same chain as the paste/ttf-parser waivers) and via usvg←resvg. Shapes local fonts / bundled SVGs only. Tracked in hud-qrmw1; remove with the wgpu 28+ MSRV bump + resvg update." },
     # RUSTSEC-2026-0194 / RUSTSEC-2026-0195: quick-xml DoS (quadratic dup-attr
     # check; unbounded NsReader namespace allocation), fixed in >=0.41. Our
     # DIRECT workspace dependency was bumped to 0.41 (2026-07-02, hud-sv7z2);

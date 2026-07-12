@@ -44,6 +44,41 @@ Projection needs a live windowed runtime with MCP enabled. Two standing targets:
   "No active tab". A registered agent (`agent-alpha`) is pre-provisioned for
   resident gRPC sessions.
 
+## Deterministic Client (Preferred Driver)
+
+Do not hand-roll MCP calls: `scripts/portal_client.py` wraps all seven
+operations as subcommands with the contract boilerplate, auth, and owner-token
+custody built in. Resolve env first (either target), then drive:
+
+```bash
+eval "$(.claude/skills/user-test/scripts/tzehouse_env.sh)"   # or hud_vm_env.sh
+CLIENT=.claude/skills/hud-projection/scripts/portal_client.py
+python3 $CLIENT attach  --projection-id my-session --display-name "My Session"
+python3 $CLIENT publish --projection-id my-session --text "hello from the session"
+python3 $CLIENT status  --projection-id my-session --state active --text "working"
+python3 $CLIENT poll    --projection-id my-session --wait-ms 30000 --rounds 6 --ack handled
+python3 $CLIENT ack     --projection-id my-session --input-id input-1 --state handled --message "done"
+python3 $CLIENT detach  --projection-id my-session
+```
+
+Owner tokens are written to `~/.local/state/tze_hud/portal-tokens/<id>.token`
+(0600, outside any repo; override with `PORTAL_TOKEN_DIR`) and are redacted
+from all output — satisfying the "store immediately, never in transcript"
+rule below without manual handling. `poll` prints received items as NDJSON
+and exits 3 when no input arrived (deterministic signal); `--ack handled`
+auto-acknowledges receipt, but prefer explicit `ack` with a meaningful message
+after actually acting on an input. Re-running `attach` with the same
+projection id is safe (idempotent; the token on file stays valid).
+
+For a one-command connectivity trial (attach + greeting + poll), use
+`.claude/skills/user-test/scripts/portal_trial.sh`.
+
+**Wire dialect caveat (hud-09emd):** the runtime's MCP HTTP server dispatches
+tool names as bare JSON-RPC methods (`"method": "portal_projection_attach"`)
+and does not implement standard `tools/call`. `portal_client.py` handles both
+(bare-method first, `tools/call` fallback); spec-standard MCP clients will
+fail against it until hud-09emd is fixed.
+
 ## Source Of Truth
 
 When changing behavior or resolving ambiguity, read:
