@@ -28,6 +28,7 @@
 
 use std::sync::Arc;
 
+use glyphon::FontSystem;
 use tze_hud_input::{DRAG_OPACITY_BOOST, DRAG_Z_ORDER_BOOST};
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::*;
@@ -1763,21 +1764,32 @@ impl Compositor {
         // before the rasterizer is taken mutably (mirrors
         // `prime_viewer_echo_layout`'s two-phase borrow discipline); the resolver
         // gets a real `&MarkdownTokens` (hud-ysyis) so markdown / attributed turns
-        // measure on the same basis the render constructors paint them. If the
-        // rasterizer is not yet initialized, nothing renders this frame, so the
-        // map stays empty (cleared above) and every site falls back to `bounds.y`.
+        // measure on the same basis the render constructors paint them.
+        //
+        // If the rasterizer is not yet initialized, fall back to a fresh
+        // `bundled_font_system()` (hud-tfm3p review fix) — matching this
+        // function's pre-hud-9gopx behavior for that state exactly. Flow
+        // resolution positions EVERY `VerticalFlow` child, not just text
+        // (`SolidColor` / `StaticImage` / `HitRegion` children read
+        // `tile_flow_offsets` too, per hud-pd9bp), so gating the whole resolve on
+        // rasterizer presence would silently drop stacking for non-text geometry
+        // that never needed a `FontSystem` in the first place — a real regression
+        // Codex caught on this PR versus the pre-hud-9gopx baseline, which ran
+        // unconditionally. There can be no agent-uploaded fonts to reflect when
+        // there is no rasterizer yet anyway, so the bundled fallback is exactly
+        // as accurate as the code it replaces.
         let markdown_tokens = self.markdown_tokens.clone();
-        let offsets = self.text_rasterizer.as_mut().map(|rasterizer| {
-            crate::vertical_flow::resolve_tile_flow_offsets(
-                rasterizer.font_system_mut(),
-                &scene.nodes,
-                gap,
-                &markdown_tokens,
-            )
-        });
-        if let Some(offsets) = offsets {
-            self.tile_flow_offsets = offsets;
-        }
+        let mut bundled_fallback = None;
+        let font_system: &mut FontSystem = match self.text_rasterizer.as_mut() {
+            Some(rasterizer) => rasterizer.font_system_mut(),
+            None => bundled_fallback.get_or_insert_with(crate::fonts::bundled_font_system),
+        };
+        self.tile_flow_offsets = crate::vertical_flow::resolve_tile_flow_offsets(
+            font_system,
+            &scene.nodes,
+            gap,
+            &markdown_tokens,
+        );
     }
 
     /// Collect kind-distinct `TextItem`s for the runtime-authored viewer reply
