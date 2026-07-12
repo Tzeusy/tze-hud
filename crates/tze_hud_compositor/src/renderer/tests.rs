@@ -15473,6 +15473,114 @@ fn b0x0m_tile_with_root(
     tile_id
 }
 
+/// `prime_vertical_flow_layout` must resolve flow offsets even when
+/// `init_text_renderer` has never been called (hud-tfm3p review of hud-9gopx).
+///
+/// hud-9gopx swapped this function from unconditionally building a fresh
+/// `bundled_font_system()` to measuring against `self.text_rasterizer`'s own
+/// `FontSystem` — gating the ENTIRE resolve on `self.text_rasterizer.is_some()`.
+/// That silently dropped flow-stacking for every `VerticalFlow` child (not just
+/// text — `SolidColor` / `StaticImage` / `HitRegion` children read
+/// `tile_flow_offsets` too, per hud-pd9bp) whenever no rasterizer had been
+/// initialized yet, even though non-text children never needed a `FontSystem` at
+/// all — a real regression versus the pre-hud-9gopx baseline, which ran
+/// regardless of rasterizer state. `make_compositor_and_surface` deliberately
+/// does NOT call `init_text_renderer` (only production runtime setup and a
+/// handful of text-specific tests do), so this fixture already exercises the
+/// exact `text_rasterizer: None` state the regression required — no
+/// GPU-specific machinery beyond the existing headless adapter is needed.
+#[tokio::test]
+async fn hud_tfm3p_flow_offsets_resolve_without_a_text_rasterizer() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+    assert!(
+        compositor.text_rasterizer.is_none(),
+        "fixture precondition: this test only proves what it claims if no \
+         rasterizer has been initialized"
+    );
+
+    let mut scene = SceneGraph::new(256.0, 256.0);
+    let tab_id = scene.create_tab("t", 0).unwrap();
+    let lease_id = scene.grant_lease("t", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(tab_id, "t", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+        .unwrap();
+
+    let parent_id = SceneId::new();
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                layout: NodeLayout::VerticalFlow,
+                id: parent_id,
+                children: vec![],
+                data: NodeData::SolidColor(SolidColorNode {
+                    color: Rgba::new(0.0, 0.0, 0.0, 0.0),
+                    bounds: Rect::new(0.0, 10.0, 200.0, 0.0),
+                    radius: None,
+                }),
+            },
+        )
+        .unwrap();
+
+    // Two non-text (SolidColor) children — flow resolution positions these
+    // without ever needing a `FontSystem`, so they isolate the rasterizer-
+    // presence regression from any font-measurement concern.
+    let child0_id = SceneId::new();
+    scene
+        .add_node_to_tile(
+            tile_id,
+            Some(parent_id),
+            Node {
+                layout: Default::default(),
+                id: child0_id,
+                children: vec![],
+                data: NodeData::SolidColor(SolidColorNode {
+                    color: Rgba::new(1.0, 0.0, 0.0, 1.0),
+                    bounds: Rect::new(0.0, 999.0, 200.0, 40.0),
+                    radius: None,
+                }),
+            },
+        )
+        .unwrap();
+    let child1_id = SceneId::new();
+    scene
+        .add_node_to_tile(
+            tile_id,
+            Some(parent_id),
+            Node {
+                layout: Default::default(),
+                id: child1_id,
+                children: vec![],
+                data: NodeData::SolidColor(SolidColorNode {
+                    color: Rgba::new(0.0, 1.0, 0.0, 1.0),
+                    bounds: Rect::new(0.0, 999.0, 200.0, 20.0),
+                    radius: None,
+                }),
+            },
+        )
+        .unwrap();
+    scene.nodes.get_mut(&parent_id).unwrap().children = vec![child0_id, child1_id];
+
+    compositor.prime_vertical_flow_layout(&scene);
+
+    assert_eq!(
+        compositor.tile_flow_offsets.len(),
+        2,
+        "both flow children must resolve WITHOUT a text rasterizer: {:?}",
+        compositor.tile_flow_offsets
+    );
+    let y0 = compositor.tile_flow_offsets[&child0_id];
+    let y1 = compositor.tile_flow_offsets[&child1_id];
+    assert!(
+        (y0 - 10.0).abs() < 1e-3,
+        "first child sits at the parent's own top: {y0}"
+    );
+    assert!(
+        y1 >= y0 + 40.0,
+        "second child must clear the first child's 40px height: y0={y0} y1={y1}"
+    );
+}
+
 /// A non-rounded `SolidColor` node fill must be scaled by the whole-tile fade
 /// (hud-b0x0m). Before the fix it was painted at `sc.color.a` regardless of tile
 /// opacity — the same divergence hud-w41ef fixed for portal backgrounds.

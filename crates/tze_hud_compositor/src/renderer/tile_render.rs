@@ -28,6 +28,7 @@
 
 use std::sync::Arc;
 
+use glyphon::FontSystem;
 use tze_hud_input::{DRAG_OPACITY_BOOST, DRAG_Z_ORDER_BOOST};
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::*;
@@ -1755,21 +1756,39 @@ impl Compositor {
             return;
         }
         let gap = resolve_section_gap_px(&self.token_map);
-        // The render rasterizer's `FontSystem` is private to `TextRasterizer`
-        // (crate-root `text.rs`, owned by the measurement seam / hud-ysyis), so
-        // measure against the bundled base fonts here. Exact for the base family;
-        // reflecting agent-uploaded fonts in flow heights is a fidelity follow-up.
-        // Only reached when a `VerticalFlow` node actually exists.
-        let mut font_system = crate::fonts::bundled_font_system();
-        // hud-ysyis added a trailing `&MarkdownTokens` so the resolver measures
-        // markdown / attributed transcript turns exactly as the render path shapes
-        // them. Pass the renderer's resolved portal markdown token set — the same
-        // one the markdown render constructors consume for these nodes.
+        // Measure flow child heights against the RENDER rasterizer's OWN
+        // `FontSystem` (hud-9gopx) — the same one that shapes the glyphs — so any
+        // agent-uploaded font loaded via `load_font_data` is reflected in the
+        // stacked heights, keeping "measured == painted" true for uploaded fonts
+        // too. Clone the token set first so the `&self.markdown_tokens` borrow ends
+        // before the rasterizer is taken mutably (mirrors
+        // `prime_viewer_echo_layout`'s two-phase borrow discipline); the resolver
+        // gets a real `&MarkdownTokens` (hud-ysyis) so markdown / attributed turns
+        // measure on the same basis the render constructors paint them.
+        //
+        // If the rasterizer is not yet initialized, fall back to a fresh
+        // `bundled_font_system()` (hud-tfm3p review fix) — matching this
+        // function's pre-hud-9gopx behavior for that state exactly. Flow
+        // resolution positions EVERY `VerticalFlow` child, not just text
+        // (`SolidColor` / `StaticImage` / `HitRegion` children read
+        // `tile_flow_offsets` too, per hud-pd9bp), so gating the whole resolve on
+        // rasterizer presence would silently drop stacking for non-text geometry
+        // that never needed a `FontSystem` in the first place — a real regression
+        // Codex caught on this PR versus the pre-hud-9gopx baseline, which ran
+        // unconditionally. There can be no agent-uploaded fonts to reflect when
+        // there is no rasterizer yet anyway, so the bundled fallback is exactly
+        // as accurate as the code it replaces.
+        let markdown_tokens = self.markdown_tokens.clone();
+        let mut bundled_fallback = None;
+        let font_system: &mut FontSystem = match self.text_rasterizer.as_mut() {
+            Some(rasterizer) => rasterizer.font_system_mut(),
+            None => bundled_fallback.get_or_insert_with(crate::fonts::bundled_font_system),
+        };
         self.tile_flow_offsets = crate::vertical_flow::resolve_tile_flow_offsets(
-            &mut font_system,
+            font_system,
             &scene.nodes,
             gap,
-            &self.markdown_tokens,
+            &markdown_tokens,
         );
     }
 
