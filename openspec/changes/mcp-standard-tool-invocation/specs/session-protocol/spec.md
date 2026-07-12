@@ -7,7 +7,7 @@ The MCP server SHALL implement the standard `tools/call` JSON-RPC method so that
 
 A `tools/call` request carries `params.name` (the tool to invoke) and an optional `params.arguments` object (the tool's parameters; an omitted `arguments` is treated as an empty object). The server SHALL delegate to the SAME tool dispatch table used by the legacy bare method==tool-name path — there SHALL NOT be a forked or duplicate tool registry.
 
-On success `tools/call` SHALL return an MCP-shaped result: a `content` array containing at least one `text` block carrying the tool's result, together with `isError: false`. A tool that executes but fails SHALL be reported as a result with `isError: true` and a `text` content block describing the failure — NOT a JSON-RPC error — so the calling model can observe and react to the error. An unknown tool NAME supplied via `tools/call` SHALL return a JSON-RPC Invalid Params error (`-32602`), NOT Method Not Found (`-32601`), because the `tools/call` method itself is implemented; a missing or non-string `name` SHALL likewise return Invalid Params.
+On success `tools/call` SHALL return an MCP-shaped result: a `content` array containing at least one `text` block carrying the tool's result, together with `isError: false`. A tool that executes but fails SHALL be reported as a result with `isError: true` and a `text` content block describing the failure — NOT a JSON-RPC error — so the calling model can observe and react to the error. `isError: true` is reserved for EXECUTION/business failures of a tool that ran: INVALID ARGUMENTS to a known tool (a parameter that fails the tool's input-schema validation, or params that cannot be deserialized) SHALL instead return a JSON-RPC error — Invalid Params (`-32602`) for a schema violation, Parse Error (`-32700`) for undeserializable params — NOT an `isError` result, so a spec client can distinguish a malformed call from a recoverable failure. An unknown tool NAME supplied via `tools/call` SHALL return a JSON-RPC Invalid Params error (`-32602`), NOT Method Not Found (`-32601`), because the `tools/call` method itself is implemented; a missing or non-string `name` SHALL likewise return Invalid Params.
 
 The legacy bare method==tool-name dispatch SHALL remain supported unchanged for back-compat, returning the tool's raw JSON result directly as the JSON-RPC `result` (not wrapped in the `content`/`isError` envelope). The `capabilities.tools` object advertised by `initialize` covers both `tools/list` and `tools/call`.
 
@@ -28,6 +28,11 @@ Scope: v1-mandatory
 - **WHEN** a tool invoked through `tools/call` runs but fails (e.g. it targets a resource that does not exist)
 - **THEN** the runtime SHALL return a result with `isError: true` and a `text` content block describing the failure
 - **AND** it SHALL NOT surface the failure as a JSON-RPC error object
+
+#### Scenario: invalid tool arguments via tools/call are a JSON-RPC error
+- **WHEN** an authenticated MCP client sends `tools/call` with a `params.name` that IS a registered tool but `params.arguments` fail that tool's input-schema validation (a required parameter missing, or params that cannot be deserialized)
+- **THEN** the runtime SHALL return a JSON-RPC error — Invalid Params (`-32602`) for a schema violation, Parse Error (`-32700`) for undeserializable params
+- **AND** it SHALL NOT wrap the argument error as an `isError: true` result, so a spec client can distinguish a malformed call from a recoverable execution failure
 
 #### Scenario: bare method dispatch remains supported
 - **WHEN** an authenticated MCP client sends a request whose JSON-RPC `method` is a tool name directly (the legacy dialect)

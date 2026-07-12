@@ -603,12 +603,22 @@ impl McpServer {
             }
             Err(e) => {
                 error!(error = %e, method = %request.method, "MCP: tool error");
-                if is_tools_call {
-                    // MCP: a tool that ran but FAILED is reported as an `isError`
-                    // result (so the calling model sees the failure and can
-                    // react), NOT a JSON-RPC protocol error. Protocol-level
-                    // failures (unknown tool, missing capability, bad params) were
-                    // already returned as JSON-RPC errors above.
+                // MCP (2025-06-18 tools §Error handling) draws a line the bare
+                // path does not: a tool that RAN but failed (an execution/
+                // business error) is an `isError: true` result so the calling
+                // model can observe and react to it; but INVALID ARGUMENTS — a
+                // param schema violation (`InvalidParams`) or undeserializable
+                // params (`ParseError`) surfaced by the handler's `parse_params`
+                // — are PROTOCOL errors and MUST stay JSON-RPC errors (-32602 /
+                // -32700), so a spec client can distinguish a malformed call from
+                // a recoverable failure. (The unknown-tool / missing-capability
+                // protocol errors were already returned above; these argument
+                // errors only surface here, inside the handler.) The bare path is
+                // unchanged: every error becomes a JSON-RPC error (hud-btveq
+                // review: gemini + codex).
+                let is_argument_error =
+                    matches!(e, McpError::InvalidParams(_) | McpError::ParseError(_));
+                if is_tools_call && !is_argument_error {
                     McpResponse::ok(id, tools_call_error_result(&e))
                 } else {
                     McpResponse::err(id, JsonRpcError::from(e))
@@ -2591,6 +2601,48 @@ mod tests {
         assert!(
             resp["result"]["content"].is_null() && resp["result"]["isError"].is_null(),
             "bare-method result must NOT be tools/call content-wrapped (back-compat): {resp}"
+        );
+    }
+
+    /// MCP conformance (hud-btveq review, gemini + codex): INVALID ARGUMENTS to a
+    /// KNOWN tool via `tools/call` are a JSON-RPC error, NOT an `isError: true`
+    /// result. `isError` is reserved for a tool that RAN but failed; params that
+    /// fail the handler's `parse_params` (here: `publish_to_widget` with the
+    /// required `widget_name` missing) are a protocol error, so a spec client can
+    /// distinguish a malformed call from a recoverable execution failure.
+    #[tokio::test]
+    async fn test_tools_call_invalid_arguments_is_json_rpc_error_not_iserror() {
+        let server = server_with_gauge().await;
+        // `publish_to_widget` is Guest-reachable (see the execution-error test
+        // above), so the request passes the capability gate and reaches the
+        // handler, where `parse_params` rejects the missing required fields.
+        let call = json!({
+            "jsonrpc":"2.0",
+            "method":"tools/call",
+            "params":{"name":"publish_to_widget","arguments":{}},
+            "id":8
+        });
+        let resp = parse_response(&server.dispatch(&call.to_string(), &guest()).await);
+        // parse_params maps any deserialization failure to InvalidParams (-32602).
+        assert_eq!(
+            resp["error"]["code"],
+            json!(-32602),
+            "invalid tool arguments via tools/call must be a JSON-RPC Invalid Params \
+             error, not an isError result: {resp}"
+        );
+        assert!(
+            resp["result"].is_null(),
+            "an argument-validation failure must NOT be wrapped as an isError result: {resp}"
+        );
+
+        // The SAME invalid call on the bare-method path stays a JSON-RPC error
+        // too (back-compat unchanged — this fork only affects tools/call shaping).
+        let bare = json!({"jsonrpc":"2.0","method":"publish_to_widget","params":{},"id":9});
+        let bare_resp = parse_response(&server.dispatch(&bare.to_string(), &guest()).await);
+        assert_eq!(
+            bare_resp["error"]["code"],
+            json!(-32602),
+            "bare publish_to_widget with missing args stays Invalid Params: {bare_resp}"
         );
     }
 }
