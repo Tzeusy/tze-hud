@@ -406,6 +406,7 @@ fn grace_period_expiry_removes_all_tile_nodes() {
 
     // Add a child node to the tile.
     let node = tze_hud_scene::types::Node {
+        layout: Default::default(),
         id: SceneId::new(),
         data: NodeData::SolidColor(tze_hud_scene::types::SolidColorNode {
             color: tze_hud_scene::types::Rgba {
@@ -506,6 +507,7 @@ fn explicit_lease_release_removes_all_nodes() {
     let tile_id = create_tile(&mut scene, tab_id, "release-agent", lease_id);
 
     let node = tze_hud_scene::types::Node {
+        layout: Default::default(),
         id: SceneId::new(),
         data: NodeData::SolidColor(tze_hud_scene::types::SolidColorNode {
             color: tze_hud_scene::types::Rgba {
@@ -566,6 +568,7 @@ fn resource_ref_count_drops_after_lease_expiry() {
     let resource_id = ResourceId::from_bytes([0xAB; 32]);
     scene.register_resource(resource_id);
     let node = tze_hud_scene::types::Node {
+        layout: Default::default(),
         id: SceneId::new(),
         data: NodeData::StaticImage(StaticImageNode {
             resource_id,
@@ -628,6 +631,7 @@ fn ttl_expiry_without_renewal_removes_tile() {
     let tile_id = create_tile(&mut scene, tab_id, "ttl-agent", lease_id);
 
     let node = tze_hud_scene::types::Node {
+        layout: Default::default(),
         id: SceneId::new(),
         data: NodeData::SolidColor(tze_hud_scene::types::SolidColorNode {
             color: tze_hud_scene::types::Rgba {
@@ -691,6 +695,7 @@ fn second_agent_cannot_mutate_dashboard_tile() {
 
     // Attempt: intruder-agent tries to set_tile_root on dashboard-agent's tile.
     let node = tze_hud_scene::types::Node {
+        layout: Default::default(),
         id: SceneId::new(),
         data: NodeData::SolidColor(tze_hud_scene::types::SolidColorNode {
             color: tze_hud_scene::types::Rgba {
@@ -787,6 +792,7 @@ fn dashboard_agent_cannot_mutate_other_namespace_tiles() {
 
     // Dashboard agent attempts to mutate other-agent's tile.
     let node = tze_hud_scene::types::Node {
+        layout: Default::default(),
         id: SceneId::new(),
         data: NodeData::SolidColor(tze_hud_scene::types::SolidColorNode {
             color: tze_hud_scene::types::Rgba {
@@ -967,6 +973,7 @@ fn mutation_after_release_is_rejected() {
 
     // Attempt to mutate the tile after release — should fail.
     let node = tze_hud_scene::types::Node {
+        layout: Default::default(),
         id: SceneId::new(),
         data: NodeData::SolidColor(tze_hud_scene::types::SolidColorNode {
             color: tze_hud_scene::types::Rgba {

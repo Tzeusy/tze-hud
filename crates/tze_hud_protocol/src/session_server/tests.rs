@@ -217,6 +217,7 @@ async fn setup_test_with_input_capture_channel() -> (
         .set_tile_root(
             tile_id,
             tze_hud_scene::Node {
+                layout: Default::default(),
                 id: node_id,
                 data: tze_hud_scene::NodeData::HitRegion(tze_hud_scene::HitRegionNode {
                     bounds: tze_hud_scene::Rect::new(0.0, 0.0, 100.0, 50.0),
@@ -261,6 +262,7 @@ fn test_scene_node_contains_handles_deep_hierarchy_iteratively() {
     scene.nodes.insert(
         root_id,
         tze_hud_scene::Node {
+            layout: Default::default(),
             id: root_id,
             data: tze_hud_scene::NodeData::SolidColor(tze_hud_scene::SolidColorNode {
                 bounds: tze_hud_scene::Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -277,6 +279,7 @@ fn test_scene_node_contains_handles_deep_hierarchy_iteratively() {
         scene.nodes.insert(
             child_id,
             tze_hud_scene::Node {
+                layout: Default::default(),
                 id: child_id,
                 data: tze_hud_scene::NodeData::SolidColor(tze_hud_scene::SolidColorNode {
                     bounds: tze_hud_scene::Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -1900,6 +1903,7 @@ async fn test_publish_to_tile_by_element_id_applies_override_and_updates_timesta
     };
 
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -2058,6 +2062,7 @@ async fn test_publish_to_tile_by_element_id_rejects_invalid_node_even_with_bound
     };
 
     let mut invalid_node = crate::convert::scene_node_to_proto(&Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::SolidColor(SolidColorNode {
@@ -9632,6 +9637,7 @@ async fn test_resident_upload_then_static_image_references_uploaded_resource_id(
     };
 
     let root_node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::StaticImage(StaticImageNode {

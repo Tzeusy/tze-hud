@@ -162,6 +162,7 @@ mod tests {
                 .set_tile_root(
                     tile_id,
                     Node {
+                        layout: Default::default(),
                         id: node_id,
                         children: vec![],
                         data: NodeData::HitRegion(HitRegionNode {
@@ -235,6 +236,7 @@ mod tests {
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::SolidColor(SolidColorNode {
@@ -288,6 +290,7 @@ mod tests {
             .set_tile_root(
                 content_tile,
                 Node {
+                    layout: Default::default(),
                     id: content_node_id,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -316,6 +319,7 @@ mod tests {
             .set_tile_root(
                 chrome_tile,
                 Node {
+                    layout: Default::default(),
                     id: chrome_node_id,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -372,6 +376,7 @@ mod tests {
             .set_tile_root(
                 content_tile,
                 Node {
+                    layout: Default::default(),
                     id: content_node_id,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -401,6 +406,7 @@ mod tests {
             .set_tile_root(
                 overlay_tile,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::SolidColor(SolidColorNode {
@@ -492,6 +498,7 @@ mod tests {
         scene.nodes.insert(
             child1_id,
             Node {
+                layout: Default::default(),
                 id: child1_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -506,6 +513,7 @@ mod tests {
         scene.nodes.insert(
             child2_id,
             Node {
+                layout: Default::default(),
                 id: child2_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -522,6 +530,7 @@ mod tests {
         scene.nodes.insert(
             parent_id,
             Node {
+                layout: Default::default(),
                 id: parent_id,
                 children: vec![child1_id, child2_id],
                 data: NodeData::SolidColor(SolidColorNode {

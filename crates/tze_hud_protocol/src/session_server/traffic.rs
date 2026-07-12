@@ -235,11 +235,13 @@ mod inbound_tests {
     fn set_tile_root_with_inline_children_stays_state_stream() {
         use crate::proto::{NodeProto, SetTileRootMutation};
         let child = NodeProto {
+            layout: 0,
             id: vec![],
             data: None,
             children: vec![],
         };
         let root = NodeProto {
+            layout: 0,
             id: vec![],
             data: None,
             children: vec![child.clone(), child],

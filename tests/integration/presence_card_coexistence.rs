@@ -144,6 +144,7 @@ fn card_bounds(agent_index: usize, tab_height: f32) -> Rect {
 /// Build the SolidColorNode (semi-transparent dark background, full tile bounds).
 fn make_bg_node() -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::SolidColor(SolidColorNode {
@@ -165,6 +166,7 @@ fn make_bg_node() -> Node {
 /// is not wired in these scene-layer tests. Avatar upload is already tested in hud-apoe.1.
 fn make_placeholder_avatar_node() -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::StaticImage(StaticImageNode {
@@ -181,6 +183,7 @@ fn make_placeholder_avatar_node() -> Node {
 /// Build the TextMarkdownNode with the given content string.
 fn make_text_node(content: &str) -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -816,6 +819,7 @@ async fn set_tile_text_via_grpc(
                             proto::SetTileRootMutation {
                                 tile_id: tile_id_bytes.to_vec(),
                                 node: Some(proto::NodeProto {
+                                    layout: 0,
                                     id: Vec::new(), // server assigns
                                     data: Some(proto::node_proto::Data::TextMarkdown(
                                         proto::TextMarkdownNodeProto {

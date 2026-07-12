@@ -462,6 +462,7 @@ async fn do_content_update_with_host(
     let bg_parent_id_be = bg_uuid.as_bytes().to_vec();
 
     let bg_node = tze_hud_protocol::proto::NodeProto {
+        layout: 0,
         id: bg_node_id_le,
         data: Some(tze_hud_protocol::proto::node_proto::Data::SolidColor(
             tze_hud_protocol::proto::SolidColorNodeProto {
@@ -484,6 +485,7 @@ async fn do_content_update_with_host(
     };
 
     let icon_node = tze_hud_protocol::proto::NodeProto {
+        layout: 0,
         id: vec![],
         data: Some(tze_hud_protocol::proto::node_proto::Data::StaticImage(
             tze_hud_protocol::proto::StaticImageNodeProto {
@@ -504,6 +506,7 @@ async fn do_content_update_with_host(
     };
 
     let header_node = tze_hud_protocol::proto::NodeProto {
+        layout: 0,
         id: vec![],
         data: Some(tze_hud_protocol::proto::node_proto::Data::TextMarkdown(
             tze_hud_protocol::proto::TextMarkdownNodeProto {
@@ -531,6 +534,7 @@ async fn do_content_update_with_host(
 
     // Updated body node — content changes per cycle (tasks.md §6.1).
     let body_node = tze_hud_protocol::proto::NodeProto {
+        layout: 0,
         id: vec![],
         data: Some(tze_hud_protocol::proto::node_proto::Data::TextMarkdown(
             tze_hud_protocol::proto::TextMarkdownNodeProto {
@@ -557,6 +561,7 @@ async fn do_content_update_with_host(
     };
 
     let refresh_node = tze_hud_protocol::proto::NodeProto {
+        layout: 0,
         id: vec![],
         data: Some(tze_hud_protocol::proto::node_proto::Data::HitRegion(
             tze_hud_protocol::proto::HitRegionNodeProto {
@@ -578,6 +583,7 @@ async fn do_content_update_with_host(
     };
 
     let dismiss_node = tze_hud_protocol::proto::NodeProto {
+        layout: 0,
         id: vec![],
         data: Some(tze_hud_protocol::proto::node_proto::Data::HitRegion(
             tze_hud_protocol::proto::HitRegionNodeProto {
@@ -1613,6 +1619,7 @@ async fn create_tile_batch_with_host(
     let bg_parent_id_be = bg_uuid.as_bytes().to_vec(); // for AddNodeMutation.parent_id
 
     let bg_node = tze_hud_protocol::proto::NodeProto {
+        layout: 0,
         id: bg_node_id_le,
         data: Some(tze_hud_protocol::proto::node_proto::Data::SolidColor(
             tze_hud_protocol::proto::SolidColorNodeProto {
@@ -1635,6 +1642,7 @@ async fn create_tile_batch_with_host(
     };
 
     let icon_node = tze_hud_protocol::proto::NodeProto {
+        layout: 0,
         id: vec![], // empty = server assigns a fresh UUIDv7
         data: Some(tze_hud_protocol::proto::node_proto::Data::StaticImage(
             tze_hud_protocol::proto::StaticImageNodeProto {
@@ -1655,6 +1663,7 @@ async fn create_tile_batch_with_host(
     };
 
     let header_node = tze_hud_protocol::proto::NodeProto {
+        layout: 0,
         id: vec![],
         data: Some(tze_hud_protocol::proto::node_proto::Data::TextMarkdown(
             tze_hud_protocol::proto::TextMarkdownNodeProto {
@@ -1681,6 +1690,7 @@ async fn create_tile_batch_with_host(
     };
 
     let body_node = tze_hud_protocol::proto::NodeProto {
+        layout: 0,
         id: vec![],
         data: Some(tze_hud_protocol::proto::node_proto::Data::TextMarkdown(
             tze_hud_protocol::proto::TextMarkdownNodeProto {
@@ -1707,6 +1717,7 @@ async fn create_tile_batch_with_host(
     };
 
     let refresh_node = tze_hud_protocol::proto::NodeProto {
+        layout: 0,
         id: vec![],
         data: Some(tze_hud_protocol::proto::node_proto::Data::HitRegion(
             tze_hud_protocol::proto::HitRegionNodeProto {
@@ -1728,6 +1739,7 @@ async fn create_tile_batch_with_host(
     };
 
     let dismiss_node = tze_hud_protocol::proto::NodeProto {
+        layout: 0,
         id: vec![],
         data: Some(tze_hud_protocol::proto::node_proto::Data::HitRegion(
             tze_hud_protocol::proto::HitRegionNodeProto {
@@ -2914,6 +2926,7 @@ mod tests {
         let bg_parent_id_be = bg_uuid.as_bytes().to_vec();
 
         let bg_node = tze_hud_protocol::proto::NodeProto {
+            layout: 0,
             id: bg_node_id_le,
             data: Some(tze_hud_protocol::proto::node_proto::Data::SolidColor(
                 tze_hud_protocol::proto::SolidColorNodeProto {
@@ -2935,6 +2948,7 @@ mod tests {
             children: vec![],
         };
         let icon_node = tze_hud_protocol::proto::NodeProto {
+            layout: 0,
             id: vec![],
             data: Some(tze_hud_protocol::proto::node_proto::Data::StaticImage(
                 tze_hud_protocol::proto::StaticImageNodeProto {
@@ -3285,6 +3299,7 @@ mod tests {
         // Build a minimal SetTileRoot batch.
         let bg_uuid = uuid::Uuid::now_v7();
         let bg_node = tze_hud_protocol::proto::NodeProto {
+            layout: 0,
             id: bg_uuid.to_bytes_le().to_vec(),
             data: Some(tze_hud_protocol::proto::node_proto::Data::SolidColor(
                 tze_hud_protocol::proto::SolidColorNodeProto {
@@ -3402,6 +3417,7 @@ mod tests {
         // Build the 6-node tree using direct struct construction.
         let bg_id = tze_hud_scene::SceneId::new();
         let bg = Node {
+            layout: Default::default(),
             id: bg_id,
             children: vec![],
             data: NodeData::SolidColor(SolidColorNode {
@@ -3415,6 +3431,7 @@ mod tests {
             .expect("add bg");
 
         let header = Node {
+            layout: Default::default(),
             id: tze_hud_scene::SceneId::new(),
             children: vec![],
             data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -3434,6 +3451,7 @@ mod tests {
             .expect("add header");
 
         let body = Node {
+            layout: Default::default(),
             id: tze_hud_scene::SceneId::new(),
             children: vec![],
             data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -3453,6 +3471,7 @@ mod tests {
             .expect("add body");
 
         let refresh = Node {
+            layout: Default::default(),
             id: tze_hud_scene::SceneId::new(),
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {
@@ -3468,6 +3487,7 @@ mod tests {
             .expect("add refresh");
 
         let dismiss = Node {
+            layout: Default::default(),
             id: tze_hud_scene::SceneId::new(),
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {
@@ -5378,6 +5398,7 @@ mod tests {
 
         // ── Attempt a: set_tile_root_checked by intruder ──────────────────────
         let intruder_node = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::SolidColor(SolidColorNode {
@@ -5457,6 +5478,7 @@ mod tests {
 
         // ── Attempt a: dashboard agent sets root of other-agent's tile ────────
         let node_a = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::SolidColor(SolidColorNode {
@@ -5478,6 +5500,7 @@ mod tests {
         // ── Attempt b: dashboard agent adds a node to other-agent's tile ──────
         // Set a root on other_tile first so we can attempt AddNode.
         let other_root = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::SolidColor(SolidColorNode {
@@ -5491,6 +5514,7 @@ mod tests {
             .expect("other-agent must be able to set its own tile root");
 
         let node_b = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {

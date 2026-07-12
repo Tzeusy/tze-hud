@@ -35,6 +35,7 @@ pub(super) fn scene_with_capture_tile() -> (SceneGraph, SceneId) {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: node_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -181,6 +182,7 @@ pub(super) fn scene_with_composer_in_nonactive_tab()
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: node_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -364,6 +366,7 @@ mod tests {
         scene.nodes.insert(
             composer_id,
             Node {
+                layout: Default::default(),
                 id: composer_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -498,6 +501,7 @@ mod tests {
         scene.nodes.insert(
             composer_id,
             Node {
+                layout: Default::default(),
                 id: composer_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {

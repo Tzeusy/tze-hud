@@ -329,6 +329,7 @@ fn snapshot_references_resource_ids_not_blob_data() {
     g.register_resource(resource_id);
 
     let image_node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::StaticImage(StaticImageNode {

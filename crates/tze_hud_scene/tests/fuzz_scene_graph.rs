@@ -48,6 +48,7 @@ fn arb_valid_rect() -> impl Strategy<Value = Rect> {
 /// Generate a valid SolidColor node.
 fn arb_solid_color_node() -> impl Strategy<Value = Node> {
     arb_valid_rect().prop_map(|bounds| Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::SolidColor(SolidColorNode {
@@ -61,6 +62,7 @@ fn arb_solid_color_node() -> impl Strategy<Value = Node> {
 /// Generate a valid TextMarkdown node.
 fn arb_text_node() -> impl Strategy<Value = Node> {
     ("[a-z]{1,32}", arb_valid_rect()).prop_map(|(content, bounds)| Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -336,6 +338,7 @@ fn apply_fuzz_op(graph: &mut SceneGraph, oracle: &mut Oracle, op: &FuzzOp, idx: 
         FuzzOp::SetTileRoot { node } => {
             if let Some(tile_id) = oracle.random_tile(idx) {
                 let fresh_node = Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     ..node.clone()
                 };
@@ -348,6 +351,7 @@ fn apply_fuzz_op(graph: &mut SceneGraph, oracle: &mut Oracle, op: &FuzzOp, idx: 
         FuzzOp::AddNode { node } => {
             if let Some(tile_id) = oracle.random_tile(idx) {
                 let fresh_node = Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     ..node.clone()
                 };
@@ -557,7 +561,7 @@ proptest! {
             let _ = graph.update_tile_bounds(bogus_tile, Rect::new(0.0, 0.0, 100.0, 100.0), AGENT);
             let _ = graph.update_tile_z_order(bogus_tile, 1, AGENT);
             let _ = graph.update_tile_opacity(bogus_tile, 0.5, AGENT);
-            let _ = graph.set_tile_root(bogus_tile, Node {
+            let _ = graph.set_tile_root(bogus_tile, Node { layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -664,7 +668,7 @@ proptest! {
             graph
                 .set_tile_root(
                     tile_id,
-                    Node {
+                    Node { layout: Default::default(),
                         id: SceneId::new(),
                         children: vec![],
                         data: NodeData::SolidColor(SolidColorNode {
@@ -867,6 +871,7 @@ fn test_oversized_markdown_content_rejected() {
     let result = graph.set_tile_root(
         tile_id,
         Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::TextMarkdown(TextMarkdownNode {

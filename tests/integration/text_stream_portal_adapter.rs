@@ -657,6 +657,7 @@ async fn set_tile_root_text(
                             proto::SetTileRootMutation {
                                 tile_id,
                                 node: Some(proto::NodeProto {
+                                    layout: 0,
                                     id: vec![],
                                     data: Some(proto::node_proto::Data::TextMarkdown(
                                         proto::TextMarkdownNodeProto {

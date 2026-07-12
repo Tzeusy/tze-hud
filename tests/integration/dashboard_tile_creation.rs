@@ -197,6 +197,7 @@ async fn upload_png(
 /// Rgba(0.07, 0.07, 0.07, 0.90), bounds (0, 0, 400, 300).
 fn make_bg_node() -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![], // children added separately via AddNode
         data: NodeData::SolidColor(SolidColorNode {
@@ -219,6 +220,7 @@ fn make_bg_root_with_children(
     dismiss_id: SceneId,
 ) -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![icon_id, header_id, body_id, refresh_id, dismiss_id],
         data: NodeData::SolidColor(SolidColorNode {
@@ -234,6 +236,7 @@ fn make_bg_root_with_children(
 /// Spec §Dashboard Tile Composition node 2.
 fn make_icon_node(resource_id: ResourceId) -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::StaticImage(StaticImageNode {
@@ -253,6 +256,7 @@ fn make_icon_node(resource_id: ResourceId) -> Node {
 /// font_size=18, white, position (76, 20, 308, 32).
 fn make_header_node() -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -275,6 +279,7 @@ fn make_header_node() -> Node {
 /// font_size=14, gray, position (16, 72, 368, 180).
 fn make_body_node(content: &str) -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -298,6 +303,7 @@ fn make_body_node(content: &str) -> Node {
 /// accepts_focus=true, accepts_pointer=true, auto_capture=true, release_on_up=true.
 fn make_refresh_node() -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::HitRegion(HitRegionNode {
@@ -321,6 +327,7 @@ fn make_refresh_node() -> Node {
 /// accepts_focus=true, accepts_pointer=true, auto_capture=true, release_on_up=true.
 fn make_dismiss_node() -> Node {
     Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::HitRegion(HitRegionNode {
@@ -590,6 +597,7 @@ fn static_image_node_with_unregistered_resource_id_is_rejected() {
     ]);
 
     let icon = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::StaticImage(StaticImageNode {

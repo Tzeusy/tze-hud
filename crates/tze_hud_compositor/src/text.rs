@@ -475,6 +475,30 @@ pub(crate) fn composer_wrap_line_widths(
     buf.layout_runs().map(|run| run.line_w).collect()
 }
 
+/// The tile-local text content-box margins `(margin_x, margin_y)` the render path
+/// insets a `TextMarkdownNode` by, for a node of the given bounds and
+/// `line_height`: a horizontal margin scaled from width and a vertical margin
+/// scaled from height (both clamped to `[1, 6]` px), the vertical one additionally
+/// bounded so it never eats more than half the height above one line. The painted
+/// content box is `(bounds.width - 2*margin_x, bounds.height - 2*margin_y)`.
+///
+/// Extracted so the render constructors (`TextItem::from_text_markdown_node` /
+/// `_cached`) and the vertical-flow measurement
+/// (`crate::vertical_flow::flow_child_height`) compute the wrap width and vertical
+/// padding from the SAME formula and cannot drift (hud-yfj8u; the drift class
+/// hud-3xdlf fixed for the height math).
+pub(crate) fn text_content_box_margins(
+    bounds_width: f32,
+    bounds_height: f32,
+    line_height: f32,
+) -> (f32, f32) {
+    let margin_x = (bounds_width * 0.08).clamp(1.0, 6.0);
+    let target_margin_y = (bounds_height * 0.20).clamp(1.0, 6.0);
+    let max_margin_y = ((bounds_height - line_height).max(0.0) / 2.0).min(6.0);
+    let margin_y = target_margin_y.min(max_margin_y);
+    (margin_x, margin_y)
+}
+
 /// Measure the rendered height (px) of markdown `content` wrapped to
 /// `wrap_width`, reproducing the SAME shaping the render path uses for a
 /// `TextMarkdownNode` — [`TextItem::from_text_markdown_cached`] +
@@ -2152,10 +2176,8 @@ impl TextItem {
         let font_size_px = node.font_size_px.clamp(6.0, 200.0);
         let lh_multiplier = crate::markdown::MarkdownTokens::default().line_height_multiplier;
         let line_height = font_size_px * lh_multiplier;
-        let margin_x = (node.bounds.width * 0.08).clamp(1.0, 6.0);
-        let target_margin_y = (node.bounds.height * 0.20).clamp(1.0, 6.0);
-        let max_margin_y = ((node.bounds.height - line_height).max(0.0) / 2.0).min(6.0);
-        let margin_y = target_margin_y.min(max_margin_y);
+        let (margin_x, margin_y) =
+            text_content_box_margins(node.bounds.width, node.bounds.height, line_height);
         let x = tile_x + node.bounds.x + margin_x;
         let y = tile_y + node.bounds.y + margin_y;
         let w = (node.bounds.width - margin_x * 2.0).max(1.0);
@@ -2275,10 +2297,8 @@ impl TextItem {
         let font_size_px = node.font_size_px.clamp(6.0, 200.0);
         let lh_multiplier = parsed.line_height_multiplier;
         let line_height = font_size_px * lh_multiplier;
-        let margin_x = (node.bounds.width * 0.08).clamp(1.0, 6.0);
-        let target_margin_y = (node.bounds.height * 0.20).clamp(1.0, 6.0);
-        let max_margin_y = ((node.bounds.height - line_height).max(0.0) / 2.0).min(6.0);
-        let margin_y = target_margin_y.min(max_margin_y);
+        let (margin_x, margin_y) =
+            text_content_box_margins(node.bounds.width, node.bounds.height, line_height);
         let x = tile_x + node.bounds.x + margin_x;
         let y = tile_y + node.bounds.y + margin_y;
         let w = (node.bounds.width - margin_x * 2.0).max(1.0);

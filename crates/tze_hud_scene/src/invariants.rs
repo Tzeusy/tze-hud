@@ -2049,6 +2049,7 @@ mod tests {
         // Add root HitRegionNode using set_tile_root
         let node1_id = SceneId::new();
         let root_node = Node {
+            layout: Default::default(),
             id: node1_id,
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {
@@ -2064,6 +2065,7 @@ mod tests {
         // Add second HitRegionNode as child using add_node_to_tile
         let node2_id = SceneId::new();
         let child_node = Node {
+            layout: Default::default(),
             id: node2_id,
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {
@@ -2108,6 +2110,7 @@ mod tests {
 
         let node_id = SceneId::new();
         let root_node = Node {
+            layout: Default::default(),
             id: node_id,
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {
@@ -2356,6 +2359,7 @@ mod tests {
         graph.nodes.insert(
             node_id,
             Node {
+                layout: Default::default(),
                 id: node_id,
                 children: vec![node_id], // self-reference
                 data: NodeData::SolidColor(SolidColorNode {
@@ -2464,6 +2468,7 @@ mod tests {
             graph.nodes.insert(
                 nid,
                 Node {
+                    layout: Default::default(),
                     id: nid,
                     children: children.clone(),
                     data: NodeData::SolidColor(SolidColorNode {
@@ -2586,6 +2591,7 @@ mod tests {
         graph.nodes.insert(
             fake_key,
             Node {
+                layout: Default::default(),
                 id: real_id,
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -2670,6 +2676,7 @@ mod tests {
             )
             .unwrap();
         let root_node = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::SolidColor(SolidColorNode {
@@ -2805,6 +2812,7 @@ mod tests {
 
         let node_id = SceneId::new();
         let root_node = Node {
+            layout: Default::default(),
             id: node_id,
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {
@@ -2958,6 +2966,7 @@ mod tests {
 
     fn make_text_node(content: &str, runs: Vec<TextColorRun>) -> Node {
         Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::TextMarkdown(TextMarkdownNode {

@@ -1146,6 +1146,7 @@ async fn test_color_runs_red_error_text_rendered() {
     // "ERROR rest of the text" — "ERROR" (bytes 0..5) → red, rest → base white.
     let content = "ERROR rest of the text";
     let node = Node {
+        layout: Default::default(),
         id: tze_hud_scene::types::SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {

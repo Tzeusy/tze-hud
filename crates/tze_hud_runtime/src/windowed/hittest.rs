@@ -580,6 +580,7 @@ mod tests {
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id: node_id,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -624,6 +625,7 @@ mod tests {
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id: node_id,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {

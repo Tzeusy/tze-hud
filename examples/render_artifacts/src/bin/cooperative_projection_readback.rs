@@ -199,6 +199,7 @@ fn build_projection_scene(
     scene.set_tile_root(
         tile,
         Node {
+            layout: Default::default(),
             id: SceneId::new(),
             data: NodeData::TextMarkdown(TextMarkdownNode {
                 content: [

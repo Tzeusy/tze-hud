@@ -142,6 +142,7 @@ async fn test_static_image_node_renders_placeholder_quad() {
     // RS-4: StaticImageNode uses resource_id + decoded_bytes; no raw blob embedded.
     let resource_id = ResourceId::of(b"8x8 test image placeholder");
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::StaticImage(StaticImageNode {
@@ -213,6 +214,7 @@ async fn test_static_image_node_composited_with_other_nodes() {
         .set_tile_root(
             left_tile_id,
             Node {
+                layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -239,6 +241,7 @@ async fn test_static_image_node_composited_with_other_nodes() {
         .set_tile_root(
             right_tile_id,
             Node {
+                layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::StaticImage(StaticImageNode {
@@ -308,6 +311,7 @@ async fn test_focused_hit_region_emits_focus_ring_in_overlay_mode() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: node_id,
                 children: vec![],
                 data: NodeData::HitRegion(hit),
@@ -573,6 +577,7 @@ async fn test_composerless_node_focus_emits_ring() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: node_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -666,6 +671,7 @@ async fn test_viewer_echo_renders_kind_distinct_line_above_composer() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: composer_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -811,6 +817,7 @@ async fn test_viewer_echo_stack_tracks_live_composer_box() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: composer_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -917,6 +924,7 @@ fn viewer_echo_test_scene() -> (SceneGraph, SceneId) {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: composer_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -1200,6 +1208,7 @@ async fn test_chrome_always_above_max_zorder_tile() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -1270,6 +1279,7 @@ async fn test_chrome_pass_uses_load_op_load() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -1328,6 +1338,7 @@ async fn test_chrome_pass_uses_load_op_load() {
 async fn test_two_pass_with_empty_chrome_cmds() {
     let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
     let scene = scene_with_node(Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::SolidColor(SolidColorNode {
@@ -1579,6 +1590,7 @@ async fn test_text_markdown_node_renders_visible_text() {
 
     // Dark-blue background, white text — high contrast for pixel detection.
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -1621,6 +1633,7 @@ async fn test_text_markdown_node_avoids_placeholder_bar_when_text_renderer_activ
     compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
 
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -1673,6 +1686,7 @@ async fn test_text_clip_overflow_stays_within_bounds() {
     // Content: many lines so overflow is tested.
     let content = "Line1\nLine2\nLine3\nLine4\nLine5\nLine6\nLine7\nLine8".to_owned();
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -1730,6 +1744,7 @@ async fn test_text_ellipsis_overflow_no_panic() {
 
     let long_line = "A very long line that definitely overflows the available width of this tile";
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -2111,6 +2126,7 @@ async fn test_stage6_budget_with_text_rendering_active() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -2357,6 +2373,7 @@ async fn test_lifecycle_sentinel_keeps_cached_markdown_render_path() {
     let content = "# Portal\n**attached** and ready".to_owned();
 
     let make_node = |runs: Box<[tze_hud_scene::types::TextColorRun]>| Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -8870,6 +8887,7 @@ async fn test_collect_text_items_applies_tile_scroll_offset() {
     let node_x = 10.0_f32;
     let node_y = 20.0_f32;
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -8921,6 +8939,7 @@ async fn test_collect_text_items_applies_tile_scroll_offset() {
         .unwrap();
     // No scroll offset registered — offset defaults to (0, 0).
     let baseline_node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -9394,6 +9413,7 @@ async fn scrolled_portal_output_tile_clips_geometry_outside_viewport() {
         .set_tile_root(
             frame_id,
             Node {
+                layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -9431,6 +9451,7 @@ async fn scrolled_portal_output_tile_clips_geometry_outside_viewport() {
         .set_tile_root(
             output_id,
             Node {
+                layout: Default::default(),
                 id: root_id,
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -9446,6 +9467,7 @@ async fn scrolled_portal_output_tile_clips_geometry_outside_viewport() {
             output_id,
             Some(root_id),
             Node {
+                layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -9533,6 +9555,7 @@ async fn scrolled_rounded_solid_preserves_original_shape_with_viewport_clip() {
         .set_tile_root(
             output_id,
             Node {
+                layout: Default::default(),
                 id: root_id,
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -9548,6 +9571,7 @@ async fn scrolled_rounded_solid_preserves_original_shape_with_viewport_clip() {
             output_id,
             Some(root_id),
             Node {
+                layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -9608,6 +9632,7 @@ async fn test_collect_text_items_zero_scroll_unchanged() {
     let node_x = 5.0_f32;
     let node_y = 10.0_f32;
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -9687,6 +9712,7 @@ async fn test_collect_text_items_at_tail_ellipsis_uses_tail_anchored_viewport() 
         )
         .unwrap();
     let node_ellipsis = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -9762,6 +9788,7 @@ async fn test_collect_text_items_at_tail_ellipsis_uses_tail_anchored_viewport() 
         )
         .unwrap();
     let node_ellipsis_head = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -9810,6 +9837,7 @@ async fn test_collect_text_items_at_tail_ellipsis_uses_tail_anchored_viewport() 
         )
         .unwrap();
     let node_clip = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -10529,6 +10557,7 @@ fn markdown_cache_compute_key_is_deterministic_and_content_addressed() {
 
     let node_a_id = SceneId::new();
     let node_a = Node {
+        layout: Default::default(),
         id: node_a_id,
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -10621,6 +10650,7 @@ fn portal_markdown_node_ids_scopes_by_scroll_config() {
 
     fn md_node(id: SceneId, content: &str) -> Node {
         Node {
+            layout: Default::default(),
             id,
             children: vec![],
             data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -10764,6 +10794,7 @@ async fn prime_markdown_cache_builds_node_key_cache_entry() {
 
     let node_id = SceneId::new();
     let node = Node {
+        layout: Default::default(),
         id: node_id,
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -10841,6 +10872,7 @@ async fn render_frame_headless_is_parse_free_after_commit_time_prime() {
 
     let node_id = SceneId::new();
     let node = Node {
+        layout: Default::default(),
         id: node_id,
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -11415,6 +11447,7 @@ async fn local_composer_text_item_uses_hit_region_bounds() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: root_id,
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -11432,6 +11465,7 @@ async fn local_composer_text_item_uses_hit_region_bounds() {
             tile_id,
             Some(root_id),
             Node {
+                layout: Default::default(),
                 id: hit_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -11529,6 +11563,7 @@ async fn composer_placeholder_renders_only_when_draft_empty() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: root_id,
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -11545,6 +11580,7 @@ async fn composer_placeholder_renders_only_when_draft_empty() {
             tile_id,
             Some(root_id),
             Node {
+                layout: Default::default(),
                 id: hit_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -11686,6 +11722,7 @@ async fn composer_echo_confined_to_bottom_strip_full_tile_hitregion() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: root_id,
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -11703,6 +11740,7 @@ async fn composer_echo_confined_to_bottom_strip_full_tile_hitregion() {
             tile_id,
             Some(root_id),
             Node {
+                layout: Default::default(),
                 id: hit_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -11819,6 +11857,7 @@ async fn composer_wrapped_draft_stays_in_short_pane_headless() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: root_id,
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -11838,6 +11877,7 @@ async fn composer_wrapped_draft_stays_in_short_pane_headless() {
             tile_id,
             Some(root_id),
             Node {
+                layout: Default::default(),
                 id: hit_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -11928,6 +11968,7 @@ async fn composer_draft_overflow_is_clipped_to_box_headless() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: root_id,
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -11948,6 +11989,7 @@ async fn composer_draft_overflow_is_clipped_to_box_headless() {
             tile_id,
             Some(root_id),
             Node {
+                layout: Default::default(),
                 id: hit_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -12081,6 +12123,7 @@ fn composer_caret_test_scene() -> (SceneGraph, SceneId, SceneId) {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: root_id,
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -12097,6 +12140,7 @@ fn composer_caret_test_scene() -> (SceneGraph, SceneId, SceneId) {
             tile_id,
             Some(root_id),
             Node {
+                layout: Default::default(),
                 id: hit_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -12946,6 +12990,7 @@ async fn top_anchored_empty_caret_sits_at_pane_origin_no_teleport() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: root_id,
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -12967,6 +13012,7 @@ async fn top_anchored_empty_caret_sits_at_pane_origin_no_teleport() {
             tile_id,
             Some(root_id),
             Node {
+                layout: Default::default(),
                 id: hit_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -13507,6 +13553,7 @@ async fn input_history_block_honors_tile_scroll_offset() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: composer_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -13660,6 +13707,7 @@ async fn transcript_divider_rects_track_tile_scroll_offset() {
 
     // A transcript with one thematic break between two entries.
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -14224,6 +14272,7 @@ async fn scroll_reshape_bench_hud991cj() {
         // Laid out far taller than the 256px tile so the pane is scrollable
         // (windowed by offset, not truncated).
         let make_node = |text: String| Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -14331,6 +14380,7 @@ fn hud_u4lq2_scenario_scene(repeat: usize) -> SceneGraph {
         a: 1.0,
     };
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -14465,6 +14515,7 @@ async fn reused_compositor_across_scenes_lands_markdown_primer_hud_u4lq2() {
             "The quick brown fox jumps over the lazy dog.\n".repeat(repeat)
         );
         let node = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: tze_hud_scene::types::NodeData::TextMarkdown(
@@ -14689,6 +14740,7 @@ async fn portal_tile_fade_in_starts_on_first_content() {
 
     // Attach content — root node present.
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::SolidColor(SolidColorNode {
@@ -14827,6 +14879,7 @@ async fn portal_tile_interrupt_seeds_fade_in_from_eased_opacity() {
         .register_tile_scroll_config(tile_id, TileScrollConfig::vertical())
         .unwrap();
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::SolidColor(SolidColorNode {
@@ -14923,6 +14976,7 @@ async fn non_scrollable_tile_has_no_portal_animation_state() {
 
     // NO register_tile_scroll_config — this is NOT a portal tile.
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::SolidColor(SolidColorNode {
@@ -14972,6 +15026,7 @@ async fn prime_truncation_cache_is_commit_primed_before_render_frame_headless() 
     let content = "The quick brown fox jumps over the lazy dog.".repeat(4);
 
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -15050,6 +15105,7 @@ async fn drag_move_position_only_skips_content_cache_reprimes_bench() {
     // A realistically large transcript so the per-frame re-hash cost is visible.
     let content = "The quick brown fox jumps over the lazy dog. ".repeat(400);
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -15150,6 +15206,7 @@ async fn load_font_bytes_new_font_resets_truncation_cache_scene_version() {
     compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
 
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -15231,6 +15288,7 @@ fn w41ef_portal_tile(scene: &mut SceneGraph, bounds: Rect, node_bounds: Rect) ->
         .register_tile_scroll_config(tile_id, TileScrollConfig::vertical())
         .unwrap();
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -15291,6 +15349,7 @@ async fn hud_w41ef_portal_content_background_scaled_by_tile_opacity() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: root_id,
                 children: vec![],
                 data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -15404,6 +15463,7 @@ fn b0x0m_tile_with_root(
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: root_id,
                 children: vec![],
                 data,
@@ -15601,6 +15661,7 @@ fn dat3x_markdown_tile_scene(content: &str, opacity: f32) -> (SceneGraph, SceneI
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: root_id,
                 children: vec![],
                 data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -15763,6 +15824,7 @@ fn portal_reveal_tile(scene: &mut SceneGraph) -> (SceneId, SceneId) {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: root_id,
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -15792,6 +15854,7 @@ fn portal_reveal_add_md(
             tile_id,
             Some(parent_id),
             Node {
+                layout: Default::default(),
                 id,
                 children: vec![],
                 data: portal_reveal_md_data(content, color_runs, top),
@@ -16275,6 +16338,7 @@ async fn portal_surface_renders_parts_with_per_part_scope_and_clip() {
     // Transcript root: many lines, taller than its band → overflow.
     let transcript_content = "Line A\nLine B\nLine C\nLine D\nLine E\nLine F\nLine G\nLine H";
     let transcript_node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -16297,6 +16361,7 @@ async fn portal_surface_renders_parts_with_per_part_scope_and_clip() {
     // Composer child: bounded strip at the bottom, same Ellipsis overflow.
     let composer_content = "draft reply text";
     let composer_node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -16419,6 +16484,7 @@ async fn portal_surface_container_part_scopes_descendant_text() {
 
     // Container root (the declared Transcript part node) — geometry-only.
     let container = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::SolidColor(SolidColorNode {
@@ -16432,6 +16498,7 @@ async fn portal_surface_container_part_scopes_descendant_text() {
 
     // Transcript text lives in a CHILD of the container, not a declared part.
     let text_node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {

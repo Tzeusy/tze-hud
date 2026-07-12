@@ -1027,6 +1027,7 @@ mod tests {
     ) -> SceneId {
         let node_id = SceneId::new();
         let node = Node {
+            layout: Default::default(),
             id: node_id,
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {
@@ -1485,6 +1486,7 @@ mod tests {
         let n1 = SceneId::new();
         let n2 = SceneId::new();
         let node_n1 = Node {
+            layout: Default::default(),
             id: n1,
             children: vec![n2],
             data: NodeData::HitRegion(HitRegionNode {
@@ -1496,6 +1498,7 @@ mod tests {
             }),
         };
         let node_n2 = Node {
+            layout: Default::default(),
             id: n2,
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {
@@ -1515,6 +1518,7 @@ mod tests {
         scene.nodes.insert(
             n3,
             Node {
+                layout: Default::default(),
                 id: n3,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -1533,6 +1537,7 @@ mod tests {
         scene.nodes.insert(
             nc,
             Node {
+                layout: Default::default(),
                 id: nc,
                 children: vec![],
                 data: NodeData::SolidColor(tze_hud_scene::SolidColorNode {
@@ -1615,6 +1620,7 @@ mod tests {
             scene.nodes.insert(
                 id,
                 Node {
+                    layout: Default::default(),
                     id,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -1638,6 +1644,7 @@ mod tests {
         scene.nodes.insert(
             root,
             Node {
+                layout: Default::default(),
                 id: root,
                 children: vec![minimize, drag, composer, submit, resize],
                 data: NodeData::SolidColor(tze_hud_scene::SolidColorNode {
@@ -1761,6 +1768,7 @@ mod tests {
         scene.nodes.insert(
             id,
             Node {
+                layout: Default::default(),
                 id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {

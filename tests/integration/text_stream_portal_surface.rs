@@ -151,6 +151,7 @@ fn build_collapsed_nodes(
     icon_id: tze_hud_scene::ResourceId,
 ) -> Vec<Node> {
     let root = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::SolidColor(SolidColorNode {
@@ -160,6 +161,7 @@ fn build_collapsed_nodes(
         }),
     };
     let title = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -180,6 +182,7 @@ fn build_collapsed_nodes(
         .cloned()
         .unwrap_or_else(|| "<empty stream>".to_string());
     let preview = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -195,6 +198,7 @@ fn build_collapsed_nodes(
         }),
     };
     let activity = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -210,6 +214,7 @@ fn build_collapsed_nodes(
         }),
     };
     let icon = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::StaticImage(tze_hud_scene::StaticImageNode {
@@ -222,6 +227,7 @@ fn build_collapsed_nodes(
         }),
     };
     let expand_hit = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::HitRegion(HitRegionNode {
@@ -241,6 +247,7 @@ fn build_expanded_nodes(
     icon_id: tze_hud_scene::ResourceId,
 ) -> Vec<Node> {
     let root = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::SolidColor(SolidColorNode {
@@ -251,6 +258,7 @@ fn build_expanded_nodes(
     };
     let transcript_text = state.bounded_transcript_markdown();
     let transcript = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -266,6 +274,7 @@ fn build_expanded_nodes(
         }),
     };
     let title = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -281,6 +290,7 @@ fn build_expanded_nodes(
         }),
     };
     let icon = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::StaticImage(tze_hud_scene::StaticImageNode {
@@ -293,6 +303,7 @@ fn build_expanded_nodes(
         }),
     };
     let reply_label = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -308,6 +319,7 @@ fn build_expanded_nodes(
         }),
     };
     let collapse_hit = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::HitRegion(HitRegionNode {
@@ -319,6 +331,7 @@ fn build_expanded_nodes(
         }),
     };
     let reply_hit = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::HitRegion(HitRegionNode {
@@ -522,6 +535,7 @@ fn user_scroll_offset_remains_authoritative_after_append_update() {
         .expect("set local scroll offset");
 
     let root = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::SolidColor(SolidColorNode {
@@ -531,6 +545,7 @@ fn user_scroll_offset_remains_authoritative_after_append_update() {
         }),
     };
     let transcript = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -778,6 +793,7 @@ fn expanded_transcript_materialization_is_bounded_to_viewport_and_budget() {
         .expect("local-first scroll offset must be writable");
 
     let root = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::SolidColor(SolidColorNode {
@@ -787,6 +803,7 @@ fn expanded_transcript_materialization_is_bounded_to_viewport_and_budget() {
         }),
     };
     let transcript = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -1359,6 +1376,7 @@ fn portal_adapter_append_preserves_user_scroll_position() {
 
     // Simulate an adapter append: update the tile content (SetTileRoot).
     let root = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::SolidColor(tze_hud_scene::types::SolidColorNode {
@@ -1368,6 +1386,7 @@ fn portal_adapter_append_preserves_user_scroll_position() {
         }),
     };
     let transcript = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: Vec::new(),
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -1506,6 +1525,7 @@ fn click_to_focus_grants_focus_to_composer_hit_region() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: composer_node_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -1605,6 +1625,7 @@ fn keyboard_processor_delivers_to_focused_composer_and_buffer_mutates() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: composer_node_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {

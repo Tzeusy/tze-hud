@@ -67,6 +67,7 @@ fn build_dense_scene(tile_count: usize, nodes_per_tile: usize) -> SceneGraph {
         // Root node (occupies full tile)
         let root_id = SceneId::new();
         let root_node = Node {
+            layout: Default::default(),
             id: root_id,
             children: vec![],
             data: NodeData::SolidColor(SolidColorNode {
@@ -81,6 +82,7 @@ fn build_dense_scene(tile_count: usize, nodes_per_tile: usize) -> SceneGraph {
         let extra_nodes = nodes_per_tile.saturating_sub(1).min(63);
         for j in 0..extra_nodes {
             let child = Node {
+                layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {

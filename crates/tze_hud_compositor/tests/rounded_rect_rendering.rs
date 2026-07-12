@@ -431,6 +431,7 @@ async fn test_tile_solid_color_radius_rounds_corners() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {

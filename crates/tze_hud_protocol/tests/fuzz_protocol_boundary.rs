@@ -184,6 +184,7 @@ fn proto_rect_negative_dims_does_not_panic() {
 #[test]
 fn proto_node_no_data_returns_none() {
     let n = NodeProto {
+        layout: 0,
         id: vec![],
         data: None,
         children: vec![],
@@ -195,6 +196,7 @@ fn proto_node_no_data_returns_none() {
 #[test]
 fn proto_node_static_image_empty_resource_id_returns_none() {
     let n = NodeProto {
+        layout: 0,
         id: vec![],
         data: Some(ProtoNodeData::StaticImage(StaticImageNodeProto {
             resource_id: vec![],
@@ -218,6 +220,7 @@ fn proto_node_static_image_empty_resource_id_returns_none() {
 #[test]
 fn proto_node_static_image_malformed_resource_id_returns_none() {
     let n = NodeProto {
+        layout: 0,
         id: vec![],
         data: Some(ProtoNodeData::StaticImage(StaticImageNodeProto {
             resource_id: vec![0u8; 31],
@@ -241,6 +244,7 @@ fn proto_node_static_image_malformed_resource_id_returns_none() {
 #[test]
 fn proto_node_static_image_valid_returns_some() {
     let n = NodeProto {
+        layout: 0,
         id: vec![],
         data: Some(ProtoNodeData::StaticImage(StaticImageNodeProto {
             resource_id: vec![1u8; 32],
@@ -264,6 +268,7 @@ fn proto_node_static_image_valid_returns_some() {
 #[test]
 fn proto_node_solid_color_no_bounds_returns_some() {
     let n = NodeProto {
+        layout: 0,
         id: vec![],
         data: Some(ProtoNodeData::SolidColor(SolidColorNodeProto {
             color: Some(ProtoRgba {
@@ -285,6 +290,7 @@ fn proto_node_solid_color_no_bounds_returns_some() {
 #[test]
 fn proto_node_text_zero_font_size_defaults_to_16() {
     let n = NodeProto {
+        layout: 0,
         id: vec![],
         data: Some(ProtoNodeData::TextMarkdown(TextMarkdownNodeProto {
             content: "hello".into(),
@@ -748,7 +754,7 @@ proptest! {
         w in 0f32..2000f32,
         h in 0f32..2000f32,
     ) {
-        let n = NodeProto {
+        let n = NodeProto { layout: 0,
             id: vec![],
             data: Some(ProtoNodeData::StaticImage(StaticImageNodeProto {
                 resource_id,

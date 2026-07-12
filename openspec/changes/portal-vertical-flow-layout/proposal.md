@@ -56,6 +56,9 @@ resolution engine a future split will consume.
   split will consume — consistent with §Phase-0 Raw-Tile Pilot (existing node
   types), §Portal Component Profile Styling (token-driven), §Promotion Scope
   Boundary, and §Phase-1 Promotion Evidence Gate (the consumer stays gated).
+- `scene-graph`: MODIFIES §Struct Overhead Budgets — raises the per-node budget
+  150 → 160 bytes for the additive `layout: NodeLayout` field (hud-yfj8u), which
+  grows `Node` 144 → 152 bytes (one enum byte + 8-aligned padding).
 
 ## Impact
 

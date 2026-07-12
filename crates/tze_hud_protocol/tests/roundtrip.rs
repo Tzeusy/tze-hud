@@ -182,6 +182,7 @@ fn roundtrip_rgba_zero() {
 #[test]
 fn roundtrip_node_proto_solid_color() {
     let orig = NodeProto {
+        layout: 0,
         id: b"node-abc".to_vec(),
         data: Some(NodeData::SolidColor(SolidColorNodeProto {
             color: Some(Rgba {
@@ -214,6 +215,7 @@ fn roundtrip_node_proto_solid_color() {
 #[test]
 fn roundtrip_node_proto_text_markdown() {
     let orig = NodeProto {
+        layout: 0,
         id: b"node-text".to_vec(),
         data: Some(NodeData::TextMarkdown(TextMarkdownNodeProto {
             content: "**hello world**".to_string(),
@@ -265,6 +267,7 @@ fn roundtrip_node_proto_text_markdown_with_color_runs() {
     use tze_hud_protocol::proto::TextColorRunProto;
 
     let orig = NodeProto {
+        layout: 0,
         id: b"node-colored".to_vec(),
         data: Some(NodeData::TextMarkdown(TextMarkdownNodeProto {
             content: "ERROR: disk full".to_string(),
@@ -387,6 +390,7 @@ fn convert_roundtrip_color_runs() {
 #[test]
 fn roundtrip_node_proto_hit_region() {
     let orig = NodeProto {
+        layout: 0,
         id: b"hit-1".to_vec(),
         data: Some(NodeData::HitRegion(HitRegionNodeProto {
             bounds: Some(Rect {
@@ -427,6 +431,7 @@ fn roundtrip_node_proto_static_image_all_fit_modes() {
         ImageFitModeProto::ImageFitModeScaleDown,
     ] {
         let orig = NodeProto {
+            layout: 0,
             id: b"img-node".to_vec(),
             data: Some(NodeData::StaticImage(StaticImageNodeProto {
                 resource_id: vec![0xAB; 32],
@@ -2049,6 +2054,7 @@ fn roundtrip_rendering_policy_json_backward_compat_pre_extension() {
 #[test]
 fn roundtrip_text_markdown_node_proto_overflow_ellipsis() {
     let orig = NodeProto {
+        layout: 0,
         id: b"node-overflow".to_vec(),
         data: Some(NodeData::TextMarkdown(TextMarkdownNodeProto {
             content: "line one\nline two overflow candidate".to_string(),
@@ -2089,6 +2095,7 @@ fn roundtrip_text_markdown_node_proto_overflow_ellipsis() {
 #[test]
 fn roundtrip_text_markdown_node_proto_overflow_clip() {
     let orig = NodeProto {
+        layout: 0,
         id: b"node-clip".to_vec(),
         data: Some(NodeData::TextMarkdown(TextMarkdownNodeProto {
             content: "explicit clip content".to_string(),
@@ -2130,6 +2137,7 @@ fn roundtrip_text_markdown_node_proto_overflow_clip() {
 #[test]
 fn roundtrip_text_markdown_node_proto_overflow_absent_defaults_to_unspecified() {
     let orig = NodeProto {
+        layout: 0,
         id: b"node-compat".to_vec(),
         data: Some(NodeData::TextMarkdown(TextMarkdownNodeProto {
             content: "old message no overflow field".to_string(),
@@ -2173,6 +2181,7 @@ fn convert_text_markdown_node_overflow_ellipsis_proto_to_scene() {
     use tze_hud_scene::types::TextOverflow;
 
     let node_proto = NodeProto {
+        layout: 0,
         id: vec![0u8; 16],
         data: Some(NodeData::TextMarkdown(TextMarkdownNodeProto {
             content: "portal transcript text".to_string(),
@@ -2219,6 +2228,7 @@ fn convert_text_markdown_node_overflow_clip_proto_to_scene() {
     use tze_hud_scene::types::TextOverflow;
 
     let node_proto = NodeProto {
+        layout: 0,
         id: vec![0u8; 16],
         data: Some(NodeData::TextMarkdown(TextMarkdownNodeProto {
             content: "explicit clip text".to_string(),
@@ -2267,6 +2277,7 @@ fn convert_text_markdown_node_overflow_unspecified_defaults_to_ellipsis() {
     use tze_hud_scene::types::TextOverflow;
 
     let node_proto = NodeProto {
+        layout: 0,
         id: vec![0u8; 16],
         data: Some(NodeData::TextMarkdown(TextMarkdownNodeProto {
             content: "default overflow text".to_string(),
@@ -2317,6 +2328,7 @@ fn convert_text_markdown_node_overflow_scene_to_proto_roundtrip() {
     };
 
     let scene_node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {

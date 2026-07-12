@@ -256,6 +256,7 @@ fn spec_post_mutation_cycle_detected() {
     // Create a node that references itself as a child (creates a cycle)
     let node_id = SceneId::new();
     let cyclic_node = Node {
+        layout: Default::default(),
         id: node_id,
         children: vec![node_id], // self-reference → cycle!
         data: NodeData::SolidColor(SolidColorNode {
@@ -1072,6 +1073,7 @@ fn stage1_set_tile_root_with_expired_lease_rejected() {
     scene.leases.get_mut(&lease_id).unwrap().state = LeaseState::Expired;
 
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::SolidColor(SolidColorNode {
@@ -1130,6 +1132,7 @@ fn stage1_add_node_with_expired_lease_rejected() {
     scene.leases.get_mut(&lease_id).unwrap().state = LeaseState::Expired;
 
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::SolidColor(SolidColorNode {

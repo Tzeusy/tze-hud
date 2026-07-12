@@ -223,6 +223,7 @@ fn run_scene_workload() -> f64 {
         // Set a root node
         let node = if i % 2 == 0 {
             Node {
+                layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -233,6 +234,7 @@ fn run_scene_workload() -> f64 {
             }
         } else {
             Node {
+                layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -281,6 +283,7 @@ fn run_scene_workload() -> f64 {
         for offset in 2..4 {
             let idx = (base + offset) % tile_ids.len();
             let node = Node {
+                layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -326,6 +329,7 @@ fn run_scene_workload() -> f64 {
                 (recycle_idx + 1) as u32,
             ) {
                 let node = Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::SolidColor(SolidColorNode {

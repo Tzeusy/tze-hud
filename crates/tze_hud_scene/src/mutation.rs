@@ -1483,6 +1483,7 @@ mod tests {
     #[cfg(test)]
     fn transcript_root(text: &str) -> Node {
         Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -1740,6 +1741,7 @@ mod tests {
         );
         let tile_id = scene.apply_batch(&create).created_ids[0];
         let root = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::SolidColor(SolidColorNode {
@@ -2077,6 +2079,7 @@ mod tests {
 
         // Republish the tile root with a fresh node tree (the old root is removed).
         let new_root = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::SolidColor(SolidColorNode {
@@ -2479,6 +2482,7 @@ mod tests {
             )
             .unwrap();
         let node = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -2636,6 +2640,7 @@ mod tests {
             )
             .unwrap();
         let node_a = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::TextMarkdown(TextMarkdownNode {

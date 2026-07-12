@@ -48,6 +48,7 @@ fn test_create_scene_with_tab_and_tiles() {
 
     // Add nodes
     let text_node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -65,6 +66,7 @@ fn test_create_scene_with_tab_and_tiles() {
     scene.set_tile_root(tile1_id, text_node).unwrap();
 
     let hit_node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::HitRegion(HitRegionNode {
@@ -103,6 +105,7 @@ fn test_hit_test() {
 
     let hr_node_id = SceneId::new();
     let hit_node = Node {
+        layout: Default::default(),
         id: hr_node_id,
         children: vec![],
         data: NodeData::HitRegion(HitRegionNode {
@@ -159,6 +162,7 @@ fn test_hit_test_applies_tile_scroll_offset() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: node_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -221,6 +225,7 @@ fn test_hit_test_uses_displayed_scroll_offset_during_animation() {
     scene.nodes.insert(
         row_a,
         Node {
+            layout: Default::default(),
             id: row_a,
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {
@@ -235,6 +240,7 @@ fn test_hit_test_uses_displayed_scroll_offset_during_animation() {
     scene.nodes.insert(
         row_b,
         Node {
+            layout: Default::default(),
             id: row_b,
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {
@@ -249,6 +255,7 @@ fn test_hit_test_uses_displayed_scroll_offset_during_animation() {
     scene.nodes.insert(
         root,
         Node {
+            layout: Default::default(),
             id: root,
             children: vec![row_a, row_b],
             data: NodeData::SolidColor(SolidColorNode {
@@ -401,6 +408,7 @@ fn portal_snapshot_scene(namespace: &str) -> (SceneGraph, SceneId, SceneId) {
         )
         .unwrap();
     let root = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::SolidColor(SolidColorNode {
@@ -463,6 +471,7 @@ fn snapshot_portal_surface_with_nulled_part_node_round_trips() {
     // Republish the tile root: the old subtree (root_id) is removed, so the
     // Transcript part's node ref is revalidated back to None.
     let new_root = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::SolidColor(SolidColorNode {
@@ -519,6 +528,7 @@ fn snapshot_portal_surfaces_are_tile_keyed_for_namespace_visibility() {
         )
         .unwrap();
     let root_b = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::SolidColor(SolidColorNode {
@@ -2121,6 +2131,7 @@ fn test_static_image_node_creation() {
     let (resource_id, decoded_bytes) = make_test_image_resource(64, 48);
     scene.register_resource(resource_id);
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::StaticImage(StaticImageNode {
@@ -2200,6 +2211,7 @@ fn test_static_image_node_snapshot_roundtrip() {
     let (resource_id, decoded_bytes) = make_test_image_resource(16, 16);
     scene.register_resource(resource_id);
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::StaticImage(StaticImageNode {
@@ -2259,6 +2271,7 @@ fn test_static_image_node_replace_with_set_tile_root() {
     let (resource_id, decoded_bytes) = make_test_image_resource(8, 8);
     scene.register_resource(resource_id);
     let node1 = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::StaticImage(StaticImageNode {
@@ -2277,6 +2290,7 @@ fn test_static_image_node_replace_with_set_tile_root() {
 
     // Replace with a SolidColor node.
     let node2 = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::SolidColor(SolidColorNode {
@@ -2317,6 +2331,7 @@ fn scene_with_static_image_node(w: u32, h: u32) -> (SceneGraph, SceneId, SceneId
     // enforce resource-upload-before-use) can reference it.
     scene.register_resource(resource_id);
     let node = Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::StaticImage(StaticImageNode {
@@ -2513,6 +2528,7 @@ fn resource_freed_when_only_referencing_tile_is_removed() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::StaticImage(StaticImageNode {
@@ -2587,6 +2603,7 @@ fn resource_kept_alive_while_second_tile_references_it_then_freed() {
     scene.register_resource(resource_id);
 
     let make_image_node = || Node {
+        layout: Default::default(),
         id: SceneId::new(),
         children: vec![],
         data: NodeData::StaticImage(StaticImageNode {
@@ -2659,6 +2676,7 @@ fn resource_freed_on_lease_expiry() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::StaticImage(StaticImageNode {
@@ -2784,6 +2802,7 @@ fn resource_refs_updated_on_set_tile_root_replacement() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::StaticImage(StaticImageNode {
@@ -2809,6 +2828,7 @@ fn resource_refs_updated_on_set_tile_root_replacement() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::StaticImage(StaticImageNode {
@@ -4260,6 +4280,7 @@ fn portal_scene_with_minimize() -> (SceneGraph, SceneId, SceneId, SceneId) {
     // Minimize control in the header (tile-local x 0..44, y 0..52).
     let minimize_id = SceneId::new();
     let minimize = Node {
+        layout: Default::default(),
         id: minimize_id,
         children: vec![],
         data: NodeData::HitRegion(HitRegionNode {
@@ -4372,6 +4393,7 @@ fn header_band_survives_full_tile_click_to_focus_region() {
         .set_tile_root(
             tile_id,
             Node {
+                layout: Default::default(),
                 id: composer_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -4723,6 +4745,7 @@ fn live_exemplar_portal_scene() -> (SceneGraph, SceneId, SceneId, SceneId, Scene
         .set_tile_root(
             frame,
             Node {
+                layout: Default::default(),
                 id: minimize_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {
@@ -5133,6 +5156,7 @@ mod inline_subtree_materialization {
 
     fn text_node(id: SceneId, children: Vec<SceneId>, content: &str) -> Node {
         Node {
+            layout: Default::default(),
             id,
             children,
             data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -5151,6 +5175,7 @@ mod inline_subtree_materialization {
 
     fn hit_node(id: SceneId) -> Node {
         Node {
+            layout: Default::default(),
             id,
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {

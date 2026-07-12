@@ -105,6 +105,7 @@ fn setup_dashboard_tile_scene() -> (SceneGraph, SceneId, SceneId, SceneId, Scene
     scene.nodes.insert(
         refresh_id,
         Node {
+            layout: Default::default(),
             id: refresh_id,
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {
@@ -123,6 +124,7 @@ fn setup_dashboard_tile_scene() -> (SceneGraph, SceneId, SceneId, SceneId, Scene
     scene.nodes.insert(
         dismiss_id,
         Node {
+            layout: Default::default(),
             id: dismiss_id,
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {
@@ -141,6 +143,7 @@ fn setup_dashboard_tile_scene() -> (SceneGraph, SceneId, SceneId, SceneId, Scene
     scene.nodes.insert(
         bg_id,
         Node {
+            layout: Default::default(),
             id: bg_id,
             children: vec![refresh_id, dismiss_id],
             data: NodeData::SolidColor(SolidColorNode {
@@ -1088,6 +1091,7 @@ fn tab_from_dismiss_crosses_to_next_tile() {
         .set_tile_root(
             tile_id2,
             Node {
+                layout: Default::default(),
                 id: other_node_id,
                 children: vec![],
                 data: NodeData::HitRegion(HitRegionNode {

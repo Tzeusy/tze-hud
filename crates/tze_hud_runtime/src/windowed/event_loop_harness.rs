@@ -237,6 +237,7 @@ impl HeadlessEventLoopHarness {
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id: composer_id,
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {

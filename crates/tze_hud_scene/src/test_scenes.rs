@@ -247,6 +247,7 @@ impl TestSceneRegistry {
             .expect("create_tile failed");
 
         let text_node = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -309,6 +310,7 @@ impl TestSceneRegistry {
             .expect("create_tile failed");
 
         let text_node = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -340,6 +342,7 @@ impl TestSceneRegistry {
         let hr_w = (half_w * 0.4).min(hit_tile_bounds.width - hr_x);
         let hr_h = (content_h * 0.15).min(hit_tile_bounds.height - hr_y);
         let hit_node = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {
@@ -361,6 +364,7 @@ impl TestSceneRegistry {
             .expect("create_tile failed");
 
         let status_node = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::SolidColor(SolidColorNode {
@@ -424,6 +428,7 @@ impl TestSceneRegistry {
                 // Alternate between SolidColor and TextMarkdown to exercise both node types
                 let node = if z % 2 == 0 {
                     Node {
+                        layout: Default::default(),
                         id: SceneId::new(),
                         children: vec![],
                         data: NodeData::SolidColor(SolidColorNode {
@@ -439,6 +444,7 @@ impl TestSceneRegistry {
                     }
                 } else {
                     Node {
+                        layout: Default::default(),
                         id: SceneId::new(),
                         children: vec![],
                         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -531,6 +537,7 @@ impl TestSceneRegistry {
                 .create_tile(tab_id, "agent.overlap", lease_id, bounds, z)
                 .expect("create_tile failed");
             let node = Node {
+                layout: Default::default(),
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
@@ -590,6 +597,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 base_tile,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::SolidColor(SolidColorNode {
@@ -610,6 +618,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 overlay_tile,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::SolidColor(SolidColorNode {
@@ -680,6 +689,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 tile_a,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -721,6 +731,7 @@ impl TestSceneRegistry {
                 .set_tile_root(
                     tile,
                     Node {
+                        layout: Default::default(),
                         id: SceneId::new(),
                         children: vec![],
                         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -792,6 +803,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -858,6 +870,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -938,6 +951,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 tile_a,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::SolidColor(SolidColorNode {
@@ -969,6 +983,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 tile_b,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::SolidColor(SolidColorNode {
@@ -1041,6 +1056,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 bg_tile,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::SolidColor(SolidColorNode {
@@ -1066,6 +1082,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 btn_tile,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -1150,6 +1167,7 @@ impl TestSceneRegistry {
                     .set_tile_root(
                         tile_id,
                         Node {
+                            layout: Default::default(),
                             id: SceneId::new(),
                             children: vec![],
                             data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -1290,6 +1308,7 @@ impl TestSceneRegistry {
                 .set_tile_root(
                     tile_id,
                     Node {
+                        layout: Default::default(),
                         id: SceneId::new(),
                         children: vec![],
                         data: NodeData::SolidColor(SolidColorNode {
@@ -1363,6 +1382,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 content_tile,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -1395,6 +1415,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 overlay_tile,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::SolidColor(SolidColorNode {
@@ -1420,6 +1441,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 widget_tile,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -1516,6 +1538,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 tile_one_a,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::SolidColor(SolidColorNode {
@@ -1535,6 +1558,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 tile_one_b,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -1563,6 +1587,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 tile_two,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::SolidColor(SolidColorNode {
@@ -1585,6 +1610,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 tile_three,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::SolidColor(SolidColorNode {
@@ -1650,6 +1676,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 public_tile,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -1684,6 +1711,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 sensitive_tile,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -1760,6 +1788,7 @@ impl TestSceneRegistry {
                     .set_tile_root(
                         tile_id,
                         Node {
+                            layout: Default::default(),
                             id: SceneId::new(),
                             children: vec![],
                             data: NodeData::HitRegion(HitRegionNode {
@@ -1844,6 +1873,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -1932,6 +1962,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -2029,6 +2060,7 @@ impl TestSceneRegistry {
                 .set_tile_root(
                     tile_id,
                     Node {
+                        layout: Default::default(),
                         id: SceneId::new(),
                         children: vec![],
                         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -2177,6 +2209,7 @@ impl TestSceneRegistry {
                 .set_tile_root(
                     tile_id,
                     Node {
+                        layout: Default::default(),
                         id: SceneId::new(),
                         children: vec![],
                         data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -2292,6 +2325,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 tile_id,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::SolidColor(SolidColorNode {
@@ -2380,6 +2414,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 stable_tile,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::SolidColor(SolidColorNode {
@@ -2405,6 +2440,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 pub_tile,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -2502,6 +2538,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 chrome_tile,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::SolidColor(SolidColorNode {
@@ -2532,6 +2569,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 public_tile,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -2573,6 +2611,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 sensitive_tile,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -2617,6 +2656,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 chrome_btn_tile,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::HitRegion(HitRegionNode {
@@ -2705,6 +2745,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 safety_tile_id,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::SolidColor(SolidColorNode {
@@ -2735,6 +2776,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 privacy_tile_id,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -2777,6 +2819,7 @@ impl TestSceneRegistry {
             .set_tile_root(
                 content_tile_id,
                 Node {
+                    layout: Default::default(),
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::TextMarkdown(TextMarkdownNode {
@@ -4680,6 +4723,7 @@ mod tests {
             .unwrap();
 
         let hr_node = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {

@@ -283,6 +283,7 @@ async fn frame_budgets_hold_under_sustained_portal_stream() {
             .create_tile(tab_id, "cadence_test", lease_id, bounds, 10)
             .expect("create_tile");
         let root = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::SolidColor(SolidColorNode {
@@ -453,6 +454,7 @@ async fn frame_budgets_hold_under_burst() {
             .create_tile(tab_id, "burst_test", lease_id, bounds, 10)
             .expect("create_tile");
         let root = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::SolidColor(SolidColorNode {
@@ -756,6 +758,7 @@ async fn input_latency_not_degraded_under_portal_stream() {
         // Root node with a hit region for input testing.
         let root_id = SceneId::new();
         let root = Node {
+            layout: Default::default(),
             id: root_id,
             children: vec![SceneId::new()],
             data: NodeData::SolidColor(SolidColorNode {
@@ -766,6 +769,7 @@ async fn input_latency_not_degraded_under_portal_stream() {
         };
         let _ = scene.set_tile_root(tile_id, root);
         let hit_region = Node {
+            layout: Default::default(),
             id: SceneId::new(),
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {
