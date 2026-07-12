@@ -39,7 +39,15 @@ from typing import Any
 def rpc_call(
     url: str, token: str, method: str, params: dict[str, Any], request_id: int
 ) -> dict[str, Any]:
-    """Send a single JSON-RPC 2.0 request and return the parsed response."""
+    """Send a single JSON-RPC 2.0 request and return the parsed response.
+
+    This uses the runtime's bare-method dialect, where the JSON-RPC ``method``
+    is the tool name directly (e.g. ``publish_to_zone``). The runtime also
+    implements the MCP-standard ``tools/call`` envelope
+    (``method="tools/call"``, ``params={"name": <tool>, "arguments": {...}}``);
+    both dialects reach the same tool dispatch table. The bare form is kept here
+    for brevity; standard MCP clients use ``tools/call``.
+    """
     body = json.dumps(
         {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
     ).encode("utf-8")

@@ -192,6 +192,30 @@ impl McpConfig {
 
 // ─── Guest / Resident tool classification ────────────────────────────────────
 
+/// Wrap a tool's successful raw JSON result in the MCP `tools/call` result shape
+/// (hud-09emd): a single text `content` block carrying the JSON serialization
+/// (so text-only clients get the full result) with `isError: false`. The bare
+/// tool JSON stays available verbatim to legacy method==tool-name callers.
+fn tools_call_success_result(value: serde_json::Value) -> serde_json::Value {
+    let text = serde_json::to_string(&value).unwrap_or_else(|_| value.to_string());
+    serde_json::json!({
+        "content": [{ "type": "text", "text": text }],
+        "isError": false,
+    })
+}
+
+/// Wrap a tool EXECUTION error in the MCP `tools/call` `isError` result shape
+/// (hud-09emd): a text `content` block with the error message and
+/// `isError: true`, so the calling model sees and can react to the failure —
+/// rather than a JSON-RPC protocol error, which MCP reserves for unknown
+/// tool / missing capability / malformed params.
+fn tools_call_error_result(err: &crate::McpError) -> serde_json::Value {
+    serde_json::json!({
+        "content": [{ "type": "text", "text": err.to_string() }],
+        "isError": true,
+    })
+}
+
 /// Tool categories per spec §8.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolClass {
@@ -460,6 +484,14 @@ impl McpServer {
         // before the capability gate and tool router: their `name/` style method
         // names are not registered tools and would otherwise fall through to
         // MethodNotFound.
+        // When true, the request arrived via the MCP-standard `tools/call`
+        // envelope and its response MUST be spec-shaped (a `content`/`isError`
+        // result), not the bare tool JSON the legacy method==tool-name path
+        // returns. Set by the `tools/call` arm below, which rewrites the request
+        // to the bare form so the SAME classify → capability-gate → invoke_tool
+        // pipeline runs unchanged (hud-09emd).
+        let mut is_tools_call = false;
+
         match request.method.as_str() {
             "initialize" => {
                 let resp = McpResponse::ok(request.id.clone(), crate::schema::initialize_result());
@@ -468,6 +500,39 @@ impl McpServer {
             "tools/list" => {
                 let resp = McpResponse::ok(request.id.clone(), crate::schema::tools_list_result());
                 return serde_json::to_string(&resp).unwrap_or_default();
+            }
+            "tools/call" => {
+                // Spec-standard tool invocation:
+                //   params = { "name": "<tool>", "arguments": { ... } }
+                // Delegate to the exact same dispatch table the bare-method path
+                // uses by unwrapping the envelope into the bare form (method =
+                // tool name, params = arguments) and flagging the response for
+                // spec-shaping below. No forked tool registry — `invoke_tool`
+                // stays the single source of truth (hud-09emd).
+                let params_obj = request.params.as_object();
+                let Some(name) = params_obj
+                    .and_then(|p| p.get("name"))
+                    .and_then(|n| n.as_str())
+                    .map(str::to_string)
+                else {
+                    let resp = McpResponse::err(
+                        request.id.clone(),
+                        JsonRpcError::invalid_params(
+                            "tools/call requires a string `name` parameter",
+                        ),
+                    );
+                    return serde_json::to_string(&resp).unwrap_or_default();
+                };
+                // `arguments` is optional per MCP (a no-arg tool may omit it);
+                // default to an empty object so param deserialization behaves
+                // exactly as a bare-method call with `{}`.
+                let arguments = params_obj
+                    .and_then(|p| p.get("arguments"))
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                request.method = name;
+                request.params = arguments;
+                is_tools_call = true;
             }
             _ => {}
         }
@@ -494,10 +559,16 @@ impl McpServer {
         let tool_class = classify_tool(&request.method);
 
         if tool_class == ToolClass::Unknown {
-            let resp = McpResponse::err(
-                request.id.clone(),
-                JsonRpcError::method_not_found(&request.method),
-            );
+            // Via `tools/call` the METHOD (`tools/call`) exists — it is the tool
+            // NAME that is unknown, so return Invalid Params, not Method Not Found
+            // (a raw -32601 would wrongly tell the client `tools/call` is
+            // unsupported). The bare-method path keeps its -32601 (hud-09emd).
+            let error = if is_tools_call {
+                JsonRpcError::invalid_params(format!("Unknown tool: {}", request.method))
+            } else {
+                JsonRpcError::method_not_found(&request.method)
+            };
+            let resp = McpResponse::err(request.id.clone(), error);
             return serde_json::to_string(&resp).unwrap_or_default();
         }
 
@@ -520,10 +591,28 @@ impl McpServer {
             .await;
 
         let response = match result {
-            Ok(value) => McpResponse::ok(id, value),
+            Ok(value) => {
+                // Bare-method path returns the tool's raw JSON verbatim (back-
+                // compat). `tools/call` wraps it in the spec result shape.
+                let result = if is_tools_call {
+                    tools_call_success_result(value)
+                } else {
+                    value
+                };
+                McpResponse::ok(id, result)
+            }
             Err(e) => {
                 error!(error = %e, method = %request.method, "MCP: tool error");
-                McpResponse::err(id, JsonRpcError::from(e))
+                if is_tools_call {
+                    // MCP: a tool that ran but FAILED is reported as an `isError`
+                    // result (so the calling model sees the failure and can
+                    // react), NOT a JSON-RPC protocol error. Protocol-level
+                    // failures (unknown tool, missing capability, bad params) were
+                    // already returned as JSON-RPC errors above.
+                    McpResponse::ok(id, tools_call_error_result(&e))
+                } else {
+                    McpResponse::err(id, JsonRpcError::from(e))
+                }
             }
         };
 
@@ -2356,5 +2445,152 @@ mod tests {
         assert!(attach_required.contains(&"projection_id"));
         assert!(attach_required.contains(&"display_name"));
         assert!(!attach_required.contains(&"idempotency_key"));
+    }
+
+    // ── MCP tools/call dispatch (hud-09emd) ──────────────────────────────────
+
+    /// `tools/call` delegates to the SAME tool the bare-method path runs, and
+    /// wraps its result in the spec shape (`content` array + `isError: false`).
+    /// The wrapped text is the JSON serialization of the identical tool payload.
+    #[tokio::test]
+    async fn test_tools_call_delegates_to_same_tool_and_spec_shapes_result() {
+        let server = server_with_gauge().await;
+
+        // Bare method form → raw tool JSON as `result`.
+        let bare = json!({"jsonrpc":"2.0","method":"list_widgets","params":{},"id":1});
+        let bare_resp = parse_response(&server.dispatch(&bare.to_string(), &guest()).await);
+        assert!(
+            bare_resp["error"].is_null(),
+            "bare list_widgets failed: {bare_resp}"
+        );
+        let bare_result = bare_resp["result"].clone();
+        assert!(bare_result["widget_instances"].is_array());
+
+        // tools/call form → same tool, spec-shaped result.
+        let call = json!({
+            "jsonrpc":"2.0",
+            "method":"tools/call",
+            "params":{"name":"list_widgets","arguments":{}},
+            "id":2
+        });
+        let call_resp = parse_response(&server.dispatch(&call.to_string(), &guest()).await);
+        assert!(
+            call_resp["error"].is_null(),
+            "tools/call must be supported (no -32601): {call_resp}"
+        );
+        assert_eq!(call_resp["result"]["isError"], json!(false));
+        let content = call_resp["result"]["content"]
+            .as_array()
+            .expect("tools/call result has a content array");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+        // The text block carries the SAME tool payload the bare path returned.
+        let inner: serde_json::Value = serde_json::from_str(
+            content[0]["text"]
+                .as_str()
+                .expect("content text is a string"),
+        )
+        .expect("content text is the tool's JSON result");
+        assert_eq!(
+            inner, bare_result,
+            "tools/call must delegate to the identical dispatch table / payload"
+        );
+    }
+
+    /// An unknown tool NAME via `tools/call` is Invalid Params (-32602), NOT
+    /// Method Not Found (-32601) — the `tools/call` method itself exists. The
+    /// bare-method path keeps returning -32601 for an unknown method.
+    #[tokio::test]
+    async fn test_tools_call_unknown_tool_is_invalid_params_not_method_not_found() {
+        let server = server_with_gauge().await;
+
+        let call = json!({
+            "jsonrpc":"2.0",
+            "method":"tools/call",
+            "params":{"name":"no_such_tool","arguments":{}},
+            "id":3
+        });
+        let resp = parse_response(&server.dispatch(&call.to_string(), &guest()).await);
+        assert_eq!(
+            resp["error"]["code"],
+            json!(-32602),
+            "unknown tool via tools/call must be Invalid Params, not -32601: {resp}"
+        );
+
+        // Bare-method unknown method stays Method Not Found (back-compat).
+        let bare = json!({"jsonrpc":"2.0","method":"no_such_tool","params":{},"id":4});
+        let bare_resp = parse_response(&server.dispatch(&bare.to_string(), &guest()).await);
+        assert_eq!(
+            bare_resp["error"]["code"],
+            json!(-32601),
+            "bare-method unknown method stays Method Not Found"
+        );
+    }
+
+    /// `tools/call` with no `name` is Invalid Params.
+    #[tokio::test]
+    async fn test_tools_call_missing_name_is_invalid_params() {
+        let server = server_with_gauge().await;
+        let call = json!({
+            "jsonrpc":"2.0",
+            "method":"tools/call",
+            "params":{"arguments":{}},
+            "id":5
+        });
+        let resp = parse_response(&server.dispatch(&call.to_string(), &guest()).await);
+        assert_eq!(
+            resp["error"]["code"],
+            json!(-32602),
+            "tools/call without a name is Invalid Params: {resp}"
+        );
+    }
+
+    /// A tool that RUNS but fails via `tools/call` is reported as an `isError`
+    /// result (so the calling model can see it), not a JSON-RPC error.
+    #[tokio::test]
+    async fn test_tools_call_tool_execution_error_is_iserror_result() {
+        let server = server_with_gauge().await;
+        // Publishing to a widget that isn't registered fails inside the handler.
+        let call = json!({
+            "jsonrpc":"2.0",
+            "method":"tools/call",
+            "params":{
+                "name":"publish_to_widget",
+                "arguments":{"widget_name":"does_not_exist","params":{"level":0.5}}
+            },
+            "id":6
+        });
+        let resp = parse_response(&server.dispatch(&call.to_string(), &guest()).await);
+        assert!(
+            resp["error"].is_null(),
+            "a tool execution error must NOT be a JSON-RPC error under tools/call: {resp}"
+        );
+        assert_eq!(
+            resp["result"]["isError"],
+            json!(true),
+            "tool execution failure must be reported as isError: true: {resp}"
+        );
+        assert!(
+            resp["result"]["content"][0]["text"].is_string(),
+            "isError result still carries a text content block"
+        );
+    }
+
+    /// Back-compat: the bare method==tool-name path returns the raw tool JSON as
+    /// `result`, NEVER the tools/call content/isError wrapper.
+    #[tokio::test]
+    async fn test_bare_method_result_is_unwrapped_for_back_compat() {
+        let server = server_with_gauge().await;
+        let bare = json!({"jsonrpc":"2.0","method":"list_widgets","params":{},"id":7});
+        let resp = parse_response(&server.dispatch(&bare.to_string(), &guest()).await);
+        assert!(resp["error"].is_null());
+        assert!(
+            resp["result"]["widget_instances"].is_array(),
+            "bare result is the raw tool JSON"
+        );
+        assert!(
+            resp["result"]["content"].is_null() && resp["result"]["isError"].is_null(),
+            "bare-method result must NOT be tools/call content-wrapped (back-compat): {resp}"
+        );
     }
 }

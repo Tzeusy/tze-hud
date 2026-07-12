@@ -61,3 +61,14 @@ with `TZE_HUD_MCP_RESIDENT_PRINCIPAL` set equal to that PSK so the caller is
 minted `resident_mcp`. The projection facade and the zone-publishing bridge are
 distinguished by which tools you call (`portal_projection_*` vs the zone/widget
 tools), not by separate servers.
+
+A standard MCP client configured this way (Claude Code, the MCP inspector, the
+SDKs) invokes tools through the MCP-standard `tools/call` method —
+`{"method": "tools/call", "params": {"name": "portal_projection_attach",
+"arguments": { ... }}}` — and receives a spec-shaped result (a `content` array
+with `isError`). The runtime also accepts a **bare-method** dialect where the
+JSON-RPC `method` is the tool name directly (e.g.
+`{"method": "portal_projection_attach", "params": { ... }}`), returning the
+tool's raw JSON result; the in-process harness and lightweight scripts use that
+form. Both dialects reach the same tool dispatch table, so tool names and
+`arguments`/`params` shapes are identical between them.
