@@ -1779,6 +1779,23 @@ impl Compositor {
         // there is no rasterizer yet anyway, so the bundled fallback is exactly
         // as accurate as the code it replaces.
         let markdown_tokens = self.markdown_tokens.clone();
+        // hud-5wx09: measure markdown flow children against the commit-time cached
+        // parse the render path already produced, NOT a fresh per-frame parse
+        // (text-stream-portals MUST). Pin the render `MarkdownCache` snapshot (a
+        // cheap atomic `Arc` load) and build a `SceneId -> &ParsedMarkdown` lookup
+        // BEFORE the `&mut FontSystem` borrow below — its references borrow the
+        // local `cache` binding (not `self`), so they do not conflict with the
+        // mutable rasterizer borrow. Reusing `node_key_cache` keys each node under
+        // the SAME portal/generic token scope `prime_markdown_cache` used, so a
+        // recomputed-key scope mismatch can't turn a hit into a miss. On unchanged
+        // content the commit-time prime guarantees a hit → zero frame-path parse; a
+        // cold-frame miss falls back to a one-time inline parse in the resolver.
+        let cache = self.markdown_cache();
+        let parsed_by_id: std::collections::HashMap<SceneId, &crate::markdown::ParsedMarkdown> =
+            self.node_key_cache
+                .iter()
+                .filter_map(|(id, key)| cache.get_by_key(key).map(|parsed| (*id, parsed)))
+                .collect();
         let mut bundled_fallback = None;
         let font_system: &mut FontSystem = match self.text_rasterizer.as_mut() {
             Some(rasterizer) => rasterizer.font_system_mut(),
@@ -1789,6 +1806,7 @@ impl Compositor {
             &scene.nodes,
             gap,
             &markdown_tokens,
+            &parsed_by_id,
         );
     }
 

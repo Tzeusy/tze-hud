@@ -533,15 +533,24 @@ pub(crate) fn text_content_box_margins(
 /// spans' metrics. Floors to one base line's height when `content` produces no
 /// layout runs (e.g. empty content), matching `composer_wrap_line_widths`'
 /// documented empty-input behavior plus the `.max(1)` floor its callers apply.
-pub(crate) fn measure_markdown_content_height(
+/// Measure the rendered height (px) of an ALREADY-PARSED markdown node — the
+/// commit-time cached [`crate::markdown::ParsedMarkdown`] the render path consumes
+/// via [`TextItem::from_text_markdown_cached`] — WITHOUT re-parsing on the frame
+/// path (hud-5wx09; text-stream-portals §"per-frame flow measurement MUST consume
+/// the commit-time cached parsed representation … MUST NOT re-parse").
+///
+/// This is the parse-free core of [`measure_markdown_content_height`]: it consumes
+/// `parsed.plain_text`, `parsed.spans`, and `parsed.line_height_multiplier`
+/// exactly as `from_text_markdown_cached` does, so a flowed node whose content has
+/// not changed incurs ZERO per-frame parse cost. The re-parsing
+/// [`measure_markdown_content_height`] is retained only as the cache-MISS fallback.
+pub(crate) fn measure_markdown_content_height_cached(
     font_system: &mut FontSystem,
-    content: &str,
+    parsed: &crate::markdown::ParsedMarkdown,
     wrap_width: f32,
     base_font_size_px: f32,
     font_family: FontFamily,
-    markdown_tokens: &crate::markdown::MarkdownTokens,
 ) -> f32 {
-    let parsed = crate::markdown::parse_markdown_subset(content, markdown_tokens);
     let styled_runs = markdown_spans_to_styled_runs(&parsed.plain_text, &parsed.spans);
 
     // Same font-size clamp `TextItem::from_text_markdown_cached` applies to
@@ -582,6 +591,35 @@ pub(crate) fn measure_markdown_content_height(
         .last()
         .map(|run| run.line_top + run.line_height)
         .unwrap_or(base_line_height)
+}
+
+/// Cache-MISS fallback for [`measure_markdown_content_height_cached`]: parse
+/// `content` with `markdown_tokens` and measure the result.
+///
+/// The steady-state flow-measurement path looks up the commit-time cached
+/// [`crate::markdown::ParsedMarkdown`] and calls the `_cached` variant with zero
+/// per-frame parsing (hud-5wx09). This re-parsing variant is invoked ONLY when the
+/// cache does not yet hold the node's content — a cold first frame or a node added
+/// mid-frame — which is a one-time fill on content change, not a per-frame parse
+/// of unchanged content, and mirrors the render path's own inline parse-on-miss
+/// (`renderer/text.rs`, `MarkdownCache` miss branch). It is also used by callers
+/// (tests, non-cache paths) that hold no cache.
+pub(crate) fn measure_markdown_content_height(
+    font_system: &mut FontSystem,
+    content: &str,
+    wrap_width: f32,
+    base_font_size_px: f32,
+    font_family: FontFamily,
+    markdown_tokens: &crate::markdown::MarkdownTokens,
+) -> f32 {
+    let parsed = crate::markdown::parse_markdown_subset(content, markdown_tokens);
+    measure_markdown_content_height_cached(
+        font_system,
+        &parsed,
+        wrap_width,
+        base_font_size_px,
+        font_family,
+    )
 }
 
 /// Measure the rendered height (px) of RAW markdown SOURCE `content` —
