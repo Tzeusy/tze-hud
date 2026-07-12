@@ -751,7 +751,7 @@ fn tile_struct_size_under_200_bytes() {
 }
 
 #[test]
-fn node_struct_size_under_150_bytes() {
+fn node_struct_size_under_160_bytes() {
     use std::mem::size_of;
     let node_size = size_of::<Node>();
     assert!(
