@@ -71,17 +71,21 @@
       (filtered, no GPU); verified the wiring-level test fails against a
       simulated pre-fix (always-plain-text, no fork) implementation before
       restoring the real fix.
-- [ ] 3.3 Render-site geometry substitution: thread the resolved-y map into
-      `renderer/tile_render.rs` render_node (~2037) and `renderer/text.rs`
-      from_text_markdown_node (~2075) / from_text_markdown_cached (~2200) / the
-      ellipsis twin (~1969), substituting the flow-y for `bounds.y`. Deferred to a
-      live-hardware evidence bead (hud-yfj8u live-verify scope): the substitution
-      is behavior-preserving for the absolute path (empty map), but pixel
-      correctness of the stacked flow render requires GPU/reference-Windows
-      verification, which cannot run in this lane. NOTE (hud-ysyis): the
-      hud-pd9bp branch doing this wiring calls `resolve_tile_flow_offsets`,
-      whose signature gained a trailing `markdown_tokens: &MarkdownTokens`
-      parameter in this bead — that call site needs one new argument.
+- [x] 3.3 Render-site geometry substitution (bead hud-pd9bp): per-frame
+      `prime_vertical_flow_layout` (renderer field `tile_flow_offsets`, mirrors
+      `prime_viewer_echo_layout`; early-out + `bundled_font_system` measurement
+      when a `VerticalFlow` node exists) resolves the child→y map; `render_node`
+      substitutes `effective_y` at all geometry quads and `collect_text_items_from_node`
+      folds `flow_dy = resolved_y − bounds.y` into the `from_text_markdown_*`
+      `tile_y` so the constructor nets the resolved y. The ellipsis/truncation
+      prime is NOT touched: `TruncationKey` is y-independent (content + box dims +
+      font + viewport, no y), so flow placement cannot drift the truncation cache.
+      Token gap via `resolve_section_gap_px` (`portal.spacing.section_gap_px`,
+      default 8). Behavior-preserving for Absolute (empty map → `bounds.y`).
+      Requirement: §Vertical-Flow Render Placement. Unit tests: gap resolver
+      (default/override/malformed). PIXEL VERIFICATION of the stacked flow render
+      remains hardware-gated (reference Windows, evidence pattern hud-2u5j7) — see
+      4.2.
 
 ## 4. Follow-ups (separate beads)
 

@@ -1243,6 +1243,21 @@ impl super::Compositor {
         let effective_part = resolve_effective_part(part_index, node_id, active_part);
 
         if let NodeData::TextMarkdown(tm) = &node.data {
+            // hud-pd9bp: when this node is a `NodeLayout::VerticalFlow` child, its
+            // glyph origin moves to the runtime-resolved stacked y. The
+            // `from_text_markdown_*` constructors add `node.bounds.y` internally,
+            // so fold the delta `(resolved_y - tm.bounds.y)` into the `tile_y`
+            // argument below — the constructor then nets exactly `resolved_y`.
+            // Zero for Absolute nodes (absent from the map) → byte-identical, and
+            // it matches the `effective_y` substitution in `render_node`'s
+            // geometry pass so the background quad and glyphs stay aligned. The
+            // truncation cache is y-independent (TruncationKey excludes y), so the
+            // ellipsis-prime walk needs no matching change.
+            let flow_dy = self
+                .tile_flow_offsets
+                .get(&node_id)
+                .map(|resolved_y| resolved_y - tm.bounds.y)
+                .unwrap_or(0.0);
             // Subtract scroll offset so text glyphs move with the scrolled
             // content — matches the geometry pass in `render_node` which already
             // applies `tile.bounds.x - scroll_x` / `tile.bounds.y - scroll_y`.
@@ -1307,7 +1322,7 @@ impl super::Compositor {
                     TextItem::from_text_markdown_cached(
                         tm,
                         tile.bounds.x - scroll_x,
-                        tile.bounds.y - scroll_y,
+                        tile.bounds.y - scroll_y + flow_dy,
                         parsed,
                     )
                 } else {
@@ -1354,7 +1369,7 @@ impl super::Compositor {
                                 TextItem::from_text_markdown_cached(
                                     tm,
                                     tile.bounds.x - scroll_x,
-                                    tile.bounds.y - scroll_y,
+                                    tile.bounds.y - scroll_y + flow_dy,
                                     parsed,
                                 )
                             })
@@ -1366,7 +1381,7 @@ impl super::Compositor {
                         let item = TextItem::from_text_markdown_cached(
                             tm,
                             tile.bounds.x - scroll_x,
-                            tile.bounds.y - scroll_y,
+                            tile.bounds.y - scroll_y + flow_dy,
                             &parsed,
                         );
                         self.markdown_fallback_cache
@@ -1382,7 +1397,7 @@ impl super::Compositor {
                 TextItem::from_text_markdown_node(
                     tm,
                     tile.bounds.x - scroll_x,
-                    tile.bounds.y - scroll_y,
+                    tile.bounds.y - scroll_y + flow_dy,
                 )
             };
             // Viewer-local whole-portal resize font scaling (hud-ovjxu.1): scale

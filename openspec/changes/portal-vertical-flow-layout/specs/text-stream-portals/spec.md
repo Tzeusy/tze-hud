@@ -97,3 +97,49 @@ Scope: v1
 - **WHEN** promotion-era work proposes materializing the OUTPUT transcript as one scene node per turn driven by this layout
 - **THEN** that split SHALL remain gated on the Phase-1 Promotion Evidence Gate
 - **AND** until the gate passes, the raw-tile pilot's single-node transcript SHALL stay authoritative
+
+### Requirement: Vertical-Flow Render Placement
+
+A node that is a child of a `VerticalFlow` parent SHALL be rendered at its
+runtime-resolved vertical-flow `y` (from the Vertical-Flow Transcript Layout
+resolution) in place of the child's own `bounds.y`, so the stacked layout the
+runtime computed is what paints. The
+resolution SHALL run once per frame before the geometry and text passes, keyed by
+each child's scene id, and both the child's background geometry and its glyph
+placement SHALL use the same resolved `y` so they stay aligned.
+
+The substitution SHALL affect only the vertical PLACEMENT of flowed children.
+It MUST NOT change any node's width, height, horizontal position, or its content,
+and MUST NOT alter text wrapping or truncation: truncation depends on a node's
+content and box dimensions, not its `y`, so the truncation/overflow computation
+SHALL be unaffected by flow placement.
+
+Render placement SHALL be behavior-preserving when no `VerticalFlow` node is
+present: a scene with only `Absolute` nodes SHALL resolve no flow offsets and
+every placement site SHALL fall back to the node's own `bounds.y`, so rendering
+is byte-identical to before this capability existed and pays no per-frame layout
+cost beyond a cheap presence scan. Layout resolution runs in the
+runtime/compositor, never in the model.
+
+Source: hud-pd9bp, hud-yfj8u (NodeLayout schema + resolver), PR #1163
+(`resolve_tile_flow_offsets`), `crates/tze_hud_compositor/src/renderer/tile_render.rs`
+(`prime_vertical_flow_layout`, `render_node`),
+`crates/tze_hud_compositor/src/renderer/text.rs` (`collect_text_items_from_node`),
+`crates/tze_hud_compositor/src/text.rs` (`TruncationKey`, y-independent)
+Scope: v1
+
+#### Scenario: flowed child paints at its resolved y
+
+- **WHEN** the runtime renders a child of a `VerticalFlow` node
+- **THEN** the child's background geometry and glyphs SHALL both be placed at the runtime-resolved flow `y`, not the child's own `bounds.y`
+
+#### Scenario: flow placement does not affect truncation
+
+- **WHEN** a flowed child's text overflows its box
+- **THEN** the truncation/overflow result SHALL be identical to the same content and box dimensions at any `y` (the flow `y` SHALL NOT enter the truncation computation)
+
+#### Scenario: absolute scenes render byte-identically
+
+- **WHEN** a scene contains no `VerticalFlow` node
+- **THEN** the runtime SHALL resolve no flow offsets and every placement site SHALL use the node's own `bounds.y`
+- **AND** the rendered output SHALL be byte-identical to before this capability existed

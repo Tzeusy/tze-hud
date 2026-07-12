@@ -563,9 +563,23 @@ impl super::Compositor {
 
         if let NodeData::SolidColor(sc) = &node.data {
             if let Some(radius) = sc.radius.filter(|r| *r > 0.0) {
+                // hud-xe37d (review finding on hud-pd9bp, confirmed real): a
+                // rounded SolidColor is emitted here, not by render_node's flat-
+                // quad path (which explicitly skips radius > 0), so it needs the
+                // SAME `effective_y` vertical-flow substitution `render_node`
+                // applies — otherwise a rounded backdrop stays at its own
+                // `bounds.y` while its siblings (and, for a shared node, its own
+                // glyphs) move to the resolved stack position. Absent from the
+                // map (every node in an Absolute scene) falls back to `sc.bounds.y`,
+                // matching the old behavior exactly.
+                let effective_y = self
+                    .tile_flow_offsets
+                    .get(&node_id)
+                    .copied()
+                    .unwrap_or(sc.bounds.y);
                 let rect = Rect::new(
                     tile.bounds.x + sc.bounds.x - scroll_x,
-                    tile.bounds.y + sc.bounds.y - scroll_y,
+                    tile.bounds.y + effective_y - scroll_y,
                     sc.bounds.width,
                     sc.bounds.height,
                 );

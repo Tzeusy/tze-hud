@@ -472,6 +472,17 @@ pub struct Compositor {
     /// pilot-path history reads as discrete turns. Absent => no per-entry divider
     /// geometry that frame (the joined text still renders).
     pub(crate) viewer_echo_entry_line_counts: HashMap<SceneId, Vec<usize>>,
+    /// Per-frame resolved vertical-flow y-offsets (hud-pd9bp): for each direct
+    /// child of a `NodeLayout::VerticalFlow` node, its runtime-stacked tile-local
+    /// `y` keyed by the child's own `SceneId`. Populated once per frame by
+    /// [`Self::prime_vertical_flow_layout`] and read at the `&self` geometry sites
+    /// (`render_node` and the text-collect walks), which substitute the resolved
+    /// `y` for the child's own `bounds.y`.
+    ///
+    /// EMPTY for any scene with no `VerticalFlow` node (the overwhelmingly common
+    /// case) — every geometry site then falls back to `bounds.y` and rendering is
+    /// byte-identical to before this capability existed.
+    pub(crate) tile_flow_offsets: HashMap<SceneId, f32>,
     /// Shared handle carrying the current keyboard-focus owner from the runtime
     /// `FocusManager` (hud-k6yvb). Drained at frame start into `focus_ring_owner`;
     /// the chrome-layer ring pass draws the ring for whatever owner it names.
@@ -725,6 +736,7 @@ impl Compositor {
             composer_visual_layout: Arc::new(StdMutex::new(None)),
             viewer_echo_line_counts: HashMap::new(),
             viewer_echo_entry_line_counts: HashMap::new(),
+            tile_flow_offsets: HashMap::new(),
             focus_ring_owner_state: Arc::new(StdMutex::new(None)),
             focus_ring_owner: None,
             resize_grip_hover_state: Arc::new(StdMutex::new(None)),
@@ -1019,6 +1031,7 @@ impl Compositor {
             composer_visual_layout: Arc::new(StdMutex::new(None)),
             viewer_echo_line_counts: HashMap::new(),
             viewer_echo_entry_line_counts: HashMap::new(),
+            tile_flow_offsets: HashMap::new(),
             focus_ring_owner_state: Arc::new(StdMutex::new(None)),
             focus_ring_owner: None,
             resize_grip_hover_state: Arc::new(StdMutex::new(None)),
