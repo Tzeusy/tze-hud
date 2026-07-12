@@ -18,25 +18,11 @@
 //! compositor's existing shaping so a measured child height agrees with what
 //! the render path paints for the same content and width.
 //!
-//! [`FlowChild::markdown_tokens`] selects which render path a child is measured
+//! [`FlowChild::content_mode`] selects which render path a child is measured
 //! against, and the "measured == painted" claim above is scoped accordingly
-//! (hud-3xdlf):
-//!
-//! - `None` — plain-text content (e.g. the composer draft). Measured via
-//!   [`composer_wrap_line_widths`], the SAME CPU wrapped-line shaper the
-//!   composer's own measurement/render paths already share (`WRAPPED_TEXT_WRAP`,
-//!   uniform `font_size_px` × [`LINE_HEIGHT_MULTIPLIER`]) — correct for plain
-//!   text, but this path does NOT strip markdown syntax or apply per-span
-//!   styling, so it must never be used to measure `TextMarkdownNode` content.
-//! - `Some(tokens)` — markdown content (e.g. a transcript turn). Measured via
-//!   [`crate::text::measure_markdown_content_height`], which reproduces
-//!   [`crate::text::TextItem::from_text_markdown_cached`]'s shaping: `content`
-//!   is parsed (markdown syntax stripped to `plain_text`, matching what
-//!   actually paints), heading `size_scale` spans shape at their real
-//!   (taller) per-span metrics, and the token-resolved
-//!   `parsed.line_height_multiplier` is used instead of the plain-text
-//!   constant. This is the path the intended per-turn transcript split
-//!   (hud-uym23) will use once wired.
+//! (hud-3xdlf, hud-ysyis) — see [`FlowContentMode`] for what each of the three
+//! modes does and does not account for, mirroring the render path's own
+//! `markdown_node_has_pixel_runs` fork (`renderer/text.rs`) one level up.
 //!
 //! This is the reusable resolution engine only. Wiring the resolved offsets into
 //! the render sites and exposing a per-node layout mode on the scene/wire schema
@@ -51,9 +37,48 @@ use tze_hud_scene::types::{FontFamily, Node, NodeData, NodeLayout, SceneId};
 
 use crate::markdown::MarkdownTokens;
 use crate::text::{
-    LINE_HEIGHT_MULTIPLIER, composer_wrap_line_widths, measure_markdown_content_height,
-    text_content_box_margins,
+    LINE_HEIGHT_MULTIPLIER, composer_wrap_line_widths, markdown_node_has_pixel_runs,
+    measure_markdown_content_height, measure_raw_content_height, text_content_box_margins,
 };
+
+/// Which render-path shaping a flowed child's content should be measured
+/// against — mirrors the render path's own dispatch one level up (the
+/// `markdown_node_has_pixel_runs` fork in `renderer/text.rs`, which chooses
+/// between [`crate::text::TextItem::from_text_markdown_cached`] and
+/// [`crate::text::TextItem::from_text_markdown_node`]), so a caller building a
+/// [`FlowChild`] from a `TextMarkdownNode` should apply the SAME fork.
+#[derive(Clone, Copy, Debug)]
+pub enum FlowContentMode<'a> {
+    /// Plain text (e.g. the composer draft). Measured via
+    /// [`composer_wrap_line_widths`], the SAME CPU wrapped-line shaper the
+    /// composer's own measurement/render paths already share (`WRAPPED_TEXT_WRAP`,
+    /// uniform `font_size_px` × [`LINE_HEIGHT_MULTIPLIER`]) — correct for plain
+    /// text, but this path does NOT strip markdown syntax or apply per-span
+    /// styling, so it must never be used to measure `TextMarkdownNode` content.
+    PlainText,
+    /// Markdown SOURCE with no pixel-bearing `color_runs` — the common case.
+    /// Measured via [`crate::text::measure_markdown_content_height`], which
+    /// reproduces [`crate::text::TextItem::from_text_markdown_cached`]'s
+    /// shaping: `content` is parsed (markdown syntax stripped to `plain_text`,
+    /// matching what actually paints), heading `size_scale` spans shape at
+    /// their real (taller) per-span metrics, and the token-resolved
+    /// `parsed.line_height_multiplier` is used instead of the plain-text
+    /// constant (hud-3xdlf). This is the path the intended per-turn transcript
+    /// split (hud-uym23) will use for the common (unattributed) case once wired.
+    Markdown(&'a MarkdownTokens),
+    /// Markdown SOURCE carrying at least one pixel-bearing `color_run` (e.g.
+    /// the hud-26869 per-turn role-attribution span) — measured via
+    /// [`crate::text::measure_raw_content_height`], which reproduces
+    /// [`crate::text::TextItem::from_text_markdown_node`]'s RAW-content
+    /// shaping: `content` is measured EXACTLY as given (markdown syntax NOT
+    /// stripped — stripping would shift bytes and invalidate the color run's
+    /// pinned offsets), at the node's own `font_family`, using the DEFAULT
+    /// line-height multiplier unconditionally (that render constructor has no
+    /// access to a parsed `MarkdownTokens` either, by design — hud-ysyis).
+    /// Attributed transcript turns (the real per-turn-attribution content
+    /// hud-26869 ships) take this branch, not [`Self::Markdown`].
+    RawWithColorRuns,
+}
 
 /// One child's inputs for vertical-flow height measurement.
 #[derive(Clone, Copy, Debug)]
@@ -64,20 +89,19 @@ pub struct FlowChild<'a> {
     pub wrap_width: f32,
     /// Font size in px used to shape and measure the child.
     pub font_size_px: f32,
-    /// Font family used to shape and measure the child. Only consulted on the
-    /// markdown path ([`Self::markdown_tokens`] is `Some`) — the plain-text
-    /// path shapes at a fixed sans-serif family, matching
-    /// [`composer_wrap_line_widths`]'s existing behavior.
+    /// Font family used to shape and measure the child. Consulted on the
+    /// [`FlowContentMode::Markdown`] and [`FlowContentMode::RawWithColorRuns`]
+    /// paths — the [`FlowContentMode::PlainText`] path shapes at a fixed
+    /// sans-serif family, matching [`composer_wrap_line_widths`]'s existing
+    /// behavior.
     pub font_family: FontFamily,
     /// Total vertical padding (top + bottom) added around the text inside the
     /// child node, matching the render path's `text_margin * 2` so the measured
     /// row height equals the painted row height.
     pub vertical_padding: f32,
-    /// `None` measures `content` as plain text (the composer/draft path).
-    /// `Some(tokens)` measures `content` as markdown SOURCE, reproducing the
-    /// render path's parse + per-span shaping (hud-3xdlf) — see the module
-    /// docs for exactly what each path does and does not account for.
-    pub markdown_tokens: Option<&'a MarkdownTokens>,
+    /// Which render-path shaping to measure `content` against — see
+    /// [`FlowContentMode`].
+    pub content_mode: FlowContentMode<'a>,
 }
 
 /// A resolved vertical-flow layout: the top y-offset of each child (in the same
@@ -127,15 +151,16 @@ pub fn flow_total_height(heights: &[f32], gap: f32) -> f32 {
 }
 
 /// Measure the rendered height (px) of one flowed child's wrapped content at its
-/// `wrap_width`, dispatching on [`FlowChild::markdown_tokens`] to the render
-/// path's OWN shaping for that content kind — see the module docs for exactly
-/// what "measured == painted" covers on each branch (hud-3xdlf).
+/// `wrap_width`, dispatching on [`FlowChild::content_mode`] to the render
+/// path's OWN shaping for that content kind — see [`FlowContentMode`] for
+/// exactly what "measured == painted" covers on each branch (hud-3xdlf,
+/// hud-ysyis).
 ///
-/// - `markdown_tokens: None` — plain text, via [`composer_wrap_line_widths`]:
+/// - [`FlowContentMode::PlainText`] — via [`composer_wrap_line_widths`]:
 ///   height = `wrapped_line_count * (font_size_px * LINE_HEIGHT_MULTIPLIER) +
 ///   vertical_padding`, with a floor of one line so an empty turn still
 ///   occupies a row rather than collapsing to zero.
-/// - `markdown_tokens: Some(tokens)` — markdown source, via
+/// - [`FlowContentMode::Markdown`] — via
 ///   [`crate::text::measure_markdown_content_height`]: `content` is parsed and
 ///   shaped exactly as [`crate::text::TextItem::from_text_markdown_cached`]
 ///   shapes it (stripped `plain_text`, per-span heading `size_scale`,
@@ -143,13 +168,18 @@ pub fn flow_total_height(heights: &[f32], gap: f32) -> f32 {
 ///   glyphon's actual per-line layout rather than a `line_count * constant`
 ///   product — the product formula assumes uniform line heights, which a
 ///   heading-containing turn violates.
+/// - [`FlowContentMode::RawWithColorRuns`] — via
+///   [`crate::text::measure_raw_content_height`]: `content` is measured
+///   exactly as given (no stripping), at `font_family`, using the default
+///   line-height multiplier, matching
+///   [`crate::text::TextItem::from_text_markdown_node`]'s raw-content branch.
 ///
-/// `wrap_width` and `vertical_padding` are clamped to non-negative on both
-/// branches.
+/// `wrap_width` and `vertical_padding` are clamped to non-negative on every
+/// branch.
 pub fn measure_child_height(font_system: &mut FontSystem, child: &FlowChild<'_>) -> f32 {
     let wrap_width = child.wrap_width.max(1.0);
-    let content_height = match child.markdown_tokens {
-        Some(tokens) => measure_markdown_content_height(
+    let content_height = match child.content_mode {
+        FlowContentMode::Markdown(tokens) => measure_markdown_content_height(
             font_system,
             child.content,
             wrap_width,
@@ -157,7 +187,14 @@ pub fn measure_child_height(font_system: &mut FontSystem, child: &FlowChild<'_>)
             child.font_family,
             tokens,
         ),
-        None => {
+        FlowContentMode::RawWithColorRuns => measure_raw_content_height(
+            font_system,
+            child.content,
+            wrap_width,
+            child.font_size_px,
+            child.font_family,
+        ),
+        FlowContentMode::PlainText => {
             let line_count = composer_wrap_line_widths(
                 font_system,
                 child.content,
@@ -209,10 +246,39 @@ pub fn resolve_vertical_flow(
 /// is `2*margin_y`, so the measured row height equals the painted row height
 /// (hud-yfj8u fidelity — the render path and this measurement share one margin
 /// formula and cannot drift).
-fn flow_child_height(font_system: &mut FontSystem, node: &Node) -> f32 {
+///
+/// `markdown_tokens` is the caller's resolved token set for the common
+/// (non-attributed) markdown case; `flow_child_height` selects which render
+/// path a `TextMarkdown` child is measured against by mirroring the SAME
+/// `markdown_node_has_pixel_runs` fork the render path itself applies
+/// (`renderer/text.rs`) — see [`FlowContentMode`] (hud-ysyis). This includes
+/// the MARGIN computation, not just the text-height measurement: the raw
+/// (color-run-bearing) branch derives its margin `line_height` from the
+/// DEFAULT multiplier (matching `from_text_markdown_node`, which has no token
+/// access), while the common branch derives it from `markdown_tokens`
+/// (matching `from_text_markdown_cached`'s token-resolved `parsed.
+/// line_height_multiplier`) — using the wrong one here would leave the wrap
+/// width/vertical padding measurement drifted from the render path even if
+/// the text-height call below is otherwise correct.
+fn flow_child_height(
+    font_system: &mut FontSystem,
+    node: &Node,
+    markdown_tokens: &MarkdownTokens,
+) -> f32 {
     match &node.data {
         NodeData::TextMarkdown(tm) => {
-            let line_height = tm.font_size_px * LINE_HEIGHT_MULTIPLIER;
+            let has_pixel_runs = markdown_node_has_pixel_runs(tm);
+            let content_mode = if has_pixel_runs {
+                FlowContentMode::RawWithColorRuns
+            } else {
+                FlowContentMode::Markdown(markdown_tokens)
+            };
+            let margin_line_height_multiplier = if has_pixel_runs {
+                MarkdownTokens::default().line_height_multiplier
+            } else {
+                markdown_tokens.line_height_multiplier
+            };
+            let line_height = tm.font_size_px * margin_line_height_multiplier;
             let (margin_x, margin_y) =
                 text_content_box_margins(tm.bounds.width, tm.bounds.height, line_height);
             measure_child_height(
@@ -223,14 +289,7 @@ fn flow_child_height(font_system: &mut FontSystem, node: &Node) -> f32 {
                     font_size_px: tm.font_size_px,
                     font_family: tm.font_family,
                     vertical_padding: margin_y * 2.0,
-                    // Plain-text measurement for now (hud-yfj8u): the pre-pass has
-                    // no production caller and threads no `MarkdownTokens`.
-                    // Transcript turns are markdown, so the render-wiring follow-up
-                    // (hud-pd9bp) SHOULD thread the tile's `MarkdownTokens` here and
-                    // pass `Some(..)` so stacked turn heights match the render
-                    // path's parse+shape (hud-3xdlf); until then this matches the
-                    // plain-text heights the resolver was unit-tested against.
-                    markdown_tokens: None,
+                    content_mode,
                 },
             )
         }
@@ -261,10 +320,18 @@ fn flow_child_height(font_system: &mut FontSystem, node: &Node) -> f32 {
 /// render geometry sites (and GPU pixel verification of the stacked result) is
 /// the remaining integration step, deferred to a live-hardware evidence bead per
 /// the hud-yfj8u live-verify scope.
+///
+/// `markdown_tokens` is the caller's resolved token set for the tile's markdown
+/// surface (the SAME set that would be passed to `parse_markdown_subset` /
+/// `resolve_portal_tokens` for these nodes) — threaded down to
+/// [`flow_child_height`] so a `TextMarkdown` child without pixel-bearing
+/// `color_runs` measures against the real tokens (hud-ysyis) rather than the
+/// plain-text fallback this pre-pass previously used unconditionally.
 pub fn resolve_tile_flow_offsets(
     font_system: &mut FontSystem,
     nodes: &HashMap<SceneId, Node>,
     gap: f32,
+    markdown_tokens: &MarkdownTokens,
 ) -> HashMap<SceneId, f32> {
     let mut offsets = HashMap::new();
     for parent in nodes.values() {
@@ -278,7 +345,7 @@ pub fn resolve_tile_flow_offsets(
             .collect();
         let heights: Vec<f32> = children
             .iter()
-            .map(|child| flow_child_height(font_system, child))
+            .map(|child| flow_child_height(font_system, child, markdown_tokens))
             .collect();
         let start_y = parent.data.bounds().y;
         for (child, y) in children.iter().zip(stack_offsets(&heights, gap, start_y)) {
@@ -292,7 +359,9 @@ pub fn resolve_tile_flow_offsets(
 mod tests {
     use super::*;
     use tze_hud_scene::types::FontFamily;
-    use tze_hud_scene::types::{Rect, Rgba, TextAlign, TextMarkdownNode, TextOverflow};
+    use tze_hud_scene::types::{
+        Rect, Rgba, TextAlign, TextColorRun, TextMarkdownNode, TextOverflow,
+    };
 
     // ── Pure geometry core (no fonts) ────────────────────────────────────────
 
@@ -351,7 +420,7 @@ mod tests {
             font_size_px: 16.0,
             font_family: FontFamily::SystemSansSerif,
             vertical_padding: 6.0,
-            markdown_tokens: None,
+            content_mode: FlowContentMode::PlainText,
         };
         let h = measure_child_height(&mut fs, &child);
         // floor of one line: 16 * 1.4 + 6 = 28.4
@@ -370,7 +439,7 @@ mod tests {
             font_size_px: 16.0,
             font_family: FontFamily::SystemSansSerif,
             vertical_padding: 0.0,
-            markdown_tokens: None,
+            content_mode: FlowContentMode::PlainText,
         };
         let wide = FlowChild {
             wrap_width: 6000.0,
@@ -456,7 +525,7 @@ mod tests {
             font_size_px: 16.0,
             font_family: FontFamily::SystemSansSerif,
             vertical_padding: 4.0,
-            markdown_tokens: Some(&tokens),
+            content_mode: FlowContentMode::Markdown(&tokens),
         };
         let measured = measure_child_height(&mut fs, &child);
         let expected =
@@ -481,7 +550,7 @@ mod tests {
             font_size_px: 16.0,
             font_family: FontFamily::SystemSansSerif,
             vertical_padding: 0.0,
-            markdown_tokens: Some(&tokens),
+            content_mode: FlowContentMode::Markdown(&tokens),
         };
         let measured = measure_child_height(&mut fs, &child);
         // Two raw lines' worth of UNIFORM (non-heading) line height — what the
@@ -513,10 +582,10 @@ mod tests {
             font_size_px: 16.0,
             font_family: FontFamily::SystemSansSerif,
             vertical_padding: 0.0,
-            markdown_tokens: Some(&tokens),
+            content_mode: FlowContentMode::Markdown(&tokens),
         };
         let plain_child = FlowChild {
-            markdown_tokens: None,
+            content_mode: FlowContentMode::PlainText,
             ..markdown_child
         };
 
@@ -563,7 +632,7 @@ mod tests {
             font_size_px: 16.0,
             font_family: FontFamily::SystemSansSerif,
             vertical_padding: 0.0,
-            markdown_tokens: Some(&tokens),
+            content_mode: FlowContentMode::Markdown(&tokens),
         };
         let measured = measure_child_height(&mut fs, &child);
         let expected = independently_shaped_markdown_height(&mut fs, content, 400.0, 16.0, &tokens);
@@ -594,7 +663,7 @@ mod tests {
                 font_size_px: 16.0,
                 font_family: FontFamily::SystemSansSerif,
                 vertical_padding: 0.0,
-                markdown_tokens: Some(tokens),
+                content_mode: FlowContentMode::Markdown(tokens),
             }
         }
         let short = measure_child_height(&mut fs, &make_child(one_paragraph, &tokens));
@@ -621,7 +690,7 @@ mod tests {
             font_size_px: 16.0,
             font_family: FontFamily::SystemSansSerif,
             vertical_padding: 2.0,
-            markdown_tokens: Some(&tokens),
+            content_mode: FlowContentMode::Markdown(&tokens),
         };
         let h = measure_child_height(&mut fs, &child);
         assert!(h.is_finite() && h > 0.0, "got {h}");
@@ -649,7 +718,7 @@ mod tests {
                 font_size_px,
                 font_family: FontFamily::SystemSansSerif,
                 vertical_padding,
-                markdown_tokens: Some(&tokens),
+                content_mode: FlowContentMode::Markdown(&tokens),
             };
             let h = measure_child_height(&mut fs, &child);
             assert!(
@@ -657,6 +726,177 @@ mod tests {
                 "degenerate input {child:?} produced non-finite/negative height: {h}"
             );
         }
+    }
+
+    // ── Raw-content (color-run) measurement mode (hud-ysyis) ──────────────────
+    //
+    // Mirrors the render path's `markdown_node_has_pixel_runs` fork
+    // (`renderer/text.rs`): a `TextMarkdownNode` WITH pixel-bearing
+    // `color_runs` (e.g. hud-26869 per-turn role attribution) bypasses
+    // `from_text_markdown_cached` and paints via `from_text_markdown_node` on
+    // RAW, un-stripped content — so it must be MEASURED on that same raw
+    // basis, not the parsed/stripped one `FlowContentMode::Markdown` uses.
+
+    #[test]
+    fn measure_child_height_raw_mode_does_not_strip_markdown_syntax() {
+        // Content whose markdown syntax bytes are the difference between
+        // wrapping to 1 line and 2 at this width (same fixture shape as the
+        // hud-3xdlf strips-vs-raw test, but this time asserting RawWithColorRuns
+        // matches the RAW (longer) wrap, not the stripped one.
+        let mut fs = FontSystem::new();
+        let tokens = MarkdownTokens::default();
+        let content = "**bold** `code` [a link](https://example.com/x) plain";
+        let wrap_width = 260.0;
+
+        let raw_child = FlowChild {
+            content,
+            wrap_width,
+            font_size_px: 16.0,
+            font_family: FontFamily::SystemSansSerif,
+            vertical_padding: 0.0,
+            content_mode: FlowContentMode::RawWithColorRuns,
+        };
+        let markdown_child = FlowChild {
+            content_mode: FlowContentMode::Markdown(&tokens),
+            ..raw_child
+        };
+
+        let raw_height = measure_child_height(&mut fs, &raw_child);
+        let markdown_height = measure_child_height(&mut fs, &markdown_child);
+        assert!(
+            raw_height > markdown_height,
+            "raw mode must measure the UN-stripped (longer) source, wrapping to \
+             MORE lines than the stripped markdown-mode measurement at the same \
+             width: raw={raw_height} markdown={markdown_height}"
+        );
+    }
+
+    #[test]
+    fn measure_child_height_raw_mode_uses_the_real_font_family_not_hardcoded_sans_serif() {
+        // composer_wrap_line_widths (the PlainText path) always shapes at a
+        // fixed sans-serif family; the render path's from_text_markdown_node
+        // does not — it uses the node's own font_family even on the raw
+        // branch. Monospace glyphs are typically wider than sans-serif at the
+        // same font_size_px, so the same content/width should wrap to a
+        // different (here: taller/more-lines) result under Monospace.
+        let mut fs = FontSystem::new();
+        let content = "the quick brown fox jumps over the lazy dog and then some more words";
+        let wrap_width = 220.0;
+
+        let sans = FlowChild {
+            content,
+            wrap_width,
+            font_size_px: 16.0,
+            font_family: FontFamily::SystemSansSerif,
+            vertical_padding: 0.0,
+            content_mode: FlowContentMode::RawWithColorRuns,
+        };
+        let mono = FlowChild {
+            font_family: FontFamily::SystemMonospace,
+            ..sans
+        };
+
+        let sans_height = measure_child_height(&mut fs, &sans);
+        let mono_height = measure_child_height(&mut fs, &mono);
+        assert_ne!(
+            sans_height, mono_height,
+            "raw mode must shape at the child's own font_family — SansSerif and \
+             Monospace must not measure identically for the same wrapped content \
+             (a hardcoded-family bug would make them equal): sans={sans_height} \
+             mono={mono_height}"
+        );
+    }
+
+    #[test]
+    fn measure_child_height_raw_mode_uses_default_line_height_not_real_tokens() {
+        // from_text_markdown_node has no access to a parsed MarkdownTokens (by
+        // design — a token-driven reflow could shift glyphs out from under the
+        // pinned color-run byte offsets), so it always uses the DEFAULT
+        // multiplier. A raw-mode measurement against a token set that diverges
+        // from the default must NOT move — proving raw mode genuinely ignores
+        // the tokens it's never even given.
+        let mut fs = FontSystem::new();
+        let content = "one line only, no wrap";
+        let child = FlowChild {
+            content,
+            wrap_width: 400.0,
+            font_size_px: 16.0,
+            font_family: FontFamily::SystemSansSerif,
+            vertical_padding: 0.0,
+            content_mode: FlowContentMode::RawWithColorRuns,
+        };
+        let raw_height = measure_child_height(&mut fs, &child);
+
+        let default_multiplier = MarkdownTokens::default().line_height_multiplier;
+        let expected = 16.0 * default_multiplier;
+        assert!(
+            (raw_height - expected).abs() < 1e-2,
+            "raw mode must use the DEFAULT line-height multiplier: raw_height={raw_height} \
+             expected={expected}"
+        );
+
+        // A divergent token set must not change the raw-mode result at all —
+        // FlowContentMode::RawWithColorRuns doesn't even carry a MarkdownTokens
+        // reference, so there is nothing for a divergent token set to reach.
+        let diverging_multiplier = default_multiplier + 1.0;
+        assert!(
+            (diverging_multiplier - default_multiplier).abs() > 0.5,
+            "sanity: fixture multiplier must diverge meaningfully"
+        );
+    }
+
+    #[test]
+    fn flow_child_height_forks_on_pixel_bearing_color_runs() {
+        // The Node-level wrapper must mirror markdown_node_has_pixel_runs
+        // exactly: a node WITH a non-empty color run takes RawWithColorRuns
+        // (raw, unstripped measurement); a node WITHOUT one takes Markdown
+        // (parsed/stripped measurement, using the real tokens passed in).
+        let mut fs = FontSystem::new();
+        // A MarkdownTokens whose line-height diverges sharply from the
+        // default, so the two branches produce OBSERVABLY different heights
+        // for byte-identical content — this is the concrete regression this
+        // bead closes: before the fix, BOTH node shapes measured via the
+        // plain-text fallback and neither one would exercise the divergence.
+        let tokens = MarkdownTokens {
+            line_height_multiplier: 3.0,
+            ..MarkdownTokens::default()
+        };
+        assert!(
+            (tokens.line_height_multiplier - MarkdownTokens::default().line_height_multiplier)
+                .abs()
+                > 1.0,
+            "fixture must diverge meaningfully from the default multiplier"
+        );
+
+        let content = "**attributed** tool output line";
+
+        let mut attributed_node = text_node(content, 0.0, 300.0);
+        if let NodeData::TextMarkdown(tm) = &mut attributed_node.data {
+            tm.color_runs = Box::from([TextColorRun {
+                start_byte: 0,
+                end_byte: 4,
+                color: Rgba::new(1.0, 0.5, 0.0, 1.0),
+            }]);
+        }
+        let plain_node = text_node(content, 0.0, 300.0);
+
+        let attributed_height = flow_child_height(&mut fs, &attributed_node, &tokens);
+        let plain_height = flow_child_height(&mut fs, &plain_node, &tokens);
+        // Directional, not just "different": the plain (markdown-mode) node
+        // uses tokens.line_height_multiplier (3.0, both for text-height and,
+        // via the margin formula, for vertical padding); the attributed
+        // (raw-mode) node ignores `tokens` entirely and uses the much smaller
+        // default (~1.4) — so the plain node must measure taller. A bug that
+        // routed BOTH nodes through the same branch (the pre-fix behavior,
+        // both plain-text) would make them equal instead, and any other
+        // accidental divergence would not reliably produce this specific
+        // direction.
+        assert!(
+            attributed_height < plain_height,
+            "raw-mode (attributed) height must be LESS than markdown-mode (plain) \
+             height given a token line-height multiplier far above the raw path's \
+             default: attributed={attributed_height} plain={plain_height}"
+        );
     }
 
     // ── Full resolution (the demonstration) ───────────────────────────────────
@@ -671,7 +911,7 @@ mod tests {
                 font_size_px: 16.0,
                 font_family: FontFamily::SystemSansSerif,
                 vertical_padding: 4.0,
-                markdown_tokens: None,
+                content_mode: FlowContentMode::PlainText,
             },
             FlowChild {
                 content: "tool: ran a command\nand printed two lines",
@@ -679,7 +919,7 @@ mod tests {
                 font_size_px: 16.0,
                 font_family: FontFamily::SystemSansSerif,
                 vertical_padding: 4.0,
-                markdown_tokens: None,
+                content_mode: FlowContentMode::PlainText,
             },
             FlowChild {
                 content: "assistant turn three",
@@ -687,7 +927,7 @@ mod tests {
                 font_size_px: 16.0,
                 font_family: FontFamily::SystemSansSerif,
                 vertical_padding: 4.0,
-                markdown_tokens: None,
+                content_mode: FlowContentMode::PlainText,
             },
         ];
         let gap = 8.0;
@@ -758,7 +998,8 @@ mod tests {
         let a = text_node("one", 0.0, 300.0);
         let b = text_node("two", 40.0, 300.0);
         let map = scene_map(vec![a, b]);
-        let offsets = resolve_tile_flow_offsets(&mut fs, &map, 8.0);
+        let tokens = MarkdownTokens::default();
+        let offsets = resolve_tile_flow_offsets(&mut fs, &map, 8.0, &tokens);
         assert!(
             offsets.is_empty(),
             "absolute-only scene must resolve no flow offsets"
@@ -780,7 +1021,8 @@ mod tests {
 
         let map = scene_map(vec![parent, c0, c1, c2]);
         let gap = 8.0;
-        let offsets = resolve_tile_flow_offsets(&mut fs, &map, gap);
+        let tokens = MarkdownTokens::default();
+        let offsets = resolve_tile_flow_offsets(&mut fs, &map, gap, &tokens);
 
         assert_eq!(offsets.len(), 3, "every flow child gets a resolved y");
         // First child sits at the parent's top.
@@ -790,7 +1032,7 @@ mod tests {
         );
         // Children are strictly ordered top-to-bottom and do not overlap.
         assert!(offsets[&id0] < offsets[&id1] && offsets[&id1] < offsets[&id2]);
-        let h0 = flow_child_height(&mut fs, &map[&id0]);
+        let h0 = flow_child_height(&mut fs, &map[&id0], &tokens);
         assert!(
             offsets[&id1] >= offsets[&id0] + h0 + gap - 1e-3,
             "second child must clear the first plus the gap: {offsets:?}"

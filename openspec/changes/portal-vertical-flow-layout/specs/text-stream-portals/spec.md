@@ -14,7 +14,14 @@ path uses, so a child's measured row height equals its painted row height. For a
 markdown transcript node this specifically means the SAME markdown parse and
 per-span shaping the render path applies to a `TextMarkdownNode` — including
 markdown syntax stripped before wrapping and any heading font-size-scale spans —
-not a generic plain-text measurement of the raw source (hud-3xdlf).
+not a generic plain-text measurement of the raw source (hud-3xdlf). A transcript
+node carrying at least one pixel-bearing color run (e.g. hud-26869 per-turn role
+attribution) is a SEPARATE render path — the render path SKIPS markdown stripping
+for such a node so the color run's pinned byte offsets stay valid — and
+measurement SHALL mirror that fork: RAW (un-stripped) content, the node's own
+font family, and the default line-height multiplier (that render path has no
+access to a resolved token set either, by the same offset-pinning constraint),
+not the parsed/token-resolved measurement used for the common case (hud-ysyis).
 
 Vertical-flow layout resolution SHALL run in the runtime/compositor and MUST NOT
 require the owning model or adapter to compute child positions — consistent with
@@ -37,13 +44,16 @@ within the Promotion Scope Boundary (existing node types, no new transport, no
 scene-graph transcript history — only the bounded visible window is materialized).
 
 Source: hud-txkbh, hud-26869 (deferred structural half of the turn model),
-hud-3xdlf (markdown-aware measurement), PR #1149 / hud-ga4md
+hud-3xdlf (markdown-aware measurement), hud-ysyis (raw-content/color-run
+measurement mode + real-token threading), PR #1149 / hud-ga4md
 (`NodeProto.children` materialization), §Phase-0 Raw-Tile Pilot, §Phase-1
 Promotion Evidence Gate, §Promotion Scope Boundary, §Portal Component Profile
 Styling, `crates/tze_hud_compositor/src/vertical_flow.rs`,
 `crates/tze_hud_compositor/src/text.rs` (`composer_wrap_line_widths` for
-plain-text children, `measure_markdown_content_height` for markdown children),
-`crates/tze_hud_config/src/portal_tokens.rs` (`section_gap_px`)
+plain-text children, `measure_markdown_content_height` for markdown children
+without pixel-bearing color runs, `measure_raw_content_height` for markdown
+children WITH them), `crates/tze_hud_config/src/portal_tokens.rs`
+(`section_gap_px`)
 Scope: v1
 
 #### Scenario: flowed children stack without overlap
@@ -57,6 +67,12 @@ Scope: v1
 - **WHEN** the runtime measures a flowed child's height for layout
 - **THEN** the height SHALL derive from the same wrapped-line shaping the render path uses for that content and width
 - **AND** a child that wraps to more visual lines SHALL resolve to a taller row than the same content on a wider child
+
+#### Scenario: attributed transcript nodes measure on the same raw basis they paint on
+
+- **WHEN** the runtime measures a flowed child whose `TextMarkdownNode` carries at least one pixel-bearing color run
+- **THEN** the height SHALL derive from the RAW (un-stripped) content, the node's own font family, and the default line-height multiplier — the same basis that node's render path paints on — and NOT from a markdown-parsed/token-resolved measurement
+- **AND** for a child without any pixel-bearing color run, the height SHALL derive from the markdown-parsed, token-resolved measurement instead
 
 #### Scenario: layout runs in the runtime, not the publisher
 
