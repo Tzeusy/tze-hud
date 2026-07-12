@@ -584,6 +584,65 @@ pub(crate) fn measure_markdown_content_height(
         .unwrap_or(base_line_height)
 }
 
+/// Measure the rendered height (px) of RAW markdown SOURCE `content` —
+/// markdown syntax NOT stripped — wrapped to `wrap_width`, reproducing the
+/// render path's shaping for a `TextMarkdownNode` that carries pixel-bearing
+/// `color_runs` ([`TextItem::from_text_markdown_node`]'s raw-content branch,
+/// hud-ysyis).
+///
+/// That render constructor deliberately does two things
+/// [`measure_markdown_content_height`] does not, mirrored here:
+///
+/// 1. **Skips markdown stripping entirely.** The caller-supplied color-run
+///    byte offsets are pinned to the RAW content; stripping markdown syntax
+///    before shaping would shift every byte position after the first marker
+///    and invalidate them. `content` is measured exactly as given.
+/// 2. **Uses the DEFAULT line-height multiplier unconditionally**, via
+///    `crate::markdown::MarkdownTokens::default()` — that constructor has no
+///    access to a parsed, token-resolved `MarkdownTokens` (by design: a
+///    token-driven reflow of the wrap width or line height could shift glyph
+///    positions out from under the pinned color-run offsets the same way
+///    stripping would), so this measurement must not resolve real tokens
+///    either, even when the caller has them.
+///
+/// `color_runs` themselves carry only a color (`ColorRunItem`/`TextColorRun`
+/// — no weight, italic, monospace, or size_scale), so they never affect
+/// layout or wrapping and are correctly irrelevant to a height measurement;
+/// callers do not need to supply them here.
+///
+/// Unlike [`composer_wrap_line_widths`] (which always shapes at a fixed
+/// sans-serif family — correct for composer/viewer-echo plain text, which
+/// never carries pixel-bearing runs), this uses `font_family`: the render
+/// path applies the node's own family on this branch too.
+pub(crate) fn measure_raw_content_height(
+    font_system: &mut FontSystem,
+    content: &str,
+    wrap_width: f32,
+    font_size_px: f32,
+    font_family: FontFamily,
+) -> f32 {
+    // Same font-size clamp `TextItem::from_text_markdown_node` applies to
+    // `node.font_size_px`.
+    let font_size_px = font_size_px.clamp(6.0, 200.0);
+    let line_height_multiplier = crate::markdown::MarkdownTokens::default().line_height_multiplier;
+    let line_height = font_size_px * line_height_multiplier;
+    let mut buf = Buffer::new(font_system, Metrics::new(font_size_px, line_height));
+    buf.set_size(font_system, Some(wrap_width.max(1.0)), None);
+    buf.set_wrap(font_system, WRAPPED_TEXT_WRAP);
+    let family = match font_family {
+        FontFamily::SystemSansSerif => Family::SansSerif,
+        FontFamily::SystemMonospace => Family::Monospace,
+        FontFamily::SystemSerif => Family::Serif,
+    };
+    let base_attrs = Attrs::new().family(family).weight(Weight(400));
+    buf.set_text(font_system, content, base_attrs, Shaping::Advanced);
+    buf.shape_until_scroll(font_system, false);
+    buf.layout_runs()
+        .last()
+        .map(|run| run.line_top + run.line_height)
+        .unwrap_or(line_height)
+}
+
 impl TextRasterizer {
     /// Create a text rasterizer targeting the given surface format.
     ///

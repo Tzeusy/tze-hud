@@ -44,6 +44,33 @@
       flow parent's children, stacks from the parent top with the token gap →
       `SceneId → y` map). Behavior-preserving: empty map for all-Absolute scenes.
       Unit-tested (empty-for-absolute + stacks-from-parent-top).
+- [x] 3.4 hud-ysyis (P1, Codex-found on PR #1162, confirmed by reviewer-1149):
+      `flow_child_height`'s markdown measurement always used the plain-text
+      fallback (`markdown_tokens: None`), and had no measurement mode at all
+      for `TextMarkdownNode`s carrying pixel-bearing `color_runs` (e.g. the
+      hud-26869 per-turn role-attribution spans) — the render path forks on
+      `markdown_node_has_pixel_runs` and paints such a node's RAW,
+      un-stripped content via `from_text_markdown_node` (no markdown
+      stripping, no token access — stripping/reflow would invalidate the
+      color run's pinned byte offsets); the pre-existing measurement always
+      took the stripped/token-agnostic path regardless, so an attributed
+      transcript turn would measure wrong (line-count divergence,
+      overlap/gaps). Fixed by replacing `FlowChild::markdown_tokens:
+      Option<&MarkdownTokens>` with a 3-state `FlowContentMode` enum
+      (`PlainText` / `Markdown(&MarkdownTokens)` / `RawWithColorRuns`) and a
+      new `measure_raw_content_height` in `text.rs` reproducing
+      `from_text_markdown_node`'s raw shaping (node's own `font_family`, not
+      the hardcoded sans-serif `composer_wrap_line_widths` uses; the DEFAULT
+      line-height multiplier, not token-resolved). `flow_child_height` now
+      forks on `markdown_node_has_pixel_runs` exactly like the render path,
+      and also threads a real `&MarkdownTokens` (new trailing parameter on
+      `resolve_tile_flow_offsets`, additive/purely-appended — flagged to the
+      coordinator for sequencing with the parallel hud-pd9bp render-site-wiring
+      branch) into the common (non-attributed) case's margin AND text-height
+      computation, replacing the plain-text fallback. 4 new unit tests
+      (filtered, no GPU); verified the wiring-level test fails against a
+      simulated pre-fix (always-plain-text, no fork) implementation before
+      restoring the real fix.
 - [ ] 3.3 Render-site geometry substitution: thread the resolved-y map into
       `renderer/tile_render.rs` render_node (~2037) and `renderer/text.rs`
       from_text_markdown_node (~2075) / from_text_markdown_cached (~2200) / the
@@ -51,7 +78,10 @@
       live-hardware evidence bead (hud-yfj8u live-verify scope): the substitution
       is behavior-preserving for the absolute path (empty map), but pixel
       correctness of the stacked flow render requires GPU/reference-Windows
-      verification, which cannot run in this lane.
+      verification, which cannot run in this lane. NOTE (hud-ysyis): the
+      hud-pd9bp branch doing this wiring calls `resolve_tile_flow_offsets`,
+      whose signature gained a trailing `markdown_tokens: &MarkdownTokens`
+      parameter in this bead — that call site needs one new argument.
 
 ## 4. Follow-ups (separate beads)
 
