@@ -1783,18 +1783,57 @@ impl Compositor {
         // parse the render path already produced, NOT a fresh per-frame parse
         // (text-stream-portals MUST). Pin the render `MarkdownCache` snapshot (a
         // cheap atomic `Arc` load) and build a `SceneId -> &ParsedMarkdown` lookup
-        // BEFORE the `&mut FontSystem` borrow below — its references borrow the
-        // local `cache` binding (not `self`), so they do not conflict with the
-        // mutable rasterizer borrow. Reusing `node_key_cache` keys each node under
-        // the SAME portal/generic token scope `prime_markdown_cache` used, so a
-        // recomputed-key scope mismatch can't turn a hit into a miss. On unchanged
-        // content the commit-time prime guarantees a hit → zero frame-path parse; a
-        // cold-frame miss falls back to a one-time inline parse in the resolver.
+        // BEFORE the `&mut FontSystem` borrow below.
         let cache = self.markdown_cache();
+
+        // hud-wrlv1: content over the async-parse threshold parses on the
+        // background worker, so the AUTHORITATIVE snapshot misses for several
+        // frames after a commit. Without self-heal, a large unchanged flow child
+        // would take the resolver's parse-on-miss fallback EVERY frame of that
+        // window. Mirror the render path (`collect_text_items_from_node`): before
+        // building the lookup, parse any missing flow markdown child ONCE with its
+        // scoped tokens and park it in `markdown_fallback_cache`, then consult that
+        // side cache alongside the authoritative one below. Large content then
+        // re-parses at most once per content version, not per frame. The
+        // `borrow_mut()` (populate) is scoped to a block so it is released before
+        // the `borrow()` (consult) — the render path's own `BorrowMutError`
+        // discipline (hud-u4lq2).
+        let flow_child_ids: std::collections::HashSet<SceneId> = scene
+            .nodes
+            .values()
+            .filter(|node| node.layout == NodeLayout::VerticalFlow)
+            .flat_map(|node| node.children.iter().copied())
+            .collect();
+        let portal_node_ids = super::portal_markdown_node_ids(scene);
+        {
+            let mut fallback = self.markdown_fallback_cache.borrow_mut();
+            heal_flow_markdown_fallback(
+                &cache,
+                &mut fallback,
+                &self.node_key_cache,
+                &scene.nodes,
+                &flow_child_ids,
+                &portal_node_ids,
+                &self.markdown_tokens,
+                &self.markdown_tokens_generic,
+            );
+        }
+        // Consult authoritative FIRST, then the self-heal side cache. Reusing
+        // `node_key_cache` keys each node under the SAME portal/generic token scope
+        // `prime_markdown_cache` used, so a recomputed-key scope mismatch can't turn
+        // a hit into a miss. The `fallback` `Ref` and the `cache` `Arc` both pin the
+        // `&ParsedMarkdown` references for the whole resolve; both are disjoint from
+        // the `&mut self.text_rasterizer` borrow taken below.
+        let fallback = self.markdown_fallback_cache.borrow();
         let parsed_by_id: std::collections::HashMap<SceneId, &crate::markdown::ParsedMarkdown> =
             self.node_key_cache
                 .iter()
-                .filter_map(|(id, key)| cache.get_by_key(key).map(|parsed| (*id, parsed)))
+                .filter_map(|(id, key)| {
+                    cache
+                        .get_by_key(key)
+                        .or_else(|| fallback.get(key))
+                        .map(|parsed| (*id, parsed))
+                })
                 .collect();
         let mut bundled_fallback = None;
         let font_system: &mut FontSystem = match self.text_rasterizer.as_mut() {
@@ -2433,6 +2472,65 @@ impl Compositor {
     }
 }
 
+/// Self-heal the vertical-flow markdown fallback cache (hud-wrlv1): for each flow
+/// child markdown node missing from BOTH the authoritative `MarkdownCache` and the
+/// `fallback` side cache, parse it ONCE with its scoped tokens and store it in
+/// `fallback` — mirroring the render path's own check-then-store
+/// (`collect_text_items_from_node`). Content over the async-parse threshold
+/// authoritative-misses for several frames after a commit; without this, the flow
+/// measurement would re-parse it every frame of that window. Idempotent: once a
+/// node's key is in `fallback` (or the authoritative snapshot lands), a later call
+/// finds it and does not re-parse, so large content re-parses at most once per
+/// content version.
+///
+/// The raw / pixel-bearing-color-run fork never parses markdown, so those nodes
+/// are skipped. The scope (portal vs generic tokens) is chosen exactly as
+/// `prime_markdown_cache` chooses it, and the key is taken from `node_key_cache`
+/// (already scope-baked) or computed with the same scoped tokens on a miss, so the
+/// stored entry is keyed identically to what the render path will look up.
+#[allow(clippy::too_many_arguments)]
+fn heal_flow_markdown_fallback(
+    authoritative: &crate::markdown::MarkdownCache,
+    fallback: &mut std::collections::HashMap<[u8; 32], crate::markdown::ParsedMarkdown>,
+    node_key_cache: &std::collections::HashMap<SceneId, [u8; 32]>,
+    nodes: &std::collections::HashMap<SceneId, Node>,
+    flow_child_ids: &std::collections::HashSet<SceneId>,
+    portal_node_ids: &std::collections::HashSet<SceneId>,
+    portal_tokens: &crate::markdown::MarkdownTokens,
+    generic_tokens: &crate::markdown::MarkdownTokens,
+) {
+    for id in flow_child_ids {
+        let Some(node) = nodes.get(id) else {
+            continue;
+        };
+        let NodeData::TextMarkdown(tm) = &node.data else {
+            continue;
+        };
+        // The raw/color-run branch measures un-parsed content, so it needs no
+        // cached parse and must not be filled here.
+        if crate::text::markdown_node_has_pixel_runs(tm) {
+            continue;
+        }
+        let tokens = if portal_node_ids.contains(id) {
+            portal_tokens
+        } else {
+            generic_tokens
+        };
+        let key = node_key_cache
+            .get(id)
+            .copied()
+            .unwrap_or_else(|| crate::markdown::MarkdownCache::compute_key(&tm.content, tokens));
+        // Already authoritative, or already self-healed → no parse this frame.
+        if authoritative.get_by_key(&key).is_some() || fallback.contains_key(&key) {
+            continue;
+        }
+        fallback.insert(
+            key,
+            crate::markdown::parse_markdown_subset(&tm.content, tokens),
+        );
+    }
+}
+
 #[cfg(test)]
 mod viewer_echo_timestamp_tests {
     use super::*;
@@ -2732,6 +2830,156 @@ mod composer_draft_color_tests {
             composer_draft_base_color(&tokens, true, true),
             tokens.placeholder_color,
             "a placeholder hint must always render in the placeholder color"
+        );
+    }
+}
+
+#[cfg(test)]
+mod flow_fallback_cache_tests {
+    use super::heal_flow_markdown_fallback;
+    use crate::markdown::{MarkdownCache, MarkdownTokens, PARSE_MARKDOWN_SUBSET_CALLS};
+    use std::collections::{HashMap, HashSet};
+    use tze_hud_scene::types::{
+        FontFamily, Node, NodeData, NodeLayout, Rect, Rgba, SceneId, TextAlign, TextMarkdownNode,
+        TextOverflow,
+    };
+
+    /// Markdown content comfortably over `INLINE_PARSE_BYTE_THRESHOLD` (4096B), so
+    /// in production it parses on the background worker and the authoritative
+    /// `MarkdownCache` misses for several frames after a commit.
+    fn big_markdown_content() -> String {
+        let content = format!("# Heading\n{}", "lorem ipsum dolor sit amet ".repeat(200));
+        assert!(
+            content.len() > 4096,
+            "fixture must exceed the async-parse threshold"
+        );
+        content
+    }
+
+    fn markdown_node(id: SceneId, content: &str) -> Node {
+        Node {
+            id,
+            children: vec![],
+            layout: NodeLayout::Absolute,
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: content.to_string(),
+                bounds: Rect::new(0.0, 0.0, 300.0, 40.0),
+                font_size_px: 16.0,
+                font_family: FontFamily::SystemSansSerif,
+                color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+                background: None,
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Ellipsis,
+                color_runs: Box::default(),
+            }),
+        }
+    }
+
+    /// hud-wrlv1: a large unchanged flow child that keeps authoritative-missing
+    /// (background parse still pending) must re-parse AT MOST ONCE across repeated
+    /// per-frame heal calls — the self-heal side cache absorbs every frame after
+    /// the first.
+    #[test]
+    fn heal_parses_large_content_at_most_once_across_repeated_calls() {
+        let child_id = SceneId::new();
+        let content = big_markdown_content();
+        let tokens = MarkdownTokens::default();
+        let key = MarkdownCache::compute_key(&content, &tokens);
+
+        let mut node_key_cache = HashMap::new();
+        node_key_cache.insert(child_id, key);
+        let nodes: HashMap<SceneId, Node> = [(child_id, markdown_node(child_id, &content))]
+            .into_iter()
+            .collect();
+        let flow_child_ids: HashSet<SceneId> = [child_id].into_iter().collect();
+        let portal_node_ids: HashSet<SceneId> = [child_id].into_iter().collect();
+        // Empty authoritative snapshot → the background parse has not landed yet,
+        // so every frame authoritative-misses.
+        let authoritative = MarkdownCache::new();
+        let mut fallback: HashMap<[u8; 32], _> = HashMap::new();
+
+        // Cold frame: one parse, parked in the fallback cache.
+        PARSE_MARKDOWN_SUBSET_CALLS.with(|c| c.set(0));
+        heal_flow_markdown_fallback(
+            &authoritative,
+            &mut fallback,
+            &node_key_cache,
+            &nodes,
+            &flow_child_ids,
+            &portal_node_ids,
+            &tokens,
+            &tokens,
+        );
+        assert_eq!(
+            PARSE_MARKDOWN_SUBSET_CALLS.with(|c| c.get()),
+            1,
+            "cold heal parses the large child exactly once"
+        );
+        assert!(
+            fallback.contains_key(&key),
+            "the parse must be parked in the fallback cache for later frames"
+        );
+
+        // Subsequent frames (content unchanged, authoritative still missing): the
+        // side cache absorbs them — NOT one parse per frame (the bug).
+        for _ in 0..5 {
+            heal_flow_markdown_fallback(
+                &authoritative,
+                &mut fallback,
+                &node_key_cache,
+                &nodes,
+                &flow_child_ids,
+                &portal_node_ids,
+                &tokens,
+                &tokens,
+            );
+        }
+        assert_eq!(
+            PARSE_MARKDOWN_SUBSET_CALLS.with(|c| c.get()),
+            1,
+            "repeated frames must re-parse at most once, not per frame (hud-wrlv1)"
+        );
+    }
+
+    /// A node already present in the authoritative snapshot is never parsed or
+    /// parked by the heal pass (the common steady-state).
+    #[test]
+    fn heal_skips_nodes_already_in_the_authoritative_cache() {
+        let child_id = SceneId::new();
+        let content = big_markdown_content();
+        let tokens = MarkdownTokens::default();
+        let key = MarkdownCache::compute_key(&content, &tokens);
+
+        let mut node_key_cache = HashMap::new();
+        node_key_cache.insert(child_id, key);
+        let nodes: HashMap<SceneId, Node> = [(child_id, markdown_node(child_id, &content))]
+            .into_iter()
+            .collect();
+        let flow_child_ids: HashSet<SceneId> = [child_id].into_iter().collect();
+        let portal_node_ids: HashSet<SceneId> = [child_id].into_iter().collect();
+        let mut authoritative = MarkdownCache::new();
+        authoritative.prime(&content, &tokens);
+        let mut fallback: HashMap<[u8; 32], _> = HashMap::new();
+
+        PARSE_MARKDOWN_SUBSET_CALLS.with(|c| c.set(0));
+        heal_flow_markdown_fallback(
+            &authoritative,
+            &mut fallback,
+            &node_key_cache,
+            &nodes,
+            &flow_child_ids,
+            &portal_node_ids,
+            &tokens,
+            &tokens,
+        );
+        assert_eq!(
+            PARSE_MARKDOWN_SUBSET_CALLS.with(|c| c.get()),
+            0,
+            "an authoritative-cached node must not be re-parsed by the heal pass"
+        );
+        assert!(
+            fallback.is_empty(),
+            "no fallback entry needed for an authoritative hit"
         );
     }
 }
