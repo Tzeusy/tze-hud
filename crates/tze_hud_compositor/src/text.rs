@@ -971,6 +971,16 @@ impl TextRasterizer {
     /// the echo's break-anywhere wrap identical to what the render path paints
     /// (hud-n0x4u), so an over-long single-word reply is counted as the multiple
     /// in-box lines it actually occupies rather than one clipped line.
+    /// Mutable access to the rasterizer's `FontSystem` — the SAME font system the
+    /// render path shapes glyphs with, so it carries any agent-uploaded fonts
+    /// loaded via `load_font_data` (hud-9gopx). Exposed so the vertical-flow
+    /// pre-pass (`renderer::…::prime_vertical_flow_layout`) can measure flow child
+    /// heights against the real render fonts instead of a fresh bundled font
+    /// system, keeping "measured == painted" true for uploaded fonts too.
+    pub(crate) fn font_system_mut(&mut self) -> &mut FontSystem {
+        &mut self.font_system
+    }
+
     pub(crate) fn measure_wrapped_line_count(
         &mut self,
         text: &str,

@@ -1755,22 +1755,29 @@ impl Compositor {
             return;
         }
         let gap = resolve_section_gap_px(&self.token_map);
-        // The render rasterizer's `FontSystem` is private to `TextRasterizer`
-        // (crate-root `text.rs`, owned by the measurement seam / hud-ysyis), so
-        // measure against the bundled base fonts here. Exact for the base family;
-        // reflecting agent-uploaded fonts in flow heights is a fidelity follow-up.
-        // Only reached when a `VerticalFlow` node actually exists.
-        let mut font_system = crate::fonts::bundled_font_system();
-        // hud-ysyis added a trailing `&MarkdownTokens` so the resolver measures
-        // markdown / attributed transcript turns exactly as the render path shapes
-        // them. Pass the renderer's resolved portal markdown token set — the same
-        // one the markdown render constructors consume for these nodes.
-        self.tile_flow_offsets = crate::vertical_flow::resolve_tile_flow_offsets(
-            &mut font_system,
-            &scene.nodes,
-            gap,
-            &self.markdown_tokens,
-        );
+        // Measure flow child heights against the RENDER rasterizer's OWN
+        // `FontSystem` (hud-9gopx) — the same one that shapes the glyphs — so any
+        // agent-uploaded font loaded via `load_font_data` is reflected in the
+        // stacked heights, keeping "measured == painted" true for uploaded fonts
+        // too. Clone the token set first so the `&self.markdown_tokens` borrow ends
+        // before the rasterizer is taken mutably (mirrors
+        // `prime_viewer_echo_layout`'s two-phase borrow discipline); the resolver
+        // gets a real `&MarkdownTokens` (hud-ysyis) so markdown / attributed turns
+        // measure on the same basis the render constructors paint them. If the
+        // rasterizer is not yet initialized, nothing renders this frame, so the
+        // map stays empty (cleared above) and every site falls back to `bounds.y`.
+        let markdown_tokens = self.markdown_tokens.clone();
+        let offsets = self.text_rasterizer.as_mut().map(|rasterizer| {
+            crate::vertical_flow::resolve_tile_flow_offsets(
+                rasterizer.font_system_mut(),
+                &scene.nodes,
+                gap,
+                &markdown_tokens,
+            )
+        });
+        if let Some(offsets) = offsets {
+            self.tile_flow_offsets = offsets;
+        }
     }
 
     /// Collect kind-distinct `TextItem`s for the runtime-authored viewer reply
