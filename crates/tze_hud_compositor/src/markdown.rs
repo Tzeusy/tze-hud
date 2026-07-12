@@ -1128,6 +1128,21 @@ fn tx_if_worker_spawned(
 
 // ─── parse_markdown_subset ───────────────────────────────────────────────────
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only PER-THREAD counter of [`parse_markdown_subset`] invocations, so
+    /// tests can prove a code path performs ZERO markdown parses (hud-5wx09: the
+    /// per-frame flow measurement MUST NOT re-parse cached content). Counting the
+    /// actual behavior is stronger than asserting which branch was taken.
+    ///
+    /// Thread-local (not a global atomic) so it stays correct under cargo's
+    /// parallel test execution: measurement is synchronous on the calling test's
+    /// thread, and other tests parsing on their own threads cannot perturb the
+    /// count this test reads.
+    pub(crate) static PARSE_MARKDOWN_SUBSET_CALLS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// Parse the Phase-1 CommonMark subset from `content` into a [`ParsedMarkdown`].
 ///
 /// The parser is intentionally simple and allocation-efficient: it walks the
@@ -1140,6 +1155,8 @@ fn tx_if_worker_spawned(
 /// and autolinks are **not** parsed.  Their literal source text is included in
 /// the output verbatim so transcript content is never silently dropped.
 pub fn parse_markdown_subset(content: &str, tokens: &MarkdownTokens) -> ParsedMarkdown {
+    #[cfg(test)]
+    PARSE_MARKDOWN_SUBSET_CALLS.with(|calls| calls.set(calls.get() + 1));
     let mut plain = String::with_capacity(content.len());
     let mut spans: Vec<StyledSpan> = Vec::new();
     // Code-panel backdrop regions: populated when tokens.code_background is Some.

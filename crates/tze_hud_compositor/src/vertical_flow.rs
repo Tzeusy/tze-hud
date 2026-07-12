@@ -35,10 +35,11 @@ use std::collections::HashMap;
 use glyphon::FontSystem;
 use tze_hud_scene::types::{FontFamily, Node, NodeData, NodeLayout, SceneId};
 
-use crate::markdown::MarkdownTokens;
+use crate::markdown::{MarkdownTokens, ParsedMarkdown};
 use crate::text::{
     LINE_HEIGHT_MULTIPLIER, composer_wrap_line_widths, markdown_node_has_pixel_runs,
-    measure_markdown_content_height, measure_raw_content_height, text_content_box_margins,
+    measure_markdown_content_height, measure_markdown_content_height_cached,
+    measure_raw_content_height, text_content_box_margins,
 };
 
 /// Which render-path shaping a flowed child's content should be measured
@@ -65,7 +66,20 @@ pub enum FlowContentMode<'a> {
     /// `parsed.line_height_multiplier` is used instead of the plain-text
     /// constant (hud-3xdlf). This is the path the intended per-turn transcript
     /// split (hud-uym23) will use for the common (unattributed) case once wired.
-    Markdown(&'a MarkdownTokens),
+    Markdown {
+        /// The resolved token set for this content's markdown surface — used to
+        /// parse ONLY on the cache-miss fallback, and to derive the margin
+        /// line-height (which equals `parsed.line_height_multiplier`).
+        tokens: &'a MarkdownTokens,
+        /// The commit-time cached parse of `content` (hud-5wx09), when the render
+        /// path's `MarkdownCache` already holds it. `Some` → measured via
+        /// [`crate::text::measure_markdown_content_height_cached`] with ZERO
+        /// per-frame parse; `None` (cold-frame miss, or a caller with no cache)
+        /// → the re-parsing [`crate::text::measure_markdown_content_height`]
+        /// fallback. On unchanged content the commit-time prime guarantees `Some`,
+        /// so the steady-state per-frame parse cost is zero (the spec MUST).
+        cached: Option<&'a ParsedMarkdown>,
+    },
     /// Markdown SOURCE carrying at least one pixel-bearing `color_run` (e.g.
     /// the hud-26869 per-turn role-attribution span) — measured via
     /// [`crate::text::measure_raw_content_height`], which reproduces
@@ -179,14 +193,26 @@ pub fn flow_total_height(heights: &[f32], gap: f32) -> f32 {
 pub fn measure_child_height(font_system: &mut FontSystem, child: &FlowChild<'_>) -> f32 {
     let wrap_width = child.wrap_width.max(1.0);
     let content_height = match child.content_mode {
-        FlowContentMode::Markdown(tokens) => measure_markdown_content_height(
-            font_system,
-            child.content,
-            wrap_width,
-            child.font_size_px,
-            child.font_family,
-            tokens,
-        ),
+        FlowContentMode::Markdown { tokens, cached } => match cached {
+            // Cache HIT (hud-5wx09): measure the commit-time cached parse — the
+            // frame path performs no markdown parsing.
+            Some(parsed) => measure_markdown_content_height_cached(
+                font_system,
+                parsed,
+                wrap_width,
+                child.font_size_px,
+                child.font_family,
+            ),
+            // Cache MISS (cold frame / no cache): re-parse once via the fallback.
+            None => measure_markdown_content_height(
+                font_system,
+                child.content,
+                wrap_width,
+                child.font_size_px,
+                child.font_family,
+                tokens,
+            ),
+        },
         FlowContentMode::RawWithColorRuns => measure_raw_content_height(
             font_system,
             child.content,
@@ -264,14 +290,20 @@ fn flow_child_height(
     font_system: &mut FontSystem,
     node: &Node,
     markdown_tokens: &MarkdownTokens,
+    cached_parsed: Option<&ParsedMarkdown>,
 ) -> f32 {
     match &node.data {
         NodeData::TextMarkdown(tm) => {
             let has_pixel_runs = markdown_node_has_pixel_runs(tm);
             let content_mode = if has_pixel_runs {
+                // The raw/color-run branch never parses markdown, so the cached
+                // parse is irrelevant here (and correctly unused).
                 FlowContentMode::RawWithColorRuns
             } else {
-                FlowContentMode::Markdown(markdown_tokens)
+                FlowContentMode::Markdown {
+                    tokens: markdown_tokens,
+                    cached: cached_parsed,
+                }
             };
             let margin_line_height_multiplier = if has_pixel_runs {
                 MarkdownTokens::default().line_height_multiplier
@@ -327,11 +359,22 @@ fn flow_child_height(
 /// [`flow_child_height`] so a `TextMarkdown` child without pixel-bearing
 /// `color_runs` measures against the real tokens (hud-ysyis) rather than the
 /// plain-text fallback this pre-pass previously used unconditionally.
+///
+/// `parsed_by_id` maps a child `SceneId` to the commit-time cached
+/// [`ParsedMarkdown`] the render path already produced (hud-5wx09). On a HIT the
+/// markdown height is measured from that cached parse with ZERO per-frame parsing
+/// (text-stream-portals: "per-frame flow measurement MUST consume the commit-time
+/// cached parsed representation … MUST NOT re-parse"); a MISS (cold first frame /
+/// node added mid-frame) falls back to a one-time inline parse. Build it from the
+/// render `MarkdownCache` via the per-node key cache so each entry carries the
+/// correct portal/generic token scope. Pass an empty map to force the re-parse
+/// fallback (e.g. callers with no cache).
 pub fn resolve_tile_flow_offsets(
     font_system: &mut FontSystem,
     nodes: &HashMap<SceneId, Node>,
     gap: f32,
     markdown_tokens: &MarkdownTokens,
+    parsed_by_id: &HashMap<SceneId, &ParsedMarkdown>,
 ) -> HashMap<SceneId, f32> {
     let mut offsets = HashMap::new();
     for parent in nodes.values() {
@@ -345,7 +388,15 @@ pub fn resolve_tile_flow_offsets(
             .collect();
         let heights: Vec<f32> = children
             .iter()
-            .map(|child| flow_child_height(font_system, child, markdown_tokens))
+            .map(|child| {
+                // The commit-time cached parse for this child, when the render
+                // MarkdownCache already holds its content (hud-5wx09). Keyed by
+                // the child's own SceneId, so the correct portal/generic token
+                // scope is already baked in (the caller built the map from
+                // node_key_cache). `None` for a cache miss or a non-markdown child.
+                let cached = parsed_by_id.get(&child.id).copied();
+                flow_child_height(font_system, child, markdown_tokens, cached)
+            })
             .collect();
         let start_y = parent.data.bounds().y;
         for (child, y) in children.iter().zip(stack_offsets(&heights, gap, start_y)) {
@@ -525,7 +576,10 @@ mod tests {
             font_size_px: 16.0,
             font_family: FontFamily::SystemSansSerif,
             vertical_padding: 4.0,
-            content_mode: FlowContentMode::Markdown(&tokens),
+            content_mode: FlowContentMode::Markdown {
+                tokens: &tokens,
+                cached: None,
+            },
         };
         let measured = measure_child_height(&mut fs, &child);
         let expected =
@@ -550,7 +604,10 @@ mod tests {
             font_size_px: 16.0,
             font_family: FontFamily::SystemSansSerif,
             vertical_padding: 0.0,
-            content_mode: FlowContentMode::Markdown(&tokens),
+            content_mode: FlowContentMode::Markdown {
+                tokens: &tokens,
+                cached: None,
+            },
         };
         let measured = measure_child_height(&mut fs, &child);
         // Two raw lines' worth of UNIFORM (non-heading) line height — what the
@@ -582,7 +639,10 @@ mod tests {
             font_size_px: 16.0,
             font_family: FontFamily::SystemSansSerif,
             vertical_padding: 0.0,
-            content_mode: FlowContentMode::Markdown(&tokens),
+            content_mode: FlowContentMode::Markdown {
+                tokens: &tokens,
+                cached: None,
+            },
         };
         let plain_child = FlowChild {
             content_mode: FlowContentMode::PlainText,
@@ -632,7 +692,10 @@ mod tests {
             font_size_px: 16.0,
             font_family: FontFamily::SystemSansSerif,
             vertical_padding: 0.0,
-            content_mode: FlowContentMode::Markdown(&tokens),
+            content_mode: FlowContentMode::Markdown {
+                tokens: &tokens,
+                cached: None,
+            },
         };
         let measured = measure_child_height(&mut fs, &child);
         let expected = independently_shaped_markdown_height(&mut fs, content, 400.0, 16.0, &tokens);
@@ -663,7 +726,10 @@ mod tests {
                 font_size_px: 16.0,
                 font_family: FontFamily::SystemSansSerif,
                 vertical_padding: 0.0,
-                content_mode: FlowContentMode::Markdown(tokens),
+                content_mode: FlowContentMode::Markdown {
+                    tokens,
+                    cached: None,
+                },
             }
         }
         let short = measure_child_height(&mut fs, &make_child(one_paragraph, &tokens));
@@ -690,7 +756,10 @@ mod tests {
             font_size_px: 16.0,
             font_family: FontFamily::SystemSansSerif,
             vertical_padding: 2.0,
-            content_mode: FlowContentMode::Markdown(&tokens),
+            content_mode: FlowContentMode::Markdown {
+                tokens: &tokens,
+                cached: None,
+            },
         };
         let h = measure_child_height(&mut fs, &child);
         assert!(h.is_finite() && h > 0.0, "got {h}");
@@ -718,7 +787,10 @@ mod tests {
                 font_size_px,
                 font_family: FontFamily::SystemSansSerif,
                 vertical_padding,
-                content_mode: FlowContentMode::Markdown(&tokens),
+                content_mode: FlowContentMode::Markdown {
+                    tokens: &tokens,
+                    cached: None,
+                },
             };
             let h = measure_child_height(&mut fs, &child);
             assert!(
@@ -757,7 +829,10 @@ mod tests {
             content_mode: FlowContentMode::RawWithColorRuns,
         };
         let markdown_child = FlowChild {
-            content_mode: FlowContentMode::Markdown(&tokens),
+            content_mode: FlowContentMode::Markdown {
+                tokens: &tokens,
+                cached: None,
+            },
             ..raw_child
         };
 
@@ -880,8 +955,8 @@ mod tests {
         }
         let plain_node = text_node(content, 0.0, 300.0);
 
-        let attributed_height = flow_child_height(&mut fs, &attributed_node, &tokens);
-        let plain_height = flow_child_height(&mut fs, &plain_node, &tokens);
+        let attributed_height = flow_child_height(&mut fs, &attributed_node, &tokens, None);
+        let plain_height = flow_child_height(&mut fs, &plain_node, &tokens, None);
         // Directional, not just "different": the plain (markdown-mode) node
         // uses tokens.line_height_multiplier (3.0, both for text-height and,
         // via the margin formula, for vertical padding); the attributed
@@ -999,7 +1074,7 @@ mod tests {
         let b = text_node("two", 40.0, 300.0);
         let map = scene_map(vec![a, b]);
         let tokens = MarkdownTokens::default();
-        let offsets = resolve_tile_flow_offsets(&mut fs, &map, 8.0, &tokens);
+        let offsets = resolve_tile_flow_offsets(&mut fs, &map, 8.0, &tokens, &HashMap::new());
         assert!(
             offsets.is_empty(),
             "absolute-only scene must resolve no flow offsets"
@@ -1022,7 +1097,7 @@ mod tests {
         let map = scene_map(vec![parent, c0, c1, c2]);
         let gap = 8.0;
         let tokens = MarkdownTokens::default();
-        let offsets = resolve_tile_flow_offsets(&mut fs, &map, gap, &tokens);
+        let offsets = resolve_tile_flow_offsets(&mut fs, &map, gap, &tokens, &HashMap::new());
 
         assert_eq!(offsets.len(), 3, "every flow child gets a resolved y");
         // First child sits at the parent's top.
@@ -1032,10 +1107,99 @@ mod tests {
         );
         // Children are strictly ordered top-to-bottom and do not overlap.
         assert!(offsets[&id0] < offsets[&id1] && offsets[&id1] < offsets[&id2]);
-        let h0 = flow_child_height(&mut fs, &map[&id0], &tokens);
+        let h0 = flow_child_height(&mut fs, &map[&id0], &tokens, None);
         assert!(
             offsets[&id1] >= offsets[&id0] + h0 + gap - 1e-3,
             "second child must clear the first plus the gap: {offsets:?}"
+        );
+    }
+
+    // ── Cache-backed measurement: zero per-frame parse (hud-5wx09) ─────────────
+
+    fn md_content(node: &Node) -> &str {
+        match &node.data {
+            NodeData::TextMarkdown(tm) => &tm.content,
+            other => panic!("expected TextMarkdown, got {other:?}"),
+        }
+    }
+
+    /// A `VerticalFlow` markdown scene with the render `MarkdownCache` populated:
+    /// parent + two markdown children (no pixel-runs → the `Markdown` branch) and
+    /// the pre-parsed `ParsedMarkdown` for each. The parse-count probe lets the
+    /// tests below prove the frame path performs ZERO parses on a hit.
+    fn flow_markdown_scene() -> (Node, Node, ParsedMarkdown, ParsedMarkdown, MarkdownTokens) {
+        let c0 = text_node(
+            "**bold** assistant turn with enough text to wrap once",
+            0.0,
+            200.0,
+        );
+        let c1 = text_node("# heading\ntool output across two lines here", 0.0, 200.0);
+        let tokens = MarkdownTokens::default();
+        let p0 = parse_markdown_subset(md_content(&c0), &tokens);
+        let p1 = parse_markdown_subset(md_content(&c1), &tokens);
+        (c0, c1, p0, p1, tokens)
+    }
+
+    #[test]
+    fn resolve_tile_flow_offsets_performs_zero_parse_on_cache_hit() {
+        let mut fs = FontSystem::new();
+        let (c0, c1, p0, p1, tokens) = flow_markdown_scene();
+        let (id0, id1) = (c0.id, c1.id);
+        let mut parent = text_node("", 0.0, 200.0);
+        parent.layout = NodeLayout::VerticalFlow;
+        parent.children = vec![id0, id1];
+        let map = scene_map(vec![parent, c0, c1]);
+        let parsed_by_id: HashMap<SceneId, &ParsedMarkdown> =
+            [(id0, &p0), (id1, &p1)].into_iter().collect();
+
+        // Reset AFTER the commit-time fill (flow_markdown_scene parsed once each);
+        // the frame-path resolve below must not parse at all.
+        crate::markdown::PARSE_MARKDOWN_SUBSET_CALLS.with(|c| c.set(0));
+        let offsets = resolve_tile_flow_offsets(&mut fs, &map, 8.0, &tokens, &parsed_by_id);
+        assert_eq!(offsets.len(), 2);
+        assert_eq!(
+            crate::markdown::PARSE_MARKDOWN_SUBSET_CALLS.with(|c| c.get()),
+            0,
+            "cache-hit flow measurement MUST perform zero markdown parses per frame (spec MUST)"
+        );
+    }
+
+    #[test]
+    fn resolve_tile_flow_offsets_parses_once_per_child_on_cache_miss() {
+        let mut fs = FontSystem::new();
+        let (c0, c1, _p0, _p1, tokens) = flow_markdown_scene();
+        let (id0, id1) = (c0.id, c1.id);
+        let mut parent = text_node("", 0.0, 200.0);
+        parent.layout = NodeLayout::VerticalFlow;
+        parent.children = vec![id0, id1];
+        let map = scene_map(vec![parent, c0, c1]);
+
+        // Empty cache → each markdown child falls back to a one-time inline parse.
+        crate::markdown::PARSE_MARKDOWN_SUBSET_CALLS.with(|c| c.set(0));
+        let _ = resolve_tile_flow_offsets(&mut fs, &map, 8.0, &tokens, &HashMap::new());
+        assert_eq!(
+            crate::markdown::PARSE_MARKDOWN_SUBSET_CALLS.with(|c| c.get()),
+            2,
+            "cache miss parses each of the two markdown children exactly once (fallback)"
+        );
+    }
+
+    #[test]
+    fn cached_flow_height_equals_reparse_fallback_height() {
+        let mut fs = FontSystem::new();
+        let node = text_node(
+            "# Heading\nwith **bold**, `code`, and a longer paragraph that wraps across lines",
+            0.0,
+            160.0,
+        );
+        let tokens = MarkdownTokens::default();
+        let parsed = parse_markdown_subset(md_content(&node), &tokens);
+
+        let h_cached = flow_child_height(&mut fs, &node, &tokens, Some(&parsed));
+        let h_fallback = flow_child_height(&mut fs, &node, &tokens, None);
+        assert_eq!(
+            h_cached, h_fallback,
+            "measuring the cached parse must yield the same height as re-parsing"
         );
     }
 
@@ -1087,14 +1251,14 @@ mod tests {
         // Baseline: exactly what `TextRasterizer::new` (and the OLD
         // per-frame call site) constructs.
         let mut fs_baseline = crate::fonts::bundled_font_system();
-        let h_mono_baseline = flow_child_height(&mut fs_baseline, &mono_child, &tokens);
-        let h_sans_baseline = flow_child_height(&mut fs_baseline, &sans_child, &tokens);
+        let h_mono_baseline = flow_child_height(&mut fs_baseline, &mono_child, &tokens, None);
+        let h_sans_baseline = flow_child_height(&mut fs_baseline, &sans_child, &tokens, None);
 
         // "Uploaded font" stand-in: same bundled base, Monospace remapped.
         let mut fs_swapped = crate::fonts::bundled_font_system();
         fs_swapped.db_mut().set_monospace_family("DejaVu Serif");
-        let h_mono_swapped = flow_child_height(&mut fs_swapped, &mono_child, &tokens);
-        let h_sans_swapped = flow_child_height(&mut fs_swapped, &sans_child, &tokens);
+        let h_mono_swapped = flow_child_height(&mut fs_swapped, &mono_child, &tokens, None);
+        let h_sans_swapped = flow_child_height(&mut fs_swapped, &sans_child, &tokens, None);
 
         assert_ne!(
             h_mono_baseline, h_mono_swapped,
