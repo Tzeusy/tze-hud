@@ -1038,4 +1038,80 @@ mod tests {
             "second child must clear the first plus the gap: {offsets:?}"
         );
     }
+
+    // ── Font-system sensitivity (hud-tfm3p review of hud-9gopx) ────────────────
+    //
+    // hud-9gopx swapped the caller (`prime_vertical_flow_layout`) from
+    // constructing a fresh `bundled_font_system()` every frame to measuring
+    // against the render rasterizer's OWN persistent `FontSystem` (reachable via
+    // the new `TextRasterizer::font_system_mut()`), so agent-uploaded fonts
+    // (loaded into that same `FontSystem` via `load_font_bytes`) are reflected in
+    // flow heights. The claimed no-regression basis is that `TextRasterizer::new`
+    // seeds `font_system` from the SAME `bundled_font_system()` call the old code
+    // used directly — so un-uploaded measurement is unchanged — and the actual
+    // upload path (`self.font_system.db_mut().load_font_data(..)`) is pure
+    // `fontdb`, with no wgpu `Device`/`Queue` involved. That means the core claim
+    // — flow measurement tracks whatever `FontSystem` instance it is handed,
+    // rather than a fixed/rebuilt bundled snapshot — is fully testable here
+    // without a GPU-backed `TextRasterizer` at all.
+    //
+    // Simulate "an uploaded font changed what a generic family resolves to" by
+    // remapping the Monospace generic slot from the bundled fixed-width DejaVu
+    // Sans Mono face to the bundled proportional DejaVu Serif face — using only
+    // the crate's own bundled assets (`fonts::bundled_font_system`), no
+    // fabricated font bytes. A fixed-width-vs-proportional swap at a fixed wrap
+    // width is a large enough character-width delta to change wrapped line count
+    // deterministically for realistic content, so this is not a metrics-rounding
+    // coin flip.
+    #[test]
+    fn flow_child_height_reflects_font_system_state_not_a_fixed_bundled_snapshot() {
+        // wrap_width chosen empirically at exactly this content length to sit
+        // where the fixed-width-vs-proportional line-wrap delta is large (three
+        // fewer wrapped lines under the swap, not a single-line rounding
+        // coincidence) — see the assertion messages for the actual measured
+        // values if this ever needs re-tuning after a bundled-font change.
+        let mono_content = "the quick brown fox jumps over the lazy dog again and again and again \
+             and again and again and again and again and again";
+        let sans_content = "a stable control paragraph whose measurement must never move";
+
+        let mono_child = {
+            let mut n = text_node(mono_content, 0.0, 150.0);
+            if let NodeData::TextMarkdown(tm) = &mut n.data {
+                tm.font_family = FontFamily::SystemMonospace;
+            }
+            n
+        };
+        let sans_child = text_node(sans_content, 0.0, 220.0);
+        let tokens = MarkdownTokens::default();
+
+        // Baseline: exactly what `TextRasterizer::new` (and the OLD
+        // per-frame call site) constructs.
+        let mut fs_baseline = crate::fonts::bundled_font_system();
+        let h_mono_baseline = flow_child_height(&mut fs_baseline, &mono_child, &tokens);
+        let h_sans_baseline = flow_child_height(&mut fs_baseline, &sans_child, &tokens);
+
+        // "Uploaded font" stand-in: same bundled base, Monospace remapped.
+        let mut fs_swapped = crate::fonts::bundled_font_system();
+        fs_swapped.db_mut().set_monospace_family("DejaVu Serif");
+        let h_mono_swapped = flow_child_height(&mut fs_swapped, &mono_child, &tokens);
+        let h_sans_swapped = flow_child_height(&mut fs_swapped, &sans_child, &tokens);
+
+        assert_ne!(
+            h_mono_baseline, h_mono_swapped,
+            "remapping the Monospace family must change measured height for \
+             Monospace content ({h_mono_baseline} vs {h_mono_swapped}) — proves \
+             flow_child_height measures against the FontSystem instance it is \
+             given, not a fixed/rebuilt bundled snapshot. If this ever starts \
+             failing, hud-9gopx's whole premise (uploaded fonts affect flow \
+             height) has silently stopped being true."
+        );
+        assert_eq!(
+            h_sans_baseline, h_sans_swapped,
+            "content on an UNTOUCHED family (SansSerif) must measure byte-\
+             identically regardless of the Monospace remap ({h_sans_baseline} \
+             vs {h_sans_swapped}) — the base-font-parity claim: swapping in an \
+             uploaded font must not perturb measurement of content that does \
+             not use it."
+        );
+    }
 }
