@@ -43,18 +43,21 @@ Exit codes: 0 success · 1 transport/config error · 2 operation rejected ·
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
 import urllib.request
 
-TOKEN_DIR = os.environ.get(
-    "PORTAL_TOKEN_DIR",
-    os.path.join(
-        os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
-        "tze_hud", "portal-tokens",
-    ),
+TOKEN_DIR = os.environ.get("PORTAL_TOKEN_DIR") or os.path.join(
+    os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+    "tze_hud", "portal-tokens",
 )
+
+# Projection IDs become token filenames; reject anything not filename-safe
+# BEFORE any RPC so a successful attach can never lose its one-time token to
+# a failed save (and `..`/`/` can never escape the token directory).
+PROJECTION_ID_SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def die(msg, code=1):
@@ -90,11 +93,13 @@ def save_token(projection_id, token):
 def load_token(projection_id):
     path = token_path(projection_id)
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             return f.read().strip()
     except FileNotFoundError:
         die(f"no owner token on file at {path} — attach first (token loss is unrecoverable; "
             "if the runtime restarted, cleanup/TTL then re-attach)")
+    except OSError as e:
+        die(f"cannot read owner token at {path}: {e}")
 
 
 def redact(node):
@@ -119,16 +124,19 @@ def rpc(method, params):
     })
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
-            raw = resp.read().decode()
+            raw = resp.read().decode("utf-8", errors="replace")
             ctype = resp.headers.get("Content-Type", "")
     except urllib.error.HTTPError as e:
-        die(f"HTTP {e.code} from {mcp_url()}: {e.read().decode()[:400]}")
+        die(f"HTTP {e.code} from {mcp_url()}: {e.read().decode('utf-8', errors='replace')[:400]}")
     except urllib.error.URLError as e:
         die(f"cannot reach {mcp_url()}: {e.reason}")
     if "text/event-stream" in ctype:
         lines = [l[5:].strip() for l in raw.splitlines() if l.startswith("data:")]
         raw = lines[-1] if lines else "{}"
-    return json.loads(raw)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        die(f"malformed JSON from {mcp_url()}: {raw[:400]!r}")
 
 
 def call_tool(tool, args):
@@ -136,7 +144,7 @@ def call_tool(tool, args):
     args.setdefault("client_timestamp_wall_us", int(time.time() * 1_000_000))
     args.setdefault("request_id", f"req-{tool}-{int(time.time() * 1000)}")
     resp = rpc(tool, args)
-    if resp.get("error", {}).get("code") == -32601:
+    if (resp.get("error") or {}).get("code") == -32601:
         resp = rpc("tools/call", {"name": tool, "arguments": args})
         content = resp.get("result", {}).get("content")
         if isinstance(content, list) and content and content[0].get("type") == "text":
@@ -145,10 +153,10 @@ def call_tool(tool, args):
 
 
 def result_or_die(resp):
-    if "error" in resp:
+    if resp.get("error") is not None:
         print(json.dumps(redact(resp), indent=2))
         sys.exit(2)
-    result = resp.get("result", {})
+    result = resp.get("result") or {}
     if result.get("accepted") is False:
         print(json.dumps(redact(result), indent=2))
         sys.exit(2)
@@ -177,8 +185,15 @@ def cmd_attach(a):
     if a.icon_profile:
         args["icon_profile_hint"] = a.icon_profile
     resp = call_tool("portal_projection_attach", args)
-    err = resp.get("error", {})
-    if "ALREADY_ATTACHED" in str(err.get("message", "")) and os.path.exists(token_path(a.projection_id)):
+    err = resp.get("error") or {}
+    # Already-attached surfaces as error.data.error_code =
+    # PROJECTION_ALREADY_ATTACHED with message "projection_id is already
+    # attached" (crates/tze_hud_projection/src/authority.rs); match the
+    # structured code first, message as fallback.
+    err_code = (err.get("data") or {}).get("error_code", "")
+    already = err_code == "PROJECTION_ALREADY_ATTACHED" \
+        or "already attached" in str(err.get("message", "")).lower()
+    if already and os.path.exists(token_path(a.projection_id)):
         emit({"accepted": True, "status_summary": "already attached; owner token on file",
               "token_file": token_path(a.projection_id)})
         return
@@ -200,8 +215,11 @@ def cmd_attach(a):
 def cmd_publish(a):
     if a.text is not None:
         text = a.text
+    elif a.text_file == "-":
+        text = sys.stdin.read()
     elif a.text_file:
-        text = sys.stdin.read() if a.text_file == "-" else open(a.text_file).read()
+        with open(a.text_file, encoding="utf-8", errors="replace") as f:
+            text = f.read()
     else:
         die("provide --text or --text-file (use '-' for stdin)")
     args = {
@@ -275,13 +293,15 @@ def cmd_ack(a):
     emit(do_ack(a.projection_id, a.input_id, a.state, a.message, a.not_before_us))
 
 
-def _terminal(a, op, tool):
-    result = result_or_die(call_tool(tool, {
+def _terminal(a, op, tool, extra=None):
+    args = {
         "operation": op,
         "projection_id": a.projection_id,
         "owner_token": load_token(a.projection_id),
         "reason": a.reason,
-    }))
+    }
+    args.update(extra or {})
+    result = result_or_die(call_tool(tool, args))
     try:
         os.remove(token_path(a.projection_id))
         result["token_file_removed"] = True
@@ -349,12 +369,19 @@ def main():
 
     sp = base(sub.add_parser("cleanup"))
     sp.add_argument("--reason", default="remove stale portal")
-    sp.set_defaults(fn=lambda a: _terminal(a, "cleanup", "portal_projection_cleanup"))
+    # The MCP cleanup handler requires cleanup_authority; this client only
+    # holds the owner token, so it always acts with owner authority
+    # (operator cleanup uses separate daemon authority, out of scope here).
+    sp.set_defaults(fn=lambda a: _terminal(a, "cleanup", "portal_projection_cleanup",
+                                           {"cleanup_authority": "owner"}))
 
     sp = base(sub.add_parser("token-path"))
     sp.set_defaults(fn=lambda a: print(token_path(a.projection_id)))
 
     args = p.parse_args()
+    if getattr(args, "projection_id", None) and not PROJECTION_ID_SAFE.match(args.projection_id):
+        die(f"unsafe projection id {args.projection_id!r} — must match {PROJECTION_ID_SAFE.pattern} "
+            "(it becomes the token filename)")
     args.fn(args)
 
 
