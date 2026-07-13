@@ -1,6 +1,8 @@
-# Mobile and Smart Glasses
+# Mobile, Smart Glasses, and VR Headsets
 
-> **DEFERRED INDEFINITELY (2026-05-09).** Mobile and smart-glasses deployment profiles are parked. The project has refocused on a performant single-device Rust HUD runtime for Windows. Mobile capability negotiation hooks remain in the schema as documented in `v1.md`'s deferral list, but **no mobile- or glasses-specific implementation, doctrine evolution, or beads** are admitted until the single-Windows runtime is done. The "first-class from the start" framing below is superseded; treat it as historical context, not as an active requirement. See `openspec/changes/windows-first-performant-runtime/` and epic `hud-9wljr`.
+> **IMPLEMENTATION DEFERRED — GOAL REAFFIRMED (amended 2026-07-13; original deferral 2026-05-09).** Mobile-, glasses-, and headset-specific *implementation* remains parked: no device build targets, no device-specific beads, until the single-Windows runtime is delivered to its performance bar (see `openspec/changes/windows-first-performant-runtime/` and epic `hud-9wljr`; mobile capability negotiation hooks remain in the schema per `v1.md`'s deferral list).
+>
+> What the 2026-07-13 owner mandate changes: smart glasses and VR headsets are re-declared as the project's **eventual deployment goal** — active doctrine, not historical context. The design pressure applies *now*: the Windows runtime is built as a highly compute- and token-efficient HUD runtime so nothing shipped today assumes headroom the wearable envelope won't have. The active requirements live in `efficiency.md`; the profile below adds VR-headset-class devices (stereo presentation, 90–120Hz duty cycles) alongside phone/glasses to the Mobile Presence Node when those lanes reopen. The "first-class from the start" implementation framing below remains superseded.
 >
 > Original mobile doctrine follows.
 
@@ -16,7 +18,7 @@ The system supports two deployment profiles from day one:
 
 **Full Display Node.** A high-end local display appliance: powerful local GPU, large always-on screen (mirror, monitor, wall display), local or near-local networking, up to 10 Gbps links to media/agent producers, multiple concurrent live feeds, rich multimodal scenes, long-lived resident agents.
 
-**Mobile Presence Node.** A degraded but compatible mobile target: high-end phone or smart-glasses-class device, variable 5G network conditions, smaller display and tighter interaction budget, tighter thermal/battery/memory/decoder limits, reduced concurrent media capacity, narrower feature surface.
+**Mobile Presence Node.** A degraded but compatible mobile target: high-end phone, smart-glasses-class, or VR-headset-class device, variable 5G network conditions, smaller display and tighter interaction budget, tighter thermal/battery/memory/decoder limits, reduced concurrent media capacity, narrower feature surface. Headset-class devices add stereo presentation and 90–120Hz duty cycles where missed frames are physically felt — the least forgiving envelope the one scene model must eventually serve.
 
 The system must not fork into a "desktop architecture" and a "mobile architecture." One scene model, one API. Differences are negotiated capabilities and budgets, not separate codepaths.
 

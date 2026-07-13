@@ -27,26 +27,28 @@ Without the magnet, you get a flux diagram where every arrow points somewhere di
 
 2. **[architecture.md](architecture.md)** — How the system is structured. Protocol planes, message classes, timing model, rendering/media/language choices.
 
-3. **[presence.md](presence.md)** — The presence model. Tabs, tiles, leases, presence levels, multi-agent coordination, interaction.
+3. **[efficiency.md](efficiency.md)** — Compute and token efficiency as product requirements. The deployment trajectory: desktop overlays today, smart glasses and VR headsets as the eventual goal. Read early — it constrains every design decision.
 
-4. **[security.md](security.md)** — Trust and governance. Authentication, capability scopes, agent isolation, resource governance, human override.
+4. **[presence.md](presence.md)** — The presence model. Tabs, tiles, leases, presence levels, multi-agent coordination, interaction.
 
-5. **[media-doctrine.md](media-doctrine.md)** — The media plane: what it is, what it never does, and the governance posture (capability-gated, role-arbitrated, in-process budget-watched). Precedes RFC 0014.
+5. **[security.md](security.md)** — Trust and governance. Authentication, capability scopes, agent isolation, resource governance, human override.
 
-6. **[privacy.md](privacy.md)** — Attention governance for household surfaces. Viewer context, content classification, redaction, interruption classes, quiet hours.
+6. **[media-doctrine.md](media-doctrine.md)** — The media plane: what it is, what it never does, and the governance posture (capability-gated, role-arbitrated, in-process budget-watched). Precedes RFC 0014.
 
-7. **[attention.md](attention.md)** — The philosophical stance on attention, attention budget, and the anti-patterns of attention exploitation. Read after privacy.md.
+7. **[privacy.md](privacy.md)** — Attention governance for household surfaces. Viewer context, content classification, redaction, interruption classes, quiet hours.
 
-8. **[failure.md](failure.md)** — What happens when things break. Agent failure modes, recovery, degradation, persistence, reconnection.
+8. **[attention.md](attention.md)** — The philosophical stance on attention, attention budget, and the anti-patterns of attention exploitation. Read after privacy.md.
 
-9. **[mobile.md](mobile.md)** — Mobile and smart-glasses profile. Same model, different budgets, degradation axes, upstream composition.
+9. **[failure.md](failure.md)** — What happens when things break. Agent failure modes, recovery, degradation, persistence, reconnection.
 
-10. **[validation.md](validation.md)** — How we test. Testing doctrine, five validation layers, LLM development loop, fuzzing, chaos testing, developer visibility artifacts.
+10. **[mobile.md](mobile.md)** — Mobile, smart-glasses, and VR-headset profile. Same model, different budgets, degradation axes, upstream composition. Implementation deferred; the eventual-goal pressure lives in efficiency.md.
 
-11. **[development.md](development.md)** — How we build. Spec-driven workflow, task management, execution loop, development principles.
+11. **[validation.md](validation.md)** — How we test. Testing doctrine, five validation layers, LLM development loop, fuzzing, chaos testing, developer visibility artifacts.
 
-12. **[v1.md](v1.md)** — What v1 ships and what it defers. Scope boundary for the first working system.
+12. **[development.md](development.md)** — How we build. Spec-driven workflow, task management, execution loop, development principles.
 
-13. **[v2.md](v2.md)** — The V2 Program: four phases extending tze_hud into the media plane, embodied presence, device-profile execution, and end-to-end operations. What V2 IS, what it explicitly is NOT, and the RFC/doctrine sequencing that gates it.
+13. **[v1.md](v1.md)** — What v1 ships and what it defers. Scope boundary for the first working system.
+
+14. **[v2.md](v2.md)** — The V2 Program: four phases extending tze_hud into the media plane, embodied presence, device-profile execution, and end-to-end operations. What V2 IS, what it explicitly is NOT, and the RFC/doctrine sequencing that gates it.
 
 Note: The component shape language (design tokens, component profiles, visual extensibility) is documented in **presence.md** §"Component shape language" and **architecture.md** §"Text rendering policy and design tokens". The detailed specification lives in `openspec/changes/component-shape-language/`. The corresponding RFC is 0012 in `about/legends-and-lore/`.
