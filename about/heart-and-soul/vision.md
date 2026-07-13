@@ -74,7 +74,7 @@ Performance says the system must be fast. Efficiency says it must be *cheap* —
 
 The runtime's deployment trajectory is: desktop PC overlays today, smart glasses and VR headsets as the eventual goal. Wearable-class devices have no headroom to waste — battery, thermals, memory, and display duty cycles are all unforgiving, and VR adds stereo presentation at rates where missed frames are physically felt. Every design decision made on the desktop runtime must survive that envelope: idle screens cost nothing, work is proportional to change, and desktop headroom is treated as a test environment, not a budget.
 
-The runtime's primary clients are LLMs, and LLMs pay for every byte that crosses their context. The API surface is designed for metered intelligences: models state semantic intent in a handful of small, deterministic calls; layout, styling, chrome, and design live server-side and never pass through model context. Token cost of holding presence is a product metric, tracked like latency.
+The runtime's primary clients are LLMs, and LLMs pay for every byte that crosses their context. The API surface is designed for metered intelligences: models state semantic intent in a handful of small, deterministic calls; raw layout, styling, chrome, and design live server-side and never pass through model context. Token cost of holding presence is a product metric, tracked like latency.
 
 ## Non-goals
 

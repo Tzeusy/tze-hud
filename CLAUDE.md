@@ -62,7 +62,7 @@ Design transport around these — they have different delivery semantics:
 - Treating graceful degradation as a bug
 - Hardcoded visual properties in the compositor (use design tokens and RenderingPolicy)
 - Monolithic visual implementations that can't be swapped (use component profiles)
-- Layout, styling, or geometry data passing through LLM token context (the runtime does the design; models state intent)
+- Raw layout, geometry, pixel-positioning, or full-styling payloads passing through LLM token context (the runtime does the design; models state intent — bound typed widget parameters like `color`/`enum`/`f32` are intent, not design)
 - Re-rendering unchanged content, or idle scenes that burn CPU/GPU (see `about/heart-and-soul/efficiency.md`)
 
 ## LLM Self-Projection

@@ -18,8 +18,9 @@ The runtime has one architecture and an expanding set of power envelopes:
    display duty cycles — and, for VR, stereo presentation at 90–120Hz where
    missed frames are physically felt.
 
-Execution remains Windows-first (`v1.md` §Single-Windows Refocus governs what
-is built now; `mobile.md` keeps device-specific implementation parked). What
+Execution remains single-Windows — Windows-only, per `v1.md` §Single-Windows
+Refocus, which governs what is built now (`mobile.md` keeps device-specific
+implementation parked). What
 this file changes is the **design pressure**: every decision made on the
 desktop runtime today must survive the wearable envelope tomorrow. Desktop
 headroom is a test environment, not a budget.
@@ -44,12 +45,13 @@ Frames, watts, and memory. The compositor's cost model must satisfy:
   (`failure.md`) and capability negotiation (`mobile.md`) exist so the same
   scene model runs honestly at a smaller budget. Features that only work with
   desktop-class headroom must degrade or be rejected at design time.
-- **Budgets are enforced on constrained hardware.** Performance claims are
-  validated against low-power envelopes (software rasterizers, small-core
-  CPUs), not only against developer workstations (`validation.md` hardware
-  calibration). The reference numbers in `v1.md` are ceilings measured where
-  they are cheapest to hit; the doctrine target is the envelope where they
-  are hardest.
+- **Budgets are enforced on constrained hardware.** Performance claims must
+  be validated against low-power envelopes (software rasterizers, small-core
+  CPUs), not only against developer workstations — extending `validation.md`'s
+  hardware-calibration vector to a constrained-envelope lane is mandated
+  work. The reference numbers in `v1.md` are ceilings measured where they
+  are cheapest to hit; the doctrine target is the envelope where they are
+  hardest.
 
 ### Token budget
 
@@ -61,8 +63,12 @@ intelligences**:
   styling, chrome, and animation live server-side (zones, design tokens,
   component profiles, rendering policies). A model publishes semantic content
   in a handful of small calls; pixels, positions, and polish never pass
-  through model context. If driving a surface requires the model to emit
-  layout data, that surface is misdesigned.
+  through model context. Bound typed semantic parameters against server-side
+  templates (a widget's `color`/`enum`/`f32` value per `v1.md`'s widget
+  contract) are intent, not design, and remain permitted; what is forbidden
+  is raw layout, geometry, pixel positioning, and full-styling payloads. If
+  driving a surface requires the model to emit those, that surface is
+  misdesigned.
 - **Deterministic scripts over model improvisation.** Every recurring
   operational flow (deploy, attach, publish, poll, verify) is captured as a
   deterministic script or tool the model invokes with a few tokens, rather
@@ -74,9 +80,10 @@ intelligences**:
   not returned to it.
 - **Token cost is a product metric.** Canonical flows (publish a zone
   message, hold a text-stream portal conversation, run a status dashboard)
-  have measurable token footprints, tracked alongside latency budgets. A
-  regression that doubles the tokens needed to hold presence is a performance
-  regression.
+  must have measured token footprints, tracked alongside latency budgets —
+  `validation.md` does not yet define this layer; building it is mandated
+  work, not an existing property. A regression that doubles the tokens
+  needed to hold presence is a performance regression.
 
 The two budgets reinforce each other: server-side design is what makes the
 model's footprint small, and semantic (rather than pixel-pushing) protocols
@@ -116,5 +123,6 @@ and tokens.
   mechanics this doctrine's budgets constrain.
 - `attention.md` — the attention budget is the human-side analogue: screens
   and humans are both finite resources the runtime governs.
-- `validation.md` — where efficiency budgets become measured, hardware-
-  normalized, CI-enforced properties.
+- `validation.md` — where efficiency budgets must become measured, hardware-
+  normalized, CI-enforced properties (a mandated extension; the token-cost
+  and idle-cost layers do not exist there yet).

@@ -16,7 +16,7 @@ Drop a magnet into a field of iron filings and every particle snaps to the same 
 - **Architecture decisions** resolve against shared principles instead of individual taste. When two reasonable designs conflict, doctrine breaks the tie.
 - **Work planning** inherits direction from the goal rather than inventing its own. Tasks trace back to doctrine; orphan work is visible.
 - **Testing** validates the invariants that actually matter — the ones doctrine names — instead of chasing coverage for its own sake.
-- **Design** stays coherent across ten documents because every document points at the same north.
+- **Design** stays coherent across the doctrine set because every document points at the same north.
 - **New contributors** align in minutes. Read the doctrine, absorb the field, start pulling in the same direction.
 
 Without the magnet, you get a flux diagram where every arrow points somewhere different — maximum entropy, minimum progress. With it, every arrow points the same way. The project moves.

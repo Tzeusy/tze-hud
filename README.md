@@ -1,6 +1,6 @@
 # tze_hud
 
-A local, high-performance display runtime that gives LLMs safe, synchronized, live presence on real screens — wall displays, bathroom mirrors, kitchen panels, smart glasses.
+A local, high-performance, compute- and token-efficient display runtime that gives LLMs safe, synchronized, live, interactive presence on real screens — desktop overlays and wall displays today, smart glasses and VR headsets as the eventual goal.
 
 ## The Problem
 
@@ -22,6 +22,7 @@ Key properties:
 - **Graceful degradation.** Under resource pressure, the system degrades along explicit axes — coalescing updates and shedding tiles — rather than crashing or stuttering.
 - **Swappable visual identity.** Design tokens, component types, and component profiles separate visual styling from agent code and runtime logic. An operator changes the look of the entire display by swapping a configuration directory.
 - **Multi-agent coordination.** When agents compete for screen territory, the runtime arbitrates based on space, budgets, priorities, and lease state. Agents negotiate through the runtime, never directly.
+- **Efficient in compute and tokens.** Idle screens cost ~nothing; work is proportional to change; nothing assumes desktop-class headroom without a degradation path — the eventual envelope is glasses/VR-class. LLM-facing surfaces are token-minimal: models state semantic intent in a few deterministic calls, and layout/styling never passes through model context (`about/heart-and-soul/efficiency.md`).
 
 ~260k lines of Rust across 16 crates (13 active + 3 parked platform stubs) plus the `tze_hud_app` binary. Tokio async runtime, tonic for gRPC, wgpu + winit for cross-platform GPU rendering. See `about/heart-and-soul/` for full doctrine, `about/legends-and-lore/` for design contracts (14 RFCs), and `openspec/` for capability specs.
 
