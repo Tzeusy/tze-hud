@@ -70,11 +70,11 @@ Low latency, high throughput, timing precision, synchronization, backpressure, a
 
 ## Efficiency is part of the product
 
-Performance says the system must be fast. Efficiency says it must be *cheap* — in compute and in tokens — because of where it runs and who drives it (see efficiency.md for the full doctrine).
+Performance says the system must be fast. Efficiency says it must be *cheap* — in compute and in tokens — because of where it runs and who drives it.
 
-The runtime's deployment trajectory is: desktop PC overlays today, smart glasses and VR headsets as the eventual goal. Wearable-class devices have no headroom to waste — battery, thermals, memory, and display duty cycles are all unforgiving, and VR adds stereo presentation at rates where missed frames are physically felt. Every design decision made on the desktop runtime must survive that envelope: idle screens cost nothing, work is proportional to change, and desktop headroom is treated as a test environment, not a budget.
+The deployment trajectory is desktop PC overlays today, smart glasses and VR headsets as the eventual goal, and wearable-class envelopes have no headroom to waste. The runtime's primary clients are LLMs, which pay for every byte that crosses their context, so the API surface is designed for metered intelligences and the token cost of holding presence is a product metric, tracked like latency.
 
-The runtime's primary clients are LLMs, and LLMs pay for every byte that crosses their context. The API surface is designed for metered intelligences: models state semantic intent in a handful of small, deterministic calls; raw layout, styling, chrome, and design live server-side and never pass through model context. Token cost of holding presence is a product metric, tracked like latency.
+The full doctrine — the compute and token budgets, their principles, and their anti-patterns — lives in efficiency.md. Read it for the mechanism; this document carries the stance.
 
 ## Non-goals
 

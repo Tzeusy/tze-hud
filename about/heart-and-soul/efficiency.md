@@ -35,9 +35,9 @@ product-defining:
 Frames, watts, and memory. The compositor's cost model must satisfy:
 
 - **Idle screens cost nothing.** A scene with no changes and no animations
-  presents nothing and burns approximately zero CPU/GPU. Idle cost is a
-  measured property, not an assumption — a HUD that drains a battery while
-  showing a static glanceable is defective.
+  presents nothing — no per-frame GPU submission, approximately zero CPU.
+  Idle cost is a measured property, not an assumption — a HUD that drains a
+  battery while showing a static glanceable is defective.
 - **Work is proportional to change.** One dirty subtitle re-renders one
   subtitle. Full-scene re-composition in response to a one-node diff is an
   anti-pattern wherever the platform allows better.
@@ -47,11 +47,10 @@ Frames, watts, and memory. The compositor's cost model must satisfy:
   desktop-class headroom must degrade or be rejected at design time.
 - **Budgets are enforced on constrained hardware.** Performance claims must
   be validated against low-power envelopes (software rasterizers, small-core
-  CPUs), not only against developer workstations — extending `validation.md`'s
-  hardware-calibration vector to a constrained-envelope lane is mandated
-  work. The reference numbers in `v1.md` are ceilings measured where they
-  are cheapest to hit; the doctrine target is the envelope where they are
-  hardest.
+  CPUs), not only against developer workstations — a constrained-envelope
+  lane of `validation.md`'s hardware-calibration vector. The reference
+  numbers in `v1.md` are ceilings measured where they are cheapest to hit;
+  the doctrine target is the envelope where they are hardest.
 
 ### Token budget
 
@@ -80,10 +79,9 @@ intelligences**:
   not returned to it.
 - **Token cost is a product metric.** Canonical flows (publish a zone
   message, hold a text-stream portal conversation, run a status dashboard)
-  must have measured token footprints, tracked alongside latency budgets —
-  `validation.md` does not yet define this layer; building it is mandated
-  work, not an existing property. A regression that doubles the tokens
-  needed to hold presence is a performance regression.
+  must have measured token footprints, tracked alongside latency budgets. A
+  regression that doubles the tokens needed to hold presence is a
+  performance regression.
 
 The two budgets reinforce each other: server-side design is what makes the
 model's footprint small, and semantic (rather than pixel-pushing) protocols
@@ -123,6 +121,5 @@ and tokens.
   mechanics this doctrine's budgets constrain.
 - `attention.md` — the attention budget is the human-side analogue: screens
   and humans are both finite resources the runtime governs.
-- `validation.md` — where efficiency budgets must become measured, hardware-
-  normalized, CI-enforced properties (a mandated extension; the token-cost
-  and idle-cost layers do not exist there yet).
+- `validation.md` — where efficiency budgets must live as measured,
+  hardware-normalized, CI-enforced properties.
