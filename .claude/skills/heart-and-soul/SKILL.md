@@ -7,7 +7,7 @@ description: >
   tests, or proposing features. The about/heart-and-soul/ directory contains the project's
   prime directives: what the system is, what it is not, how it works, how it is tested,
   and what v1 ships. To avoid context overload, selectively load ONLY the documents
-  relevant to your current task — do not load all 10 files at once. Use this skill
+  relevant to your current task — do not load all of them at once. Use this skill
   proactively at the start of any substantive work session, when making design decisions,
   when unsure about project conventions, or when the task touches architecture, testing,
   security, presence model, failure handling, privacy, mobile, development workflow, or
@@ -35,8 +35,9 @@ Read `about/heart-and-soul/README.md` for the full reading order. Below is the s
 
 | File | Read when... | Key content |
 |------|-------------|-------------|
-| `about/heart-and-soul/vision.md` | Starting any session, onboarding, scope questions | Core thesis, performance-is-product, **non-goals** (what tze_hud is NOT) |
+| `about/heart-and-soul/vision.md` | Starting any session, onboarding, scope questions | Core thesis, performance-is-product, efficiency-is-product, **non-goals** (what tze_hud is NOT) |
 | `about/heart-and-soul/v1.md` | Implementing anything, scoping features | What v1 ships, what it defers, success criteria, platform targets |
+| `about/heart-and-soul/efficiency.md` | Any design/API/rendering decision, perf work, LLM-facing surfaces | Compute + token budgets as product requirements, deployment trajectory (desktop overlays → smart glasses/VR headsets), efficiency anti-patterns |
 
 ### Select by task domain
 
@@ -48,8 +49,10 @@ Read `about/heart-and-soul/README.md` for the full reading order. Below is the s
 | `about/heart-and-soul/privacy.md` | Household display, viewer context, content visibility, interruptions | Viewer classes, content classification tiers, redaction behavior, interruption classes, quiet hours, multi-viewer policy |
 | `about/heart-and-soul/attention.md` | Attention philosophy, attention budget, anti-patterns | Why presence ≠ attention capture, attention budget as runtime constraint, anti-patterns (notification spam, escalation creep, engagement dark patterns), ambient-over-interruptive principle |
 | `about/heart-and-soul/failure.md` | Error handling, recovery, degradation, reconnection | Agent crash/slow/noisy/misbehave handling, scene persistence, reconnection contract, degradation ladder |
-| `about/heart-and-soul/mobile.md` | Mobile/glasses targets, capability negotiation, degradation | Two deployment profiles, mobile design principles, protocol requirements, upstream composition |
+| `about/heart-and-soul/mobile.md` | Mobile/glasses/VR-headset targets, capability negotiation, degradation | Two deployment profiles (implementation deferred; goal reaffirmed 2026-07-13), mobile design principles, protocol requirements, upstream composition |
 | `about/heart-and-soul/validation.md` | Testing, benchmarks, CI, telemetry, LLM dev loop | Testing doctrine (spirit > letter), five validation layers, **split latency budgets**, calibration vector, fuzzing/chaos, developer visibility artifacts, test scene registry |
+| `about/heart-and-soul/media-doctrine.md` | Media-plane questions, ingress/AV scope checks | Media plane posture — **deferred indefinitely** except the narrow windows-media-ingress-exemplar slice; governance principles for when it reopens |
+| `about/heart-and-soul/v2.md` | Historical V2 program context only | Parked four-phase media/embodied/device program — **do not act on it**; kept for reference |
 | `about/heart-and-soul/development.md` | Workflow, specs, task management, execution process | OpenSpec lifecycle, Beads task tracking, Coordinator/Worker/PR-Reviewer roles, 15 development principles |
 
 ## How to load
@@ -76,3 +79,4 @@ These rules are absolute and non-negotiable. They appear in the soul files but a
 6. **Tests measure spirit, not letter.** The north star is consistent, deterministic, performant functionality with clean APIs — not green checkmarks.
 7. **The human can always override.** Dismiss, mute, revoke, freeze, safe mode — always available, never interceptable.
 8. **Visual identity is modular.** Every visual component separates contract from implementation. Design tokens provide shared visual vocabulary; component profiles are the swappable unit. Never hardcode colors, fonts, or styling in the compositor.
+9. **Efficiency is doctrine, in compute and in tokens.** Idle screens cost nothing; work is proportional to change; desktop headroom is a test environment, not a budget — the eventual envelope is smart-glasses/VR-headset-class. LLM-facing surfaces are token-minimal: models state semantic intent in a few deterministic calls; raw layout, geometry, and full-styling payloads never pass through model context (bound typed widget parameters are intent, not design).

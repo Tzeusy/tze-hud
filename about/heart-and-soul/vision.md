@@ -68,6 +68,14 @@ If touch is delayed, the agent is not interactive. If word-highlighting drifts f
 
 Low latency, high throughput, timing precision, synchronization, backpressure, and graceful degradation are not secondary engineering concerns. They are the foundation.
 
+## Efficiency is part of the product
+
+Performance says the system must be fast. Efficiency says it must be *cheap* — in compute and in tokens — because of where it runs and who drives it.
+
+The deployment trajectory is desktop PC overlays today, smart glasses and VR headsets as the eventual goal, and wearable-class envelopes have no headroom to waste. The runtime's primary clients are LLMs, which pay for every byte that crosses their context, so the API surface is designed for metered intelligences and the token cost of holding presence is a product metric, tracked like latency.
+
+The full doctrine — the compute and token budgets, their principles, and their anti-patterns — lives in efficiency.md. Read it for the mechanism; this document carries the stance.
+
 ## Non-goals
 
 These are things tze_hud is explicitly not, and must not drift toward:
@@ -88,4 +96,4 @@ This does not forbid text interaction. It forbids reducing the system to text in
 
 ## One-sentence definition
 
-This project is a local, high-performance, agent-native display runtime that gives LLMs safe, synchronized, live, interactive presence on real screens — from wall displays to smart glasses.
+This project is a local, high-performance, compute- and token-efficient, agent-native display runtime that gives LLMs safe, synchronized, live, interactive presence on real screens — desktop overlays and wall displays today, smart glasses and VR headsets as the eventual goal.

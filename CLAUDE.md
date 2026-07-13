@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-**tze_hud** — an agent-native presence engine. A local, high-performance display runtime that gives LLMs safe, synchronized, live, interactive presence on real screens (wall displays to smart glasses). See `about/heart-and-soul/` for full doctrine (start with `about/heart-and-soul/README.md`).
+**tze_hud** — an agent-native presence engine. A local, high-performance, compute- and token-efficient display runtime that gives LLMs safe, synchronized, live, interactive presence on real screens — desktop overlays and wall displays today; smart glasses and VR headsets are the declared eventual goal. See `about/heart-and-soul/` for full doctrine (start with `about/heart-and-soul/README.md`).
 
 This is **not** a dashboard or chatbot UI. It's an operating environment for model presence: spatial ownership, timed media, bidirectional interaction, governed leases.
 
@@ -39,6 +39,7 @@ Do not collapse these into one protocol.
 - **One scene model, two profiles.** Desktop (Full Display Node) and mobile (Mobile Presence Node) share the same API; differences are negotiated capabilities/budgets, not separate architectures.
 - **Screen is sovereign.** The runtime owns pixels, timing, composition, permissions, arbitration. Models request via leases with TTL, capability scopes, and revocation semantics.
 - **Visual identity is modular.** Every visual component (subtitle, notification, etc.) separates contract from implementation. Design tokens provide shared visual vocabulary; component profiles are the swappable unit. Never hardcode colors, fonts, or styling in the compositor — use `RenderingPolicy` fields populated from design tokens.
+- **Efficiency is doctrine — compute and tokens** (`about/heart-and-soul/efficiency.md`). Idle screens cost ~nothing; work is proportional to change; nothing may assume desktop-class headroom without a degradation path (the eventual envelope is glasses/VR-class). LLM-facing surfaces are token-minimal: semantic intent in a few deterministic calls; layout/styling/chrome never pass through model context.
 
 ## Four Message Classes
 
@@ -61,6 +62,8 @@ Design transport around these — they have different delivery semantics:
 - Treating graceful degradation as a bug
 - Hardcoded visual properties in the compositor (use design tokens and RenderingPolicy)
 - Monolithic visual implementations that can't be swapped (use component profiles)
+- Raw layout, geometry, pixel-positioning, or full-styling payloads passing through LLM token context (the runtime does the design; models state intent — bound typed widget parameters like `color`/`enum`/`f32` are intent, not design)
+- Re-rendering unchanged content, or idle scenes that burn CPU/GPU (see `about/heart-and-soul/efficiency.md`)
 
 ## LLM Self-Projection
 

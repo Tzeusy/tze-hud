@@ -1799,7 +1799,7 @@ enum CursorStyle {
 
 ### 10.1 Rationale
 
-The input model in §1–§8 is pointer-centric: touch, mouse, keyboard. This serves desktop and touch-enabled mobile, but tze_hud explicitly targets smart glasses and other compact devices (mobile.md, CLAUDE.md §Mobile Presence Node). Compact devices have input surfaces that do not map to pointer semantics:
+The input model in §1–§8 is pointer-centric: touch, mouse, keyboard. This serves desktop and touch-enabled mobile, but tze_hud explicitly targets smart glasses, VR headsets, and other compact devices (mobile.md, CLAUDE.md §Mobile Presence Node). Compact devices have input surfaces that do not map to pointer semantics:
 
 - **D-pad / directional controller** — glasses temple buttons, remote controls
 - **Single confirm/cancel button** — glasses tap, trackpoint center click
