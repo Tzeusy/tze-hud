@@ -20,8 +20,8 @@ The runtime has one architecture and an expanding set of power envelopes:
 
 Execution remains single-Windows — Windows-only, per `v1.md` §Single-Windows
 Refocus, which governs what is built now (`mobile.md` keeps device-specific
-implementation parked). What
-this file changes is the **design pressure**: every decision made on the
+implementation parked). What this file changes is the **design pressure**:
+every decision made on the
 desktop runtime today must survive the wearable envelope tomorrow. Desktop
 headroom is a test environment, not a budget.
 
