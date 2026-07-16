@@ -399,6 +399,7 @@ mod tests {
         assert_eq!(p.max_tiles, 256);
         assert_eq!(p.max_texture_mb, 512);
         assert_eq!(p.max_agents, 8);
+        assert_eq!(p.max_agent_update_hz, 60);
         assert_eq!(p.target_fps, 60);
         assert_eq!(p.min_fps, 1);
     }

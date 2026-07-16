@@ -52,7 +52,9 @@ For each agent, the effective per-session default is `min(canonical runtime defa
 
 `profile.max_agents` governs resident/embodied sessions. Guest protocol capacity remains a separate control-plane safety limit because guests do not hold resident leases or consume the profile's persistent-presence pool.
 
-The existing headless update-rate value must be reconciled before wiring this precedence: RFC 0006 §3.4 and `DisplayProfile::headless()` specify 60 Hz, while the canonical configuration OpenSpec specifies 30 Hz. This is an admission-contract drift, not compositor cadence/quiescence work.
+The headless per-agent update-rate ceiling is 60 Hz. RFC 0006 §3.4 established that value before `DisplayProfile::headless()` implemented it in `edd5fee1`; the implementation commit explicitly cites RFC 0006. The canonical configuration OpenSpec's later 30 Hz value was introduced in `1cb0e39b` while previously omitted profile fields were being filled, without a contract rationale, and matches the RFC's separate mobile ceiling. Headless is the active CI/test parity profile, so lowering only its state-stream admission ceiling would make production-rate validation unrepresentative. The canonical configuration requirement is therefore corrected to 60 Hz.
+
+This value governs registered-agent admission validation today and the future profile-derived session default. It is not compositor cadence: neither windowed nor headless runtime reads `max_agent_update_hz` to schedule frames, and the cadence/quiescence work remains owned by `hud-le1e0` / `hud-0jfqd`.
 
 ### 3. Keep logical and physical accounting distinct
 
@@ -87,7 +89,7 @@ Recommendation: option 2. Consequence: the profile schema and built-in defaults 
 ## Migration Plan
 
 1. Obtain owner approval for option 2 and its built-in full-display/headless values.
-2. Reconcile the headless `max_agent_update_hz` RFC/canonical-spec/code mismatch.
+2. Preserve the reconciled 60 Hz headless `max_agent_update_hz` authority while wiring admission; do not reuse it as compositor cadence.
 3. Add profile fields, validation, and config-freeze tests without changing runtime consumers.
 4. Introduce `OperationalRuntimeEnvelope`, the dependency-safe accounting contract, and production-consumer construction tests.
 5. Wire session/lease admission and aggregate leased-resource enforcement.
@@ -100,4 +102,3 @@ Rollback is a normal commit revert before canonical spec sync. No data migration
 
 - Owner approval of option 2 versus options 1/3.
 - Exact built-in `max_runtime_resident_mb` and per-class values for `full-display` and `headless`; current independent caps are inputs, not an upper-bound compatibility baseline, because font residency and the image/GPU path are not completely capped today.
-- Whether headless `max_agent_update_hz` is canonically 30 or 60 before the envelope starts enforcing it.

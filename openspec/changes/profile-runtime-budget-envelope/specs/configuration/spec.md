@@ -35,3 +35,24 @@ Scope: v1-mandatory
 #### Scenario: Durable widget registration retains a resident source copy
 - **WHEN** runtime widget registration stores SVG bytes durably and also retains source bytes in protocol, scene, or renderer state
 - **THEN** each distinct retained source allocation MUST debit the widget-asset-residency class while the durable file bytes remain outside the resident-memory envelope
+
+## MODIFIED Requirements
+
+### Requirement: Display Profile headless
+The `headless` built-in profile MUST define the following budget values: `max_tiles = 256`, `max_texture_mb = 512`, `max_agents = 8`, `target_fps = 60`, `min_fps = 1`, `max_media_streams = 2`, `max_agent_update_hz = 60`. The headless profile MUST use an offscreen render target with no window. The `headless` profile MUST NOT be extendable via `[display_profile].extends`. The update-rate value is a per-agent state-stream admission ceiling; it MUST NOT be interpreted as compositor frame cadence or as permission to submit idle frames.
+
+Source: RFC 0006 §3.4; RFC 0002 §7; heart-and-soul/efficiency.md §Compute budget
+Scope: v1-mandatory
+
+#### Scenario: headless profile budget values
+- **WHEN** the runtime starts with `profile = "headless"`
+- **THEN** the effective profile has max_tiles=256, max_texture_mb=512, max_agents=8, target_fps=60, min_fps=1, max_media_streams=2, max_agent_update_hz=60 and renders to an offscreen surface
+
+#### Scenario: headless update-rate boundary
+- **WHEN** a registered headless agent requests `max_update_hz = 60`
+- **THEN** configuration validation accepts the request
+- **AND** a request above 60 produces `CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE`
+
+#### Scenario: headless not extendable
+- **WHEN** a config file sets `[display_profile] extends = "headless"`
+- **THEN** startup fails with `CONFIG_HEADLESS_NOT_EXTENDABLE` structured error
