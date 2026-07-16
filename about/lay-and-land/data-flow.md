@@ -212,7 +212,9 @@ handled one stage earlier in the winit OS path.
 After that shell precedence, the windowed keyboard drain translates RFC 0004
 default bindings into `RawCommandEvent`. Focus-cycle
 commands move focus first; `CommandProcessor` then applies local feedback and
-constructs a transactional dispatch for the new/current focus owner.
+constructs a transactional dispatch for the new/current focus owner. Page-scroll
+commands apply their local offset to that focused tile, independent of the cursor;
+pointer-wheel scroll retains its separate pointer-hit-test route.
 `input_dispatch::dispatch_command_event` serializes that dispatch as the
 existing protobuf `CommandInputEvent` on the owning namespace's `INPUT_EVENTS`
 subscription. The protocol fan-out routes transactional input through an

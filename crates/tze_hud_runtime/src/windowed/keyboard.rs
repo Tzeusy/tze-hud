@@ -380,32 +380,6 @@ where
 }
 
 impl WinitApp {
-    /// Enqueue and process a keyboard-originated scroll event (PgUp / PgDn).
-    ///
-    /// Uses the current cursor position for hit-testing, exactly like wheel
-    /// scroll.  Delegates to
-    /// [`InputProcessor::process_keyboard_scroll`] which applies the same
-    /// local-first coalescing and clamping as `process_scroll_event`.
-    ///
-    /// Dispatches a `ScrollOffsetChangedEvent` to the tile-owning agent via the
-    /// `INPUT_EVENTS` channel when the scroll changes the tile offset.
-    pub(super) fn enqueue_keyboard_scroll_event(&mut self, delta_y: f32) {
-        let x = self.state.cursor_x;
-        let y = self.state.cursor_y;
-
-        if let Ok(state) = self.state.shared_state.try_lock()
-            && let Ok(mut scene) = state.scene.try_lock()
-        {
-            if let Some(ev) = self
-                .state
-                .input_processor
-                .process_keyboard_scroll(x, y, delta_y, &mut scene)
-            {
-                dispatch_scroll_offset_event(&self.state.input_event_tx, &scene, ev);
-            }
-        }
-    }
-
     /// Snap the input-pane history's scroll offset back to the tail
     /// (hud-qbcp8).
     ///
@@ -1132,11 +1106,28 @@ impl WinitApp {
                 .tile_id()
                 .and_then(|tile_id| scene.tiles.get(&tile_id))
                 .map(|tile| tile.namespace.clone());
-            namespace.and_then(|namespace| {
+            let dispatch = namespace.and_then(|namespace| {
                 CommandProcessor::new().process(command, &owner, &mut scene, move |_| {
                     Some(namespace.clone())
                 })
-            })
+            });
+            if let Some(dispatch) = &dispatch {
+                let delta_y = match dispatch.event.action {
+                    CommandAction::ScrollUp => -tze_hud_input::KEYBOARD_PAGE_SCROLL_PX,
+                    CommandAction::ScrollDown => tze_hud_input::KEYBOARD_PAGE_SCROLL_PX,
+                    _ => 0.0,
+                };
+                if delta_y != 0.0
+                    && let Some(event) = self.state.input_processor.process_keyboard_scroll(
+                        dispatch.event.tile_id,
+                        delta_y,
+                        &mut scene,
+                    )
+                {
+                    dispatch_scroll_offset_event(&self.state.input_event_tx, &scene, event);
+                }
+            }
+            dispatch
         };
 
         if let Some(dispatch) = dispatch {
