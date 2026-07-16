@@ -6,7 +6,7 @@ The resolved display profile is described as the runtime's budget envelope, but 
 
 - Define a frozen operational runtime envelope derived once from the selected display profile.
 - Make profile ceilings govern session admission defaults, aggregate leased tiles, aggregate agent update rate, and aggregate agent-leased texture residency.
-- Define which resource-store and compositor-cache allocations debit the shared in-memory envelope, while keeping durable on-disk widget storage separately governed.
+- Define which scene-resource, widget-source, compositor-cache, and font allocations debit the shared in-memory envelope, while keeping durable on-disk widget storage separately governed.
 - Require one production-visible accounting snapshot so operators and tests can prove every governed consumer uses the selected profile.
 - Preserve the Windows-only v1 execution boundary and exclude cadence/quiescence, device profiles, and device-specific implementation.
 - **BREAKING**: broaden profile budget enforcement from configuration validation to runtime admission and aggregate resident-memory accounting; configurations that relied on independently larger runtime/cache defaults may be rejected or evicted under the selected profile.
@@ -25,4 +25,4 @@ None.
 
 ## Impact
 
-Affected surfaces include `DisplayProfile`/`ResolvedConfig`, `RuntimeContext`, session and lease admission, resource-store construction, compositor cache construction/accounting, startup diagnostics, and configuration/runtime/resource integration tests. No protocol schema, device target, cadence, or third-party dependency changes are proposed.
+Affected surfaces include `DisplayProfile`/`ResolvedConfig`, `RuntimeContext`, session and lease admission, resource-store and protocol widget-store construction, compositor cache construction/accounting, startup diagnostics, and configuration/runtime/resource integration tests. No wire-protocol schema, device target, compositor cadence, or third-party dependency changes are proposed.

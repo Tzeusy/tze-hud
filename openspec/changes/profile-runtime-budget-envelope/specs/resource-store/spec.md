@@ -1,9 +1,9 @@
 ## ADDED Requirements
 
-### Requirement: Shared Physical Resident-Memory Ledger
-The resource store and compositor cache classes MUST debit a shared physical resident-memory ledger derived from the frozen operational envelope. Each actual CPU or GPU allocation MUST be charged once to its named class, even when multiple handles or agents reference it. Distinct resident copies of the same content, including a decoded CPU image and its GPU texture, MUST each be charged because each consumes memory. Logical per-agent resource accounting MUST remain separate and MUST continue to double-count shared resources as required by the per-agent budget contract.
+### Requirement: Shared Resident-Allocation Ledger
+The resource store, gRPC/MCP widget-source stores, and compositor cache classes MUST debit a shared resident-allocation ledger derived from the frozen operational envelope. Each owned CPU or GPU allocation identity MUST be charged once to exactly one named class, even when multiple handles or agents reference it. Distinct resident copies of the same content, including a decoded CPU image, its GPU texture, and a separately retained widget SVG source, MUST each be charged because each consumes memory. CPU and GPU charges MUST use documented deterministic accounted-byte sizes; they MUST NOT claim to measure allocator metadata, driver padding, shared heaps, or process RSS exactly. Logical per-agent resource accounting MUST remain separate and MUST continue to double-count shared resources as required by the per-agent budget contract.
 
-Source: RFC 0011 §4.3, §7.5, §8, §11; RFC 0006 §3.1
+Source: RFC 0011 §2.2a, §4.3, §7.5, §8, §9.1, §11; RFC 0006 §3.1
 Scope: v1-mandatory
 
 #### Scenario: Duplicate handle does not duplicate physical charge
@@ -12,7 +12,11 @@ Scope: v1-mandatory
 
 #### Scenario: CPU and GPU copies are separate allocations
 - **WHEN** one resource has both decoded CPU bytes and a GPU texture copy resident
-- **THEN** the ledger MUST charge both actual allocations to their named classes
+- **THEN** the ledger MUST charge both owned allocation identities using their documented accounted-byte sizes
+
+#### Scenario: One allocation cannot debit overlapping classes
+- **WHEN** a resident allocation is reserved through a class-scoped ledger handle
+- **THEN** its allocation identity MUST debit exactly one class and the aggregate once
 
 ### Requirement: Cache Admission Under Aggregate Pressure
 Before admitting a resource-store or compositor-cache allocation, the runtime MUST enforce both the class sub-ceiling and aggregate runtime-resident-memory ceiling. A cache class MUST attempt eviction using its existing safe eviction policy before denying cache admission. If no safe eviction can create headroom, optional cache work MUST proceed uncached or at the already-specified lower-quality path; mandatory resource admission MUST fail with a structured budget error. No eviction MAY free an allocation referenced by the frame currently being rendered.

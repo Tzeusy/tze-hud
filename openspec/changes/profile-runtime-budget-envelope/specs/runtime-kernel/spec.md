@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Profile-Derived Admission Defaults
-The runtime MUST derive resident-session and per-session resource admission from the frozen operational envelope. The effective default for each per-session dimension MUST be the smaller of the canonical runtime default and the selected-profile ceiling. A validated registered-agent override MUST replace the canonical default for that agent, then remain capped by the selected profile and the absolute runtime hard maximum. `profile.max_agents` MUST cap concurrent resident sessions; guest session capacity MUST remain a separate control-plane safety limit.
+The runtime MUST derive resident/embodied-session and per-session resource admission from the frozen operational envelope. The effective default for each per-session dimension MUST be the smaller of the canonical runtime default and the selected-profile ceiling. A validated registered-agent override MUST replace the canonical default for that agent, then remain capped by the selected profile and the absolute runtime hard maximum. `profile.max_agents` MUST cap concurrent resident/embodied sessions; guest session capacity MUST remain a separate control-plane safety limit.
 
 Source: RFC 0002 §4.2-4.3; RFC 0006 §3.1-3.2
 Scope: v1-mandatory
@@ -33,11 +33,11 @@ Scope: v1-mandatory
 - **THEN** each agent MUST receive the full logical texture charge while the process-resident ledger MUST charge each actual allocation only once
 
 ### Requirement: Operational Envelope Accounting Snapshot
-The production runtime MUST expose a machine-readable accounting snapshot containing profile identity, every admission ceiling, every resident-memory class ceiling, current usage, and denial/eviction counters. The snapshot MUST come from the same frozen envelope and accounting ledgers used for enforcement; a reconstructed documentation-only view is not sufficient.
+The production runtime MUST expose a machine-readable accounting snapshot containing profile identity, every admission ceiling, every disjoint resident-memory class ceiling, current accounted usage, and denial/eviction counters. The snapshot MUST come from the same frozen envelope and accounting ledgers used for enforcement; a reconstructed documentation-only view is not sufficient. The snapshot MUST state the deterministic CPU/GPU accounted-byte rules and MUST NOT represent those enforcement totals as exact allocator, driver-heap, or process-RSS measurements.
 
 Source: RFC 0002 §3.2 Stage 8; heart-and-soul/validation.md DR-V3
 Scope: v1-mandatory
 
 #### Scenario: Startup snapshot traces every consumer
 - **WHEN** the runtime completes startup
-- **THEN** its accounting snapshot MUST identify the selected profile and report the effective limits used by session admission, lease defaults, aggregate scene resources, resource-store residency, widget caches, and font cache
+- **THEN** its accounting snapshot MUST identify the selected profile and report the effective limits used by session admission, lease defaults, aggregate scene resources, resource/image residency, gRPC/MCP and renderer widget-source residency, widget raster caches, and font residency
