@@ -7,7 +7,7 @@
 ## 2. Configuration Envelope
 
 - [x] 2.1 Add the approved runtime-resident aggregate and class fields to raw/resolved display profiles with overflow-safe validation and built-in defaults.
-- [ ] 2.2 Retain registered-agent budget overrides in `ResolvedConfig` and derive immutable `OperationalRuntimeEnvelope` in `RuntimeContext`.
+- [x] 2.2 Retain registered-agent budget overrides in `ResolvedConfig` and derive immutable `OperationalRuntimeEnvelope` in `RuntimeContext`.
 - [ ] 2.3 Add configuration tests for freeze, precedence, sub-ceiling totals, custom-profile lowering, and restart-only semantics.
 
 ## 3. Admission and Lease Wiring

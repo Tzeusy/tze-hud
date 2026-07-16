@@ -1608,6 +1608,31 @@ max_tiles = 4
     );
 }
 
+#[test]
+fn freeze_retains_registered_agent_budget_overrides() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[agents.registered.my_agent]
+max_tiles = 4
+max_texture_mb = 32
+max_update_hz = 10
+"#;
+
+    let resolved = parse_ok(toml).freeze().expect("valid config freezes");
+    let overrides = resolved
+        .agent_budget_overrides
+        .get("my_agent")
+        .expect("registered override retained");
+    assert_eq!(overrides.max_tiles, Some(4));
+    assert_eq!(overrides.max_texture_mb, Some(32));
+    assert_eq!(overrides.max_update_hz, Some(10));
+}
+
 /// WHEN agent sets max_tiles = 2048 and profile has max_tiles = 1024 THEN
 /// CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE identifying agent, field, and ceiling.
 #[test]

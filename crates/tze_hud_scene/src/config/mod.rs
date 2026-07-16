@@ -207,6 +207,14 @@ impl DisplayProfile {
 
 // ─── Resolved Config ──────────────────────────────────────────────────────────
 
+/// Validated optional per-agent budget overrides retained at config freeze.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RegisteredAgentBudgetOverrides {
+    pub max_tiles: Option<u32>,
+    pub max_texture_mb: Option<u32>,
+    pub max_update_hz: Option<u32>,
+}
+
 /// A fully validated, frozen configuration.
 ///
 /// Returned by `ConfigLoader::freeze()`.
@@ -215,6 +223,8 @@ pub struct ResolvedConfig {
     pub profile: DisplayProfile,
     pub tab_names: Vec<String>,
     pub agent_capabilities: std::collections::HashMap<String, Vec<String>>,
+    /// Per-agent budget overrides keyed by registered agent name.
+    pub agent_budget_overrides: std::collections::HashMap<String, RegisteredAgentBudgetOverrides>,
     /// Frozen Windows media-ingress config. Defaults to disabled.
     pub media_ingress: MediaIngressConfig,
     /// Sourced TOML file path.
