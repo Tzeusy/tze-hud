@@ -252,10 +252,10 @@ pub fn validate_display_profile(raw: &RawConfig, errors: &mut Vec<ConfigError>) 
         None => return, // no [display_profile] section → nothing to validate here
     };
 
-    let extends = match &dp.extends {
-        Some(e) => e.as_str(),
-        None => return, // no extends → no extends-specific checks
-    };
+    // A custom profile without an explicit `extends` inherits full-display.
+    // Validation must use that same base or raw overrides can bypass both
+    // escalation and resident class-sum checks before freeze.
+    let extends = dp.extends.as_deref().unwrap_or("full-display");
 
     // ── Rule: headless MUST NOT be extended ───────────────────────────────────
     if extends == "headless" {
@@ -287,7 +287,8 @@ pub fn validate_display_profile(raw: &RawConfig, errors: &mut Vec<ConfigError>) 
     // ── Rule: profile/extends conflict ────────────────────────────────────────
     // If [runtime].profile names a built-in (not "custom") and [display_profile].extends
     // names a DIFFERENT built-in, that's a conflict.
-    if let Some(p) = runtime_profile
+    if dp.extends.is_some()
+        && let Some(p) = runtime_profile
         && matches!(p, "full-display" | "headless")
         && p != extends
     {
@@ -673,6 +674,31 @@ mod tests {
             .expect("overflowing resident sub-ceiling total must be rejected");
         assert!(error.got.contains("resource=4294967295"));
         assert!(error.got.contains("aggregate=4294967295"));
+    }
+
+    #[test]
+    fn custom_resident_subceilings_without_extends_are_still_validated() {
+        let raw = RawConfig {
+            runtime: Some(RawRuntime {
+                profile: Some("custom".into()),
+                ..Default::default()
+            }),
+            display_profile: Some(RawDisplayProfile {
+                max_runtime_resident_mb: Some(1),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let mut errors = Vec::new();
+        validate_display_profile(&raw, &mut errors);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| matches!(error.code, ConfigErrorCode::ProfileResidentBudgetInvalid)),
+            "custom profiles without extends inherit full-display class ceilings and must not bypass aggregate validation: {errors:?}"
+        );
     }
 
     #[test]

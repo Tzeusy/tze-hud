@@ -138,13 +138,18 @@ impl Compositor {
             ));
         }
 
-        // ── Ensure image textures are uploaded before rendering ──────────────
-        let mut image_refs = self.ensure_scene_image_textures(scene);
-        // Ensure icon textures (key_icon_map SVGs) are rasterized and cached.
-        // Merge their ResourceIds into the eviction-guard set so they survive.
-        let icon_refs = self.ensure_scene_icon_textures(scene);
-        image_refs.extend(icon_refs);
+        // ── Reclaim stale image textures before admitting this frame ─────────
+        // Collect the complete current-frame guard set first, then evict only
+        // allocations outside it. This creates headroom before cache admission
+        // while ensuring a resource referenced by this frame is never freed.
+        let mut image_refs = Self::scene_image_resource_ids(scene);
+        image_refs.extend(Self::scene_icon_resource_ids(scene));
         self.evict_unused_image_textures(&image_refs);
+
+        // Ensure current-frame image/icon textures only after the safe eviction
+        // pass, so class/aggregate reserve sees all reclaimable headroom.
+        self.ensure_scene_image_textures(scene);
+        self.ensure_scene_icon_textures(scene);
 
         // Update zone animation states (fade-in/fade-out) before rendering.
         // Must run before any render_zone_content call below.

@@ -11,7 +11,16 @@ copies are charged separately. Logical agent texture accounting remains a
 separate per-lease/aggregate admission domain and intentionally double-charges
 shared logical references. Durable widget blobs on disk are not resident bytes.
 
-At startup the runtime emits a structured `tze_hud::resident_accounting` event
-containing the profile, exact byte ceilings, current per-class usage, aggregate
-usage, and allocation count. Class admission failure uses an existing safe
-eviction/no-cache boundary; it never borrows from another class.
+After its accounting consumers are constructed, the runtime emits a structured
+`tze_hud::resident_accounting` event. The JSON snapshot contains the selected
+profile; session, lease, aggregate-scene, and hard admission ceilings; exact
+resident class limits and current usage; allocation, denial, and safe-eviction
+counters; deterministic byte-counting rules; and a consumer trace for resource,
+image, widget-source, widget-raster, and font residency. These totals are
+enforcement values, not exact allocator metadata, GPU-driver heap usage, or RSS.
+
+Before compositor cache admission, stale entries not referenced by the current
+frame are released through the shared ledger. Current-frame entries stay pinned.
+Optional raster/image work falls back to the existing uncached, old-cache, or
+lower-quality path when no safe headroom remains; mandatory resource admission
+returns a structured budget error. No class borrows unused capacity from another.

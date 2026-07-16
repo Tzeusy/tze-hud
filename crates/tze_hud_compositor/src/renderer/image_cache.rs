@@ -15,6 +15,16 @@ use tze_hud_scene::types::*;
 
 use crate::text::TextRasterizer;
 
+fn unreferenced_resource_ids<'a>(
+    cached_ids: impl Iterator<Item = &'a ResourceId>,
+    referenced_ids: &HashSet<ResourceId>,
+) -> Vec<ResourceId> {
+    cached_ids
+        .filter(|id| !referenced_ids.contains(id))
+        .copied()
+        .collect()
+}
+
 // ─── Image texture cache ────────────────────────────────────────────────────
 
 /// A cached GPU texture for a static image resource.
@@ -418,9 +428,9 @@ impl super::Compositor {
     /// (matches `tze_hud_resource::ResourceId::as_bytes()`); duplicate calls
     /// with the same `resource_id` are no-ops.
     ///
-    /// Silently skips if the text renderer is not yet initialized (e.g. if
-    /// `init_text_renderer` has not been called).  Callers in the runtime may
-    /// defer font uploads until the compositor is ready.
+    /// Returns `true` when the font was loaded/already present. Returns `false`
+    /// when the text renderer is not initialized or resident admission denies
+    /// the new copy, allowing the runtime handoff to report the real outcome.
     ///
     /// # Truncation cache invalidation
     ///
@@ -432,9 +442,28 @@ impl super::Compositor {
     /// the scene version has changed.  The cadence gate is bypassed for
     /// forced primes (see `prime_truncation_cache`), ensuring the new font is
     /// reflected immediately on the next commit.  [hud-v2z6u]
-    pub fn load_font_bytes(&mut self, resource_id: [u8; 32], data: &[u8]) {
+    pub fn load_font_bytes(&mut self, resource_id: [u8; 32], data: &[u8]) -> bool {
         if let Some(rasterizer) = &mut self.text_rasterizer {
             let was_new = !rasterizer.has_font(&resource_id);
+            if was_new
+                && let Some(ledger) = &self.resident_ledger
+                && ledger
+                    .reserve(
+                        tze_hud_resource::ResidentClass::Font,
+                        format!(
+                            "font:glyphon:{}",
+                            crate::text::format_resource_id(&resource_id)
+                        ),
+                        data.len() as u64,
+                    )
+                    .is_err()
+            {
+                tracing::warn!(
+                    resource_id = %crate::text::format_resource_id(&resource_id),
+                    "font residency admission denied"
+                );
+                return false;
+            }
             rasterizer.load_font_bytes(resource_id, data);
             if was_new {
                 // A new font changes shaping widths — cached truncation points
@@ -447,8 +476,10 @@ impl super::Compositor {
                     "load_font_bytes: new font loaded — truncation cache invalidated [hud-v2z6u]"
                 );
             }
+            true
         } else {
             tracing::debug!("load_font_bytes called before text renderer is initialized — skipped");
+            false
         }
     }
 
@@ -565,18 +596,6 @@ impl super::Compositor {
             );
             return false;
         }
-        if let Some(ledger) = &self.resident_ledger
-            && ledger
-                .reserve(
-                    tze_hud_resource::ResidentClass::Resource,
-                    format!("image:{resource_id}:gpu"),
-                    expected_bytes as u64,
-                )
-                .is_err()
-        {
-            return false;
-        }
-
         let reduce_quality = self.degradation_policy.level
             >= tze_hud_scene::DegradationLevel::Moderate
             && (img_width > self.degradation_policy.texture_quality_threshold_px
@@ -601,6 +620,17 @@ impl super::Compositor {
             )
         });
         let upload_rgba = scaled_rgba.as_deref().unwrap_or(&rgba_data);
+        if let Some(ledger) = &self.resident_ledger
+            && ledger
+                .reserve(
+                    tze_hud_resource::ResidentClass::Resource,
+                    format!("image:{resource_id}:gpu"),
+                    upload_rgba.len() as u64,
+                )
+                .is_err()
+        {
+            return false;
+        }
 
         // Create GPU texture.
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -845,23 +875,18 @@ impl super::Compositor {
     /// `ResourceId`s that appeared in zone publications or tile nodes during
     /// this frame. Any cache entry not in this set is dropped.
     pub fn evict_unused_image_textures(&mut self, referenced_ids: &HashSet<ResourceId>) {
+        let stale_texture_ids =
+            unreferenced_resource_ids(self.image_texture_cache.keys(), referenced_ids);
+        let stale_byte_ids = unreferenced_resource_ids(self.image_bytes.keys(), referenced_ids);
         if let Some(ledger) = &self.resident_ledger {
-            for id in self
-                .image_texture_cache
-                .keys()
-                .filter(|id| !referenced_ids.contains(id))
-            {
-                ledger.release(
+            for id in &stale_texture_ids {
+                ledger.release_evicted(
                     tze_hud_resource::ResidentClass::Resource,
                     &tze_hud_resource::AllocationId(format!("image:{id}:gpu")),
                 );
             }
-            for id in self
-                .image_bytes
-                .keys()
-                .filter(|id| !referenced_ids.contains(id))
-            {
-                ledger.release(
+            for id in &stale_byte_ids {
+                ledger.release_evicted(
                     tze_hud_resource::ResidentClass::Resource,
                     &tze_hud_resource::AllocationId(format!("image:{id}:cpu")),
                 );
@@ -877,7 +902,22 @@ impl super::Compositor {
 
 #[cfg(test)]
 mod degradation_texture_tests {
-    use super::downsample_rgba_nearest;
+    use std::collections::{HashMap, HashSet};
+
+    use super::{downsample_rgba_nearest, unreferenced_resource_ids};
+    use tze_hud_scene::types::ResourceId;
+
+    #[test]
+    fn current_frame_references_are_never_eviction_candidates() {
+        let current = ResourceId::of(b"current-frame");
+        let stale = ResourceId::of(b"stale-frame");
+        let cached = HashMap::from([(current, ()), (stale, ())]);
+        let referenced = HashSet::from([current]);
+
+        let candidates = unreferenced_resource_ids(cached.keys(), &referenced);
+
+        assert_eq!(candidates, vec![stale]);
+    }
 
     #[test]
     fn nearest_downsample_is_deterministic_and_preserves_rgba_pixels() {

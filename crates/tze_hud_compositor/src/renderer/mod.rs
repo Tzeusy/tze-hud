@@ -1863,6 +1863,31 @@ impl Compositor {
     /// [`Compositor::evict_unused_image_textures`] once per frame so that
     /// stale cache entries are reclaimed and the cache does not grow without
     /// bound across frames.
+    fn scene_image_resource_ids(scene: &SceneGraph) -> HashSet<ResourceId> {
+        let mut referenced = HashSet::new();
+        for node in scene.nodes.values() {
+            if let NodeData::StaticImage(img) = &node.data {
+                referenced.insert(img.resource_id);
+            }
+        }
+        for publishes in scene.zone_registry.active_publishes.values() {
+            for record in publishes {
+                match &record.content {
+                    ZoneContent::StaticImage(resource_id) => {
+                        referenced.insert(*resource_id);
+                    }
+                    ZoneContent::Notification(payload) if !payload.icon.is_empty() => {
+                        if let Some(resource_id) = parse_notification_icon(&payload.icon) {
+                            referenced.insert(resource_id);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        referenced
+    }
+
     fn ensure_scene_image_textures(&mut self, scene: &SceneGraph) -> HashSet<ResourceId> {
         let mut referenced: HashSet<ResourceId> = HashSet::new();
 
@@ -1929,6 +1954,16 @@ impl Compositor {
     /// SVG rasterization only occurs on cache miss (init-time / first-seen
     /// path).  Subsequent calls are O(1) per path due to the cache hit-check
     /// guard in `ensure_icon_texture`.
+    fn scene_icon_resource_ids(scene: &SceneGraph) -> HashSet<ResourceId> {
+        scene
+            .zone_registry
+            .zones
+            .values()
+            .flat_map(|zone| zone.rendering_policy.key_icon_map.values())
+            .map(|svg_path| ResourceId::of(svg_path.as_bytes()))
+            .collect()
+    }
+
     fn ensure_scene_icon_textures(&mut self, scene: &SceneGraph) -> HashSet<ResourceId> {
         let mut icon_ids: HashSet<ResourceId> = HashSet::new();
         for zone_def in scene.zone_registry.zones.values() {

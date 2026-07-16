@@ -80,7 +80,8 @@ pub mod widgets;
 pub mod zone_publish;
 
 pub use budget_gate::{
-    MutationBudgetDecision, MutationBudgetEnforcer, SharedMutationBudgetEnforcer,
+    MutationBudgetDecision, MutationBudgetEnforcer, MutationBudgetUsage,
+    SharedMutationBudgetEnforcer,
 };
 pub use config::SessionConfig;
 pub use degradation_notice_bus::{DegradationNoticeReceiver, DegradationNoticeSender};
@@ -871,7 +872,7 @@ impl HudSession for HudSessionImpl {
                 .abort_all_uploads(&namespace_for_cleanup)
                 .await;
             if let Some(enforcer) = &session.budget_enforcer {
-                enforcer.remove_session(&namespace_for_cleanup);
+                enforcer.remove_session(session.scene_session_id);
             }
         });
 

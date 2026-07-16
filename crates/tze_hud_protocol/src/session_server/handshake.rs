@@ -208,6 +208,7 @@ pub(super) async fn handle_session_init(
             namespace.clone(),
             resource_budget.clone(),
             agent_resource_budgets.contains_key(&init.agent_id),
+            super::MutationBudgetUsage::default(),
         ) {
             let _ = tx
                 .send(Ok(ServerMessage {
@@ -406,6 +407,19 @@ pub(super) async fn handle_session_resume(
         .get(&resume.agent_id)
         .cloned()
         .unwrap_or_else(|| fallback_resource_budget.clone());
+    let restored_usage = {
+        let st = state.lock().await;
+        let scene = st.scene.lock().await;
+        prior_entry.orphaned_lease_ids.iter().fold(
+            super::MutationBudgetUsage::default(),
+            |mut total, lease_id| {
+                let usage = scene.lease_resource_usage(lease_id);
+                total.tiles = total.tiles.saturating_add(usage.tiles);
+                total.texture_bytes = total.texture_bytes.saturating_add(usage.texture_bytes);
+                total
+            },
+        )
+    };
     if let Some(enforcer) = budget_enforcer {
         if let super::MutationBudgetDecision::Reject {
             error_code,
@@ -419,6 +433,7 @@ pub(super) async fn handle_session_resume(
             namespace.clone(),
             resource_budget.clone(),
             agent_resource_budgets.contains_key(&resume.agent_id),
+            restored_usage,
         ) {
             let _ = tx
                 .send(Ok(ServerMessage {

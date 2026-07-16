@@ -276,7 +276,6 @@ impl HeadlessRuntime {
         // Returns Err if config_toml is None in a production build (dev-mode not enabled).
         let (runtime_ctx, fallback_unrestricted) = config.build_runtime_context()?;
         let runtime_context = Arc::new(runtime_ctx);
-        tracing::info!(target: "tze_hud::resident_accounting", snapshot = %runtime_context.resident_accounting_snapshot(), "runtime resident accounting initialized");
 
         let mut compositor = Compositor::new_headless(config.width, config.height).await?;
         let surface = HeadlessSurface::new(&compositor.device, config.width, config.height);
@@ -374,15 +373,20 @@ impl HeadlessRuntime {
         let state = Arc::new(Mutex::new(SharedState {
             scene,
             sessions,
-            resource_store: ResourceStore::new(ResourceStoreConfig {
-                max_total_texture_bytes: resident_limits.resource_bytes,
-                max_font_cache_bytes: resident_limits.font_bytes,
-                ..ResourceStoreConfig::default()
-            }),
-            widget_asset_store: tze_hud_protocol::session::WidgetAssetStore::new_with_limits(
-                resident_limits.widget_source_bytes,
-                resident_limits.widget_namespace_bytes,
+            resource_store: ResourceStore::new_with_resident_ledger(
+                ResourceStoreConfig {
+                    max_total_texture_bytes: resident_limits.resource_bytes,
+                    max_font_cache_bytes: resident_limits.font_bytes,
+                    ..ResourceStoreConfig::default()
+                },
+                runtime_context.resident_ledger.clone(),
             ),
+            widget_asset_store:
+                tze_hud_protocol::session::WidgetAssetStore::new_with_limits_and_resident_ledger(
+                    resident_limits.widget_source_bytes,
+                    resident_limits.widget_namespace_bytes,
+                    runtime_context.resident_ledger.clone(),
+                ),
             runtime_widget_store: runtime_widget_store.clone(),
             element_store: element_store_bootstrap.store,
             element_store_path: Some(element_store_bootstrap.path),
@@ -395,6 +399,12 @@ impl HeadlessRuntime {
             input_capture_tx: None,
             resolved_portal_tokens: std::collections::HashMap::new(),
         }));
+
+        tracing::info!(
+            target: "tze_hud::resident_accounting",
+            snapshot = %runtime_context.resident_accounting_snapshot(),
+            "headless runtime resident accounting initialised"
+        );
 
         let degradation_notices = DegradationNoticeSender::default();
         Ok(Self {

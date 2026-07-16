@@ -1050,7 +1050,7 @@ pub(super) async fn handle_mutation_batch(
         .mutation_budget_delta(&lease_id, &scene_batch);
     if let Some(enforcer) = &session.budget_enforcer {
         match enforcer.reserve_mutation(
-            &session.namespace,
+            session.scene_session_id,
             budget_delta.delta_tiles,
             budget_delta.delta_texture_bytes,
             budget_delta.max_nodes_in_batch,
@@ -1111,7 +1111,7 @@ pub(super) async fn handle_mutation_batch(
         && let Some(enforcer) = &session.budget_enforcer
     {
         enforcer.rollback_mutation(
-            &session.namespace,
+            session.scene_session_id,
             budget_delta.delta_tiles,
             budget_delta.delta_texture_bytes,
         );
@@ -1299,7 +1299,7 @@ pub(super) async fn apply_queued_batch_to_scene(
     if let Some(enforcer) = &session.budget_enforcer {
         if !matches!(
             enforcer.reserve_mutation(
-                &session.namespace,
+                session.scene_session_id,
                 budget_delta.delta_tiles,
                 budget_delta.delta_texture_bytes,
                 budget_delta.max_nodes_in_batch,
@@ -1326,7 +1326,7 @@ pub(super) async fn apply_queued_batch_to_scene(
     if !result.applied {
         if let Some(enforcer) = &session.budget_enforcer {
             enforcer.rollback_mutation(
-                &session.namespace,
+                session.scene_session_id,
                 budget_delta.delta_tiles,
                 budget_delta.delta_texture_bytes,
             );

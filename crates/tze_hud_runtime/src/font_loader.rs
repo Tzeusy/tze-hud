@@ -62,10 +62,7 @@ impl FontLoader {
 
         let id = ResourceId::from_bytes(resource_id);
         match self.store.font_bytes().get(&id) {
-            Some(bytes) => {
-                compositor.load_font_bytes(resource_id, &bytes);
-                true
-            }
+            Some(bytes) => compositor.load_font_bytes(resource_id, &bytes),
             None => {
                 tracing::debug!(
                     resource_id = %id,

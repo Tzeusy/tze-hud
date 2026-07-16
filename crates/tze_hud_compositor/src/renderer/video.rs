@@ -538,13 +538,25 @@ impl super::Compositor {
         // removal takes effect on the next frame instead of rendering defaults.
         let instance_names: Vec<String> = registry.instances.keys().cloned().collect();
 
+        // Reclaim every safely inactive texture before admitting any new or
+        // replacement raster for this frame. Active publications form the
+        // current-frame guard set and are never evicted by this pass.
+        for instance_name in &instance_names {
+            let has_active_publication = registry
+                .active_publishes
+                .get(instance_name)
+                .is_some_and(|publishes| !publishes.is_empty());
+            if !has_active_publication {
+                wr.remove_texture(instance_name);
+            }
+        }
+
         for instance_name in instance_names {
             let has_active_publication = registry
                 .active_publishes
                 .get(&instance_name)
                 .is_some_and(|publishes| !publishes.is_empty());
             if !has_active_publication {
-                wr.remove_texture(&instance_name);
                 continue;
             }
 

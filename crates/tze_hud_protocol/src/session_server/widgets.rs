@@ -497,6 +497,29 @@ pub(super) async fn handle_widget_asset_register(
         return;
     }
 
+    let resident_allocation_id = format!(
+        "widget-source:grpc:{}",
+        tze_hud_resource::ResourceId::from_bytes(expected_hash).to_hex()
+    );
+    let resident_reserved = match st
+        .widget_asset_store
+        .reserve_resident_payload(&resident_allocation_id, payload_len)
+    {
+        Ok(reserved) => reserved,
+        Err(_) => {
+            let budget_error = make_widget_asset_error_result(
+                request_sequence,
+                &register.widget_type_id,
+                &register.svg_filename,
+                "WIDGET_ASSET_BUDGET_EXCEEDED",
+                "runtime resident widget-source budget exceeded".to_string(),
+            );
+            drop(st);
+            send_widget_asset_register_result(session, tx, budget_error).await;
+            return;
+        }
+    };
+
     let runtime_register_result = {
         let mut scene = st.scene.lock().await;
         register_widget_asset_in_scene(
@@ -507,6 +530,10 @@ pub(super) async fn handle_widget_asset_register(
         )
     };
     if let Err(err) = runtime_register_result {
+        if resident_reserved {
+            st.widget_asset_store
+                .release_resident_payload(&resident_allocation_id);
+        }
         let error_result = make_widget_asset_error_result(
             request_sequence,
             &register.widget_type_id,
@@ -529,6 +556,10 @@ pub(super) async fn handle_widget_asset_register(
         },
     );
     if previous.is_some() {
+        if resident_reserved {
+            st.widget_asset_store
+                .release_resident_payload(&resident_allocation_id);
+        }
         // Should be unreachable due to dedup checks above; return a stable error anyway.
         let duplicate_error = make_widget_asset_error_result(
             request_sequence,

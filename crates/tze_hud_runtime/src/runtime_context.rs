@@ -415,8 +415,27 @@ impl RuntimeContext {
     pub fn resident_accounting_snapshot(&self) -> serde_json::Value {
         let limits = self.resident_ledger.limits();
         let usage = self.resident_ledger.snapshot();
+        let fallback = self.fallback_resource_budget();
         serde_json::json!({
             "profile": self.operational_envelope.profile_name,
+            "admission": {
+                "max_resident_sessions": self.operational_envelope.max_resident_sessions,
+                "max_guest_sessions": DEFAULT_MAX_GUEST_SESSIONS,
+                "max_leased_tiles": self.operational_envelope.max_leased_tiles,
+                "max_agent_leased_texture_bytes": self.operational_envelope.max_agent_leased_texture_bytes,
+                "max_agent_update_hz": self.operational_envelope.max_agent_update_hz,
+                "fallback_session": {
+                    "max_tiles": fallback.max_tiles,
+                    "max_nodes_per_tile": fallback.max_nodes_per_tile,
+                    "max_texture_bytes": fallback.max_texture_bytes,
+                    "max_update_rate_hz": fallback.max_update_rate_hz,
+                },
+                "absolute_hard_max": {
+                    "tiles": HARD_MAX_TILES,
+                    "texture_bytes": HARD_MAX_TEXTURE_BYTES,
+                    "update_rate_hz": HARD_MAX_UPDATE_RATE_HZ,
+                },
+            },
             "limits": {
                 "aggregate_bytes": limits.aggregate_bytes,
                 "resource_bytes": limits.resource_bytes,
@@ -431,7 +450,30 @@ impl RuntimeContext {
                 "widget_raster_bytes": usage.widget_raster_bytes,
                 "font_bytes": usage.font_bytes,
                 "allocation_count": usage.allocation_count,
-            }
+            },
+            "counters": {
+                "class_denials": usage.class_denial_count,
+                "aggregate_denials": usage.aggregate_denial_count,
+                "evictions": usage.eviction_count,
+            },
+            "accounted_byte_rules": {
+                "resource_cpu": "retained decoded/source allocation bytes",
+                "resource_gpu": "texture width * height * bytes_per_pixel * samples * mip factor",
+                "widget_source": "retained SVG byte vector length per owned copy",
+                "widget_raster": "RGBA8 width * height * 4 per cached GPU texture",
+                "font": "retained uploaded font source byte length per owned raw/font-system copy",
+                "measurement_scope": "deterministic admission quantities; excludes allocator metadata, driver padding, shared heaps, and process RSS",
+            },
+            "consumers": {
+                "session_admission": ["HudSessionImpl", "RuntimeMutationBudgetEnforcer"],
+                "lease_defaults": ["SceneGraph::try_grant_lease_for_session_with_budget"],
+                "aggregate_scene_resources": ["RuntimeMutationBudgetEnforcer"],
+                "resource": ["ResourceStore", "Compositor::image_bytes", "Compositor::image_texture_cache"],
+                "widget_source": ["WidgetAssetStore(gRPC fallback)", "WidgetAssetRegistry(MCP metadata-only)", "WidgetRenderer::svgs"],
+                "widget_raster": ["WidgetRenderer::textures"],
+                "font": ["FontBytesStore", "glyphon::FontSystem"],
+                "durable_disk_excluded": ["RuntimeWidgetStore"],
+            },
         })
     }
 
@@ -989,5 +1031,12 @@ mod tests {
         let snapshot = ctx.resident_accounting_snapshot();
         assert_eq!(snapshot["limits"]["aggregate_bytes"], 512 * 1024 * 1024_u64);
         assert_eq!(snapshot["usage"]["allocation_count"], 0);
+        assert_eq!(snapshot["admission"]["max_resident_sessions"], 8);
+        assert_eq!(snapshot["admission"]["max_leased_tiles"], 256);
+        assert_eq!(snapshot["counters"]["class_denials"], 0);
+        assert!(snapshot["accounted_byte_rules"]["measurement_scope"].is_string());
+        assert!(snapshot["consumers"]["resource"].is_array());
+        assert!(snapshot["consumers"]["widget_source"].is_array());
+        assert!(snapshot["consumers"]["font"].is_array());
     }
 }

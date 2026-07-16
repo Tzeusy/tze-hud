@@ -138,6 +138,7 @@ pub struct ResourceStore {
     /// decode validation.  Font bytes are retained so the compositor can load
     /// them into glyphon's `FontSystem` at any time after upload.
     font_bytes: FontBytesStore,
+    resident_ledger: Option<crate::ResidentLedger>,
 }
 
 impl ResourceStore {
@@ -148,6 +149,24 @@ impl ResourceStore {
             config: Arc::new(config),
             agent_uploads: Arc::new(Mutex::new(HashMap::new())),
             font_bytes: FontBytesStore::new(),
+            resident_ledger: None,
+        }
+    }
+
+    pub fn new_with_resident_ledger(
+        config: ResourceStoreConfig,
+        resident_ledger: crate::ResidentLedger,
+    ) -> Self {
+        let font_bytes = FontBytesStore::new_with_resident_ledger(resident_ledger.clone());
+        Self {
+            dedup: DedupIndex::new_with_resident_ledger(
+                resident_ledger.clone(),
+                font_bytes.clone(),
+            ),
+            config: Arc::new(config),
+            agent_uploads: Arc::new(Mutex::new(HashMap::new())),
+            font_bytes,
+            resident_ledger: Some(resident_ledger),
         }
     }
 
@@ -489,6 +508,26 @@ impl ResourceStore {
 
         // Insert into dedup index.
         let resource_id = ResourceId::from_bytes(expected_hash);
+        if !matches!(resource_type, ResourceType::FontTtf | ResourceType::FontOtf)
+            && let Some(ledger) = &self.resident_ledger
+        {
+            ledger
+                .reserve(
+                    crate::ResidentClass::Resource,
+                    format!("resource-store:{resource_id}:decoded"),
+                    meta.decoded_bytes as u64,
+                )
+                .map_err(|error| ResourceError::BudgetExceeded {
+                    detail: format!("resident resource admission denied: {error:?}"),
+                })?;
+        }
+        if matches!(resource_type, ResourceType::FontTtf | ResourceType::FontOtf) {
+            self.font_bytes
+                .try_insert(resource_id, data.clone().into())
+                .map_err(|error| ResourceError::BudgetExceeded {
+                    detail: format!("resident font admission denied: {error:?}"),
+                })?;
+        }
         let record = ResourceRecord::new(resource_id, resource_type, &meta);
 
         let (resource_id, was_deduplicated) = match self.dedup.insert(resource_id, record) {
@@ -516,7 +555,6 @@ impl ResourceStore {
         // Retain raw bytes for font resources so the compositor can load them
         // into glyphon's FontSystem.  Image resources do not need byte retention.
         if matches!(resource_type, ResourceType::FontTtf | ResourceType::FontOtf) {
-            self.font_bytes.insert(resource_id, data.into());
             tracing::debug!(
                 resource_id = %resource_id,
                 "font bytes stored for compositor consumption"
@@ -626,6 +664,42 @@ mod tests {
         assert!(!result.was_deduplicated);
         assert_eq!(result.resource_id.as_bytes(), &hash);
         assert_eq!(result.decoded_bytes, 4); // 1×1 RGBA8
+    }
+
+    #[tokio::test]
+    async fn mandatory_decoded_resource_debits_shared_resident_ledger_atomically() {
+        let ledger = crate::ResidentLedger::new(crate::ResidentLedgerLimits {
+            aggregate_bytes: 3,
+            resource_bytes: 3,
+            widget_source_bytes: 0,
+            widget_raster_bytes: 0,
+            font_bytes: 0,
+        });
+        let store =
+            ResourceStore::new_with_resident_ledger(ResourceStoreConfig::default(), ledger.clone());
+        let data = minimal_png_1x1();
+        let hash = *blake3::hash(&data).as_bytes();
+
+        let error = store
+            .handle_upload_start(UploadStartRequest {
+                agent_namespace: "agent-a".into(),
+                agent_capabilities: caps(),
+                agent_budget: unlimited_budget(),
+                upload_id: upload_id(77),
+                resource_type: ResourceType::ImagePng,
+                expected_hash: hash,
+                total_size: data.len(),
+                inline_data: data,
+                width: 0,
+                height: 0,
+            })
+            .await
+            .expect_err("decoded 1x1 RGBA resource must not exceed a 3-byte class ceiling");
+
+        assert!(matches!(error, ResourceError::BudgetExceeded { .. }));
+        assert_eq!(ledger.snapshot().aggregate_bytes, 0);
+        assert_eq!(ledger.snapshot().class_denial_count, 1);
+        assert!(!store.dedup_index().contains(&ResourceId::from_bytes(hash)));
     }
 
     // Acceptance: inline upload for small resource (spec lines 78-79).

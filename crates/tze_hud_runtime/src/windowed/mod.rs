@@ -1580,6 +1580,7 @@ impl ApplicationHandler for WinitApp {
             tracing::warn!("compositor thread did not signal ready in time");
         } else {
             tracing::info!("windowed runtime initialised successfully");
+            tracing::info!(target: "tze_hud::resident_accounting", snapshot = %self.state.runtime_context.resident_accounting_snapshot(), "windowed runtime resident accounting initialised");
         }
 
         // Request first frame.
@@ -1904,7 +1905,6 @@ impl WindowedRuntime {
         let cfg = self.config;
         let (runtime_context, fallback_unrestricted): (SharedRuntimeContext, bool) =
             build_runtime_context(&cfg);
-        tracing::info!(target: "tze_hud::resident_accounting", snapshot = %runtime_context.resident_accounting_snapshot(), "runtime resident accounting initialized");
 
         // Resolve the effective window mode, applying platform fallback checks.
         // Spec §Unsupported overlay fallback (line 185): if overlay is requested
@@ -2026,17 +2026,20 @@ impl WindowedRuntime {
         let shared_state = Arc::new(Mutex::new(SharedState {
             scene: Arc::clone(&shared_scene),
             sessions,
-            resource_store: tze_hud_resource::ResourceStore::new(
+            resource_store: tze_hud_resource::ResourceStore::new_with_resident_ledger(
                 tze_hud_resource::ResourceStoreConfig {
                     max_total_texture_bytes: resident_limits.resource_bytes,
                     max_font_cache_bytes: resident_limits.font_bytes,
                     ..tze_hud_resource::ResourceStoreConfig::default()
                 },
+                runtime_context.resident_ledger.clone(),
             ),
-            widget_asset_store: tze_hud_protocol::session::WidgetAssetStore::new_with_limits(
-                resident_limits.widget_source_bytes,
-                resident_limits.widget_namespace_bytes,
-            ),
+            widget_asset_store:
+                tze_hud_protocol::session::WidgetAssetStore::new_with_limits_and_resident_ledger(
+                    resident_limits.widget_source_bytes,
+                    resident_limits.widget_namespace_bytes,
+                    runtime_context.resident_ledger.clone(),
+                ),
             runtime_widget_store: runtime_widget_store.clone(),
             element_store: startup_element_store,
             element_store_path: Some(startup_element_store_path),

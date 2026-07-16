@@ -2486,6 +2486,7 @@ pub struct WidgetRenderer {
     /// Raw SVG bytes keyed by (widget_type_id, svg_filename).
     /// Stored at widget type registration time.
     svgs: HashMap<(String, String), Vec<u8>>,
+    svg_resident_allocation_ids: HashMap<(String, String), tze_hud_resource::AllocationId>,
 
     /// Per-instance texture cache keyed by instance_name.
     textures: HashMap<String, WidgetTextureEntry>,
@@ -2498,6 +2499,26 @@ pub struct WidgetRenderer {
 
     /// Render pipeline for compositing widget textures.
     texture_pipeline: wgpu::RenderPipeline,
+}
+
+fn reserve_widget_source(
+    ledger: Option<&tze_hud_resource::ResidentLedger>,
+    widget_type_id: &str,
+    svg_filename: &str,
+    svg_bytes: &[u8],
+) -> Result<tze_hud_resource::AllocationId, tze_hud_resource::ResidentReserveError> {
+    let allocation_id = tze_hud_resource::AllocationId(format!(
+        "widget-source:renderer:{widget_type_id}:{svg_filename}:{}",
+        blake3::hash(svg_bytes).to_hex()
+    ));
+    if let Some(ledger) = ledger {
+        ledger.reserve(
+            tze_hud_resource::ResidentClass::WidgetSource,
+            allocation_id.clone(),
+            svg_bytes.len() as u64,
+        )?;
+    }
+    Ok(allocation_id)
 }
 
 impl WidgetRenderer {
@@ -2534,6 +2555,7 @@ impl WidgetRenderer {
         Self {
             resident_ledger: None,
             svgs: HashMap::new(),
+            svg_resident_allocation_ids: HashMap::new(),
             textures: HashMap::new(),
             render_plans: HashMap::new(),
             texture_bind_group_layout,
@@ -2597,10 +2619,32 @@ impl WidgetRenderer {
     /// are initialized. The SVG bytes are stored keyed by (widget_type_id, svg_filename).
     pub fn register_svg(&mut self, widget_type_id: &str, svg_filename: &str, svg_bytes: Vec<u8>) {
         let byte_count = svg_bytes.len();
-        self.svgs.insert(
-            (widget_type_id.to_string(), svg_filename.to_string()),
-            svg_bytes,
-        );
+        let key = (widget_type_id.to_string(), svg_filename.to_string());
+        let allocation_id = match reserve_widget_source(
+            self.resident_ledger.as_ref(),
+            widget_type_id,
+            svg_filename,
+            &svg_bytes,
+        ) {
+            Ok(id) => id,
+            Err(_) => {
+                tracing::warn!(
+                    widget_type_id,
+                    svg_filename,
+                    "widget SVG source admission denied"
+                );
+                return;
+            }
+        };
+        self.svgs.insert(key.clone(), svg_bytes);
+        if let Some(old_id) = self.resident_ledger.as_ref().and_then(|_| {
+            self.svg_resident_allocation_ids
+                .insert(key, allocation_id.clone())
+        }) && old_id != allocation_id
+            && let Some(ledger) = &self.resident_ledger
+        {
+            ledger.release_evicted(tze_hud_resource::ResidentClass::WidgetSource, &old_id);
+        }
         self.render_plans.remove(widget_type_id);
         tracing::debug!(
             widget_type = widget_type_id,
@@ -2910,7 +2954,7 @@ impl WidgetRenderer {
             && let (Some(ledger), Some(id)) = (&self.resident_ledger, old.resident_allocation_id)
             && id != allocation_id
         {
-            ledger.release(tze_hud_resource::ResidentClass::WidgetRaster, &id);
+            ledger.release_evicted(tze_hud_resource::ResidentClass::WidgetRaster, &id);
         }
     }
 
@@ -3128,7 +3172,7 @@ impl WidgetRenderer {
         if let Some(entry) = self.textures.remove(instance_name)
             && let (Some(ledger), Some(id)) = (&self.resident_ledger, entry.resident_allocation_id)
         {
-            ledger.release(tze_hud_resource::ResidentClass::WidgetRaster, &id);
+            ledger.release_evicted(tze_hud_resource::ResidentClass::WidgetRaster, &id);
         }
     }
 
@@ -3331,6 +3375,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 mod tests {
     use super::*;
     use std::sync::MutexGuard;
+
+    #[test]
+    fn renderer_retained_svg_uses_widget_source_class_atomically() {
+        let ledger =
+            tze_hud_resource::ResidentLedger::new(tze_hud_resource::ResidentLedgerLimits {
+                aggregate_bytes: 4,
+                resource_bytes: 0,
+                widget_source_bytes: 4,
+                widget_raster_bytes: 0,
+                font_bytes: 0,
+            });
+
+        assert!(reserve_widget_source(Some(&ledger), "gauge", "fill.svg", b"1234").is_ok());
+        assert!(reserve_widget_source(Some(&ledger), "gauge", "label.svg", b"x").is_err());
+        let snapshot = ledger.snapshot();
+        assert_eq!(snapshot.widget_source_bytes, 4);
+        assert_eq!(snapshot.aggregate_bytes, 4);
+        assert_eq!(snapshot.allocation_count, 1);
+    }
 
     fn sans_serif_font_available() -> bool {
         let db = shared_widget_fontdb();
