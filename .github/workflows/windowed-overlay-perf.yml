@@ -11,14 +11,6 @@ on:
         description: "Warmup frames per mode"
         required: false
         default: "120"
-      width:
-        description: "Benchmark surface width"
-        required: false
-        default: "1920"
-      height:
-        description: "Benchmark surface height"
-        required: false
-        default: "1080"
       fail_on_budget:
         description: "Fail the job when overlay p99 delta exceeds +0.5 ms"
         required: false
@@ -68,8 +60,6 @@ jobs:
           $args = @(
             "-ExePath", "target\release\tze_hud.exe",
             "-OutputDir", "artifacts\windowed-fullscreen-overlay-perf",
-            "-Width", "${{ github.event.inputs.width || '1920' }}",
-            "-Height", "${{ github.event.inputs.height || '1080' }}",
             "-Frames", "${{ github.event.inputs.frames || '600' }}",
             "-WarmupFrames", "${{ github.event.inputs.warmup_frames || '120' }}"
           )

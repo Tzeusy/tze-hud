@@ -10,10 +10,10 @@ param(
     [string]$OutputDir = "artifacts/windowed-fullscreen-overlay-perf",
 
     [Parameter(Mandatory=$false)]
-    [int]$Width = 1920,
+    [Nullable[int]]$Width = $null,
 
     [Parameter(Mandatory=$false)]
-    [int]$Height = 1080,
+    [Nullable[int]]$Height = $null,
 
     [Parameter(Mandatory=$false)]
     [int]$Frames = 600,
@@ -44,6 +44,18 @@ if ($Frames -le 0) {
 
 if ($WarmupFrames -lt 0) {
     throw "-WarmupFrames must be zero or greater"
+}
+
+if (($null -eq $Width) -xor ($null -eq $Height)) {
+    throw "-Width and -Height must be provided together"
+}
+
+$surfaceArgs = @()
+if ($null -ne $Width) {
+    if ($Width -le 0 -or $Height -le 0) {
+        throw "-Width and -Height must be greater than zero"
+    }
+    $surfaceArgs = @("--width", "$Width", "--height", "$Height")
 }
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
@@ -81,8 +93,6 @@ function Invoke-WindowedBenchmarkMode {
     $args = @(
         "--config", $configPath,
         "--window-mode", $Mode,
-        "--width", "$Width",
-        "--height", "$Height",
         "--grpc-port", "0",
         "--mcp-port", "0",
         "--psk", $psk,
@@ -90,6 +100,7 @@ function Invoke-WindowedBenchmarkMode {
         "--benchmark-frames", "$Frames",
         "--benchmark-warmup-frames", "$WarmupFrames"
     )
+    $args += $surfaceArgs
 
     $process = Start-Process `
         -FilePath $ExePath `
@@ -114,8 +125,91 @@ function Invoke-WindowedBenchmarkMode {
     return Get-Content -Path $EmitPath -Raw | ConvertFrom-Json
 }
 
+function Get-EffectiveSurfaceDimensions {
+    param(
+        [Parameter(Mandatory=$true)]
+        [object]$Artifact,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateSet("fullscreen", "overlay")]
+        [string]$Mode
+    )
+
+    $integerTypeCodes = @(
+        [System.TypeCode]::SByte,
+        [System.TypeCode]::Byte,
+        [System.TypeCode]::Int16,
+        [System.TypeCode]::UInt16,
+        [System.TypeCode]::Int32,
+        [System.TypeCode]::UInt32,
+        [System.TypeCode]::Int64,
+        [System.TypeCode]::UInt64
+    )
+
+    $windowProperty = $Artifact.PSObject.Properties["window"]
+    if ($null -eq $windowProperty -or $null -eq $windowProperty.Value) {
+        throw "$Mode benchmark artifact missing window object"
+    }
+
+    $widthProperty = $windowProperty.Value.PSObject.Properties["width"]
+    if ($null -eq $widthProperty -or $null -eq $widthProperty.Value) {
+        throw "$Mode benchmark artifact missing window.width"
+    }
+    [uint32]$parsedWidth = 0
+    $widthTypeCode = [System.Type]::GetTypeCode($widthProperty.Value.GetType())
+    if ($widthTypeCode -notin $integerTypeCodes -or
+        -not [uint32]::TryParse([string]$widthProperty.Value, [ref]$parsedWidth) -or
+        $parsedWidth -eq 0) {
+        throw "$Mode benchmark artifact has malformed window.width: $($widthProperty.Value)"
+    }
+
+    $heightProperty = $windowProperty.Value.PSObject.Properties["height"]
+    if ($null -eq $heightProperty -or $null -eq $heightProperty.Value) {
+        throw "$Mode benchmark artifact missing window.height"
+    }
+    [uint32]$parsedHeight = 0
+    $heightTypeCode = [System.Type]::GetTypeCode($heightProperty.Value.GetType())
+    if ($heightTypeCode -notin $integerTypeCodes -or
+        -not [uint32]::TryParse([string]$heightProperty.Value, [ref]$parsedHeight) -or
+        $parsedHeight -eq 0) {
+        throw "$Mode benchmark artifact has malformed window.height: $($heightProperty.Value)"
+    }
+
+    return [pscustomobject]@{
+        width = $parsedWidth
+        height = $parsedHeight
+    }
+}
+
+function Assert-ComparableEffectiveSurfaces {
+    param(
+        [Parameter(Mandatory=$true)]
+        [object]$FullscreenArtifact,
+
+        [Parameter(Mandatory=$true)]
+        [object]$OverlayArtifact
+    )
+
+    $fullscreenSurface = Get-EffectiveSurfaceDimensions `
+        -Artifact $FullscreenArtifact `
+        -Mode "fullscreen"
+    $overlaySurface = Get-EffectiveSurfaceDimensions `
+        -Artifact $OverlayArtifact `
+        -Mode "overlay"
+
+    if ($fullscreenSurface.width -ne $overlaySurface.width -or
+        $fullscreenSurface.height -ne $overlaySurface.height) {
+        throw "effective surface mismatch: fullscreen=$($fullscreenSurface.width)x$($fullscreenSurface.height) overlay=$($overlaySurface.width)x$($overlaySurface.height)"
+    }
+
+    return $fullscreenSurface
+}
+
 $fullscreen = Invoke-WindowedBenchmarkMode -Mode "fullscreen" -EmitPath $fullscreenPath
 $overlay = Invoke-WindowedBenchmarkMode -Mode "overlay" -EmitPath $overlayPath
+$effectiveSurface = Assert-ComparableEffectiveSurfaces `
+    -FullscreenArtifact $fullscreen `
+    -OverlayArtifact $overlay
 
 $fullscreenP50 = [int64]$fullscreen.frame_time.p50_us
 $fullscreenP99 = [int64]$fullscreen.frame_time.p99_us
@@ -137,10 +231,15 @@ $report = [ordered]@{
     }
     command = [ordered]@{
         exe_path = $ExePath
+        auto_size = $null -eq $Width
         width = $Width
         height = $Height
         frames = $Frames
         warmup_frames = $WarmupFrames
+    }
+    effective_surface = [ordered]@{
+        width = $effectiveSurface.width
+        height = $effectiveSurface.height
     }
     fullscreen = $fullscreen
     overlay = $overlay
