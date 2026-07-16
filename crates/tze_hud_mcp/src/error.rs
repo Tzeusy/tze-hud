@@ -121,16 +121,17 @@ impl JsonRpcError {
     /// the known portal tool vocabulary before serialization.
     pub fn projection_rejected(error_code: ProjectionErrorCode, operation: &str) -> Self {
         let operation = bounded_projection_operation(operation);
-        let message = projection_error_message(error_code);
+        let recovery_operation = projection_recovery_operation(error_code, operation);
+        let message = projection_error_message(error_code, operation, recovery_operation);
         let data = serde_json::json!({
             "error_code": error_code.as_str(),
-            "message": message,
+            "message": message.clone(),
             "context": {
                 "operation": operation,
                 "subsystem": "portal_projection"
             },
             "hint": {
-                "recovery_operation": projection_recovery_operation(error_code, operation),
+                "recovery_operation": recovery_operation,
                 "resolution": projection_resolution(error_code)
             }
         });
@@ -246,22 +247,50 @@ const fn projection_json_rpc_code(error_code: ProjectionErrorCode) -> i64 {
     }
 }
 
-const fn projection_error_message(error_code: ProjectionErrorCode) -> &'static str {
+fn projection_error_message(
+    error_code: ProjectionErrorCode,
+    operation: &'static str,
+    recovery_operation: &'static str,
+) -> String {
     match error_code {
-        ProjectionErrorCode::ProjectionNotFound => "Projection not found",
-        ProjectionErrorCode::ProjectionAlreadyAttached => "Projection already attached",
-        ProjectionErrorCode::ProjectionUnauthorized => "Projection owner authentication failed",
-        ProjectionErrorCode::ProjectionTokenExpired => "Projection owner token expired",
-        ProjectionErrorCode::ProjectionInvalidArgument => "Projection arguments are invalid",
-        ProjectionErrorCode::ProjectionOutputTooLarge => "Projection output exceeds its limit",
-        ProjectionErrorCode::ProjectionInputTooLarge => "Projection input exceeds its limit",
-        ProjectionErrorCode::ProjectionInputQueueFull => "Projection input queue is full",
-        ProjectionErrorCode::ProjectionRateLimited => "Projection operation is rate limited",
-        ProjectionErrorCode::ProjectionStateConflict => {
-            "Projection state conflicts with this operation"
+        ProjectionErrorCode::ProjectionNotFound => {
+            format!("Projection not found; call {recovery_operation}, then retry {operation}.")
         }
-        ProjectionErrorCode::ProjectionHudUnavailable => "HUD projection service is unavailable",
-        ProjectionErrorCode::ProjectionInternalError => "Projection operation failed internally",
+        ProjectionErrorCode::ProjectionAlreadyAttached => format!(
+            "Projection already attached; call {recovery_operation} with the original idempotency_key to rotate the owner token."
+        ),
+        ProjectionErrorCode::ProjectionUnauthorized => format!(
+            "Projection owner authentication failed; call {recovery_operation} with the original idempotency_key to rotate the owner token."
+        ),
+        ProjectionErrorCode::ProjectionTokenExpired => format!(
+            "Projection owner token expired; call {recovery_operation} with the original idempotency_key to rotate the owner token."
+        ),
+        ProjectionErrorCode::ProjectionInvalidArgument => format!(
+            "Projection arguments are invalid; correct them, then retry {recovery_operation}."
+        ),
+        ProjectionErrorCode::ProjectionOutputTooLarge => format!(
+            "Projection output exceeds its limit; split it, then retry {recovery_operation}."
+        ),
+        ProjectionErrorCode::ProjectionInputTooLarge => format!(
+            "Projection input exceeds its limit; reduce it, then retry {recovery_operation}."
+        ),
+        ProjectionErrorCode::ProjectionInputQueueFull => format!(
+            "Projection input queue is full; call {recovery_operation}, acknowledge pending input, then retry {operation}."
+        ),
+        ProjectionErrorCode::ProjectionRateLimited => format!(
+            "Projection operation is rate limited; back off, then retry {recovery_operation}."
+        ),
+        ProjectionErrorCode::ProjectionStateConflict => {
+            format!(
+                "Projection state conflicts with this operation; refresh lifecycle state, then retry {recovery_operation}."
+            )
+        }
+        ProjectionErrorCode::ProjectionHudUnavailable => format!(
+            "HUD projection service is unavailable; wait for availability, then retry {recovery_operation}."
+        ),
+        ProjectionErrorCode::ProjectionInternalError => format!(
+            "Projection operation failed internally; retry {recovery_operation} once, then inspect bounded runtime telemetry."
+        ),
     }
 }
 
@@ -381,6 +410,15 @@ mod tests {
             assert!(
                 data["hint"]["recovery_operation"].is_string(),
                 "{error_code} must name a recovery operation"
+            );
+            assert!(
+                first.message.contains(
+                    data["hint"]["recovery_operation"]
+                        .as_str()
+                        .expect("recovery operation is text")
+                ),
+                "{error_code} message must name its recovery operation: {:?}",
+                first.message
             );
             assert!(
                 data["hint"]["resolution"].is_string(),
