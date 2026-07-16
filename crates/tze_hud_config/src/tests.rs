@@ -1875,13 +1875,9 @@ max_update_hz = 60
 "#;
     let loader = parse_ok(toml);
     let errors = loader.validate();
-    let has_budget_error = errors.iter().any(|e| {
-        matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile)
-            && e.field_path.contains("max_update_hz")
-    });
     assert!(
-        !has_budget_error,
-        "max_update_hz=60 equal to headless ceiling should be accepted, got: {:?}",
+        errors.is_empty(),
+        "max_update_hz=60 equal to headless ceiling should validate cleanly, got: {:?}",
         errors
             .iter()
             .map(|e| (&e.code, &e.field_path))
