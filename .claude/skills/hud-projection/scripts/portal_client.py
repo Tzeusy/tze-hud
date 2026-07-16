@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.9"
+# dependencies = []
+# ///
 """Deterministic CLI for the tze_hud `portal_projection_*` MCP facade.
 
 One subcommand per projection operation, with owner-token custody handled for
@@ -96,8 +100,8 @@ def load_token(projection_id):
         with open(path, encoding="utf-8") as f:
             return f.read().strip()
     except FileNotFoundError:
-        die(f"no owner token on file at {path} — attach first (token loss is unrecoverable; "
-            "if the runtime restarted, cleanup/TTL then re-attach)")
+        die(f"no owner token on file at {path} — attach first; for a live projection, "
+            "repeat attach with the original idempotency key to rotate ownership")
     except OSError as e:
         die(f"cannot read owner token at {path}: {e}")
 
@@ -185,29 +189,13 @@ def cmd_attach(a):
     if a.icon_profile:
         args["icon_profile_hint"] = a.icon_profile
     resp = call_tool("portal_projection_attach", args)
-    err = resp.get("error") or {}
-    # Already-attached surfaces as error.data.error_code =
-    # PROJECTION_ALREADY_ATTACHED with message "projection_id is already
-    # attached" (crates/tze_hud_projection/src/authority.rs); match the
-    # structured code first, message as fallback.
-    err_code = (err.get("data") or {}).get("error_code", "")
-    already = err_code == "PROJECTION_ALREADY_ATTACHED" \
-        or "already attached" in str(err.get("message", "")).lower()
-    if already and os.path.exists(token_path(a.projection_id)):
-        emit({"accepted": True, "status_summary": "already attached; owner token on file",
-              "token_file": token_path(a.projection_id)})
-        return
     result = result_or_die(resp)
     token = result.get("owner_token")
     if token:
         save_token(a.projection_id, token)
-    elif os.path.exists(token_path(a.projection_id)):
-        # Idempotent re-attach: the authority accepts but only the original
-        # attach ever returns the owner token. The one on file stays valid.
-        result["status_summary"] = "already attached; owner token on file"
     else:
-        die("attach accepted but returned no owner_token and none is on file — "
-            "unrecoverable (cleanup or wait for TTL, then re-attach)", 2)
+        die("attach accepted without owner_token — protocol violation; the prior token "
+            "must not be assumed valid after a replay", 2)
     result["token_file"] = token_path(a.projection_id)
     emit(result)
 
