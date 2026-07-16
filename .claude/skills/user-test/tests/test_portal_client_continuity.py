@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import errno
 import hashlib
 import io
 import json
@@ -487,6 +488,85 @@ def test_http_client_rejection_is_classified_as_definitive(
 
     assert exc.value.code == 1
     assert exc.value.definitive_rejection is True
+
+
+@pytest.mark.parametrize("status_code", [408, 425])
+def test_transient_http_rejection_is_classified_as_ambiguous(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    monkeypatch.setenv("HUD_MCP_URL", "http://127.0.0.1:9090/mcp")
+    monkeypatch.setenv("HUD_PSK", "test-psk")
+    rejection = portal_client.urllib.error.HTTPError(
+        "http://127.0.0.1:9090/mcp",
+        status_code,
+        "Transient rejection",
+        {},
+        io.BytesIO(b"retry later"),
+    )
+
+    with (
+        mock.patch.object(
+            portal_client.urllib.request, "urlopen", side_effect=rejection
+        ),
+        pytest.raises(portal_client.PortalClientExit) as exc,
+    ):
+        portal_client.rpc("tools/call", {})
+
+    assert exc.value.code == 1
+    assert exc.value.definitive_rejection is False
+
+
+def test_windows_lock_retries_past_msvcrt_built_in_timeout() -> None:
+    locking_api = SimpleNamespace(
+        LK_NBLCK=2,
+        locking=mock.Mock(
+            side_effect=[
+                PermissionError(13, "lock held"),
+                PermissionError(13, "lock held"),
+                None,
+            ]
+        ),
+    )
+    sleeps: list[float] = []
+
+    portal_client._acquire_windows_lock(17, locking_api, sleeps.append)
+
+    assert locking_api.locking.call_args_list == [
+        mock.call(17, locking_api.LK_NBLCK, 1),
+        mock.call(17, locking_api.LK_NBLCK, 1),
+        mock.call(17, locking_api.LK_NBLCK, 1),
+    ]
+    assert sleeps == [portal_client.WINDOWS_LOCK_RETRY_SECONDS] * 2
+
+
+@pytest.mark.parametrize(
+    "error_number", [errno.EAGAIN, errno.EDEADLK, errno.EBADF, errno.EINVAL]
+)
+def test_windows_lock_does_not_mask_non_contention_errors(error_number: int) -> None:
+    failure = OSError(error_number, "not a documented lock-contention result")
+    locking_api = SimpleNamespace(
+        LK_NBLCK=2,
+        locking=mock.Mock(side_effect=[failure, AssertionError("retried")]),
+    )
+
+    with pytest.raises(OSError) as exc:
+        portal_client._acquire_windows_lock(17, locking_api, mock.Mock())
+
+    assert exc.value is failure
+    locking_api.locking.assert_called_once_with(17, locking_api.LK_NBLCK, 1)
+
+
+def test_windows_lock_wait_is_interruptible() -> None:
+    locking_api = SimpleNamespace(
+        LK_NBLCK=2,
+        locking=mock.Mock(side_effect=PermissionError(errno.EACCES, "lock held")),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        portal_client._acquire_windows_lock(
+            17, locking_api, mock.Mock(side_effect=KeyboardInterrupt)
+        )
 
 
 def test_definitive_http_rejection_rolls_back_prepared_record() -> None:

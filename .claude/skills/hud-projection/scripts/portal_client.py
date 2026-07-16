@@ -53,6 +53,7 @@ Exit codes: 0 success · 1 transport/config error · 2 operation rejected ·
 
 import argparse
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -80,6 +81,7 @@ CONTINUITY_DIR = os.environ.get("PORTAL_CONTINUITY_DIR") or os.path.join(
     STATE_ROOT,
     "portal-continuity",
 )
+WINDOWS_LOCK_RETRY_SECONDS = 0.05
 CONTINUITY_VERSION = 1
 CONTINUITY_MAX_ITEMS = 64
 CONTINUITY_MAX_BYTES = 64 * 1024
@@ -197,6 +199,18 @@ def _atomic_write_private(path, text):
         raise
 
 
+def _acquire_windows_lock(fd, locking_api, sleep=time.sleep):
+    """Block until the one-byte Windows lock is acquired or interrupted."""
+    while True:
+        try:
+            locking_api.locking(fd, locking_api.LK_NBLCK, 1)
+            return
+        except OSError as error:
+            if error.errno != errno.EACCES:
+                raise
+            sleep(WINDOWS_LOCK_RETRY_SECONDS)
+
+
 @contextlib.contextmanager
 def continuity_lock(projection_id):
     """Serialize one projection's continuity transaction across CLI processes."""
@@ -211,7 +225,7 @@ def continuity_lock(projection_id):
                 os.write(fd, b"\0")
                 os.fsync(fd)
             os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            _acquire_windows_lock(fd, msvcrt)
         else:
             fcntl.flock(fd, fcntl.LOCK_EX)
         locked = True
