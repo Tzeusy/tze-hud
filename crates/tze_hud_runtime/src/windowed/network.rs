@@ -143,7 +143,7 @@ pub(super) fn start_network_services(
         Option<NetworkRuntime>,
         Vec<tokio::task::JoinHandle<()>>,
         Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::ElementRepositionedEvent>>,
-        Option<tokio::sync::broadcast::Sender<(String, tze_hud_protocol::proto::EventBatch)>>,
+        Option<tze_hud_protocol::session_server::InputEventSender>,
         Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::FramePresented>>,
         Option<std::net::SocketAddr>,
     ),

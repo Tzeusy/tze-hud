@@ -384,18 +384,18 @@ struct WindowedRuntimeState {
     /// the async session lock (the reset path is sync chrome-layer code).
     element_repositioned_tx:
         Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::ElementRepositionedEvent>>,
-    /// Broadcast sender for runtime-injected input event batches.
+    /// Traffic-class-aware sender for runtime-injected input event batches.
     ///
     /// Cloned from the `HudSessionImpl` after creation. `None` when gRPC is
     /// disabled (grpc_port == 0) or before network services start.
     ///
     /// Used by the windowed runtime to dispatch any `EventBatch` to agents —
     /// scroll offset changes, keyboard down/up/character events, and future
-    /// input event types.  Each `(namespace, EventBatch)` pair is delivered
+    /// input event types. Transactional variants use the durable lane while
+    /// ephemeral/state-stream variants remain bounded. Each pair is delivered
     /// only to the session handler whose namespace matches, filtered by
     /// `INPUT_EVENTS` subscription.
-    input_event_tx:
-        Option<tokio::sync::broadcast::Sender<(String, tze_hud_protocol::proto::EventBatch)>>,
+    input_event_tx: Option<tze_hud_protocol::session_server::InputEventSender>,
     /// Delivery context captured at the
     /// moment a composer node loses focus (blur transition).
     ///
@@ -452,6 +452,12 @@ struct WindowedRuntimeState {
     /// key-down inserts the chord here, the matching key-up removes it instead of
     /// resizing again.
     consumed_portal_resize_keydowns: std::collections::HashSet<String>,
+    /// Focused nodes holding local pressed feedback from a keyboard ACTIVATE,
+    /// keyed by physical key identity until the matching key release.
+    keyboard_activation_nodes: std::collections::HashMap<String, tze_hud_scene::SceneId>,
+    /// Non-navigation command bindings whose raw key-down was replaced by a
+    /// `CommandInputEvent`; their matching raw key-up must be swallowed too.
+    consumed_command_keydowns: std::collections::HashSet<String>,
     /// Shared local composer echo state for the compositor thread (hud-r3ax6).
     ///
     /// Written by the input-event thread (this thread) on every keystroke that
@@ -2333,6 +2339,8 @@ impl WindowedRuntime {
             composer_pointer_drag_anchor: None,
             portal_resize_states: std::collections::HashMap::new(),
             consumed_portal_resize_keydowns: std::collections::HashSet::new(),
+            keyboard_activation_nodes: std::collections::HashMap::new(),
+            consumed_command_keydowns: std::collections::HashSet::new(),
             // Placeholder; replaced in resumed() with the Arc cloned from the
             // compositor.  Separate Arc so it works before compositor is created.
             local_composer_state: Arc::new(StdMutex::new(None)),

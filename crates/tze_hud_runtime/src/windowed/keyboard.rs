@@ -3,13 +3,14 @@ use std::ops::ControlFlow;
 use std::time::Instant;
 
 use tze_hud_input::{
-    AgentDispatch, AgentDispatchKind, HotkeyResizeAxis, HotkeyResizeDir, KeyboardModifiers,
-    PortalFocusTarget, RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent, ShellReservedShortcut,
+    AgentDispatch, AgentDispatchKind, CommandAction, CommandProcessor, CommandSource,
+    HotkeyResizeAxis, HotkeyResizeDir, KeyboardModifiers, PortalFocusTarget, RawCharacterEvent,
+    RawCommandEvent, RawKeyDownEvent, RawKeyUpEvent, ShellReservedShortcut,
 };
 
 use super::WinitApp;
 use super::input_dispatch::{
-    dispatch_focus_event, dispatch_keyboard_event, dispatch_pointer_event,
+    dispatch_command_event, dispatch_focus_event, dispatch_keyboard_event, dispatch_pointer_event,
     dispatch_scroll_offset_event,
 };
 use super::lifecycle::{INTERACTION_LOCK_BUDGET, spin_acquire, write_windows_clipboard_text};
@@ -93,14 +94,13 @@ fn keyboard_kind_preview(kind: &tze_hud_input::KeyboardDispatchKind) -> String {
     }
 }
 
-/// Stable identity for a portal-resize chord, used to pair a consumed `KeyDown`
-/// with its later `KeyUp` so the key-up fallback (below) never double-resizes a
-/// normal physical key-down/key-up pair.
+/// Stable identity for a keyboard chord, used to pair a consumed `KeyDown`
+/// with its later `KeyUp`.
 ///
 /// Prefer the physical `key_code` (layout- and modifier-independent: `Equal`,
 /// `Minus`, `NumpadAdd`, …); fall back to the logical `key` only when the OS
 /// did not supply a code.
-fn portal_resize_key_code(raw_key_code: &str, raw_key: &str) -> String {
+fn keyboard_key_identity(raw_key_code: &str, raw_key: &str) -> String {
     if raw_key_code.is_empty() {
         raw_key.to_string()
     } else {
@@ -155,6 +155,62 @@ fn directional_portal_resize(
 /// too, never reaching the composer or agent as a raw release.
 fn is_bare_tab_chord(key: &str, modifiers: &KeyboardModifiers) -> bool {
     key == "Tab" && !modifiers.ctrl && !modifiers.alt && !modifiers.meta
+}
+
+/// Translate an RFC 0004 default keyboard binding into the platform-neutral
+/// command vocabulary. Composer editing and shell-reserved shortcuts are
+/// intercepted before this helper is called.
+fn keyboard_command(
+    raw: &RawKeyDownEvent,
+    focus: &tze_hud_input::FocusOwner,
+) -> Option<RawCommandEvent> {
+    if raw.modifiers.ctrl || raw.modifiers.alt || raw.modifiers.meta {
+        return None;
+    }
+
+    let node_focused = matches!(focus, tze_hud_input::FocusOwner::Node { .. });
+    let tile_focused = matches!(focus, tze_hud_input::FocusOwner::Tile(_));
+    let action = match (raw.key_code.as_str(), raw.key.as_str()) {
+        ("Tab", _) | (_, "Tab") => {
+            if raw.modifiers.shift {
+                CommandAction::NavigatePrev
+            } else {
+                CommandAction::NavigateNext
+            }
+        }
+        ("Enter" | "NumpadEnter", _) | (_, "Enter") => CommandAction::Activate,
+        ("Space", _) | (_, " ") | (_, "Space") if node_focused => CommandAction::Activate,
+        ("Escape", _) | (_, "Escape") => CommandAction::Cancel,
+        ("ContextMenu", _) | (_, "ContextMenu") => CommandAction::Context,
+        ("F10", _) | (_, "F10") if raw.modifiers.shift => CommandAction::Context,
+        ("PageUp", _) | (_, "PageUp") if tile_focused => CommandAction::ScrollUp,
+        ("PageDown", _) | (_, "PageDown") if tile_focused => CommandAction::ScrollDown,
+        ("ArrowUp", _) | (_, "ArrowUp") if node_focused => CommandAction::NavigatePrev,
+        ("ArrowDown", _) | (_, "ArrowDown") if node_focused => CommandAction::NavigateNext,
+        ("ArrowUp", _) | (_, "ArrowUp") if tile_focused => CommandAction::ScrollUp,
+        ("ArrowDown", _) | (_, "ArrowDown") if tile_focused => CommandAction::ScrollDown,
+        _ => return None,
+    };
+
+    Some(RawCommandEvent {
+        action,
+        source: CommandSource::Keyboard,
+        device_id: "keyboard".to_string(),
+        timestamp_mono_us: raw.timestamp_mono_us,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandDispatchOutcome {
+    Done,
+    Busy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActivationReleaseOutcome {
+    NotTracked,
+    Released,
+    Busy,
 }
 
 /// A raw keyboard event deferred from the winit event-loop thread because the
@@ -490,7 +546,7 @@ impl WinitApp {
                     // down/up pair to exactly one resize).
                     self.state
                         .consumed_portal_resize_keydowns
-                        .insert(portal_resize_key_code(&raw.key_code, &raw.key));
+                        .insert(keyboard_key_identity(&raw.key_code, &raw.key));
                     tracing::debug!(
                         key = %str_preview(&raw.key),
                         key_code = %str_preview(&raw.key_code),
@@ -520,7 +576,7 @@ impl WinitApp {
             {
                 self.state
                     .consumed_portal_resize_keydowns
-                    .insert(portal_resize_key_code(&raw.key_code, &raw.key));
+                    .insert(keyboard_key_identity(&raw.key_code, &raw.key));
                 tracing::debug!(
                     key_code = %str_preview(&raw.key_code),
                     ?axis,
@@ -549,7 +605,11 @@ impl WinitApp {
         // switchers) are likewise excluded.  The Tab key is always consumed so
         // it is never forwarded to the composer draft or the agent as raw input.
         if is_bare_tab_chord(&raw.key, &raw.modifiers) {
-            if self.navigate_portal_focus(tab_id, raw.modifiers.shift) == TabFocusOutcome::Busy {
+            let command = keyboard_command(raw, self.state.focus_manager.current_owner(tab_id))
+                .expect("bare Tab is always a command binding");
+            if self.navigate_portal_focus(tab_id, raw.modifiers.shift, &command)
+                == TabFocusOutcome::Busy
+            {
                 // A required lock was busy — defer and retry on the next drain,
                 // mirroring the composer/namespace busy-defer paths below.
                 self.state
@@ -606,8 +666,16 @@ impl WinitApp {
                     // the keyboard user is never stranded on a control they cannot
                     // type into — a later Tab re-enters the cycle (hud-k6yvb).
                     if is_escape_key(&raw.key, &raw.key_code) {
-                        match self.try_escape_clear_focus(tab_id) {
-                            EscapeClearOutcome::Cleared => return,
+                        let command =
+                            keyboard_command(raw, self.state.focus_manager.current_owner(tab_id))
+                                .expect("unmodified Escape is always a CANCEL command binding");
+                        match self.try_escape_clear_focus(tab_id, &command) {
+                            EscapeClearOutcome::Cleared => {
+                                self.state
+                                    .consumed_command_keydowns
+                                    .insert(keyboard_key_identity(&raw.key_code, &raw.key));
+                                return;
+                            }
                             EscapeClearOutcome::Busy => {
                                 self.state
                                     .pending_keyboard_events
@@ -730,6 +798,38 @@ impl WinitApp {
 
         let focus_owner = self.state.focus_manager.current_owner(tab_id).clone();
 
+        // ── Platform-neutral command dispatch (RFC 0004 §10) ─────────────
+        // Composer editing and portal-control compatibility have already had
+        // first refusal above. Ordinary focused elements receive the abstract
+        // command rather than a device-specific raw key.
+        if let Some(command) = keyboard_command(raw, &focus_owner) {
+            let key_identity = keyboard_key_identity(&raw.key_code, &raw.key);
+            if matches!(
+                command.action,
+                CommandAction::NavigateNext | CommandAction::NavigatePrev
+            ) {
+                let reverse = command.action == CommandAction::NavigatePrev;
+                if self.navigate_portal_focus(tab_id, reverse, &command) == TabFocusOutcome::Busy {
+                    self.state
+                        .pending_keyboard_events
+                        .push_back(PendingKeyboardEvent::KeyDown(raw.clone()));
+                } else {
+                    self.state.consumed_command_keydowns.insert(key_identity);
+                }
+                return;
+            }
+            if self.dispatch_focused_command(tab_id, &command, &key_identity)
+                == CommandDispatchOutcome::Busy
+            {
+                self.state
+                    .pending_keyboard_events
+                    .push_back(PendingKeyboardEvent::KeyDown(raw.clone()));
+            } else {
+                self.state.consumed_command_keydowns.insert(key_identity);
+            }
+            return;
+        }
+
         // Build a namespace-resolver closure: given a tile_id, return its
         // agent namespace from the scene.  A Cell is used to propagate a
         // lock-busy signal out of the closure so the caller can defer the
@@ -784,6 +884,7 @@ impl WinitApp {
         &mut self,
         tab_id: tze_hud_scene::SceneId,
         reverse: bool,
+        command: &RawCommandEvent,
     ) -> TabFocusOutcome {
         // A Tab / Shift+Tab focus traversal is a discrete, deliberate user action
         // that must produce visible feedback this frame, so acquire with a bounded
@@ -794,7 +895,7 @@ impl WinitApp {
         // about_to_wait round-trip before the focus moves.  navigate_focus needs
         // &mut scene to update hit_region_states focus flags; on a true overrun we
         // fall back to deferring the event via TabFocusOutcome::Busy.
-        let transition = {
+        let (transition, command_dispatch) = {
             let Some(state) = spin_acquire(&self.state.shared_state, INTERACTION_LOCK_BUDGET)
             else {
                 tracing::trace!("tab focus traversal deferred: shared_state lock budget elapsed");
@@ -804,12 +905,23 @@ impl WinitApp {
                 tracing::trace!("tab focus traversal deferred: scene lock budget elapsed");
                 return TabFocusOutcome::Busy;
             };
-            self.state.input_processor.navigate_focus(
+            let transition = self.state.input_processor.navigate_focus(
                 &mut self.state.focus_manager,
                 &mut scene,
                 tab_id,
                 reverse,
-            )
+            );
+            let owner = self.state.focus_manager.current_owner(tab_id).clone();
+            let namespace = owner
+                .tile_id()
+                .and_then(|tile_id| scene.tiles.get(&tile_id))
+                .map(|tile| tile.namespace.clone());
+            let command_dispatch = namespace.and_then(|namespace| {
+                CommandProcessor::new().process(command, &owner, &mut scene, move |_| {
+                    Some(namespace.clone())
+                })
+            });
+            (transition, command_dispatch)
         };
 
         // Mirror the pointer path's transition handling (lifecycle.rs
@@ -850,6 +962,9 @@ impl WinitApp {
         }
 
         dispatch_focus_event(&self.state.input_event_tx, transition);
+        if let Some(dispatch) = command_dispatch {
+            dispatch_command_event(&self.state.input_event_tx, dispatch);
+        }
 
         // Clear the local composer echo overlay if focus left a composer region.
         if composer_focus_lost {
@@ -857,6 +972,86 @@ impl WinitApp {
         }
 
         TabFocusOutcome::Done
+    }
+
+    /// Process a non-navigation command against the current focus owner and
+    /// live scene. Lock contention defers the originating keyboard event through
+    /// the established FIFO queue; missing focus is a completed no-op.
+    fn dispatch_focused_command(
+        &mut self,
+        tab_id: tze_hud_scene::SceneId,
+        command: &RawCommandEvent,
+        key_identity: &str,
+    ) -> CommandDispatchOutcome {
+        let dispatch = {
+            let Some(state) = spin_acquire(&self.state.shared_state, INTERACTION_LOCK_BUDGET)
+            else {
+                return CommandDispatchOutcome::Busy;
+            };
+            let Some(mut scene) = spin_acquire(&state.scene, INTERACTION_LOCK_BUDGET) else {
+                return CommandDispatchOutcome::Busy;
+            };
+            let owner = self.state.focus_manager.current_owner(tab_id).clone();
+            let namespace = owner
+                .tile_id()
+                .and_then(|tile_id| scene.tiles.get(&tile_id))
+                .map(|tile| tile.namespace.clone());
+            namespace.and_then(|namespace| {
+                CommandProcessor::new().process(command, &owner, &mut scene, move |_| {
+                    Some(namespace.clone())
+                })
+            })
+        };
+
+        if let Some(dispatch) = dispatch {
+            if dispatch.event.action == CommandAction::Activate
+                && let Some(node_id) = dispatch.event.node_id
+            {
+                self.state
+                    .keyboard_activation_nodes
+                    .insert(key_identity.to_string(), node_id);
+            }
+            tracing::debug!(
+                namespace = %str_preview(&dispatch.namespace),
+                tile_id = ?dispatch.event.tile_id,
+                node_id = ?dispatch.event.node_id,
+                action = ?dispatch.event.action,
+                source = ?dispatch.event.source,
+                local_ack_us = dispatch.local_ack_us,
+                "command input dispatched to focused agent"
+            );
+            dispatch_command_event(&self.state.input_event_tx, dispatch);
+        }
+        CommandDispatchOutcome::Done
+    }
+
+    /// Clear keyboard ACTIVATE feedback on the same node that received the
+    /// matching key-down, even if focus moved before the key was released.
+    fn release_keyboard_activation(&mut self, raw: &RawKeyUpEvent) -> ActivationReleaseOutcome {
+        let key_identity = keyboard_key_identity(&raw.key_code, &raw.key);
+        let Some(node_id) = self
+            .state
+            .keyboard_activation_nodes
+            .get(&key_identity)
+            .copied()
+        else {
+            return ActivationReleaseOutcome::NotTracked;
+        };
+
+        {
+            let Some(state) = spin_acquire(&self.state.shared_state, INTERACTION_LOCK_BUDGET)
+            else {
+                return ActivationReleaseOutcome::Busy;
+            };
+            let Some(mut scene) = spin_acquire(&state.scene, INTERACTION_LOCK_BUDGET) else {
+                return ActivationReleaseOutcome::Busy;
+            };
+            if let Some(hit_region_state) = scene.hit_region_states.get_mut(&node_id) {
+                hit_region_state.pressed = false;
+            }
+        }
+        self.state.keyboard_activation_nodes.remove(&key_identity);
+        ActivationReleaseOutcome::Released
     }
 
     /// Classify the active tab's keyboard focus for portal typing-recovery
@@ -964,21 +1159,26 @@ impl WinitApp {
     }
 
     /// Escape recovery for a composer-less focus stop (hud-k6yvb): a focusable
-    /// node whose tile has no composer, or a tile-level stop. Clears focus to
-    /// `None` so a keyboard user is never stranded on a control they cannot type
-    /// into; a subsequent Tab re-enters the cycle at the first stop.
+    /// node whose tile has no composer, or a tile-level stop. It delivers the
+    /// RFC 0004 CANCEL command to the current owner before clearing focus to
+    /// `None`, so a keyboard user is never stranded on a control they cannot
+    /// type into; a subsequent Tab re-enters the cycle at the first stop.
     ///
     /// Returns [`EscapeClearOutcome::Cleared`] when it released a real owner,
     /// [`EscapeClearOutcome::NoOwner`] when there was nothing to clear (caller
     /// proceeds normally), or [`EscapeClearOutcome::Busy`] on lock contention
     /// (caller defers the event).
-    fn try_escape_clear_focus(&mut self, tab_id: tze_hud_scene::SceneId) -> EscapeClearOutcome {
-        let transition = {
+    fn try_escape_clear_focus(
+        &mut self,
+        tab_id: tze_hud_scene::SceneId,
+        command: &RawCommandEvent,
+    ) -> EscapeClearOutcome {
+        let (transition, command_dispatch) = {
             let Some(state) = spin_acquire(&self.state.shared_state, INTERACTION_LOCK_BUDGET)
             else {
                 return EscapeClearOutcome::Busy;
             };
-            let Some(scene) = spin_acquire(&state.scene, INTERACTION_LOCK_BUDGET) else {
+            let Some(mut scene) = spin_acquire(&state.scene, INTERACTION_LOCK_BUDGET) else {
                 return EscapeClearOutcome::Busy;
             };
             // Nothing to clear when focus is already absent / on chrome.
@@ -988,9 +1188,23 @@ impl WinitApp {
             ) {
                 return EscapeClearOutcome::NoOwner;
             }
-            self.state.focus_manager.clear_focus(tab_id, &scene)
+            let owner = self.state.focus_manager.current_owner(tab_id).clone();
+            let namespace = owner
+                .tile_id()
+                .and_then(|tile_id| scene.tiles.get(&tile_id))
+                .map(|tile| tile.namespace.clone());
+            let command_dispatch = namespace.and_then(|namespace| {
+                CommandProcessor::new().process(command, &owner, &mut scene, move |_| {
+                    Some(namespace.clone())
+                })
+            });
+            let transition = self.state.focus_manager.clear_focus(tab_id, &scene);
+            (transition, command_dispatch)
         };
         tracing::debug!("portal recovery: Escape cleared composer-less focus stop");
+        if let Some(dispatch) = command_dispatch {
+            dispatch_command_event(&self.state.input_event_tx, dispatch);
+        }
         dispatch_focus_event(&self.state.input_event_tx, transition);
         EscapeClearOutcome::Cleared
     }
@@ -1097,6 +1311,33 @@ impl WinitApp {
             return;
         }
 
+        let key_identity = keyboard_key_identity(&raw.key_code, &raw.key);
+        match self.release_keyboard_activation(raw) {
+            ActivationReleaseOutcome::Released => {
+                self.state.consumed_command_keydowns.remove(&key_identity);
+                tracing::debug!(
+                    key_code = %str_preview(&raw.key_code),
+                    "command input: matching ACTIVATE KeyUp cleared local feedback"
+                );
+                return;
+            }
+            ActivationReleaseOutcome::Busy => {
+                self.state
+                    .pending_keyboard_events
+                    .push_back(PendingKeyboardEvent::KeyUp(raw.clone()));
+                return;
+            }
+            ActivationReleaseOutcome::NotTracked => {}
+        }
+
+        if self.state.consumed_command_keydowns.remove(&key_identity) {
+            tracing::debug!(
+                key_code = %str_preview(&raw.key_code),
+                "command input: matching KeyUp swallowed after command KeyDown"
+            );
+            return;
+        }
+
         // ── Portal resize hotkey: KeyUp fallback (hud-v4k1h) ──────────────
         //
         // On live Windows, SendInput-driven Ctrl chords can deliver ONLY the
@@ -1113,7 +1354,7 @@ impl WinitApp {
         // Direction resolution mirrors the key-down path: logical key first,
         // then the physical `KeyCode` fallback (PR #937) so the chord is
         // deterministic regardless of layout or held modifiers.
-        let resize_key_code = portal_resize_key_code(&raw.key_code, &raw.key);
+        let resize_key_code = key_identity;
         if self
             .state
             .consumed_portal_resize_keydowns
@@ -1668,13 +1909,154 @@ mod tests {
     use std::collections::VecDeque;
     use std::ops::ControlFlow;
 
-    use tze_hud_input::{KeyboardModifiers, RawKeyDownEvent};
-    use tze_hud_scene::MonoUs;
+    use tze_hud_input::{
+        CommandAction, CommandSource, FocusOwner, KeyboardModifiers, RawKeyDownEvent,
+    };
+    use tze_hud_scene::{MonoUs, SceneId};
 
     use super::{
-        PendingKeyboardEvent, drain_keyboard_queue_bounded, is_bare_tab_chord,
+        PendingKeyboardEvent, drain_keyboard_queue_bounded, is_bare_tab_chord, keyboard_command,
         restore_front_requeued_event,
     };
+
+    fn command_binding(
+        key_code: &str,
+        key: &str,
+        modifiers: KeyboardModifiers,
+        focus: &FocusOwner,
+    ) -> Option<CommandAction> {
+        keyboard_command(
+            &RawKeyDownEvent {
+                key_code: key_code.to_string(),
+                key: key.to_string(),
+                modifiers,
+                repeat: false,
+                timestamp_mono_us: MonoUs(42),
+            },
+            focus,
+        )
+        .map(|command| {
+            assert_eq!(command.source, CommandSource::Keyboard);
+            assert_eq!(command.device_id, "keyboard");
+            assert_eq!(command.timestamp_mono_us, MonoUs(42));
+            command.action
+        })
+    }
+
+    #[test]
+    fn rfc_default_keyboard_bindings_cover_the_command_vocabulary() {
+        let tile_id = SceneId::new();
+        let node_focus = FocusOwner::Node {
+            tile_id,
+            node_id: SceneId::new(),
+        };
+        let tile_focus = FocusOwner::Tile(tile_id);
+        let shift = KeyboardModifiers {
+            shift: true,
+            ..KeyboardModifiers::NONE
+        };
+
+        let cases = [
+            (
+                "Tab",
+                "Tab",
+                KeyboardModifiers::NONE,
+                CommandAction::NavigateNext,
+            ),
+            ("Tab", "Tab", shift, CommandAction::NavigatePrev),
+            (
+                "Enter",
+                "Enter",
+                KeyboardModifiers::NONE,
+                CommandAction::Activate,
+            ),
+            (
+                "Escape",
+                "Escape",
+                KeyboardModifiers::NONE,
+                CommandAction::Cancel,
+            ),
+            (
+                "ContextMenu",
+                "ContextMenu",
+                KeyboardModifiers::NONE,
+                CommandAction::Context,
+            ),
+            ("F10", "F10", shift, CommandAction::Context),
+            (
+                "ArrowUp",
+                "ArrowUp",
+                KeyboardModifiers::NONE,
+                CommandAction::NavigatePrev,
+            ),
+            (
+                "ArrowDown",
+                "ArrowDown",
+                KeyboardModifiers::NONE,
+                CommandAction::NavigateNext,
+            ),
+        ];
+        for (key_code, key, modifiers, expected) in cases {
+            assert_eq!(
+                command_binding(key_code, key, modifiers, &node_focus),
+                Some(expected),
+                "unexpected node-focused binding for {key_code}"
+            );
+        }
+
+        assert_eq!(
+            command_binding("Space", " ", KeyboardModifiers::NONE, &node_focus),
+            Some(CommandAction::Activate),
+            "Space activates only a focused node"
+        );
+        assert_eq!(
+            command_binding("Space", " ", KeyboardModifiers::NONE, &tile_focus),
+            None,
+            "Space must not activate tile-level focus"
+        );
+        for (key, action) in [
+            ("PageUp", CommandAction::ScrollUp),
+            ("PageDown", CommandAction::ScrollDown),
+        ] {
+            assert_eq!(
+                command_binding(key, key, KeyboardModifiers::NONE, &tile_focus),
+                Some(action),
+                "{key} scrolls tile-level focus"
+            );
+            assert_eq!(
+                command_binding(key, key, KeyboardModifiers::NONE, &node_focus),
+                None,
+                "{key} must not scroll while a node owns focus"
+            );
+        }
+
+        assert_eq!(
+            command_binding("ArrowUp", "ArrowUp", KeyboardModifiers::NONE, &tile_focus,),
+            Some(CommandAction::ScrollUp)
+        );
+        assert_eq!(
+            command_binding(
+                "ArrowDown",
+                "ArrowDown",
+                KeyboardModifiers::NONE,
+                &tile_focus,
+            ),
+            Some(CommandAction::ScrollDown)
+        );
+        assert_eq!(
+            command_binding(
+                "Enter",
+                "Enter",
+                KeyboardModifiers {
+                    ctrl: true,
+                    ..KeyboardModifiers::NONE
+                },
+                &node_focus,
+            ),
+            None,
+            "modifier shortcuts must remain outside the command adapter"
+        );
+    }
 
     /// hud-v0cal: the bare Tab / Shift+Tab focus-traversal chord is recognised,
     /// and the modifier-laden Tab variants (shell-reserved Ctrl+Tab, OS Alt/Meta

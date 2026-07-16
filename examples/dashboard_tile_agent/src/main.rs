@@ -3905,7 +3905,7 @@ mod tests {
         // Wrap the sender in a closure that mimics `inject_input_event`.
         let inject_fn = Box::new(
             move |namespace: String, batch: tze_hud_protocol::proto::EventBatch| -> usize {
-                input_event_tx.send((namespace, batch)).unwrap_or_default()
+                input_event_tx.send((namespace, batch))
             },
         );
 
