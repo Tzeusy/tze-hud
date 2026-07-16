@@ -1650,6 +1650,16 @@ impl ResidentGrpcPortalAdapter {
         let mut transcript = self.portal_text_node(state, new_node_id_le(), now_wall_us);
         if let Some(proto::node_proto::Data::TextMarkdown(text)) = transcript.data.as_mut() {
             text.bounds = Some(geometry.output_content);
+            // The native OUTPUT pane owns its backdrop. Keeping the legacy
+            // single-node backdrop here would put a flat rectangle in the
+            // compositor's earlier pass, underneath the rounded frame, and
+            // duplicate the pane fill.
+            text.background = Some(proto::Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            });
         }
 
         let mut frame_color = self.visual_tokens.frame_background;
@@ -1658,6 +1668,11 @@ impl ResidentGrpcPortalAdapter {
             self.visual_tokens.transcript_dim_background
         } else {
             frame_color
+        };
+        let output_background = if is_connection_degraded(state) {
+            self.visual_tokens.transcript_dim_background
+        } else {
+            self.visual_tokens.transcript_background
         };
         let input_label_bounds = proto::Rect {
             x: geometry.input_pane.x + self.visual_tokens.content_inset_px,
@@ -1715,7 +1730,7 @@ impl ResidentGrpcPortalAdapter {
                 new_node_id_le(),
                 self.visual_tokens.composer_background,
                 geometry.input_pane,
-                0.0,
+                EXPANDED_PORTAL_CORNER_RADIUS_PX,
             ),
             Self::chrome_text_node(
                 "INPUT".to_string(),
@@ -1735,9 +1750,9 @@ impl ResidentGrpcPortalAdapter {
             ),
             Self::solid_node(
                 new_node_id_le(),
-                self.visual_tokens.transcript_background,
+                output_background,
                 geometry.output_pane,
-                0.0,
+                EXPANDED_PORTAL_CORNER_RADIUS_PX,
             ),
             Self::chrome_text_node(
                 "OUTPUT".to_string(),
@@ -1750,13 +1765,13 @@ impl ResidentGrpcPortalAdapter {
                 new_node_id_le(),
                 self.visual_tokens.divider_color,
                 geometry.divider,
-                0.0,
+                geometry.divider.width * 0.5,
             ),
             Self::solid_node(
                 new_node_id_le(),
                 self.visual_tokens.divider_grip_color,
                 geometry.divider_grip,
-                0.0,
+                geometry.divider_grip.width * 0.5,
             ),
         ];
         root
@@ -2096,11 +2111,18 @@ fn portal_output_markdown_with_spans(
         return (content, spans);
     }
 
-    let cut = clamp_utf8(&content, MAX_PORTAL_MARKDOWN_BYTES).len();
-    content.truncate(cut);
+    // The authority already selected the newest-fit transcript window. Formatting
+    // (turn separators, timestamps, unread divider, streaming cursor) can add a
+    // few bytes beyond that bound, so preserve the same tail-anchored policy here:
+    // evict the oldest formatted head rather than dropping the newest turn.
+    let mut cut = content.len() - MAX_PORTAL_MARKDOWN_BYTES;
+    while !content.is_char_boundary(cut) {
+        cut += 1;
+    }
+    content.drain(..cut);
     for span in &mut spans {
-        span.start = span.start.min(cut);
-        span.end = span.end.min(cut);
+        span.start = span.start.saturating_sub(cut);
+        span.end = span.end.saturating_sub(cut);
     }
     spans.retain(|span| span.start < span.end);
     (content, spans)
@@ -3971,6 +3993,12 @@ mod tests {
                 _ => None,
             })
             .collect();
+        assert!(
+            solid_children.iter().all(|solid| solid.radius > 0.0),
+            "every native chrome solid layered over the rounded frame must use the \
+             compositor's ordered SDF pass; a flat child is drawn before the rounded \
+             root and is then hidden by that root: {solid_children:?}"
+        );
         let pane_fills: Vec<proto::Rgba> = solid_children
             .iter()
             .filter_map(|solid| {
@@ -4889,6 +4917,24 @@ mod tests {
             .unwrap_or_else(|| panic!("portal subtree must contain a transcript TextMarkdown node"))
     }
 
+    fn output_pane_background(node: &proto::NodeProto) -> proto::Rgba {
+        node.children
+            .iter()
+            .find_map(|child| match child.data.as_ref() {
+                Some(proto::node_proto::Data::SolidColor(solid))
+                    if solid.bounds.is_some_and(|bounds| {
+                        bounds.x > DEFAULT_EXPANDED_W / 2.0
+                            && bounds.width > DEFAULT_EXPANDED_W / 3.0
+                            && bounds.height > DEFAULT_EXPANDED_H / 2.0
+                    }) =>
+                {
+                    solid.color
+                }
+                _ => None,
+            })
+            .expect("expanded portal must contain a token-styled OUTPUT pane")
+    }
+
     /// §2: when the portal is connection-degraded, the expanded transcript
     /// surface uses the token-resolved DIM colors, not the live transcript
     /// colors. A control case with `connection_degraded = false` proves the live
@@ -4910,10 +4956,11 @@ mod tests {
             "live portal must use the live transcript text color"
         );
         assert_eq!(
-            live_tm.background.unwrap(),
+            output_pane_background(&live_node),
             tokens.transcript_background,
-            "live portal must use the live transcript background"
+            "live OUTPUT pane must use the live transcript background"
         );
+        assert_eq!(live_tm.background.unwrap().a, 0.0);
 
         let mut degraded = make_expanded_interaction_state("portal-degraded-colors");
         degraded.connection_degraded = true;
@@ -4925,10 +4972,11 @@ mod tests {
             "§2: degraded portal must use the DIM transcript text token"
         );
         assert_eq!(
-            degraded_tm.background.unwrap(),
+            output_pane_background(&degraded_node),
             tokens.transcript_dim_background,
-            "§2: degraded portal must use the DIM transcript background token"
+            "§2: degraded OUTPUT pane must use the DIM transcript background token"
         );
+        assert_eq!(degraded_tm.background.unwrap().a, 0.0);
     }
 
     /// §2: a degraded portal emits a content-free disconnect marker line. The
@@ -5804,6 +5852,43 @@ mod tests {
                  span={span:?} text={text:?}"
             );
         }
+    }
+
+    #[test]
+    fn portal_output_markdown_keeps_newest_turn_when_formatting_exceeds_wire_cap() {
+        let mut state = make_expanded_interaction_state("portal-output-overcap");
+        state.visible_transcript = (0..4)
+            .map(|i| {
+                let marker = if i == 0 {
+                    "OLDEST-HEAD"
+                } else if i == 3 {
+                    "NEWEST-TAIL"
+                } else {
+                    "MIDDLE-TURN"
+                };
+                let mut text = "x".repeat(4_096 - marker.len());
+                if i == 3 {
+                    text.push_str(marker);
+                } else {
+                    text.insert_str(0, marker);
+                }
+                transcript_unit_text(i, OutputKind::Assistant, &text)
+            })
+            .collect();
+
+        let (md, spans) = portal_output_markdown_with_spans(&state, 0, TimestampGranularity::Off);
+
+        assert!(md.len() <= MAX_PORTAL_MARKDOWN_BYTES);
+        assert!(
+            md.contains("NEWEST-TAIL"),
+            "tail-anchored OUTPUT must retain the newest turn when separator or timestamp \
+             formatting pushes the authority-bounded transcript over the wire cap"
+        );
+        assert!(
+            !md.contains("OLDEST-HEAD"),
+            "the oldest head, not the newest tail, must be evicted under overflow"
+        );
+        assert!(spans.iter().all(|span| span.end <= md.len()));
     }
 
     /// The INPUT band is absent when there is no INPUT history — including under
