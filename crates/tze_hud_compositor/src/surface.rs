@@ -202,6 +202,11 @@ pub struct WindowSurface {
     /// owned `wgpu::Device`, then resets both fields to `0`.
     pub pending_resize_width: std::sync::atomic::AtomicU32,
     pub pending_resize_height: std::sync::atomic::AtomicU32,
+    /// Number of swapchain textures actually presented by the main thread.
+    ///
+    /// Windowed benchmarks use this as the presentation acknowledgement; a
+    /// compositor-side build or submit attempt is not itself a displayed frame.
+    presented_frame_count: std::sync::atomic::AtomicU64,
 }
 
 impl WindowSurface {
@@ -227,7 +232,14 @@ impl WindowSurface {
             swapchain_done: std::sync::Arc::new(std::sync::Condvar::new()),
             pending_resize_width: std::sync::atomic::AtomicU32::new(0),
             pending_resize_height: std::sync::atomic::AtomicU32::new(0),
+            presented_frame_count: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Return the number of swapchain textures actually presented.
+    pub fn presented_frame_count(&self) -> u64 {
+        self.presented_frame_count
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Reconfigure the surface after a window resize.
@@ -368,6 +380,8 @@ impl WindowSurface {
 
         if let Some(texture) = slot.pending.take() {
             texture.present();
+            self.presented_frame_count
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
             true
         } else {
             false

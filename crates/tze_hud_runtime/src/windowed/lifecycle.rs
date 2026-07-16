@@ -630,6 +630,26 @@ pub(super) struct WindowedBenchmarkRunState {
     last_frame_at: Instant,
 }
 
+/// Decide whether the windowed compositor must build and present this frame.
+///
+/// An explicitly configured benchmark is fixed-cadence active work: every
+/// requested sample must reach [`WindowedBenchmarkRunState::record`], even when
+/// its deterministic scene is otherwise unchanged. Normal runtime sessions
+/// remain gated on presentation-relevant changes.
+pub(super) fn windowed_frame_needs_render(
+    scene_changed: bool,
+    geometry_changed: bool,
+    animation_inflight: bool,
+    composer_needs_render: bool,
+    benchmark_active: bool,
+) -> bool {
+    benchmark_active
+        || scene_changed
+        || geometry_changed
+        || animation_inflight
+        || composer_needs_render
+}
+
 impl WindowedBenchmarkRunState {
     pub(super) fn new(
         config: WindowedBenchmarkConfig,
@@ -655,6 +675,9 @@ impl WindowedBenchmarkRunState {
     }
 
     pub(super) fn record(&mut self, telemetry: &tze_hud_telemetry::FrameTelemetry) -> bool {
+        if telemetry.stage7_gpu_submit_us == 0 {
+            return false;
+        }
         self.last_frame_at = Instant::now();
         if self.warmup_seen < self.config.warmup_frames {
             self.warmup_seen += 1;
@@ -2036,6 +2059,55 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_windowed_benchmark_scene_presents_every_requested_sample() {
+        let warmup_frames = 2;
+        let measured_frames = 3;
+        let requested_samples = warmup_frames + measured_frames;
+        let mut state = make_benchmark_state(warmup_frames, measured_frames);
+        let mut completed = false;
+
+        for frame_number in 1..=requested_samples {
+            assert!(
+                windowed_frame_needs_render(false, false, false, false, true),
+                "explicit benchmark mode must bypass the unchanged-scene idle gate for sample {frame_number}"
+            );
+            let mut telemetry = tze_hud_telemetry::FrameTelemetry::new(frame_number);
+            telemetry.frame_time_us = 8_000;
+            telemetry.stage7_gpu_submit_us = 1;
+            completed = state.record(&telemetry);
+            assert_eq!(
+                completed,
+                frame_number == requested_samples,
+                "benchmark completion must occur on exactly the final requested sample"
+            );
+        }
+
+        assert!(
+            completed,
+            "the final requested benchmark sample must complete the run"
+        );
+        assert_eq!(state.warmup_seen, warmup_frames);
+        assert_eq!(state.measured_seen, measured_frames);
+        assert_eq!(state.summary.total_frames, measured_frames);
+        assert!(
+            !windowed_frame_needs_render(false, false, false, false, false),
+            "normal unchanged runtime sessions must remain behind the idle render gate"
+        );
+    }
+
+    #[test]
+    fn windowed_benchmark_does_not_count_skipped_present_attempt() {
+        let mut state = make_benchmark_state(0, 2);
+        let mut skipped_attempt = tze_hud_telemetry::FrameTelemetry::new(1);
+        skipped_attempt.frame_time_us = 8_000;
+        assert!(!state.record(&skipped_attempt));
+        assert_eq!(
+            state.measured_seen, 0,
+            "telemetry without a completed Stage 7 submit/present must not advance benchmark progress"
+        );
+    }
+
+    #[test]
     fn benchmark_watchdog_fires_when_no_frame_recorded_past_timeout() {
         let state = make_benchmark_state(0, 10);
         // Sleep long enough that elapsed() > the test timeout.
@@ -2053,6 +2125,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         let mut telem = tze_hud_telemetry::FrameTelemetry::new(1);
         telem.frame_time_us = 8_000;
+        telem.stage7_gpu_submit_us = 1;
         state.record(&telem);
         // Immediately after record(), last_frame_at is fresh — generous threshold.
         assert!(
@@ -2068,6 +2141,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         let mut telem = tze_hud_telemetry::FrameTelemetry::new(1);
         telem.frame_time_us = 8_000;
+        telem.stage7_gpu_submit_us = 1;
         let done = state.record(&telem); // this is a warmup frame
         assert!(!done, "warmup frame must not complete the benchmark");
         assert!(
@@ -2142,6 +2216,7 @@ mod tests {
         );
         let mut telemetry = tze_hud_telemetry::FrameTelemetry::new(1);
         telemetry.frame_time_us = 12_000;
+        telemetry.stage7_gpu_submit_us = 1;
         telemetry.tile_count = 3;
         telemetry.input_to_local_ack_us = 900;
         telemetry.input_to_scene_commit_us = 10_500;
@@ -2197,6 +2272,7 @@ mod tests {
         );
         let mut telemetry = tze_hud_telemetry::FrameTelemetry::new(1);
         telemetry.frame_time_us = 12_000;
+        telemetry.stage7_gpu_submit_us = 1;
 
         assert!(!state.record(&telemetry));
         assert!(state.summary.input_to_local_ack.samples.is_empty());
