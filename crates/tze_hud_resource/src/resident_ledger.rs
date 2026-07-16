@@ -116,13 +116,14 @@ pub enum ResidentReserveError {
     },
 }
 
+#[derive(Debug)]
 struct LedgerState {
     allocations: HashMap<(ResidentClass, AllocationId), u64>,
     snapshot: ResidentLedgerSnapshot,
 }
 
 /// Thread-safe, atomic resident allocation ledger.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ResidentLedger {
     limits: ResidentLedgerLimits,
     state: Arc<Mutex<LedgerState>>,

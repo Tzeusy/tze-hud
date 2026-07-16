@@ -1901,6 +1901,8 @@ impl WindowedRuntime {
     /// Returns an error if the winit event loop or window creation fails.
     pub fn run(self) -> Result<(), Box<dyn std::error::Error>> {
         let cfg = self.config;
+        let (runtime_context, fallback_unrestricted): (SharedRuntimeContext, bool) =
+            build_runtime_context(&cfg);
 
         // Resolve the effective window mode, applying platform fallback checks.
         // Spec §Unsupported overlay fallback (line 185): if overlay is requested
@@ -2018,13 +2020,24 @@ impl WindowedRuntime {
         // side) so composer echo never try_locks the scene mutex.
         let active_tab_mirror = Arc::new(std::sync::Mutex::new(None));
         let chrome_state = Arc::new(std::sync::RwLock::new(crate::shell::ChromeState::new()));
+        let resident_memory = &runtime_context.operational_envelope.resident_memory;
+        let resource_limit =
+            usize::try_from(resident_memory.max_resource_bytes).unwrap_or(usize::MAX);
+        let font_limit = usize::try_from(resident_memory.max_font_bytes).unwrap_or(usize::MAX);
         let shared_state = Arc::new(Mutex::new(SharedState {
             scene: Arc::clone(&shared_scene),
             sessions,
             resource_store: tze_hud_resource::ResourceStore::new(
-                tze_hud_resource::ResourceStoreConfig::default(),
+                tze_hud_resource::ResourceStoreConfig {
+                    max_total_texture_bytes: resource_limit,
+                    max_font_cache_bytes: font_limit,
+                    ..tze_hud_resource::ResourceStoreConfig::default()
+                },
             ),
-            widget_asset_store: tze_hud_protocol::session::WidgetAssetStore::default(),
+            widget_asset_store: tze_hud_protocol::session::WidgetAssetStore::new_with_limits(
+                resident_memory.max_widget_asset_bytes,
+                resident_memory.max_widget_asset_bytes.min(16 * 1024 * 1024),
+            ),
             runtime_widget_store: runtime_widget_store.clone(),
             element_store: startup_element_store,
             element_store_path: Some(startup_element_store_path),
@@ -2065,9 +2078,6 @@ impl WindowedRuntime {
         //   - Config present → Guest (registered agents only, all others denied).
         //   - No config → Unrestricted (dev-friendly; any PSK-authenticated agent
         //     gets all capabilities without a registration entry).
-        let (runtime_context, fallback_unrestricted): (SharedRuntimeContext, bool) =
-            build_runtime_context(&cfg);
-
         // ── Network runtime + gRPC + MCP HTTP servers ──────────────────────────
         // Spawn the Tokio multi-thread runtime for all network tasks (gRPC, MCP).
         // The runtime is created before the winit event loop so that network

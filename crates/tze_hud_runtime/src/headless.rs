@@ -368,11 +368,36 @@ impl HeadlessRuntime {
         let element_store_bootstrap = bootstrap_scene_element_store(&mut scene);
         let scene = Arc::new(Mutex::new(scene));
         let sessions = tze_hud_protocol::session::SessionRegistry::new(&config.psk);
+        let resource_limit = usize::try_from(
+            runtime_context
+                .operational_envelope
+                .resident_memory
+                .max_resource_bytes,
+        )
+        .unwrap_or(usize::MAX);
+        let font_limit = usize::try_from(
+            runtime_context
+                .operational_envelope
+                .resident_memory
+                .max_font_bytes,
+        )
+        .unwrap_or(usize::MAX);
+        let widget_source_limit = runtime_context
+            .operational_envelope
+            .resident_memory
+            .max_widget_asset_bytes;
         let state = Arc::new(Mutex::new(SharedState {
             scene,
             sessions,
-            resource_store: ResourceStore::new(ResourceStoreConfig::default()),
-            widget_asset_store: tze_hud_protocol::session::WidgetAssetStore::default(),
+            resource_store: ResourceStore::new(ResourceStoreConfig {
+                max_total_texture_bytes: resource_limit,
+                max_font_cache_bytes: font_limit,
+                ..ResourceStoreConfig::default()
+            }),
+            widget_asset_store: tze_hud_protocol::session::WidgetAssetStore::new_with_limits(
+                widget_source_limit,
+                widget_source_limit.min(16 * 1024 * 1024),
+            ),
             runtime_widget_store: runtime_widget_store.clone(),
             element_store: element_store_bootstrap.store,
             element_store_path: Some(element_store_bootstrap.path),

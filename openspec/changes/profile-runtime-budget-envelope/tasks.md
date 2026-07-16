@@ -19,7 +19,7 @@
 ## 4. Resource and Cache Wiring
 
 - [x] 4.1 Introduce a project-owned resident-allocation ledger with deterministic accounted-byte rules, allocation identities, disjoint class totals, and atomic reserve/release semantics; place the neutral contract below runtime in the dependency graph while runtime owns construction and policy.
-- [ ] 4.2 Construct scene resource stores and both gRPC/MCP widget-source stores from distinct resource-residency and widget-asset-residency envelope limits instead of independent defaults; converge MCP registration on the durable/runtime registration path or remove its payload-retaining duplicate.
+- [x] 4.2 Construct scene resource stores and both gRPC/MCP widget-source stores from distinct resource-residency and widget-asset-residency envelope limits instead of independent defaults; converge MCP registration on the durable/runtime registration path or remove its payload-retaining duplicate.
 - [ ] 4.3 Wire image/GPU resource residency, widget raster caches, and font residency to class/aggregate admission at their existing safe eviction boundaries, including no-cache fallbacks where the work is optional.
 - [ ] 4.4 Add tests proving logical shared-resource double-charging, physical allocation single-charging, separate CPU/GPU copies, and current-frame eviction safety.
 

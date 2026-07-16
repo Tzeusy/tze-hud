@@ -155,6 +155,17 @@ impl OperationalRuntimeEnvelope {
     }
 }
 
+fn resident_ledger_for(envelope: &OperationalRuntimeEnvelope) -> tze_hud_resource::ResidentLedger {
+    let memory = &envelope.resident_memory;
+    tze_hud_resource::ResidentLedger::new(tze_hud_resource::ResidentLedgerLimits {
+        aggregate_bytes: memory.max_aggregate_bytes,
+        resource_bytes: memory.max_resource_bytes,
+        widget_source_bytes: memory.max_widget_asset_bytes,
+        widget_raster_bytes: memory.max_widget_raster_bytes,
+        font_bytes: memory.max_font_bytes,
+    })
+}
+
 // ─── RuntimeContext ───────────────────────────────────────────────────────────
 
 /// Runtime context derived from validated configuration.
@@ -181,6 +192,9 @@ pub struct RuntimeContext {
 
     /// Profile-derived operational limits, constructed once at startup.
     pub operational_envelope: OperationalRuntimeEnvelope,
+
+    /// Shared physical resident-allocation authority for all cache classes.
+    pub resident_ledger: tze_hud_resource::ResidentLedger,
 
     /// Frozen Windows media-ingress configuration.
     ///
@@ -220,9 +234,11 @@ impl RuntimeContext {
     /// They will be populated on the first SIGHUP or `ReloadConfig` RPC call.
     pub fn from_config(config: ResolvedConfig, fallback_policy: FallbackPolicy) -> Self {
         let operational_envelope = OperationalRuntimeEnvelope::from_profile(&config.profile);
+        let resident_ledger = resident_ledger_for(&operational_envelope);
         Self {
             profile: config.profile,
             operational_envelope,
+            resident_ledger,
             media_ingress: config.media_ingress,
             agent_capabilities: config.agent_capabilities,
             agent_budget_overrides: config.agent_budget_overrides,
@@ -243,9 +259,11 @@ impl RuntimeContext {
         hot: HotReloadableConfig,
     ) -> Self {
         let operational_envelope = OperationalRuntimeEnvelope::from_profile(&config.profile);
+        let resident_ledger = resident_ledger_for(&operational_envelope);
         Self {
             profile: config.profile,
             operational_envelope,
+            resident_ledger,
             media_ingress: config.media_ingress,
             agent_capabilities: config.agent_capabilities,
             agent_budget_overrides: config.agent_budget_overrides,
@@ -262,9 +280,11 @@ impl RuntimeContext {
     pub fn headless_default() -> Self {
         let profile = DisplayProfile::headless();
         let operational_envelope = OperationalRuntimeEnvelope::from_profile(&profile);
+        let resident_ledger = resident_ledger_for(&operational_envelope);
         Self {
             profile,
             operational_envelope,
+            resident_ledger,
             media_ingress: MediaIngressConfig::default(),
             agent_capabilities: HashMap::new(),
             agent_budget_overrides: HashMap::new(),
