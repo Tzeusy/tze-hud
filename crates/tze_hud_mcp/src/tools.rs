@@ -2289,7 +2289,7 @@ pub async fn handle_portal_projection_attach(
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
             error_code: rejection.error_code,
-            message: rejection.message,
+            operation: "portal_projection_attach",
         }),
         Err(_) => Err(McpError::Internal(
             "portal authority did not respond (channel dropped)".to_string(),
@@ -2415,7 +2415,7 @@ pub async fn handle_portal_projection_publish(
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
             error_code: rejection.error_code,
-            message: rejection.message,
+            operation: "portal_projection_publish",
         }),
         Err(_) => Err(McpError::Internal(
             "portal authority did not respond (channel dropped)".to_string(),
@@ -2523,7 +2523,7 @@ pub async fn handle_portal_projection_publish_status(
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
             error_code: rejection.error_code,
-            message: rejection.message,
+            operation: "portal_projection_publish_status",
         }),
         Err(_) => Err(McpError::Internal(
             "portal authority did not respond (channel dropped)".to_string(),
@@ -2627,7 +2627,7 @@ pub async fn handle_portal_projection_get_pending_input(
             Ok(Err(rejection)) => {
                 return Err(McpError::ProjectionRejected {
                     error_code: rejection.error_code,
-                    message: rejection.message,
+                    operation: "portal_projection_get_pending_input",
                 });
             }
             Err(_) => {
@@ -2757,7 +2757,7 @@ pub async fn handle_portal_projection_acknowledge_input(
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
             error_code: rejection.error_code,
-            message: rejection.message,
+            operation: "portal_projection_acknowledge_input",
         }),
         Err(_) => Err(McpError::Internal(
             "portal authority did not respond (channel dropped)".to_string(),
@@ -2843,7 +2843,7 @@ pub async fn handle_portal_projection_detach(
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
             error_code: rejection.error_code,
-            message: rejection.message,
+            operation: "portal_projection_detach",
         }),
         Err(_) => Err(McpError::Internal(
             "portal authority did not respond (channel dropped)".to_string(),
@@ -2970,7 +2970,7 @@ pub async fn handle_portal_projection_cleanup(
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
             error_code: rejection.error_code,
-            message: rejection.message,
+            operation: "portal_projection_cleanup",
         }),
         Err(_) => Err(McpError::Internal(
             "portal authority did not respond (channel dropped)".to_string(),

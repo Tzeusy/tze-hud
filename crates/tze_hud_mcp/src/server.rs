@@ -210,6 +210,25 @@ fn tools_call_success_result(value: serde_json::Value) -> serde_json::Value {
 /// rather than a JSON-RPC protocol error, which MCP reserves for unknown
 /// tool / missing capability / malformed params.
 fn tools_call_error_result(err: &crate::McpError) -> serde_json::Value {
+    if let McpError::ProjectionRejected {
+        error_code,
+        operation,
+    } = err
+    {
+        let wire = JsonRpcError::projection_rejected(*error_code, operation);
+        let structured = wire.data.unwrap_or_else(|| {
+            serde_json::json!({
+                "error_code": error_code.as_str(),
+                "message": wire.message,
+            })
+        });
+        let text = serde_json::to_string(&structured).unwrap_or_else(|_| "{}".to_string());
+        return serde_json::json!({
+            "content": [{ "type": "text", "text": text }],
+            "structuredContent": structured,
+            "isError": true,
+        });
+    }
     serde_json::json!({
         "content": [{ "type": "text", "text": err.to_string() }],
         "isError": true,
@@ -1402,8 +1421,14 @@ mod tests {
             .as_str()
             .expect("resolution is text");
         assert!(resolution.contains("authenticated"), "{resolution}");
-        assert!(resolution.contains("original idempotency_key"), "{resolution}");
-        assert!(resolution.contains("rotate the owner token"), "{resolution}");
+        assert!(
+            resolution.contains("original idempotency_key"),
+            "{resolution}"
+        );
+        assert!(
+            resolution.contains("rotate the owner token"),
+            "{resolution}"
+        );
     }
 
     #[tokio::test]

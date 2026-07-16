@@ -31,6 +31,19 @@ pub mod codes {
     pub const INVALID_ID: i64 = -32003;
     /// Authentication failed (bad or missing pre-shared key).
     pub const UNAUTHENTICATED: i64 = -32004;
+    /// Stable append-only portal projection application errors.
+    pub const PROJECTION_NOT_FOUND: i64 = -32100;
+    pub const PROJECTION_ALREADY_ATTACHED: i64 = -32101;
+    pub const PROJECTION_UNAUTHORIZED: i64 = -32102;
+    pub const PROJECTION_TOKEN_EXPIRED: i64 = -32103;
+    pub const PROJECTION_INVALID_ARGUMENT: i64 = -32104;
+    pub const PROJECTION_OUTPUT_TOO_LARGE: i64 = -32105;
+    pub const PROJECTION_INPUT_TOO_LARGE: i64 = -32106;
+    pub const PROJECTION_INPUT_QUEUE_FULL: i64 = -32107;
+    pub const PROJECTION_RATE_LIMITED: i64 = -32108;
+    pub const PROJECTION_STATE_CONFLICT: i64 = -32109;
+    pub const PROJECTION_HUD_UNAVAILABLE: i64 = -32110;
+    pub const PROJECTION_INTERNAL_ERROR: i64 = -32111;
 }
 
 /// A serializable JSON-RPC 2.0 error object.
@@ -99,29 +112,29 @@ impl JsonRpcError {
         Self::new(codes::UNAUTHENTICATED, "Authentication required")
     }
 
-    /// Projection authority rejection carrying a stable `PROJECTION_*` code.
+    /// Projection authority rejection with a distinct append-only application
+    /// code and bounded, non-secret recovery data (hud-w2h5c).
     ///
-    /// Mirrors [`Self::capability_required`]: the JSON-RPC `code` stays
-    /// `-32603` (internal error, the resident-MCP convention for denials), but
-    /// the stable code is carried in `data.error_code` so the LLM can branch on
-    /// it (`PROJECTION_TOKEN_EXPIRED` = hard stop, `PROJECTION_RATE_LIMITED` =
-    /// defer) instead of seeing an opaque flattened message (hud-s8a62).
-    ///
-    /// Returns a JSON-RPC 2.0 error with:
-    /// - code: -32603 (Internal error)
-    /// - message: the human-readable rejection detail
-    /// - data.error_code: the stable `PROJECTION_*` string
-    /// - data.message: the same human-readable detail
-    pub fn projection_rejected(
-        error_code: ProjectionErrorCode,
-        message: impl Into<String>,
-    ) -> Self {
-        let message = message.into();
+    /// Authority rejection details are deliberately not accepted here: they may
+    /// contain owner-token or private-content context. The wire message and hint
+    /// are fixed solely by the stable error code, and the operation is reduced to
+    /// the known portal tool vocabulary before serialization.
+    pub fn projection_rejected(error_code: ProjectionErrorCode, operation: &str) -> Self {
+        let operation = bounded_projection_operation(operation);
+        let message = projection_error_message(error_code);
         let data = serde_json::json!({
             "error_code": error_code.as_str(),
-            "message": message.clone(),
+            "message": message,
+            "context": {
+                "operation": operation,
+                "subsystem": "portal_projection"
+            },
+            "hint": {
+                "recovery_operation": projection_recovery_operation(error_code, operation),
+                "resolution": projection_resolution(error_code)
+            }
         });
-        Self::new(codes::INTERNAL_ERROR, message).with_data(data)
+        Self::new(projection_json_rpc_code(error_code), message).with_data(data)
     }
 
     /// Capability-required error per spec §8.3.
@@ -184,12 +197,12 @@ pub enum McpError {
     /// Projection authority rejected a `portal_projection_*` operation.
     /// Carries the stable [`ProjectionErrorCode`] so it reaches the wire as
     /// `data.error_code` instead of flattening to an opaque `-32603` message.
-    #[error("projection rejected ({error_code}): {message}")]
+    #[error("projection rejected ({error_code}) during {operation}")]
     ProjectionRejected {
         /// Stable `PROJECTION_*` code surfaced to the LLM.
         error_code: ProjectionErrorCode,
-        /// Human-readable rejection detail.
-        message: String,
+        /// Fixed portal tool name; authority-provided details are discarded.
+        operation: &'static str,
     },
 }
 
@@ -210,9 +223,111 @@ impl From<McpError> for JsonRpcError {
             McpError::Unauthenticated => JsonRpcError::unauthenticated(),
             McpError::ProjectionRejected {
                 error_code,
-                message,
-            } => JsonRpcError::projection_rejected(error_code, message),
+                operation,
+            } => JsonRpcError::projection_rejected(error_code, operation),
         }
+    }
+}
+
+const fn projection_json_rpc_code(error_code: ProjectionErrorCode) -> i64 {
+    match error_code {
+        ProjectionErrorCode::ProjectionNotFound => codes::PROJECTION_NOT_FOUND,
+        ProjectionErrorCode::ProjectionAlreadyAttached => codes::PROJECTION_ALREADY_ATTACHED,
+        ProjectionErrorCode::ProjectionUnauthorized => codes::PROJECTION_UNAUTHORIZED,
+        ProjectionErrorCode::ProjectionTokenExpired => codes::PROJECTION_TOKEN_EXPIRED,
+        ProjectionErrorCode::ProjectionInvalidArgument => codes::PROJECTION_INVALID_ARGUMENT,
+        ProjectionErrorCode::ProjectionOutputTooLarge => codes::PROJECTION_OUTPUT_TOO_LARGE,
+        ProjectionErrorCode::ProjectionInputTooLarge => codes::PROJECTION_INPUT_TOO_LARGE,
+        ProjectionErrorCode::ProjectionInputQueueFull => codes::PROJECTION_INPUT_QUEUE_FULL,
+        ProjectionErrorCode::ProjectionRateLimited => codes::PROJECTION_RATE_LIMITED,
+        ProjectionErrorCode::ProjectionStateConflict => codes::PROJECTION_STATE_CONFLICT,
+        ProjectionErrorCode::ProjectionHudUnavailable => codes::PROJECTION_HUD_UNAVAILABLE,
+        ProjectionErrorCode::ProjectionInternalError => codes::PROJECTION_INTERNAL_ERROR,
+    }
+}
+
+const fn projection_error_message(error_code: ProjectionErrorCode) -> &'static str {
+    match error_code {
+        ProjectionErrorCode::ProjectionNotFound => "Projection not found",
+        ProjectionErrorCode::ProjectionAlreadyAttached => "Projection already attached",
+        ProjectionErrorCode::ProjectionUnauthorized => "Projection owner authentication failed",
+        ProjectionErrorCode::ProjectionTokenExpired => "Projection owner token expired",
+        ProjectionErrorCode::ProjectionInvalidArgument => "Projection arguments are invalid",
+        ProjectionErrorCode::ProjectionOutputTooLarge => "Projection output exceeds its limit",
+        ProjectionErrorCode::ProjectionInputTooLarge => "Projection input exceeds its limit",
+        ProjectionErrorCode::ProjectionInputQueueFull => "Projection input queue is full",
+        ProjectionErrorCode::ProjectionRateLimited => "Projection operation is rate limited",
+        ProjectionErrorCode::ProjectionStateConflict => {
+            "Projection state conflicts with this operation"
+        }
+        ProjectionErrorCode::ProjectionHudUnavailable => "HUD projection service is unavailable",
+        ProjectionErrorCode::ProjectionInternalError => "Projection operation failed internally",
+    }
+}
+
+const fn projection_resolution(error_code: ProjectionErrorCode) -> &'static str {
+    match error_code {
+        ProjectionErrorCode::ProjectionNotFound => {
+            "Attach the projection, then retry the requested operation."
+        }
+        ProjectionErrorCode::ProjectionAlreadyAttached => {
+            "Reuse the existing owner token or repeat the idempotent attach."
+        }
+        ProjectionErrorCode::ProjectionUnauthorized
+        | ProjectionErrorCode::ProjectionTokenExpired => {
+            "Perform an authenticated attach with the original idempotency_key to rotate the owner token, then retry."
+        }
+        ProjectionErrorCode::ProjectionInvalidArgument => {
+            "Correct the documented arguments and retry the requested operation."
+        }
+        ProjectionErrorCode::ProjectionOutputTooLarge => {
+            "Split the output into smaller bounded publishes and retry."
+        }
+        ProjectionErrorCode::ProjectionInputTooLarge => {
+            "Reduce the input payload or raise the documented bounded input limit, then retry."
+        }
+        ProjectionErrorCode::ProjectionInputQueueFull => {
+            "Drain and acknowledge pending input before retrying."
+        }
+        ProjectionErrorCode::ProjectionRateLimited => {
+            "Back off for the configured rate window, then retry."
+        }
+        ProjectionErrorCode::ProjectionStateConflict => {
+            "Refresh projection state, resolve the lifecycle conflict, then retry."
+        }
+        ProjectionErrorCode::ProjectionHudUnavailable => {
+            "Wait for HUD availability and retry without recreating private content."
+        }
+        ProjectionErrorCode::ProjectionInternalError => {
+            "Retry once; if it recurs, inspect bounded runtime telemetry using the stable error code."
+        }
+    }
+}
+
+const fn projection_recovery_operation(
+    error_code: ProjectionErrorCode,
+    operation: &'static str,
+) -> &'static str {
+    match error_code {
+        ProjectionErrorCode::ProjectionNotFound
+        | ProjectionErrorCode::ProjectionAlreadyAttached
+        | ProjectionErrorCode::ProjectionUnauthorized
+        | ProjectionErrorCode::ProjectionTokenExpired => "portal_projection_attach",
+        ProjectionErrorCode::ProjectionInputQueueFull => "portal_projection_get_pending_input",
+        _ => operation,
+    }
+}
+
+fn bounded_projection_operation(operation: &str) -> &'static str {
+    match operation {
+        "portal_projection_attach" => "portal_projection_attach",
+        "portal_projection_publish" => "portal_projection_publish",
+        "portal_projection_publish_status" => "portal_projection_publish_status",
+        "portal_projection_get_pending_input" => "portal_projection_get_pending_input",
+        "portal_projection_acknowledge_input" => "portal_projection_acknowledge_input",
+        "portal_projection_detach" => "portal_projection_detach",
+        "portal_projection_cleanup" => "portal_projection_cleanup",
+        _ => "portal_projection_operation",
     }
 }
 
@@ -231,23 +346,16 @@ mod tests {
     #[test]
     fn projection_error_mapping_is_total_distinct_and_deterministic() {
         let expected_json_rpc_codes = [
-            -32100, -32101, -32102, -32103, -32104, -32105, -32106, -32107, -32108,
-            -32109, -32110, -32111,
+            -32100, -32101, -32102, -32103, -32104, -32105, -32106, -32107, -32108, -32109, -32110,
+            -32111,
         ];
         let mut observed_codes = HashSet::new();
 
-        for (error_code, expected_json_rpc_code) in INITIAL_ERROR_CODES
-            .into_iter()
-            .zip(expected_json_rpc_codes)
+        for (error_code, expected_json_rpc_code) in
+            INITIAL_ERROR_CODES.into_iter().zip(expected_json_rpc_codes)
         {
-            let first = JsonRpcError::projection_rejected(
-                error_code,
-                "portal_projection_publish",
-            );
-            let second = JsonRpcError::projection_rejected(
-                error_code,
-                "portal_projection_publish",
-            );
+            let first = JsonRpcError::projection_rejected(error_code, "portal_projection_publish");
+            let second = JsonRpcError::projection_rejected(error_code, "portal_projection_publish");
 
             assert_eq!(first.code, expected_json_rpc_code, "{error_code}");
             assert!(
@@ -266,8 +374,7 @@ mod tests {
             let data = first.data.expect("projection errors carry structured data");
             assert_eq!(data["error_code"], error_code.as_str(), "{error_code}");
             assert_eq!(
-                data["context"]["operation"],
-                "portal_projection_publish",
+                data["context"]["operation"], "portal_projection_publish",
                 "{error_code} must name the failed operation"
             );
             assert_eq!(data["context"]["subsystem"], "portal_projection");
@@ -278,6 +385,16 @@ mod tests {
             assert!(
                 data["hint"]["resolution"].is_string(),
                 "{error_code} must prescribe a resolution"
+            );
+            assert!(
+                data.to_string().len() <= 1_024,
+                "{error_code} structured recovery data must stay bounded"
+            );
+            assert!(
+                data["hint"]["resolution"]
+                    .as_str()
+                    .is_some_and(|resolution| resolution.len() <= 240),
+                "{error_code} resolution must stay concise"
             );
         }
 
@@ -304,8 +421,32 @@ mod tests {
                 .as_str()
                 .expect("resolution is text");
             assert!(resolution.contains("authenticated"), "{resolution}");
-            assert!(resolution.contains("original idempotency_key"), "{resolution}");
-            assert!(resolution.contains("rotate the owner token"), "{resolution}");
+            assert!(
+                resolution.contains("original idempotency_key"),
+                "{resolution}"
+            );
+            assert!(
+                resolution.contains("rotate the owner token"),
+                "{resolution}"
+            );
         }
+    }
+
+    #[test]
+    fn projection_error_context_accepts_only_bounded_operation_vocabulary() {
+        let private_detail = "secret-token/private-output/".repeat(1_000);
+        let wire = JsonRpcError::projection_rejected(
+            ProjectionErrorCode::ProjectionUnauthorized,
+            &private_detail,
+        );
+        let serialized = serde_json::to_string(&wire).expect("wire error serializes");
+
+        assert!(!serialized.contains("secret-token"));
+        assert!(!serialized.contains("private-output"));
+        assert_eq!(
+            wire.data.expect("structured data")["context"]["operation"],
+            "portal_projection_operation"
+        );
+        assert!(serialized.len() <= 1_024);
     }
 }
