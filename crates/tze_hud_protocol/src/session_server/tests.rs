@@ -423,9 +423,8 @@ async fn handshake(
 
     let mut response_stream = client.session(stream).await.unwrap().into_inner();
 
-    // Collect SessionEstablished and SceneSnapshot
+    // Collect SessionEstablished and SceneSnapshot.
     let mut messages = Vec::new();
-    // We expect exactly 2 messages: SessionEstablished and SceneSnapshot
     for _ in 0..2 {
         if let Some(msg) = response_stream.next().await {
             messages.push(msg.unwrap());
@@ -2544,7 +2543,8 @@ async fn test_resume_with_token() {
 
     let mut response_stream = client.session(resume_stream).await.unwrap().into_inner();
 
-    // Should get SessionResumeResult + SceneSnapshot (not SessionEstablished)
+    // Resume ordering is result, coherent snapshot, then current degradation
+    // state before any live transition.
     let msg1 = response_stream.next().await.unwrap().unwrap();
     match &msg1.payload {
         Some(ServerPayload::SessionResumeResult(result)) => {
@@ -2563,6 +2563,14 @@ async fn test_resume_with_token() {
     match &msg2.payload {
         Some(ServerPayload::SceneSnapshot(_)) => {}
         other => panic!("Expected SceneSnapshot on resume, got: {other:?}"),
+    }
+
+    let msg3 = response_stream.next().await.unwrap().unwrap();
+    match &msg3.payload {
+        Some(ServerPayload::DegradationNotice(notice)) => {
+            assert_eq!(notice.level, DegradationLevel::Normal as i32);
+        }
+        other => panic!("Expected current DegradationNotice on resume, got: {other:?}"),
     }
 }
 
@@ -5186,6 +5194,13 @@ async fn test_capability_request_after_resume_uses_policy_scope() {
         Some(ServerPayload::SceneSnapshot(_)) => {}
         other => panic!("Expected SceneSnapshot after resume, got: {other:?}"),
     }
+    let current_degradation = resumed.next().await.unwrap().unwrap();
+    match current_degradation.payload {
+        Some(ServerPayload::DegradationNotice(notice)) => {
+            assert_eq!(notice.level, DegradationLevel::Normal as i32);
+        }
+        other => panic!("Expected current degradation after snapshot, got: {other:?}"),
+    }
 
     // Authorized post-resume escalation must succeed.
     resume_tx
@@ -5685,7 +5700,7 @@ fn test_degradation_notice_is_transactional() {
 async fn test_degradation_notice_broadcast_to_active_session() {
     let scene = SceneGraph::new(800.0, 600.0);
     let service = HudSessionImpl::new(scene, "test-key");
-    let degradation_tx = service.degradation_tx.clone();
+    let degradation_notices = service.degradation_notices.clone();
     let state_ref = service.state.clone();
 
     let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
@@ -5716,7 +5731,7 @@ async fn test_degradation_notice_broadcast_to_active_session() {
         affected_capabilities: vec!["state_stream".to_string()],
         timestamp_wall_us: now_wall_us(),
     };
-    let _ = degradation_tx.send(notice.clone());
+    assert_eq!(degradation_notices.publish(notice.clone()).await, 1);
 
     // Update shared state level (mirrors what broadcast_degradation() does).
     {

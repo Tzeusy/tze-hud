@@ -27,6 +27,7 @@
 | 13 | 2026-03-22 | rig-5vq.30 | Final hardening and quantitative verification | Fixed §9 intro paragraph: removed `RuntimeError` from the list of types imported from `scene_service.proto` (it is defined in `session.proto` itself). Fixed §9.1 import graph: expanded to show both `"scene_service.proto"` and `"scene.proto"` imports with accurate type lists matching the proto header. Added `active_subscriptions` (field 7) and `denied_subscriptions` (field 8) to `SessionResumeResult` in §6.3 prose proto and §9 proto — mirrors `SessionEstablished` fields 7–8 so agents have confirmed subscription state after resume. |
 | 14 | 2026-03-23 | P1 consolidation (rig-b2s, rig-3uy, rig-anb, rig-5xu, rig-upg, rig-77n, rig-6c2, rig-8uq, rig-de2) | Capability vocabulary alignment (Fix 3) | Unified §7.1 capability names with RFC 0006 §6.3 canonical vocabulary: `read_scene` → `read_scene_topology`, `receive_input` → `access_input_events`, `zone_publish:<zone>` → `publish_zone:<zone>`. Verified all other P1 fixes (Fixes 1–2, 4–9) were already applied in Rounds 2–13: duplicate resume paths resolved (Round 2), full-snapshot reconnect aligned (Round 10), SubscriptionChangeResult added (Rounds 2+4), TelemetryFrame defined (Round 3), clock-domain naming fixed (Round 6), guest MCP surface narrowed (Round 5), SceneSnapshot referenced (Round 8), SceneId types aligned (Rounds 7+9). All 9 P1 beads closed. |
 | A1 | 2026-04-19 | hud-ora8.1.10 | Amendment: media signaling in session envelope | Closed §12 Open Question 5 (embodied session stream shape). Confirmed session-envelope extension shape (fields 50–99) over a separate `rpc MediaSignaling(...)`. Allocated `ClientMessage` fields 50–51 (`MediaIngressOpen`, `MediaIngressClose`) and `ServerMessage` fields 50–52 (`MediaIngressOpenResult`, `MediaIngressState`, `MediaIngressCloseNotice`) for bounded media ingress signaling. Defined per-message traffic class contract. Specified capability gating (`media_ingress` + protocol-version negotiation). Specified reconnect/snapshot semantics (`stream_epoch` epoch matching; snapshot-first ordering unchanged). Added §11 cross-RFC row for RFC 0014. Added §9.2 addendum rows for post-v1 field allocations. Explicitly protected `WidgetPublishResult.request_sequence` (field 1 of `WidgetPublishResult`; `ServerMessage` field 47) and Layer 3 extension semantics from the rust-widget-publish-load-harness and mcp-stress-testing changes. Full amendment document: `about/legends-and-lore/rfcs/reviews/0005-amendment-media-signaling.md` (issue hud-ora8.1.10). |
+| A2 | 2026-07-16 | hud-cpj4v / owner decision hud-o5snv | Production degradation notices | Appended exact texture-quality and emergency-rendering levels without renumbering existing values, defined fail-safe unspecified handling, bounded never-drop per-session delivery, and SessionEstablished/resume snapshot-then-current-state ordering. |
 
 ---
 
@@ -174,7 +175,14 @@ message SessionEstablished {
 
 `denied_subscriptions` is populated when an agent requests subscription categories for which it lacks the required capability (§7.2). The denied categories are listed here rather than being silently dropped — agents can inspect this field to detect capability gaps and request elevated capabilities if needed.
 
-**Snapshot delivery:** Immediately after `SessionEstablished`, the runtime sends a `SceneSnapshot` message (§9) containing the current scene topology. This ensures the agent has a consistent view of the scene before it can issue any mutations or receive incremental `SceneEvent` updates. Agents MUST wait for the `SceneSnapshot` before acting on scene state. See §6.5 for the equivalent behavior on post-grace-period reconnects and §6.4 for resume (reconnect within grace period).
+**Snapshot and degradation-state delivery:** Immediately after
+`SessionEstablished`, the runtime sends a `SceneSnapshot` message (§9), then the
+current exact `DegradationNotice`, then ordinary incremental events. This
+ensures the agent has a consistent scene and render-policy baseline before it
+acts. Subscription to later degradation transitions and capture of current
+state are atomic, so no transition can be lost between them. The current notice
+is sent even at `NORMAL`. See §6.4 and §6.5 for the same ordering on resume and
+post-grace reconnect.
 
 ### 1.4 Authentication
 
@@ -462,11 +470,26 @@ message DegradationNotice {
     RENDERING_SIMPLIFIED             = 5;
     SHEDDING_TILES                   = 6;
     AUDIO_ONLY_FALLBACK              = 7;
+    TEXTURE_QUALITY_REDUCED           = 8;
+    EMERGENCY_RENDERING               = 9;
   }
 }
 ```
 
-The degradation ladder is defined in failure.md §"Degradation axes". Agents must gracefully handle capability reduction; non-compliance within the grace period leads to session throttling.
+Existing values 0-7 are append-only and must never be renumbered. The exact v1
+runtime mapping is: Normal→`NORMAL`, Coalesce→`COALESCING_MORE`,
+ReduceTextureQuality→`TEXTURE_QUALITY_REDUCED`,
+DisableTransparency→`RENDERING_SIMPLIFIED`, ShedTiles→`SHEDDING_TILES`, and
+Emergency→`EMERGENCY_RENDERING`. `DEGRADATION_LEVEL_UNSPECIFIED` is a sentinel:
+receivers must not infer or apply a runtime/compositor policy from it. Render-only
+transitions carry an empty `affected_capabilities` list.
+
+Delivery uses a bounded per-session transactional queue. Publishing blocks when
+a live queue is full until capacity is available or the session closes; notices
+are never overwritten, lag-skipped, or dropped. The degradation ladder is
+defined in failure.md §"Degradation axes". Agents must gracefully handle
+capability reduction; non-compliance within the grace period leads to session
+throttling.
 
 ### 3.5 RuntimeError
 
@@ -802,8 +825,9 @@ message SessionResumeResult {
 When a resume is accepted within the grace period (v1 behavior, aligned with v1.md §"V1 explicitly defers"):
 
 1. The runtime sends a single `SceneSnapshot` message (§9) carrying the current scene topology — the same mechanism used for new connections (§1.3) and post-grace-period reconnects (§6.5).
-2. The agent's orphaned leases are automatically reclaimed: they were held during the grace period, so the runtime restores them and clears the disconnection badges. The agent receives its previously-held leases as part of the restored scene state.
-3. Once the agent receives the `SceneSnapshot`, the session transitions to `Active` state normally.
+2. The runtime atomically subscribes the session to future degradation transitions and captures the current exact `DegradationNotice`, then sends that notice before ordinary incremental events.
+3. The agent's orphaned leases are automatically reclaimed: they were held during the grace period, so the runtime restores them and clears the disconnection badges. The agent receives its previously-held leases as part of the restored scene state.
+4. Once the agent receives the `SceneSnapshot` and current `DegradationNotice`, the session transitions to `Active` state normally.
 
 The `last_seen_server_sequence` field in `SessionResume` is accepted by the runtime but not used for delta replay in v1. Its v1 purpose is identity binding: the sequence value proves the agent witnessed a specific runtime state, which is used to validate the session token and enable lease reclaim without capability re-negotiation.
 
@@ -816,7 +840,7 @@ If the grace period expires before the agent reconnects:
 1. The runtime has evicted the agent's leases and cleared its tiles.
 2. The `session_token` is no longer valid.
 3. The agent must perform a full re-handshake via `SessionInit` (no resume token).
-4. After `SessionEstablished`, the runtime sends a `SceneSnapshot` message (§9) containing the current scene topology, so the agent can make informed lease requests from a consistent starting state.
+4. After `SessionEstablished`, the runtime sends a `SceneSnapshot` message (§9) containing the current scene topology, then the current exact `DegradationNotice`, so the agent can make informed lease requests from a consistent scene and render-policy state.
 5. Capabilities are re-granted based on the agent's registered profile (capability grants are durable from config; security.md §"Authentication").
 
 ### 6.6 Runtime Restart
@@ -1319,6 +1343,8 @@ message DegradationNotice {
     RENDERING_SIMPLIFIED          = 5;
     SHEDDING_TILES                = 6;
     AUDIO_ONLY_FALLBACK           = 7;
+    TEXTURE_QUALITY_REDUCED       = 8;
+    EMERGENCY_RENDERING           = 9;
   }
 }
 

@@ -60,6 +60,7 @@ use tze_hud_widget::{RuntimeWidgetAssetError, register_runtime_widget_svg_asset}
 // ─── Submodules (SS-1..SS-7h) ────────────────────────────────────────────────
 
 pub mod config;
+pub mod degradation_notice_bus;
 pub mod emit_scene_event;
 pub mod freeze_queue;
 pub mod handshake;
@@ -78,6 +79,7 @@ pub mod widgets;
 pub mod zone_publish;
 
 pub use config::SessionConfig;
+pub use degradation_notice_bus::{DegradationNoticeReceiver, DegradationNoticeSender};
 // FreezeEnqueueResult, FREEZE_QUEUE_CAPACITY, and SessionFreezeQueue are used
 // transitively in `mod tests { use super::* }`.
 use emit_scene_event::handle_emit_scene_event;
@@ -485,10 +487,7 @@ impl HudSession for HudSessionImpl {
         let agent_capabilities = self.agent_capabilities.clone();
         let fallback_unrestricted = self.fallback_unrestricted;
         let media_ingress_config = self.media_ingress_config.clone();
-        // Subscribe to the degradation broadcast channel before spawning the task.
-        // Subscribing here (rather than inside the task) ensures we don't miss notices
-        // that arrive between task spawn and channel subscription.
-        let mut degradation_rx = self.degradation_tx.subscribe();
+        let degradation_notices = self.degradation_notices.clone();
         // Subscribe to the capability revocation broadcast channel.
         // Subscribing here ensures the session handler receives revocations issued
         // immediately after it is spawned (before the task subscribes itself).
@@ -564,6 +563,8 @@ impl HudSession for HudSessionImpl {
                     return;
                 }
             };
+
+            let is_resume = matches!(&first_msg.payload, Some(ClientPayload::SessionResume(_)));
 
             // Process handshake
             let mut session = match first_msg.payload {
@@ -652,6 +653,27 @@ impl HudSession for HudSessionImpl {
                     .await;
             }
 
+            // Atomically subscribe after the coherent scene snapshot. A
+            // reconnect additionally receives current policy before any later
+            // transition/incremental event; a new session preserves the v1
+            // two-message handshake and receives subsequent transitions.
+            let (mut degradation_rx, current_degradation) =
+                degradation_notices.subscribe_with_current();
+            if is_resume {
+                let seq = session.next_server_seq();
+                if tx
+                    .send(Ok(ServerMessage {
+                        sequence: seq,
+                        timestamp_wall_us: now_wall_us(),
+                        payload: Some(ServerPayload::DegradationNotice(current_degradation)),
+                    }))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+
             let upload_rate_limit_bytes_per_sec =
                 session.resource_upload_rate_limiter.limit_bytes_per_second;
             let (upload_command_tx, upload_command_rx) =
@@ -732,8 +754,8 @@ impl HudSession for HudSessionImpl {
                     //
                     // Transactional — delivered unconditionally to all active sessions
                     // regardless of subscription config. Never dropped.
-                    degradation_result = degradation_rx.recv() => {
-                        if let LoopAction::Break = session.on_degradation(degradation_result, &tx).await {
+                    degradation_notice = degradation_rx.recv() => {
+                        if let LoopAction::Break = session.on_degradation(degradation_notice, &tx).await {
                             break;
                         }
                     }
@@ -787,7 +809,11 @@ impl HudSession for HudSessionImpl {
                     // to TELEMETRY_FRAMES (requires read_telemetry). State-stream —
                     // coalesced/droppable under backpressure. Agent cannot reject.
                     frame_presented_result = frame_presented_rx.recv() => {
-                        if let LoopAction::Break = session.on_frame_presented(frame_presented_result, &tx).await {
+                        if let LoopAction::Break = session.on_frame_presented(
+                            frame_presented_result,
+                            &degradation_notices,
+                            &tx,
+                        ).await {
                             break;
                         }
                     }
@@ -1242,11 +1268,11 @@ impl StreamSession {
     /// Transactional — delivered unconditionally to all active sessions.
     async fn on_degradation(
         &mut self,
-        degradation_result: Result<DegradationNotice, tokio::sync::broadcast::error::RecvError>,
+        degradation_notice: Option<DegradationNotice>,
         tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, tonic::Status>>,
     ) -> LoopAction {
-        match degradation_result {
-            Ok(notice) => {
+        match degradation_notice {
+            Some(notice) => {
                 let seq = self.next_server_seq();
                 let _ = tx
                     .send(Ok(ServerMessage {
@@ -1257,17 +1283,7 @@ impl StreamSession {
                     .await;
                 LoopAction::Continue
             }
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                // We missed `n` notices due to slow consumption.
-                // Per spec §3.4, DegradationNotice is transactional and must not
-                // be dropped. Log the anomaly and continue — the session remains
-                // open. Operators should investigate why this session is slow.
-                // In a production implementation this would emit a metric/alert.
-                let _ = n; // suppress unused warning; real code: tracing::warn!
-                LoopAction::Continue
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                // Broadcast channel closed — runtime is shutting down.
+            None => {
                 // Treat as ungraceful disconnect.
                 self.transition(SessionState::Closed);
                 LoopAction::Break
@@ -1415,15 +1431,17 @@ impl StreamSession {
             crate::proto::FramePresented,
             tokio::sync::broadcast::error::RecvError,
         >,
+        degradation_notices: &DegradationNoticeSender,
         tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, tonic::Status>>,
     ) -> LoopAction {
         match frame_presented_result {
             Ok(event) => {
                 // Gate on TELEMETRY_FRAMES subscription (read_telemetry capability
                 // was already enforced when the subscription was granted).
-                if self
-                    .subscriptions
-                    .contains(&crate::subscriptions::category::TELEMETRY_FRAMES.to_string())
+                if degradation_notices.should_emit_state_stream(event.frame_number)
+                    && self
+                        .subscriptions
+                        .contains(&crate::subscriptions::category::TELEMETRY_FRAMES.to_string())
                 {
                     let seq = self.next_server_seq();
                     let _ = tx

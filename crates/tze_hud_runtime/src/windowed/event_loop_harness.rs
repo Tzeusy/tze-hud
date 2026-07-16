@@ -103,6 +103,7 @@ impl WindowedRuntimeState {
             frame_ready_rx,
             frame_ready_tx: Some(frame_ready_tx),
             frame_presented_tx: None,
+            degradation_notices: None,
             compositor: None,
             window_surface: None,
             input_processor: InputProcessor::new(),

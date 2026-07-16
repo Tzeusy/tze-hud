@@ -254,7 +254,7 @@ impl super::Compositor {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
-        if self.overlay_mode {
+        if self.use_opaque_rect_pipeline() {
             pass.set_pipeline(&self.clear_pipeline);
         } else {
             pass.set_pipeline(&self.pipeline);
@@ -345,6 +345,9 @@ impl super::Compositor {
             content: Vec::new(),
             chrome: Vec::new(),
         };
+        if self.degradation_policy.level >= tze_hud_scene::DegradationLevel::Significant {
+            return result;
+        }
 
         for (zone_name, publishes) in &scene.zone_registry.active_publishes {
             if publishes.is_empty() {
@@ -516,8 +519,11 @@ impl super::Compositor {
         &self,
         scene: &SceneGraph,
     ) -> Vec<crate::pipeline::RoundedRectDrawCmd> {
+        if self.degradation_policy.level >= tze_hud_scene::DegradationLevel::Significant {
+            return Vec::new();
+        }
         let mut cmds = Vec::new();
-        for tile in &Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene) {
+        for tile in &Self::sort_tiles_with_drag_boost(self.policy_visible_tiles(scene), scene) {
             if let Some(root_id) = tile.root_node {
                 // Compute scroll offset once per tile rather than on every
                 // recursive node visit — it is constant across all nodes in

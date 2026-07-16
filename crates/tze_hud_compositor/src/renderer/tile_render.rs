@@ -30,12 +30,12 @@ use std::sync::Arc;
 
 use glyphon::FontSystem;
 use tze_hud_input::{DRAG_OPACITY_BOOST, DRAG_Z_ORDER_BOOST};
+use tze_hud_scene::DegradationLevel;
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::*;
 
 use crate::pipeline::{RectVertex, rect_vertices};
 
-use super::Compositor;
 use super::ViewerEchoEntry;
 use super::draw_cmds::{TexturedDrawCmd, compute_fit_mode};
 use super::image_cache::{
@@ -48,6 +48,7 @@ use super::token_colors::{
     resolve_focus_ring_tokens, resolve_resize_grip_tokens, resolve_section_gap_px,
     resolve_tile_bg_token, resolve_tile_spacing_tokens, resolve_viewer_echo_tokens, srgb_to_linear,
 };
+use super::{Compositor, CompositorDegradationPolicy};
 
 // The composer's content inset (historically the `COMPOSER_TEXT_MARGIN = 6.0`
 // literal) is now token-driven: it resolves from the shared
@@ -346,6 +347,46 @@ pub(super) fn composer_draft_base_color(
 }
 
 impl Compositor {
+    /// Install the complete runtime-selected policy for the next frame.
+    pub fn set_degradation_policy(&mut self, policy: CompositorDegradationPolicy) {
+        let texture_policy_changed = (self.degradation_policy.level < DegradationLevel::Moderate)
+            != (policy.level < DegradationLevel::Moderate)
+            || self.degradation_policy.texture_quality_threshold_px
+                != policy.texture_quality_threshold_px
+            || self.degradation_policy.texture_scale_factor != policy.texture_scale_factor;
+        if texture_policy_changed {
+            self.image_texture_cache.clear();
+        }
+        self.degradation_level = policy.level;
+        self.degradation_policy = policy;
+    }
+
+    /// Visible tiles after applying the immutable suppression snapshot.
+    pub(super) fn policy_visible_tiles<'a>(&self, scene: &'a SceneGraph) -> Vec<&'a Tile> {
+        scene
+            .visible_tiles()
+            .into_iter()
+            .filter(|tile| !self.degradation_policy.suppressed_tiles.contains(&tile.id))
+            .collect()
+    }
+
+    pub(super) fn rendered_tile_opacity(&self, tile: &Tile, scene: &SceneGraph) -> f32 {
+        if self.degradation_policy.level >= DegradationLevel::Significant {
+            1.0
+        } else {
+            Self::effective_tile_opacity(tile, scene)
+        }
+    }
+
+    /// Whether flat geometry must bypass alpha blending for this frame.
+    ///
+    /// Overlay composition always writes RGBA directly. Level 3 and above use
+    /// the same no-blend path to implement the degradation ladder's
+    /// DisableTransparency contract.
+    pub(super) fn use_opaque_rect_pipeline(&self) -> bool {
+        self.overlay_mode || self.degradation_policy.level >= DegradationLevel::Significant
+    }
+
     // ─── Drag-boost helpers ───────────────────────────────────────────────────
 
     /// Return the effective sort key for a tile, applying `DRAG_Z_ORDER_BOOST`
@@ -574,7 +615,7 @@ impl Compositor {
         // Locate the tile + region the same way collect_composer_text_item /
         // prime_composer_scroll_offset do: the first visible tile (by drag-boosted
         // z-order) whose subtree contains the focused composer node.
-        let Some(tile) = Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene)
+        let Some(tile) = Self::sort_tiles_with_drag_boost(self.policy_visible_tiles(scene), scene)
             .into_iter()
             .find(|t| Self::composer_region_bounds(t, scene, cs.node_id).is_some())
         else {
@@ -732,7 +773,7 @@ impl Compositor {
         // Resolve both tints once; the per-tile hover slot selects between them.
         let resting = self.gpu_color_raw(grip.mark_color(false));
         let hover = self.gpu_color_raw(grip.mark_color(true));
-        for tile in scene.visible_tiles() {
+        for tile in self.policy_visible_tiles(scene) {
             // Only portal (scrollable) tiles are resizable.
             if scene.tile_scroll_config(tile.id).is_none() {
                 continue;
@@ -798,8 +839,11 @@ impl Compositor {
     /// see-through relative to the rest of the tile on any fade or geometry change
     /// that exposes it (hud-w41ef).
     pub(super) fn tile_effective_opacity(&self, tile: &Tile, scene: &SceneGraph) -> f32 {
+        if self.degradation_policy.level >= DegradationLevel::Significant {
+            return 1.0;
+        }
         // Base opacity from drag state (scene-level tile.opacity × drag boost).
-        let base_opacity = Self::effective_tile_opacity(tile, scene);
+        let base_opacity = self.rendered_tile_opacity(tile, scene);
         // §6.3: multiply portal tile animation opacity for scrollable (portal) tiles.
         (base_opacity * self.portal_tile_anim_opacity(tile.id)).clamp(0.0, 1.0)
     }
@@ -825,7 +869,9 @@ impl Compositor {
         {
             match &node.data {
                 NodeData::SolidColor(sc) => {
-                    if sc.radius.is_some_and(|r| r > 0.0) {
+                    if self.degradation_policy.level < DegradationLevel::Significant
+                        && sc.radius.is_some_and(|r| r > 0.0)
+                    {
                         return None;
                     }
                     // Apply combined opacity to the solid color alpha.
@@ -1131,7 +1177,7 @@ impl Compositor {
         // Locate the composer region the same way collect_composer_text_item does:
         // the first visible tile whose subtree contains the focused composer node.
         let mut region: Option<Rect> = None;
-        for tile in &Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene) {
+        for tile in &Self::sort_tiles_with_drag_boost(self.policy_visible_tiles(scene), scene) {
             if let Some(r) = Self::composer_region_bounds(tile, scene, cs.node_id) {
                 region = Some(r);
                 break;
@@ -1687,7 +1733,7 @@ impl Compositor {
         // Gather (tile, zone_width, per-entry texts) under &self first, then
         // measure under &mut self.text_rasterizer — the two borrows do not overlap.
         let mut jobs: Vec<(SceneId, f32, Vec<String>)> = Vec::new();
-        for tile in scene.visible_tiles() {
+        for tile in self.policy_visible_tiles(scene) {
             let Some(composer_node) = Self::find_composer_node_in_tile(tile, scene) else {
                 continue;
             };
