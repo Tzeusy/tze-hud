@@ -19,6 +19,101 @@ impl SceneGraph {
         usage
     }
 
+    /// Compute the logical lease-usage delta represented by a batch.
+    ///
+    /// This is the transport/runtime admission input. It deliberately counts
+    /// shared logical references per lease; physical resident allocation is a
+    /// separate resource-ledger domain.
+    pub fn mutation_budget_delta(
+        &self,
+        lease_id: &SceneId,
+        batch: &crate::mutation::MutationBatch,
+    ) -> crate::lease::BudgetDelta {
+        let mut delta_tiles = 0_i32;
+        let mut delta_texture_bytes = 0_i64;
+        let mut max_nodes_in_batch = 0_u32;
+        for mutation in &batch.mutations {
+            match mutation {
+                crate::mutation::SceneMutation::CreateTile { .. } => {
+                    delta_tiles = delta_tiles.saturating_add(1);
+                }
+                crate::mutation::SceneMutation::DeleteTile { tile_id } => {
+                    if let Some(tile) = self.tiles.get(tile_id)
+                        && tile.lease_id == *lease_id
+                    {
+                        delta_tiles = delta_tiles.saturating_sub(1);
+                        let old_bytes = tile
+                            .root_node
+                            .map(|root| self.sum_texture_bytes(root))
+                            .unwrap_or(0);
+                        delta_texture_bytes = delta_texture_bytes
+                            .saturating_sub(i64::try_from(old_bytes).unwrap_or(i64::MAX));
+                    }
+                }
+                crate::mutation::SceneMutation::SetTileRoot {
+                    tile_id,
+                    node,
+                    descendants,
+                } => {
+                    max_nodes_in_batch = max_nodes_in_batch.max(
+                        u32::try_from(descendants.len().saturating_add(1)).unwrap_or(u32::MAX),
+                    );
+                    let old_bytes = self
+                        .tiles
+                        .get(tile_id)
+                        .and_then(|tile| tile.root_node)
+                        .map(|root| self.sum_texture_bytes(root))
+                        .unwrap_or(0);
+                    let new_bytes = Self::count_texture_bytes_in_node(node).saturating_add(
+                        descendants
+                            .iter()
+                            .map(Self::count_texture_bytes_in_node)
+                            .sum(),
+                    );
+                    delta_texture_bytes = delta_texture_bytes.saturating_add(
+                        i64::try_from(new_bytes).unwrap_or(i64::MAX)
+                            - i64::try_from(old_bytes).unwrap_or(i64::MAX),
+                    );
+                }
+                crate::mutation::SceneMutation::AddNode { node, .. } => {
+                    max_nodes_in_batch = max_nodes_in_batch.max(1);
+                    delta_texture_bytes = delta_texture_bytes.saturating_add(
+                        i64::try_from(Self::count_texture_bytes_in_node(node)).unwrap_or(i64::MAX),
+                    );
+                }
+                crate::mutation::SceneMutation::UpdateNodeContent {
+                    node_id,
+                    data: NodeData::StaticImage(new_image),
+                    ..
+                } => {
+                    let old_bytes = self
+                        .nodes
+                        .get(node_id)
+                        .and_then(|node| match &node.data {
+                            NodeData::StaticImage(image) => Some(image.decoded_bytes),
+                            _ => None,
+                        })
+                        .unwrap_or(0);
+                    let new_bytes = if new_image.decoded_bytes == 0 {
+                        old_bytes
+                    } else {
+                        new_image.decoded_bytes
+                    };
+                    delta_texture_bytes = delta_texture_bytes.saturating_add(
+                        i64::try_from(new_bytes).unwrap_or(i64::MAX)
+                            - i64::try_from(old_bytes).unwrap_or(i64::MAX),
+                    );
+                }
+                _ => {}
+            }
+        }
+        crate::lease::BudgetDelta {
+            delta_tiles,
+            max_nodes_in_batch,
+            delta_texture_bytes,
+        }
+    }
+
     /// Check if a mutation batch would exceed the lease's resource budget.
     ///
     /// Returns Ok(()) if within budget, or Err with the specific violation.

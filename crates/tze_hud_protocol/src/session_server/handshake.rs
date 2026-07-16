@@ -195,7 +195,32 @@ pub(super) async fn handle_session_init(
         .cloned()
         .unwrap_or_else(|| fallback_resource_budget.clone());
     if let Some(enforcer) = budget_enforcer {
-        enforcer.register_session(scene_session_id, namespace.clone(), resource_budget.clone());
+        if let super::MutationBudgetDecision::Reject {
+            error_code,
+            message,
+        }
+        | super::MutationBudgetDecision::Revoke {
+            error_code,
+            message,
+        } = enforcer.register_session(
+            scene_session_id,
+            namespace.clone(),
+            resource_budget.clone(),
+            agent_resource_budgets.contains_key(&init.agent_id),
+        ) {
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: 1,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::SessionError(SessionError {
+                        code: error_code.to_string(),
+                        message,
+                        hint: String::new(),
+                    })),
+                }))
+                .await;
+            return None;
+        }
     }
 
     // Register session in the session registry and capture upload rate config +
@@ -380,7 +405,32 @@ pub(super) async fn handle_session_resume(
         .cloned()
         .unwrap_or_else(|| fallback_resource_budget.clone());
     if let Some(enforcer) = budget_enforcer {
-        enforcer.register_session(scene_session_id, namespace.clone(), resource_budget.clone());
+        if let super::MutationBudgetDecision::Reject {
+            error_code,
+            message,
+        }
+        | super::MutationBudgetDecision::Revoke {
+            error_code,
+            message,
+        } = enforcer.register_session(
+            scene_session_id,
+            namespace.clone(),
+            resource_budget.clone(),
+            agent_resource_budgets.contains_key(&resume.agent_id),
+        ) {
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: 1,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::SessionError(SessionError {
+                        code: error_code.to_string(),
+                        message,
+                        hint: String::new(),
+                    })),
+                }))
+                .await;
+            return None;
+        }
     }
 
     // Register the resumed agent in the session registry so shared-state

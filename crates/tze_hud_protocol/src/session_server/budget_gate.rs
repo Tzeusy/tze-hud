@@ -25,21 +25,19 @@ pub trait MutationBudgetEnforcer: Send + Sync {
         session_id: SceneId,
         namespace: String,
         budget: ResourceBudget,
-    );
+        resident: bool,
+    ) -> MutationBudgetDecision;
     fn remove_session(&self, namespace: &str);
-    fn check_mutation(
+    /// Atomically admit and reserve an aggregate/per-agent mutation delta.
+    fn reserve_mutation(
         &self,
         namespace: &str,
         delta_tiles: i32,
         delta_texture_bytes: i64,
         max_nodes_in_batch: u32,
     ) -> MutationBudgetDecision;
-    fn apply_mutation_delta(
-        &self,
-        namespace: &str,
-        delta_tiles: i32,
-        delta_texture_bytes: i64,
-    );
+    /// Roll back a reservation when scene commit rejects the batch.
+    fn rollback_mutation(&self, namespace: &str, delta_tiles: i32, delta_texture_bytes: i64);
 }
 
 pub type SharedMutationBudgetEnforcer = Arc<dyn MutationBudgetEnforcer>;

@@ -185,7 +185,15 @@ pub(super) fn start_network_services(
         runtime_context.fallback_resource_budget(),
         fallback_unrestricted,
         runtime_context.media_ingress.clone(),
-        Some(std::sync::Arc::new(crate::RuntimeMutationBudgetEnforcer::new())),
+        Some(std::sync::Arc::new(
+            crate::RuntimeMutationBudgetEnforcer::with_limits(
+                runtime_context.operational_envelope.max_resident_sessions,
+                runtime_context.operational_envelope.max_leased_tiles,
+                runtime_context
+                    .operational_envelope
+                    .max_agent_leased_texture_bytes,
+            ),
+        )),
     );
 
     // Clone the broadcast senders before moving the service into the gRPC task.

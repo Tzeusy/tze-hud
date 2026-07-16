@@ -22,8 +22,8 @@ use crate::proto::session::server_message::Payload as ServerPayload;
 use crate::proto::session::*;
 use crate::session::SharedState;
 
-use super::freeze_queue::FreezeEnqueueResult;
 use super::MutationBudgetDecision;
+use super::freeze_queue::FreezeEnqueueResult;
 use super::stream_session::StreamSession;
 use super::{
     DEFAULT_MAX_FUTURE_SCHEDULE_US, ElementStorePersistRequest, bytes_to_scene_id, now_ms,
@@ -39,28 +39,6 @@ struct ConvertedBatch {
     pending_touch_ids: Vec<(SceneId, ElementType)>,
     /// Elements that should have `last_published_at` updated, keyed by namespace string.
     pending_touch_names: Vec<(ElementType, String)>,
-}
-
-/// Derive the logical mutation-intake delta before scene commit.
-fn mutation_budget_delta(mutations: &[SceneMutation]) -> (i32, i64, u32) {
-    let mut tiles = 0_i32;
-    let mut max_nodes = 0_u32;
-    for mutation in mutations {
-        match mutation {
-            SceneMutation::CreateTile { .. } => tiles = tiles.saturating_add(1),
-            SceneMutation::DeleteTile { .. } => tiles = tiles.saturating_sub(1),
-            SceneMutation::SetTileRoot { descendants, .. } => {
-                max_nodes = max_nodes.max(
-                    u32::try_from(descendants.len().saturating_add(1)).unwrap_or(u32::MAX),
-                );
-            }
-            SceneMutation::AddNode { .. } => max_nodes = max_nodes.max(1),
-            _ => {}
-        }
-    }
-    // Logical agent-leased texture bytes are admitted by resource operations;
-    // mutation batches currently carry no decoded texture allocation delta.
-    (tiles, 0, max_nodes)
 }
 
 /// Convert a slice of proto [`MutationProto`] into a [`ConvertedBatch`].
@@ -1056,17 +1034,36 @@ pub(super) async fn handle_mutation_batch(
         pending_touch_ids,
         pending_touch_names,
     } = converted;
-    let budget_delta = mutation_budget_delta(&scene_mutations);
+
+    let scene_batch_id = proto_batch_id_to_scene_id(&batch.batch_id);
+    let scene_batch = SceneMutationBatch {
+        batch_id: scene_batch_id,
+        agent_namespace: session.namespace.clone(),
+        mutations: scene_mutations,
+        timing_hints: None,
+        lease_id: Some(lease_id),
+    };
+    let budget_delta = st
+        .scene
+        .lock()
+        .await
+        .mutation_budget_delta(&lease_id, &scene_batch);
     if let Some(enforcer) = &session.budget_enforcer {
-        match enforcer.check_mutation(
+        match enforcer.reserve_mutation(
             &session.namespace,
-            budget_delta.0,
-            budget_delta.1,
-            budget_delta.2,
+            budget_delta.delta_tiles,
+            budget_delta.delta_texture_bytes,
+            budget_delta.max_nodes_in_batch,
         ) {
             MutationBudgetDecision::Allow => {}
-            MutationBudgetDecision::Reject { error_code, message }
-            | MutationBudgetDecision::Revoke { error_code, message } => {
+            MutationBudgetDecision::Reject {
+                error_code,
+                message,
+            }
+            | MutationBudgetDecision::Revoke {
+                error_code,
+                message,
+            } => {
                 let cached = CachedResult {
                     accepted: false,
                     created_ids: Vec::new(),
@@ -1098,20 +1095,6 @@ pub(super) async fn handle_mutation_batch(
         }
     }
 
-    // Map the proto batch_id bytes to a SceneId for rejection-correlation.
-    // Falls back (with a debug log) when the field is absent or malformed.
-    let scene_batch_id = proto_batch_id_to_scene_id(&batch.batch_id);
-
-    // Apply as atomic batch, propagating client batch_id and lease_id so that
-    // the five-stage validation pipeline can perform lease/budget checks.
-    let scene_batch = SceneMutationBatch {
-        batch_id: scene_batch_id,
-        agent_namespace: session.namespace.clone(),
-        mutations: scene_mutations,
-        timing_hints: None,
-        lease_id: Some(lease_id),
-    };
-
     let result = {
         let mut scene = st.scene.lock().await;
         let r = scene.apply_batch(&scene_batch);
@@ -1124,14 +1107,16 @@ pub(super) async fn handle_mutation_batch(
     };
 
     let seq = session.next_server_seq();
+    if !result.applied
+        && let Some(enforcer) = &session.budget_enforcer
+    {
+        enforcer.rollback_mutation(
+            &session.namespace,
+            budget_delta.delta_tiles,
+            budget_delta.delta_texture_bytes,
+        );
+    }
     if result.applied {
-        if let Some(enforcer) = &session.budget_enforcer {
-            enforcer.apply_mutation_delta(
-                &session.namespace,
-                budget_delta.0,
-                budget_delta.1,
-            );
-        }
         let mut persist_request = persist_created_tile_entries(&mut st, &result.created_ids).await;
         let now = now_ms();
         let mut touched = false;
@@ -1298,14 +1283,26 @@ pub(super) async fn apply_queued_batch_to_scene(
         pending_touch_ids,
         pending_touch_names,
     } = converted;
-    let budget_delta = mutation_budget_delta(&scene_mutations);
+    let scene_batch_id = proto_batch_id_to_scene_id(&batch.batch_id);
+    let scene_batch = SceneMutationBatch {
+        batch_id: scene_batch_id,
+        agent_namespace: session.namespace.clone(),
+        mutations: scene_mutations,
+        timing_hints: None,
+        lease_id: Some(lease_id),
+    };
+    let budget_delta = st
+        .scene
+        .lock()
+        .await
+        .mutation_budget_delta(&lease_id, &scene_batch);
     if let Some(enforcer) = &session.budget_enforcer {
         if !matches!(
-            enforcer.check_mutation(
+            enforcer.reserve_mutation(
                 &session.namespace,
-                budget_delta.0,
-                budget_delta.1,
-                budget_delta.2,
+                budget_delta.delta_tiles,
+                budget_delta.delta_texture_bytes,
+                budget_delta.max_nodes_in_batch,
             ),
             MutationBudgetDecision::Allow
         ) {
@@ -1317,19 +1314,6 @@ pub(super) async fn apply_queued_batch_to_scene(
         }
     }
 
-    // Map the proto batch_id bytes to a SceneId for validation correlation.
-    let scene_batch_id = proto_batch_id_to_scene_id(&batch.batch_id);
-
-    let scene_batch = SceneMutationBatch {
-        batch_id: scene_batch_id,
-        agent_namespace: session.namespace.clone(),
-        mutations: scene_mutations,
-        timing_hints: None,
-        // Propagate the lease_id so that lease/budget validation runs for
-        // queued batches just as it does for live batches.
-        lease_id: Some(lease_id),
-    };
-
     // Apply to scene; response was already sent when the batch was queued.
     let result = {
         let mut scene = st.scene.lock().await;
@@ -1339,14 +1323,16 @@ pub(super) async fn apply_queued_batch_to_scene(
         st.refresh_active_tab_mirror(&scene);
         r
     };
-    if result.applied {
+    if !result.applied {
         if let Some(enforcer) = &session.budget_enforcer {
-            enforcer.apply_mutation_delta(
+            enforcer.rollback_mutation(
                 &session.namespace,
-                budget_delta.0,
-                budget_delta.1,
+                budget_delta.delta_tiles,
+                budget_delta.delta_texture_bytes,
             );
         }
+    }
+    if result.applied {
         let mut persist_request = persist_created_tile_entries(&mut st, &result.created_ids).await;
         let now = now_ms();
         let mut touched = false;
