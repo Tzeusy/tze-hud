@@ -696,7 +696,7 @@ impl Compositor {
             self.device.poll(wgpu::Maintain::Wait);
         }));
         drop(frame);
-        telemetry.stage7_gpu_submit_us = submit_start.elapsed().as_micros() as u64;
+        telemetry.stage7_gpu_submit_us = submit_start.elapsed().as_micros().max(1) as u64;
 
         if present_result.is_err() {
             tracing::error!(
@@ -704,6 +704,9 @@ impl Compositor {
                  destroyed mid-frame) — frame skipped, compositor thread preserved \
                  (hud-pi5wx)"
             );
+            // Zero is the established skipped-stage sentinel. The windowed
+            // runtime must not signal or benchmark-count a failed submission.
+            telemetry.stage7_gpu_submit_us = 0;
             telemetry.frame_time_us = frame_start.elapsed().as_micros() as u64;
             return telemetry;
         }

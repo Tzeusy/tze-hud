@@ -1040,6 +1040,13 @@ impl ApplicationHandler for WinitApp {
                 // idle gate. Content caches stay gated on scene.version so the
                 // translate never re-primes them (hud-uyhpn).
                 let mut last_rendered_geometry_epoch: u64 = u64::MAX;
+                // Benchmark progress is acknowledged by the main thread after
+                // `SurfaceTexture::present()`, not by a compositor-side attempt.
+                // Keep only the latest telemetry for the currently pending
+                // swapchain texture because `FrameReadySignal` is latest-wins.
+                let mut benchmark_present_count_seen =
+                    surface_for_compositor.presented_frame_count();
+                let mut pending_benchmark_sample = None;
                 crate::diag::diag_write("compositor thread: frame loop STARTED");
 
                 tracing::info!(
@@ -1062,6 +1069,41 @@ impl ApplicationHandler for WinitApp {
                     }
                     if shutdown_tok.is_triggered() {
                         break;
+                    }
+
+                    let presented_count = surface_for_compositor.presented_frame_count();
+                    if presented_count > benchmark_present_count_seen {
+                        benchmark_present_count_seen = presented_count;
+                        if let Some(sample) = pending_benchmark_sample.take()
+                            && let Some(state) = benchmark_state.as_mut()
+                            && state.record(&sample)
+                        {
+                            let finished = benchmark_state
+                                .take()
+                                .expect("benchmark_state must still exist when record completes");
+                            let emit_path = finished.config.emit_path.clone();
+                            match finished.finish() {
+                                Ok(()) => {
+                                    tracing::info!(
+                                        path = %emit_path.display(),
+                                        "windowed benchmark artifact written; shutting down"
+                                    );
+                                    shutdown_tok.trigger(crate::threads::ShutdownReason::Clean);
+                                    break;
+                                }
+                                Err(err) => {
+                                    tracing::error!(
+                                        error = %err,
+                                        path = %emit_path.display(),
+                                        "failed to write windowed benchmark artifact"
+                                    );
+                                    benchmark_failed
+                                        .store(true, std::sync::atomic::Ordering::Release);
+                                    shutdown_tok.trigger(crate::threads::ShutdownReason::Clean);
+                                    break;
+                                }
+                            }
+                        }
                     }
 
                     let frame_start = Instant::now();
@@ -1225,10 +1267,8 @@ impl ApplicationHandler for WinitApp {
                             );
                             let new_snap = crate::pipeline::HitTestSnapshot::from_scene(&scene);
                             hit_test_snapshot.store(Arc::new(new_snap));
-                            // Record the version we just presented so an unchanged
-                            // scene idles on the next iteration.
-                            last_rendered_scene_version = scene.version;
-                            last_rendered_geometry_epoch = scene.geometry_epoch;
+                            let built_scene_version = scene.version;
+                            let built_geometry_epoch = scene.geometry_epoch;
                             // ── Batch-correlated present ack drain (hud-91uu6) ──
                             // gRPC `apply_batch` enqueues accepted batch_ids in
                             // BOTH runtimes, so the windowed present path must drain
@@ -1251,14 +1291,22 @@ impl ApplicationHandler for WinitApp {
                             // ── Stage 6–7: Present lock-free ──────────────────
                             let compositor_telemetry = compositor
                                 .present_windowed_frame(build, surface_for_compositor.as_ref());
+                            let frame_submitted = compositor_telemetry.stage7_gpu_submit_us > 0;
 
                             // ── Signal main thread to present ─────────────────
                             // Per spec §Compositor Thread Ownership (line 55):
                             // "compositor thread MUST signal the main thread via
                             // FrameReadySignal, and only the main thread SHALL call
                             // surface.present()."
-                            let _ = frame_ready_tx.send(true);
-                            last_present_at = std::time::Instant::now();
+                            if frame_submitted {
+                                let _ = frame_ready_tx.send(true);
+                                last_present_at = std::time::Instant::now();
+                                // Advance the idle gate only after a completed
+                                // submit. A failed acquire must retry instead of
+                                // stranding an unpresented scene as "rendered".
+                                last_rendered_scene_version = built_scene_version;
+                                last_rendered_geometry_epoch = built_geometry_epoch;
+                            }
 
                             // ── Broadcast FramePresented (hud-4va6q) ──────────
                             // Stage 6–7 are complete, so the batches drained above
@@ -1269,7 +1317,8 @@ impl ApplicationHandler for WinitApp {
                             // layer. The send is off the scene lock (already
                             // dropped) and skipped when no subscriber is attached
                             // (compositor-only mode) or no batch was applied.
-                            if let Some(tx) = &frame_presented_tx
+                            if frame_submitted
+                                && let Some(tx) = &frame_presented_tx
                                 && !presented_batch_ids.is_empty()
                             {
                                 let present_wall_us = std::time::SystemTime::now()
@@ -1324,40 +1373,8 @@ impl ApplicationHandler for WinitApp {
                             }
                             telemetry.record(telem);
 
-                            if let Some(state) = benchmark_state.as_mut() {
-                                if let Some(last) = telemetry.records().last() {
-                                    if state.record(last) {
-                                        let finished = benchmark_state.take().expect(
-                                            "benchmark_state must still exist when record completes",
-                                        );
-                                        let emit_path = finished.config.emit_path.clone();
-                                        match finished.finish() {
-                                            Ok(()) => {
-                                                tracing::info!(
-                                                    path = %emit_path.display(),
-                                                    "windowed benchmark artifact written; shutting down"
-                                                );
-                                                shutdown_tok
-                                                    .trigger(crate::threads::ShutdownReason::Clean);
-                                                break;
-                                            }
-                                            Err(err) => {
-                                                tracing::error!(
-                                                    error = %err,
-                                                    path = %emit_path.display(),
-                                                    "failed to write windowed benchmark artifact"
-                                                );
-                                                benchmark_failed.store(
-                                                    true,
-                                                    std::sync::atomic::Ordering::Release,
-                                                );
-                                                shutdown_tok
-                                                    .trigger(crate::threads::ShutdownReason::Clean);
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
+                            if frame_submitted && benchmark_state.is_some() {
+                                pending_benchmark_sample = telemetry.records().last().cloned();
                             }
                         }
                     } else {
