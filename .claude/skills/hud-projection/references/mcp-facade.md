@@ -15,6 +15,14 @@ The production ingress must:
 - Emit audit records without transcript text, HUD input text, or owner tokens.
 - Route operations to the in-process `ProjectionAuthority` in `tze_hud_runtime`, not to a separate projection process.
 
+The authority's retained transcript window and reconnect bookkeeping are
+bounded, in-memory presentation state only. Durable transcript continuity is
+adapter/client state, never runtime-core persistence. The preferred client
+stores its private bounded authored tail under the XDG state hierarchy at
+`tze_hud/portal-continuity/`, then replays the same `logical_unit_id` and
+`coalesce_key` values after authenticated attach. That file must not contain
+an owner token or any viewer-authored/pending HUD input.
+
 ## Component Harness (Development / Testing Only)
 
 The repo ships a stdio component harness in `crates/tze_hud_projection` for local protocol development and unit testing:
@@ -32,6 +40,11 @@ Send one operation JSON object per stdin line. The process writes one JSON resul
 ```
 
 The harness keeps projection state in memory only for the lifetime of that process. Restarting it purges transcript text, pending input text, owner tokens, and cached lease identity. Operator cleanup can be enabled with `--operator-authority-env HUD_PROJECTION_OPERATOR_AUTHORITY`; owner operations still require the owner token issued by `attach`.
+
+When driving the harness with `portal_client.py`, the client-owned
+`portal-continuity` tail can rebuild authored output after restart. This does
+not make the harness or runtime durable: a restarted authority creates fresh
+runtime state, and the client explicitly republishes its bounded tail.
 
 ## Tool Shape
 
