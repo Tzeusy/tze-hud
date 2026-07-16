@@ -11,7 +11,7 @@ Scope: v1-mandatory
 
 #### Scenario: Single-change artifact proves closure-scoped work
 - **WHEN** the canonical single-node change scenario completes in a scene containing unrelated tiles
-- **THEN** the artifact MUST fail if any unchanged out-of-closure node is laid out, rasterized, or uploaded, if damage exceeds the closure bounds without an allowed structured full-surface reason, or if any actual-work count exceeds its corresponding closure count
+- **THEN** the artifact MUST fail if any unchanged out-of-closure node is laid out, rasterized, or uploaded, if damage exceeds the closure bounds, or if any actual-work count exceeds its corresponding closure count; a structured full-surface reason MUST instead mark the result diagnostic and MUST NOT satisfy this closure-scoped gate
 
 #### Scenario: Required efficiency field is missing
 - **WHEN** an efficiency measurement omits a required counter, identity field, closure field, or full-surface reason
