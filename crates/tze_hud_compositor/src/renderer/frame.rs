@@ -221,9 +221,7 @@ impl Compositor {
             if let Some(accent) = scene.tile_lifecycle_accent(tile.id) {
                 // Fold the tile's effective + portal-transition opacity so the
                 // accent fades with the tile (matches the tile background).
-                let opacity = (self.rendered_tile_opacity(tile, scene)
-                    * self.portal_tile_anim_opacity(tile.id))
-                .clamp(0.0, 1.0);
+                let opacity = self.tile_effective_opacity(tile, scene);
                 if let Some((bar_w, color)) =
                     Self::lifecycle_accent_bar_geom(tile.bounds, accent, opacity)
                 {

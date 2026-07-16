@@ -373,8 +373,7 @@ impl super::Compositor {
                 // The value the quad/backdrop path applies via
                 // `tile_effective_opacity` (== base × portal anim). Text fades in
                 // lockstep with the tile's solid-color backdrop.
-                let tile_opacity =
-                    (base_opacity * self.portal_tile_anim_opacity(tile.id)).clamp(0.0, 1.0);
+                let tile_opacity = self.tile_effective_opacity(tile, scene);
 
                 // Compute scroll offset once per tile and pass it down so text
                 // glyph positions track the scrolled content (Bounded Transcript

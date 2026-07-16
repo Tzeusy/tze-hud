@@ -50,6 +50,21 @@ use super::token_colors::{
 };
 use super::{Compositor, CompositorDegradationPolicy};
 
+/// Apply the DisableTransparency degradation rule without changing visibility.
+///
+/// Level 3 makes every *visible* tile opaque, but zero remains the semantic
+/// signal for a hidden/minimized tile (and for the zero endpoint of a portal
+/// transition). Turning zero into one would resurrect content the scene graph
+/// deliberately removed from the frame.
+#[inline]
+pub(super) fn degradation_tile_opacity(opacity: f32, level: DegradationLevel) -> f32 {
+    if level >= DegradationLevel::Significant && opacity > 0.0 {
+        1.0
+    } else {
+        opacity
+    }
+}
+
 // The composer's content inset (historically the `COMPOSER_TEXT_MARGIN = 6.0`
 // literal) is now token-driven: it resolves from the shared
 // `portal.spacing.content_inset_px` token into
@@ -371,11 +386,10 @@ impl Compositor {
     }
 
     pub(super) fn rendered_tile_opacity(&self, tile: &Tile, scene: &SceneGraph) -> f32 {
-        if self.degradation_policy.level >= DegradationLevel::Significant {
-            1.0
-        } else {
-            Self::effective_tile_opacity(tile, scene)
-        }
+        degradation_tile_opacity(
+            Self::effective_tile_opacity(tile, scene),
+            self.degradation_policy.level,
+        )
     }
 
     /// Whether flat geometry must bypass alpha blending for this frame.
@@ -839,13 +853,11 @@ impl Compositor {
     /// see-through relative to the rest of the tile on any fade or geometry change
     /// that exposes it (hud-w41ef).
     pub(super) fn tile_effective_opacity(&self, tile: &Tile, scene: &SceneGraph) -> f32 {
-        if self.degradation_policy.level >= DegradationLevel::Significant {
-            return 1.0;
-        }
         // Base opacity from drag state (scene-level tile.opacity × drag boost).
         let base_opacity = self.rendered_tile_opacity(tile, scene);
         // §6.3: multiply portal tile animation opacity for scrollable (portal) tiles.
-        (base_opacity * self.portal_tile_anim_opacity(tile.id)).clamp(0.0, 1.0)
+        let opacity = (base_opacity * self.portal_tile_anim_opacity(tile.id)).clamp(0.0, 1.0);
+        degradation_tile_opacity(opacity, self.degradation_policy.level)
     }
 
     /// Determine the background fill color for a tile based on its root content.
@@ -3026,6 +3038,31 @@ mod flow_fallback_cache_tests {
         assert!(
             fallback.is_empty(),
             "no fallback entry needed for an authoritative hit"
+        );
+    }
+}
+
+#[cfg(test)]
+mod degradation_opacity_tests {
+    use super::degradation_tile_opacity;
+    use tze_hud_scene::DegradationLevel;
+
+    #[test]
+    fn significant_degradation_preserves_hidden_tiles_and_opaques_visible_tiles() {
+        assert_eq!(
+            degradation_tile_opacity(0.0, DegradationLevel::Significant),
+            0.0,
+            "durably hidden tiles must remain hidden when transparency is disabled"
+        );
+        assert_eq!(
+            degradation_tile_opacity(0.35, DegradationLevel::Significant),
+            1.0,
+            "visible tiles must become opaque when transparency is disabled"
+        );
+        assert_eq!(
+            degradation_tile_opacity(0.35, DegradationLevel::Moderate),
+            0.35,
+            "lower degradation levels must preserve fractional opacity"
         );
     }
 }
