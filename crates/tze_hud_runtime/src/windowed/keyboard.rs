@@ -14,6 +14,7 @@ use super::input_dispatch::{
     dispatch_scroll_offset_event,
 };
 use super::lifecycle::{INTERACTION_LOCK_BUDGET, spin_acquire, write_windows_clipboard_text};
+use crate::shell::{ChromeShortcut, ChromeTab, handle_shortcut};
 
 pub(super) struct ComposerDeliveryContext {
     pub(super) namespace: String,
@@ -157,6 +158,26 @@ fn is_bare_tab_chord(key: &str, modifiers: &KeyboardModifiers) -> bool {
     key == "Tab" && !modifiers.ctrl && !modifiers.alt && !modifiers.meta
 }
 
+/// Decode the reserved subset implemented by [`crate::shell::handle_shortcut`].
+/// Safe-mode and monitor-cycle chords intentionally return `None`: production
+/// handles those at the earlier winit OS-event stage, while in-process callers
+/// still consume them through [`ShellReservedShortcut`] without agent delivery.
+fn chrome_shortcut(raw: &RawKeyDownEvent) -> Option<ChromeShortcut> {
+    if !raw.modifiers.ctrl || raw.modifiers.alt {
+        return None;
+    }
+    match (raw.key.as_str(), raw.modifiers.shift) {
+        ("Tab", false) => Some(ChromeShortcut::NextTab),
+        ("Tab", true) => Some(ChromeShortcut::PrevTab),
+        ("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8", false) => {
+            raw.key.parse::<usize>().ok().map(ChromeShortcut::GotoTab)
+        }
+        ("9", false) => Some(ChromeShortcut::LastTab),
+        ("m" | "M", true) => Some(ChromeShortcut::MuteToggle),
+        _ => None,
+    }
+}
+
 /// Translate an RFC 0004 default keyboard binding into the platform-neutral
 /// command vocabulary. Composer editing and shell-reserved shortcuts are
 /// intercepted before this helper is called.
@@ -210,6 +231,12 @@ enum CommandDispatchOutcome {
 enum ActivationReleaseOutcome {
     NotTracked,
     Released,
+    Busy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShellShortcutOutcome {
+    Consumed,
     Busy,
 }
 
@@ -399,6 +426,107 @@ impl WinitApp {
 
     // ── Keyboard drain helpers ────────────────────────────────────────────
 
+    /// Execute a shell-reserved shortcut locally before any portal/composer or
+    /// focused-agent route (RFC 0007 §2.3; input-model Event Routing
+    /// Resolution). Tab shortcuts update the authoritative scene and its
+    /// lock-free event-loop mirror; mute remains the v1-reserved chrome noop.
+    ///
+    /// The bounded lock/defer behavior matches other deliberate keyboard
+    /// actions in this module. On contention the caller requeues the original
+    /// event at FIFO front rather than leaking it through the agent path.
+    fn handle_shell_reserved_shortcut(&mut self, raw: &RawKeyDownEvent) -> ShellShortcutOutcome {
+        let Some(shortcut) = chrome_shortcut(raw) else {
+            // Ctrl+Shift+Escape and Ctrl+Shift+F8/F9 are handled at the OS
+            // event stage. Synthetic/in-process entry still consumes them.
+            return ShellShortcutOutcome::Consumed;
+        };
+
+        if shortcut == ChromeShortcut::MuteToggle {
+            let mut chrome = match self.state.chrome_state.try_write() {
+                Ok(chrome) => chrome,
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    return ShellShortcutOutcome::Busy;
+                }
+            };
+            let result = handle_shortcut(&mut chrome, shortcut);
+            debug_assert!(result.consumed);
+            return ShellShortcutOutcome::Consumed;
+        }
+
+        let Some(state) = spin_acquire(&self.state.shared_state, INTERACTION_LOCK_BUDGET) else {
+            return ShellShortcutOutcome::Busy;
+        };
+        let Some(mut scene) = spin_acquire(&state.scene, INTERACTION_LOCK_BUDGET) else {
+            return ShellShortcutOutcome::Busy;
+        };
+
+        // SceneGraph is authoritative for actual content visibility. Chrome's
+        // internal tab slots are reconciled to the same runtime-owned order so
+        // the existing shell state machine chooses the target index, while
+        // deliberately avoiding agent-supplied scene tab names in chrome.
+        let mut ordered_tabs: Vec<(tze_hud_scene::SceneId, u32, u64)> = scene
+            .tabs
+            .values()
+            .map(|tab| (tab.id, tab.display_order, tab.created_at_ms))
+            .collect();
+        ordered_tabs.sort_by(|a, b| {
+            a.1.cmp(&b.1)
+                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| a.0.as_uuid().as_bytes().cmp(b.0.as_uuid().as_bytes()))
+        });
+        let active_index = scene
+            .active_tab
+            .and_then(|active| ordered_tabs.iter().position(|(id, ..)| *id == active))
+            .unwrap_or(0);
+
+        let mut chrome = match self.state.chrome_state.try_write() {
+            Ok(chrome) => chrome,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return ShellShortcutOutcome::Busy;
+            }
+        };
+        if chrome.tabs.len() != ordered_tabs.len() {
+            let mut existing_tabs = std::mem::take(&mut chrome.tabs).into_iter();
+            chrome.tabs = ordered_tabs
+                .iter()
+                .enumerate()
+                .map(|(index, (scene_id, ..))| {
+                    if let Some(mut tab) = existing_tabs.next() {
+                        tab.active = index == active_index;
+                        return tab;
+                    }
+                    let bytes = scene_id.as_uuid().as_bytes();
+                    ChromeTab {
+                        id: u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+                        name: format!("Tab {}", index + 1),
+                        active: index == active_index,
+                    }
+                })
+                .collect();
+        } else {
+            for (index, tab) in chrome.tabs.iter_mut().enumerate() {
+                tab.active = index == active_index;
+            }
+        }
+        chrome.active_tab_index = active_index;
+        let result = handle_shortcut(&mut chrome, shortcut);
+        debug_assert!(result.consumed);
+        let target_tab = result
+            .new_tab_index
+            .and_then(|index| ordered_tabs.get(index))
+            .map(|(id, ..)| *id);
+        drop(chrome);
+
+        if let Some(target_tab) = target_tab
+            && scene.switch_active_tab(target_tab).is_ok()
+        {
+            state.refresh_active_tab_mirror(&scene);
+        }
+        ShellShortcutOutcome::Consumed
+    }
+
     /// Translate a raw key-down event through the `KeyboardProcessor`, log it,
     /// and broadcast the resulting `KeyboardDispatch` over the `INPUT_EVENTS`
     /// gRPC channel via `input_event_tx`.
@@ -484,17 +612,10 @@ impl WinitApp {
         raw: &RawKeyDownEvent,
         active_tab: Option<tze_hud_scene::SceneId>,
     ) {
-        // No active tab → nothing to route to.  Drop (do not re-queue / spin).
-        let Some(tab_id) = active_tab else { return };
-
         // ── Priority 2: Shell/chrome-reserved shortcuts ───────────────────
         //
         // Shell-reserved shortcuts (Ctrl+Tab, Ctrl+1..9, Ctrl+Shift+M, etc.)
-        // MUST win over portal resize hotkeys.  A reserved key is never
-        // consumed by a portal.  The portal-resize intercept is skipped so
-        // the reserved key is never consumed by a portal, but normal routing
-        // still runs so the key reaches the agent (e.g. chrome handles Ctrl+Tab
-        // at a higher layer, but the event is not suppressed here).
+        // MUST win over portal resize hotkeys and MUST never reach agents.
         //
         // Note: Ctrl+Shift+F8/F9 (monitor cycling) is handled even earlier —
         // in the OS event path (Stage 1, `WindowEvent::KeyboardInput`) — so it
@@ -506,17 +627,32 @@ impl WinitApp {
             raw.modifiers.shift,
             raw.modifiers.alt,
         ) {
-            tracing::debug!(
-                key = %str_preview(&raw.key),
-                ctrl = raw.modifiers.ctrl,
-                shift = raw.modifiers.shift,
-                "shell-reserved shortcut: portal resize skipped (chrome layer handles)"
-            );
-            // Fall through to normal routing — the key may still need to be
-            // delivered to the agent (e.g. Ctrl+Tab dispatched as a chrome
-            // event, not suppressed entirely).  The important invariant is
-            // that portal resize DOES NOT consume it.
-        } else {
+            match self.handle_shell_reserved_shortcut(raw) {
+                ShellShortcutOutcome::Consumed => {
+                    self.state
+                        .consumed_shell_shortcut_keydowns
+                        .insert(keyboard_key_identity(&raw.key_code, &raw.key));
+                    tracing::debug!(
+                        key = %str_preview(&raw.key),
+                        ctrl = raw.modifiers.ctrl,
+                        shift = raw.modifiers.shift,
+                        "shell-reserved shortcut handled locally and consumed"
+                    );
+                }
+                ShellShortcutOutcome::Busy => {
+                    self.state
+                        .pending_keyboard_events
+                        .push_back(PendingKeyboardEvent::KeyDown(raw.clone()));
+                }
+            }
+            return;
+        }
+
+        // No active tab → nothing else to route to. Drop after global shell
+        // handling, which must not depend on a focused content tab.
+        let Some(tab_id) = active_tab else { return };
+
+        {
             // ── Priority 4: Portal resize hotkey intercept (§6b.2) ────────
             //
             // Ctrl+`+`/Ctrl+`=` (grow) and Ctrl+`-` (shrink) resize the
@@ -1261,6 +1397,9 @@ impl WinitApp {
             .safe_mode_atomic
             .load(std::sync::atomic::Ordering::Acquire)
         {
+            self.state
+                .consumed_shell_shortcut_keydowns
+                .remove(&keyboard_key_identity(&raw.key_code, &raw.key));
             tracing::debug!(
                 key = %str_preview(&raw.key),
                 "safe-mode capture: KeyUp dropped (safe mode active — chrome layer owns input)"
@@ -1294,6 +1433,37 @@ impl WinitApp {
         raw: &RawKeyUpEvent,
         active_tab: Option<tze_hud_scene::SceneId>,
     ) {
+        let key_identity = keyboard_key_identity(&raw.key_code, &raw.key);
+        if self
+            .state
+            .consumed_shell_shortcut_keydowns
+            .remove(&key_identity)
+        {
+            tracing::debug!(
+                key_code = %str_preview(&raw.key_code),
+                "shell-reserved shortcut: matching KeyUp consumed"
+            );
+            return;
+        }
+        if ShellReservedShortcut::is_reserved(
+            &raw.key,
+            raw.modifiers.ctrl,
+            raw.modifiers.shift,
+            raw.modifiers.alt,
+        ) {
+            // Monitor-cycle and safe-mode presses are consumed at the earlier
+            // winit OS-event stage, so Stage 2 may see a release without having
+            // observed the press. Classifying the release closes that route;
+            // identity tracking above also covers modifier-release reordering.
+            tracing::debug!(
+                key_code = %str_preview(&raw.key_code),
+                "shell-reserved shortcut: release-only KeyUp consumed"
+            );
+            return;
+        }
+
+        // No active tab → nothing else to route to. Drop after clearing any
+        // global shell-owned key sequence above.
         let Some(tab_id) = active_tab else { return };
 
         // ── Keyboard focus traversal: swallow the matching Tab KeyUp (hud-v0cal) ──
@@ -1311,7 +1481,6 @@ impl WinitApp {
             return;
         }
 
-        let key_identity = keyboard_key_identity(&raw.key_code, &raw.key);
         match self.release_keyboard_activation(raw) {
             ActivationReleaseOutcome::Released => {
                 self.state.consumed_command_keydowns.remove(&key_identity);

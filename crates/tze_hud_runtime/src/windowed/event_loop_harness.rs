@@ -135,6 +135,7 @@ impl WindowedRuntimeState {
             composer_pointer_drag_anchor: None,
             portal_resize_states: HashMap::new(),
             consumed_portal_resize_keydowns: HashSet::new(),
+            consumed_shell_shortcut_keydowns: HashSet::new(),
             keyboard_activation_nodes: HashMap::new(),
             consumed_command_keydowns: HashSet::new(),
             local_composer_state: Arc::new(StdMutex::new(None)),
@@ -368,6 +369,33 @@ mod tests {
         })
     }
 
+    fn ctrl_key_down(key_code: &str, key: &str, shift: bool, ts: u64) -> PendingKeyboardEvent {
+        PendingKeyboardEvent::KeyDown(RawKeyDownEvent {
+            key_code: key_code.to_string(),
+            key: key.to_string(),
+            modifiers: KeyboardModifiers {
+                ctrl: true,
+                shift,
+                ..KeyboardModifiers::NONE
+            },
+            repeat: false,
+            timestamp_mono_us: MonoUs(ts),
+        })
+    }
+
+    fn ctrl_key_up(key_code: &str, key: &str, shift: bool, ts: u64) -> PendingKeyboardEvent {
+        PendingKeyboardEvent::KeyUp(RawKeyUpEvent {
+            key_code: key_code.to_string(),
+            key: key.to_string(),
+            modifiers: KeyboardModifiers {
+                ctrl: true,
+                shift,
+                ..KeyboardModifiers::NONE
+            },
+            timestamp_mono_us: MonoUs(ts),
+        })
+    }
+
     /// Install one ordinary focused button (not a portal composer/control) and
     /// return its ids plus a receiver for the runtime's real input-event channel.
     fn install_button(
@@ -450,6 +478,158 @@ mod tests {
             );
         }
         events
+    }
+
+    /// RFC 0007 §2.3 / system-shell "Tab Keyboard Shortcuts": the runtime
+    /// consumes Ctrl+Tab before agent routing and changes the authoritative
+    /// scene tab locally. Drive the real event-loop drain so this proves the
+    /// production precedence seam, not only `shell::handle_shortcut` in
+    /// isolation.
+    #[test]
+    fn ctrl_tab_switches_scene_and_key_down_never_reaches_agent() {
+        let mut harness = HeadlessEventLoopHarness::new();
+        let (_tile_id, _node_id, mut rx) = install_button(&mut harness, true);
+        let second_tab = {
+            let shared = harness.app.state.shared_state.blocking_lock();
+            let mut scene = shared.scene.blocking_lock();
+            scene.create_tab("Second", 1).unwrap()
+        };
+        harness.app.state.focus_manager.add_tab(second_tab);
+        {
+            let mut chrome = harness.app.state.chrome_state.write().unwrap();
+            chrome.add_tab(10, "Configured One".to_string());
+            chrome.add_tab(20, "Configured Two".to_string());
+        }
+
+        harness.enqueue(ctrl_key_down("Tab", "Tab", false, 1_000));
+        harness.drain();
+
+        let active_tab = {
+            let shared = harness.app.state.shared_state.blocking_lock();
+            let scene = shared.scene.blocking_lock();
+            scene.active_tab
+        };
+        assert_eq!(
+            active_tab,
+            Some(second_tab),
+            "Ctrl+Tab must execute the shell's next-tab action locally"
+        );
+        assert_eq!(
+            *harness.app.state.active_tab_mirror.lock().unwrap(),
+            Some(second_tab),
+            "the shell tab switch must refresh the event-loop mirror"
+        );
+        {
+            let chrome = harness.app.state.chrome_state.read().unwrap();
+            assert_eq!(chrome.active_tab_index, 1);
+            assert_eq!(chrome.tabs[0].name, "Configured One");
+            assert_eq!(chrome.tabs[1].name, "Configured Two");
+        }
+        assert!(
+            received_events(&mut rx).is_empty(),
+            "a shell-reserved KeyDown must never reach an agent"
+        );
+    }
+
+    /// Runtime tab topology can grow after chrome labels are configured. The
+    /// shell reconciliation must retain labels for existing chrome slots and
+    /// synthesize a neutral label only for the newly-discovered slot.
+    #[test]
+    fn ctrl_tab_preserves_configured_chrome_label_when_scene_adds_tab() {
+        let mut harness = HeadlessEventLoopHarness::new();
+        let (_tile_id, _node_id, mut rx) = install_button(&mut harness, true);
+        let second_tab = {
+            let shared = harness.app.state.shared_state.blocking_lock();
+            let mut scene = shared.scene.blocking_lock();
+            scene.create_tab("Second", 1).unwrap()
+        };
+        harness.app.state.focus_manager.add_tab(second_tab);
+        {
+            let mut chrome = harness.app.state.chrome_state.write().unwrap();
+            chrome.add_tab(10, "Configured One".to_string());
+        }
+
+        harness.enqueue(ctrl_key_down("Tab", "Tab", false, 1_000));
+        harness.drain();
+
+        let chrome = harness.app.state.chrome_state.read().unwrap();
+        assert_eq!(chrome.tabs[0].name, "Configured One");
+        assert_eq!(chrome.tabs[1].name, "Tab 2");
+        assert!(
+            received_events(&mut rx).is_empty(),
+            "the shell-owned tab shortcut must remain agent-inaccessible"
+        );
+    }
+
+    /// A shell-owned KeyDown consumes its physical sequence. Its matching
+    /// release must not surface as an impossible agent-visible KeyUp after the
+    /// shell already intercepted the press.
+    #[test]
+    fn matching_ctrl_tab_key_up_never_reaches_agent() {
+        let mut harness = HeadlessEventLoopHarness::new();
+        let (_tile_id, _node_id, mut rx) = install_button(&mut harness, true);
+
+        harness.enqueue(ctrl_key_down("Tab", "Tab", false, 1_000));
+        harness.drain();
+        let _ = received_events(&mut rx);
+
+        harness.enqueue(PendingKeyboardEvent::KeyUp(RawKeyUpEvent {
+            key_code: "Tab".to_string(),
+            key: "Tab".to_string(),
+            // The user may release Ctrl before Tab. The physical identity from
+            // KeyDown, not release-time modifiers, must still own this KeyUp.
+            modifiers: KeyboardModifiers::NONE,
+            timestamp_mono_us: MonoUs(1_100),
+        }));
+        harness.drain();
+
+        assert!(
+            received_events(&mut rx).is_empty(),
+            "a matching shell-reserved KeyUp must never reach an agent"
+        );
+    }
+
+    /// Ctrl+Shift+F8/F9 are consumed one stage earlier by the real winit path,
+    /// so the Stage-2 router can observe only their release. The complete
+    /// reserved set remains shell-owned even for that release-only route.
+    #[test]
+    fn os_stage_shell_shortcut_release_never_reaches_agent() {
+        let mut harness = HeadlessEventLoopHarness::new();
+        let (_tile_id, _node_id, mut rx) = install_button(&mut harness, true);
+
+        harness.enqueue(ctrl_key_up("F9", "F9", true, 1_100));
+        harness.drain();
+
+        assert!(
+            received_events(&mut rx).is_empty(),
+            "the monitor-cycle KeyUp must remain shell-owned after Stage 1 consumed its KeyDown"
+        );
+    }
+
+    /// The shell intercept is an exact reserved-set match, not a blanket Ctrl
+    /// filter. Ordinary focused-agent shortcuts keep their raw down/up route.
+    #[test]
+    fn non_reserved_ctrl_key_sequence_still_reaches_focused_agent() {
+        let mut harness = HeadlessEventLoopHarness::new();
+        let (_tile_id, _node_id, mut rx) = install_button(&mut harness, true);
+
+        harness.enqueue(ctrl_key_down("KeyA", "a", false, 1_000));
+        harness.enqueue(ctrl_key_up("KeyA", "a", false, 1_100));
+        harness.drain();
+
+        let events = received_events(&mut rx);
+        assert!(
+            events
+                .iter()
+                .any(|(_, event)| matches!(event, ProtoInputEvent::KeyDown(_))),
+            "non-reserved Ctrl+A KeyDown must retain raw agent routing; got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|(_, event)| matches!(event, ProtoInputEvent::KeyUp(_))),
+            "non-reserved Ctrl+A KeyUp must retain raw agent routing; got {events:?}"
+        );
     }
 
     /// RFC 0004 §10 production proof: keyboard is a concrete pointer-free

@@ -2028,6 +2028,7 @@ mod tests {
             composer_pointer_drag_anchor: None,
             portal_resize_states: std::collections::HashMap::new(),
             consumed_portal_resize_keydowns: std::collections::HashSet::new(),
+            consumed_shell_shortcut_keydowns: std::collections::HashSet::new(),
             keyboard_activation_nodes: std::collections::HashMap::new(),
             consumed_command_keydowns: std::collections::HashSet::new(),
             local_composer_state: Arc::new(StdMutex::new(None)),
