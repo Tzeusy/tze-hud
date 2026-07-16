@@ -431,7 +431,7 @@ mod tests {
         *harness.app.state.active_tab_mirror.lock().unwrap() = Some(tab_id);
 
         let tx = tze_hud_protocol::session_server::InputEventSender::new(16);
-        let rx = tx.subscribe();
+        let rx = tx.subscribe_all();
         harness.app.state.input_event_tx = Some(tx);
         (tile_id, node_id, rx)
     }

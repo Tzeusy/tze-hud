@@ -1956,7 +1956,7 @@ mod tests {
         let (_paste_inject_tx, paste_inject_rx) = tokio::sync::mpsc::unbounded_channel();
         let (frame_ready_tx, frame_ready_rx) = frame_ready_channel();
         let input_event_tx = tze_hud_protocol::session_server::InputEventSender::new(8);
-        let input_event_rx = input_event_tx.subscribe();
+        let input_event_rx = input_event_tx.subscribe_all();
         let safe_mode_atomic = {
             let state = shared_state
                 .try_lock()

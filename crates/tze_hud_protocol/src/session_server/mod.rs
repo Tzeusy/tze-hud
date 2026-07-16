@@ -494,9 +494,9 @@ impl HudSession for HudSessionImpl {
         // immediately after it is spawned (before the task subscribes itself).
         let mut capability_revocation_rx = self.capability_revocation_tx.subscribe();
 
-        // Subscribe to the input event broadcast channel (hud-i6yd.6).
-        // Each session handler delivers only batches addressed to its own namespace.
-        let mut input_event_rx = self.input_event_tx.subscribe();
+        // Clone the input-event sender into the task. The durable subscription
+        // is created only after authentication establishes the namespace.
+        let input_event_tx = self.input_event_tx.clone();
 
         // Subscribe to the element-repositioned broadcast channel (hud-bs2q.6).
         // Delivery is gated on SCENE_TOPOLOGY subscription in the session loop.
@@ -614,6 +614,11 @@ impl HudSession for HudSessionImpl {
 
             // Transition: Handshaking/Resuming → Active (RFC 0005 §1.1)
             session.transition(SessionState::Active);
+
+            // Register the durable input lane only after the session has an
+            // authenticated namespace. This prevents unrelated or incomplete
+            // sessions from accumulating transactional input for other agents.
+            let mut input_event_rx = input_event_tx.subscribe(session.namespace.clone());
 
             // Send SceneSnapshot after successful handshake (RFC 0005 §1.3, §6.4)
             {

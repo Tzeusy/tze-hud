@@ -832,7 +832,7 @@ mod tests {
         tze_hud_protocol::session_server::InputEventReceiver,
     ) {
         let tx = tze_hud_protocol::session_server::InputEventSender::new(8);
-        let rx = tx.subscribe();
+        let rx = tx.subscribe_all();
         (tx, rx)
     }
     use crate::channels::{INPUT_EVENT_CAPACITY, InputEventKind};

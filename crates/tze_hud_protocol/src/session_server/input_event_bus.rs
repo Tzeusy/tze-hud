@@ -16,7 +16,12 @@ pub struct InputEventSender {
 
 struct InputEventBusInner {
     ephemeral_tx: tokio::sync::broadcast::Sender<AddressedBatch>,
-    transactional_subscribers: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<AddressedBatch>>>,
+    transactional_subscribers: Mutex<Vec<TransactionalSubscriber>>,
+}
+
+struct TransactionalSubscriber {
+    namespace: Option<String>,
+    tx: tokio::sync::mpsc::UnboundedSender<AddressedBatch>,
 }
 
 pub struct InputEventReceiver {
@@ -48,13 +53,26 @@ impl InputEventSender {
         }
     }
 
-    pub fn subscribe(&self) -> InputEventReceiver {
+    pub fn subscribe(&self, namespace: impl Into<String>) -> InputEventReceiver {
+        self.subscribe_inner(Some(namespace.into()))
+    }
+
+    /// Subscribe without namespace filtering for focused transport tests.
+    #[doc(hidden)]
+    pub fn subscribe_all(&self) -> InputEventReceiver {
+        self.subscribe_inner(None)
+    }
+
+    fn subscribe_inner(&self, namespace: Option<String>) -> InputEventReceiver {
         let (transactional_tx, transactional_rx) = tokio::sync::mpsc::unbounded_channel();
         self.inner
             .transactional_subscribers
             .lock()
             .expect("input-event subscriber registry poisoned")
-            .push(transactional_tx);
+            .push(TransactionalSubscriber {
+                namespace,
+                tx: transactional_tx,
+            });
         InputEventReceiver {
             ephemeral_rx: self.inner.ephemeral_tx.subscribe(),
             transactional_rx,
@@ -75,7 +93,14 @@ impl InputEventSender {
                 .expect("input-event subscriber registry poisoned");
             let mut delivered = 0;
             subscribers.retain(|subscriber| {
-                if subscriber.send(item.clone()).is_ok() {
+                if subscriber
+                    .namespace
+                    .as_deref()
+                    .is_some_and(|namespace| namespace != item.0)
+                {
+                    return true;
+                }
+                if subscriber.tx.send(item.clone()).is_ok() {
                     delivered += 1;
                     true
                 } else {

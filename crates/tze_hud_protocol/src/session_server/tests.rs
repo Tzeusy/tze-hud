@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn transactional_command_input_does_not_lag_under_receiver_backpressure() {
     let service = HudSessionImpl::new(SceneGraph::new(800.0, 600.0), "test-psk");
-    let mut receiver = service.input_event_tx.subscribe();
+    let mut receiver = service.input_event_tx.subscribe("agent-a");
 
     for interaction_id in 0..=BROADCAST_CHANNEL_CAPACITY as u64 {
         let batch = crate::proto::EventBatch {
@@ -34,6 +34,31 @@ async fn transactional_command_input_does_not_lag_under_receiver_backpressure() 
         })
         .expect("first event must remain a command input event");
     assert_eq!(first_command.interaction_id, "0");
+}
+
+#[test]
+fn transactional_input_is_not_enqueued_for_an_unrelated_namespace() {
+    let service = HudSessionImpl::new(SceneGraph::new(800.0, 600.0), "test-psk");
+    let mut agent_a_receiver = service.input_event_tx.subscribe("agent-a");
+    let batch = crate::proto::EventBatch {
+        frame_number: 0,
+        batch_ts_us: 1,
+        events: vec![crate::proto::InputEnvelope {
+            event: Some(crate::proto::input_envelope::Event::CommandInput(
+                crate::proto::CommandInputEvent {
+                    interaction_id: "foreign-command".to_string(),
+                    ..Default::default()
+                },
+            )),
+        }],
+    };
+
+    service.inject_input_event("agent-b", batch);
+
+    assert!(
+        agent_a_receiver.try_recv().is_err(),
+        "agent-a durable queue must not receive agent-b transactional input"
+    );
 }
 use crate::proto::session::hud_session_client::HudSessionClient;
 use crate::proto::session::hud_session_server::HudSessionServer;
