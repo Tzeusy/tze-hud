@@ -12,13 +12,13 @@ on:
         required: false
         default: "120"
       width:
-        description: "Benchmark surface width"
+        description: "Benchmark surface width (blank uses monitor auto-size)"
         required: false
-        default: "1920"
+        default: ""
       height:
-        description: "Benchmark surface height"
+        description: "Benchmark surface height (blank uses monitor auto-size)"
         required: false
-        default: "1080"
+        default: ""
       fail_on_budget:
         description: "Fail the job when overlay p99 delta exceeds +0.5 ms"
         required: false
@@ -68,11 +68,19 @@ jobs:
           $args = @(
             "-ExePath", "target\release\tze_hud.exe",
             "-OutputDir", "artifacts\windowed-fullscreen-overlay-perf",
-            "-Width", "${{ github.event.inputs.width || '1920' }}",
-            "-Height", "${{ github.event.inputs.height || '1080' }}",
             "-Frames", "${{ github.event.inputs.frames || '600' }}",
             "-WarmupFrames", "${{ github.event.inputs.warmup_frames || '120' }}"
           )
+          $surfaceWidth = "${{ github.event.inputs.width }}"
+          $surfaceHeight = "${{ github.event.inputs.height }}"
+          $hasWidth = -not [string]::IsNullOrWhiteSpace($surfaceWidth)
+          $hasHeight = -not [string]::IsNullOrWhiteSpace($surfaceHeight)
+          if ($hasWidth -xor $hasHeight) {
+            throw "width and height workflow inputs must be supplied together"
+          }
+          if ($hasWidth) {
+            $args += @("-Width", $surfaceWidth, "-Height", $surfaceHeight)
+          }
           if ("${{ github.event.inputs.fail_on_budget || 'false' }}" -eq "true") {
             $args += "-FailOnBudget"
           }
