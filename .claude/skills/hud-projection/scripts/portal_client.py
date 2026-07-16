@@ -18,10 +18,9 @@ Environment:
   Resolve both with:  eval "$(.claude/skills/user-test/scripts/tzehouse_env.sh)"
   (or hud_vm_env.sh for the autonomous VM testhost).
 
-Dialect: the runtime's MCP server dispatches tool names as bare JSON-RPC
-methods and does not implement standard `tools/call` (bug hud-09emd). This
-client tries the bare method first and transparently falls back to
-`tools/call` so it keeps working when hud-09emd is fixed.
+Dialect: the runtime supports standard MCP `tools/call` as the primary wire
+shape. This client uses it first and falls back to the legacy bare-method
+dialect only when an older server reports `tools/call` as method-not-found.
 
 Subcommands:
   attach   --projection-id ID [--display-name S] [--provider-kind claude]
@@ -135,7 +134,7 @@ def rpc(method, params):
     except urllib.error.URLError as e:
         die(f"cannot reach {mcp_url()}: {e.reason}")
     if "text/event-stream" in ctype:
-        lines = [l[5:].strip() for l in raw.splitlines() if l.startswith("data:")]
+        lines = [line[5:].strip() for line in raw.splitlines() if line.startswith("data:")]
         raw = lines[-1] if lines else "{}"
     try:
         return json.loads(raw)
@@ -144,15 +143,23 @@ def rpc(method, params):
 
 
 def call_tool(tool, args):
-    """Bare-method dialect first; tools/call fallback (hud-09emd)."""
+    """Use standard MCP tools/call first; retain bare-method compatibility."""
     args.setdefault("client_timestamp_wall_us", int(time.time() * 1_000_000))
     args.setdefault("request_id", f"req-{tool}-{int(time.time() * 1000)}")
-    resp = rpc(tool, args)
+    resp = rpc("tools/call", {"name": tool, "arguments": args})
     if (resp.get("error") or {}).get("code") == -32601:
-        resp = rpc("tools/call", {"name": tool, "arguments": args})
-        content = resp.get("result", {}).get("content")
-        if isinstance(content, list) and content and content[0].get("type") == "text":
-            resp = {"jsonrpc": "2.0", "result": json.loads(content[0]["text"]), "id": resp.get("id")}
+        return rpc(tool, args)
+    tools_call_result = resp.get("result", {})
+    content = tools_call_result.get("content")
+    if isinstance(content, list) and content and content[0].get("type") == "text":
+        text = content[0]["text"]
+        if tools_call_result.get("isError") is True:
+            return {
+                "jsonrpc": "2.0",
+                "error": {"code": -32000, "message": text},
+                "id": resp.get("id"),
+            }
+        resp = {"jsonrpc": "2.0", "result": json.loads(text), "id": resp.get("id")}
     return resp
 
 

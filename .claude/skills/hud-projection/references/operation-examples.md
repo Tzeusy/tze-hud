@@ -4,6 +4,28 @@ These payloads are provider-neutral. Use the same schema through an external pro
 
 Replace timestamps with wall-clock microseconds and generate unique request IDs.
 
+## MCP Wire Envelope
+
+Use the standard MCP `tools/call` method as the primary wire dialect. Put the
+per-operation payloads below in `params.arguments` and name the corresponding
+`portal_projection_*` tool in `params.name`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "portal_projection_attach",
+    "arguments": { "operation": "attach", "projection_id": "..." }
+  }
+}
+```
+
+The runtime retains direct tool-name methods only as a legacy fallback for
+older lightweight clients. Both dialects use the same tool names, operation
+payloads, authorization, and capability gates.
+
 ## Attach
 
 Codex:

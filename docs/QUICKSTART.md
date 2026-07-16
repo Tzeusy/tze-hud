@@ -235,7 +235,7 @@ curl -s -X POST http://127.0.0.1:9090/mcp \
 | `refusing startup with default PSK value "tze-hud-key"` | Set a non-trivial PSK (`--psk` / `TZE_HUD_PSK`). `quickstart.sh` generates one. |
 | Nothing printed on stdout after launch | The runtime always prints a one-time non-secret startup banner (bind addrs + attach hint). *Structured* logs beyond it are gated behind the `TZE_HUD_LOG` env filter — run with `TZE_HUD_LOG=info` for detailed startup/bind logs. (`quickstart.sh` prints the attach block regardless.) |
 | Projection tool call rejected `CAPABILITY_REQUIRED` | `TZE_HUD_MCP_RESIDENT_PRINCIPAL` is not set equal to the PSK, or the bearer differs from the PSK. Make principal == bearer == PSK. |
-| `No active tab` on the autonomous test VM | Known runtime bug (hud-d5rcd) on the WARP-rendered VM: call MCP `create_tab {"name":"Main"}` once before portal work. Not needed on a normal GPU desktop where `[[tabs]]` materializes. |
+| `No active tab` on the autonomous test VM | WARP-VM-specific fallback: call MCP `create_tab {"name":"Main"}` once before portal work. The general config-tab bootstrap is fixed; this is not needed on a normal GPU desktop where `[[tabs]]` materializes. |
 | Window won't open on a headless box | Expected — you need a real display server. Use overlay/fullscreen on a desktop, or the TigerVNC path in `README.md`. |
 
 ---
