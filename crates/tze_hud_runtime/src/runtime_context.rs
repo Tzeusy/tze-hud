@@ -645,6 +645,7 @@ mod tests {
         // Snapshot frozen state before reload.
         let profile_name_before = ctx.profile.name.clone();
         let max_tiles_before = ctx.profile.max_tiles;
+        let envelope_before = ctx.operational_envelope.clone();
 
         // Reload hot config.
         ctx.reload_hot_config(HotReloadableConfig {
@@ -660,6 +661,7 @@ mod tests {
         // Frozen fields unchanged.
         assert_eq!(ctx.profile.name, profile_name_before);
         assert_eq!(ctx.profile.max_tiles, max_tiles_before);
+        assert_eq!(ctx.operational_envelope, envelope_before);
         // Frozen agent registry unchanged.
         let policy = ctx.capability_policy_for("my-agent");
         assert!(

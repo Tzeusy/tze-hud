@@ -702,6 +702,46 @@ mod tests {
         assert_eq!(profile.max_font_resident_mb, 40);
     }
 
+    #[test]
+    fn built_in_resident_classes_exactly_partition_the_aggregate() {
+        for profile in [DisplayProfile::full_display(), DisplayProfile::headless()] {
+            let class_total = u64::from(profile.max_resource_resident_mb)
+                + u64::from(profile.max_widget_asset_resident_mb)
+                + u64::from(profile.max_widget_raster_cache_mb)
+                + u64::from(profile.max_font_resident_mb);
+            assert_eq!(
+                class_total,
+                u64::from(profile.max_runtime_resident_mb),
+                "{} class ceilings must exactly partition the aggregate",
+                profile.name
+            );
+        }
+    }
+
+    #[test]
+    fn custom_resident_overrides_take_precedence_and_omissions_inherit_base() {
+        let raw = RawConfig {
+            runtime: Some(RawRuntime {
+                profile: Some("custom".into()),
+                ..Default::default()
+            }),
+            display_profile: Some(RawDisplayProfile {
+                extends: Some("full-display".into()),
+                max_runtime_resident_mb: Some(1000),
+                max_resource_resident_mb: Some(400),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let profile = resolve_profile(&raw, 8192, 60).expect("custom profile resolves");
+        assert_eq!(profile.max_runtime_resident_mb, 1000);
+        assert_eq!(profile.max_resource_resident_mb, 400);
+        assert_eq!(profile.max_widget_asset_resident_mb, 192);
+        assert_eq!(profile.max_widget_raster_cache_mb, 256);
+        assert_eq!(profile.max_font_resident_mb, 64);
+    }
+
     /// WHEN extends = "headless" THEN CONFIG_HEADLESS_NOT_EXTENDABLE (lines 68-69).
     #[test]
     fn spec_headless_not_extendable() {
