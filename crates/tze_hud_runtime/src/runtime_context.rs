@@ -86,6 +86,10 @@ use tze_hud_protocol::auth::CapabilityPolicy;
 use tze_hud_scene::config::{
     DisplayProfile, MediaIngressConfig, RegisteredAgentBudgetOverrides, ResolvedConfig,
 };
+use tze_hud_scene::types::ResourceBudget;
+
+use crate::admission::{DEFAULT_MAX_GUEST_SESSIONS, SessionLimits};
+use crate::session::{HARD_MAX_TEXTURE_BYTES, HARD_MAX_TILES, HARD_MAX_UPDATE_RATE_HZ};
 
 // ─── FallbackPolicy ───────────────────────────────────────────────────────────
 
@@ -359,6 +363,57 @@ impl RuntimeContext {
     ) -> Option<&RegisteredAgentBudgetOverrides> {
         self.agent_budget_overrides.get(agent_name)
     }
+
+    /// Build runtime session limits from the frozen profile envelope.
+    ///
+    /// Resident/embodied sessions consume the profile presence pool. Guests
+    /// retain the independent control-plane safety limit.
+    pub fn session_limits(&self) -> SessionLimits {
+        let max_resident =
+            usize::try_from(self.operational_envelope.max_resident_sessions).unwrap_or(usize::MAX);
+        SessionLimits::new(
+            max_resident,
+            DEFAULT_MAX_GUEST_SESSIONS,
+            max_resident.saturating_add(DEFAULT_MAX_GUEST_SESSIONS),
+        )
+    }
+
+    /// Resolve a per-session resource budget using config precedence.
+    ///
+    /// A registered override replaces the canonical default for its dimension,
+    /// then the value is capped by the selected profile and absolute runtime
+    /// hard maximum. Missing overrides retain canonical defaults.
+    pub fn effective_resource_budget_for(&self, agent_name: &str) -> ResourceBudget {
+        let canonical = ResourceBudget::default();
+        let overrides = self
+            .agent_budget_overrides(agent_name)
+            .copied()
+            .unwrap_or_default();
+
+        let requested_texture_bytes = overrides
+            .max_texture_mb
+            .map(|mib| u64::from(mib) * MIB_BYTES)
+            .unwrap_or(canonical.max_texture_bytes);
+        let requested_update_hz = overrides
+            .max_update_hz
+            .map(|hz| hz as f32)
+            .unwrap_or(canonical.max_update_rate_hz);
+
+        ResourceBudget {
+            max_tiles: overrides
+                .max_tiles
+                .unwrap_or(canonical.max_tiles)
+                .min(self.operational_envelope.max_leased_tiles)
+                .min(HARD_MAX_TILES),
+            max_texture_bytes: requested_texture_bytes
+                .min(self.operational_envelope.max_agent_leased_texture_bytes)
+                .min(HARD_MAX_TEXTURE_BYTES),
+            max_update_rate_hz: requested_update_hz
+                .min(self.operational_envelope.max_agent_update_hz as f32)
+                .min(HARD_MAX_UPDATE_RATE_HZ),
+            ..canonical
+        }
+    }
 }
 
 // ─── Shared runtime context type alias ───────────────────────────────────────
@@ -464,6 +519,52 @@ mod tests {
                 max_update_hz: Some(7),
             })
         );
+    }
+
+    #[test]
+    fn session_limits_use_profile_resident_ceiling_and_separate_guest_pool() {
+        let ctx = RuntimeContext::from_config(make_config(vec![]), FallbackPolicy::Guest);
+        let limits = ctx.session_limits();
+
+        assert_eq!(limits.max_resident, 8);
+        assert_eq!(limits.max_guest, DEFAULT_MAX_GUEST_SESSIONS);
+        assert_eq!(limits.max_total, 8 + DEFAULT_MAX_GUEST_SESSIONS);
+    }
+
+    #[test]
+    fn effective_budget_uses_canonical_defaults_capped_by_profile() {
+        let mut config = make_config(vec![]);
+        config.profile.max_tiles = 4;
+        config.profile.max_texture_mb = 128;
+        config.profile.max_agent_update_hz = 20;
+        let ctx = RuntimeContext::from_config(config, FallbackPolicy::Guest);
+
+        let budget = ctx.effective_resource_budget_for("unregistered");
+        assert_eq!(budget.max_tiles, 4);
+        assert_eq!(budget.max_texture_bytes, 128 * 1024 * 1024);
+        assert_eq!(budget.max_update_rate_hz, 20.0);
+    }
+
+    #[test]
+    fn registered_overrides_replace_defaults_then_obey_profile_and_hard_caps() {
+        let mut config = make_config(vec![]);
+        config.profile.max_tiles = 100;
+        config.profile.max_texture_mb = 4096;
+        config.profile.max_agent_update_hz = 240;
+        config.agent_budget_overrides.insert(
+            "agent-a".into(),
+            RegisteredAgentBudgetOverrides {
+                max_tiles: Some(80),
+                max_texture_mb: Some(3072),
+                max_update_hz: Some(180),
+            },
+        );
+        let ctx = RuntimeContext::from_config(config, FallbackPolicy::Guest);
+
+        let budget = ctx.effective_resource_budget_for("agent-a");
+        assert_eq!(budget.max_tiles, HARD_MAX_TILES);
+        assert_eq!(budget.max_texture_bytes, HARD_MAX_TEXTURE_BYTES);
+        assert_eq!(budget.max_update_rate_hz, HARD_MAX_UPDATE_RATE_HZ);
     }
 
     #[test]
