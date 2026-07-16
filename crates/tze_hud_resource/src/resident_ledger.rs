@@ -257,4 +257,19 @@ mod tests {
         assert!(ledger.release(ResidentClass::Font, &id));
         assert_eq!(ledger.snapshot(), ResidentLedgerSnapshot::default());
     }
+
+    #[test]
+    fn replacement_reserves_before_old_frame_allocation_is_released() {
+        let ledger = ledger();
+        let old = AllocationId::from("widget:old-frame");
+        ledger
+            .reserve(ResidentClass::WidgetRaster, old.clone(), 15)
+            .unwrap();
+        assert!(matches!(
+            ledger.reserve(ResidentClass::WidgetRaster, "widget:new-frame", 10),
+            Err(ResidentReserveError::ClassLimit { .. })
+        ));
+        assert_eq!(ledger.snapshot().widget_raster_bytes, 15);
+        assert!(ledger.release(ResidentClass::WidgetRaster, &old));
+    }
 }

@@ -508,6 +508,17 @@ impl super::Compositor {
         if let std::collections::hash_map::Entry::Vacant(entry) =
             self.image_bytes.entry(resource_id)
         {
+            if let Some(ledger) = &self.resident_ledger
+                && ledger
+                    .reserve(
+                        tze_hud_resource::ResidentClass::Resource,
+                        format!("image:{resource_id}:cpu"),
+                        rgba_data.len() as u64,
+                    )
+                    .is_err()
+            {
+                return;
+            }
             entry.insert(rgba_data);
             self.image_dims.insert(resource_id, (width, height));
         }
@@ -552,6 +563,17 @@ impl super::Compositor {
                 actual = rgba_data.len(),
                 "image bytes length mismatch — falling back to placeholder"
             );
+            return false;
+        }
+        if let Some(ledger) = &self.resident_ledger
+            && ledger
+                .reserve(
+                    tze_hud_resource::ResidentClass::Resource,
+                    format!("image:{resource_id}:gpu"),
+                    expected_bytes as u64,
+                )
+                .is_err()
+        {
             return false;
         }
 
@@ -823,6 +845,28 @@ impl super::Compositor {
     /// `ResourceId`s that appeared in zone publications or tile nodes during
     /// this frame. Any cache entry not in this set is dropped.
     pub fn evict_unused_image_textures(&mut self, referenced_ids: &HashSet<ResourceId>) {
+        if let Some(ledger) = &self.resident_ledger {
+            for id in self
+                .image_texture_cache
+                .keys()
+                .filter(|id| !referenced_ids.contains(id))
+            {
+                ledger.release(
+                    tze_hud_resource::ResidentClass::Resource,
+                    &tze_hud_resource::AllocationId(format!("image:{id}:gpu")),
+                );
+            }
+            for id in self
+                .image_bytes
+                .keys()
+                .filter(|id| !referenced_ids.contains(id))
+            {
+                ledger.release(
+                    tze_hud_resource::ResidentClass::Resource,
+                    &tze_hud_resource::AllocationId(format!("image:{id}:cpu")),
+                );
+            }
+        }
         self.image_texture_cache
             .retain(|id, _| referenced_ids.contains(id));
         // Also evict bytes and dims for resources no longer referenced.

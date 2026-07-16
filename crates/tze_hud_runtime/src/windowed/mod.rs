@@ -933,6 +933,7 @@ impl ApplicationHandler for WinitApp {
             .format;
         compositor.init_text_renderer(surface_format);
         compositor.init_widget_renderer(surface_format);
+        compositor.set_resident_ledger(self.state.runtime_context.resident_ledger.clone());
         // Apply the resolved per-surface truncation-input bound so the
         // viewport-adjacent-window fallback engages at the operator-configured
         // threshold rather than the compositor's built-in default (hud-59p2z).

@@ -483,8 +483,19 @@ impl super::Compositor {
     /// Calling this multiple times replaces the existing renderer (e.g. on surface
     /// reconfiguration or format change). Any cached textures are discarded.
     pub fn init_widget_renderer(&mut self, format: wgpu::TextureFormat) {
-        self.widget_renderer = Some(WidgetRenderer::new(&self.device, format));
+        let mut renderer = WidgetRenderer::new(&self.device, format);
+        if let Some(ledger) = &self.resident_ledger {
+            renderer.set_resident_ledger(ledger.clone());
+        }
+        self.widget_renderer = Some(renderer);
         tracing::debug!(format = ?format, "widget renderer initialized");
+    }
+
+    pub fn set_resident_ledger(&mut self, ledger: tze_hud_resource::ResidentLedger) {
+        if let Some(renderer) = &mut self.widget_renderer {
+            renderer.set_resident_ledger(ledger.clone());
+        }
+        self.resident_ledger = Some(ledger);
     }
 
     /// Get a mutable reference to the widget renderer, if initialized.

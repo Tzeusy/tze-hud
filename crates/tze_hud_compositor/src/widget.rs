@@ -1705,6 +1705,7 @@ pub fn interpolate_param(
 /// When `dirty` is true, the compositor re-rasterizes the SVG and uploads a
 /// new texture. When false, the cached texture is reused.
 pub struct WidgetTextureEntry {
+    resident_allocation_id: Option<tze_hud_resource::AllocationId>,
     /// The cached wgpu texture (RGBA8Unorm, premultiplied alpha).
     pub texture: wgpu::Texture,
     /// Bind group for sampling the texture in the widget render pass.
@@ -2481,6 +2482,7 @@ pub struct WidgetDrawQuad {
 ///
 /// Created once per compositor and kept for the lifetime of the runtime.
 pub struct WidgetRenderer {
+    resident_ledger: Option<tze_hud_resource::ResidentLedger>,
     /// Raw SVG bytes keyed by (widget_type_id, svg_filename).
     /// Stored at widget type registration time.
     svgs: HashMap<(String, String), Vec<u8>>,
@@ -2530,12 +2532,17 @@ impl WidgetRenderer {
             Self::create_texture_pipeline(device, &texture_bind_group_layout, output_format);
 
         Self {
+            resident_ledger: None,
             svgs: HashMap::new(),
             textures: HashMap::new(),
             render_plans: HashMap::new(),
             texture_bind_group_layout,
             texture_pipeline,
         }
+    }
+
+    pub fn set_resident_ledger(&mut self, ledger: tze_hud_resource::ResidentLedger) {
+        self.resident_ledger = Some(ledger);
     }
 
     fn create_texture_pipeline(
@@ -2804,6 +2811,20 @@ impl WidgetRenderer {
         width: u32,
         height: u32,
     ) {
+        let allocation_id =
+            tze_hud_resource::AllocationId(format!("widget:{instance_name}:{width}x{height}"));
+        if let Some(ledger) = &self.resident_ledger
+            && ledger
+                .reserve(
+                    tze_hud_resource::ResidentClass::WidgetRaster,
+                    allocation_id.clone(),
+                    rgba_data.len() as u64,
+                )
+                .is_err()
+        {
+            tracing::warn!(instance_name, "widget raster cache admission denied");
+            return;
+        }
         // Create the GPU texture.
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(&format!("widget_tex_{instance_name}")),
@@ -2869,9 +2890,13 @@ impl WidgetRenderer {
             ],
         });
 
-        self.textures.insert(
+        let old = self.textures.insert(
             instance_name.to_string(),
             WidgetTextureEntry {
+                resident_allocation_id: self
+                    .resident_ledger
+                    .as_ref()
+                    .map(|_| allocation_id.clone()),
                 texture,
                 bind_group,
                 width,
@@ -2881,6 +2906,12 @@ impl WidgetRenderer {
                 animation: None,
             },
         );
+        if let Some(old) = old
+            && let (Some(ledger), Some(id)) = (&self.resident_ledger, old.resident_allocation_id)
+            && id != allocation_id
+        {
+            ledger.release(tze_hud_resource::ResidentClass::WidgetRaster, &id);
+        }
     }
 
     /// Composite widget textures into the current render pass.
@@ -3094,7 +3125,11 @@ impl WidgetRenderer {
     }
 
     pub fn remove_texture(&mut self, instance_name: &str) {
-        self.textures.remove(instance_name);
+        if let Some(entry) = self.textures.remove(instance_name)
+            && let (Some(ledger), Some(id)) = (&self.resident_ledger, entry.resident_allocation_id)
+        {
+            ledger.release(tze_hud_resource::ResidentClass::WidgetRaster, &id);
+        }
     }
 
     /// Returns true if any widget instance has an active animation (needs re-rasterize).

@@ -144,6 +144,7 @@ impl From<wgpu::AdapterInfo> for CompositorAdapterInfo {
 }
 
 pub struct Compositor {
+    pub(crate) resident_ledger: Option<tze_hud_resource::ResidentLedger>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     adapter_info: CompositorAdapterInfo,
@@ -763,6 +764,7 @@ impl Compositor {
             degradation_policy: CompositorDegradationPolicy::default(),
             text_rasterizer: None,
             widget_renderer: None,
+            resident_ledger: None,
             zone_animation_states: HashMap::new(),
             prev_active_zones: HashMap::new(),
             portal_tile_anim_states: HashMap::new(),
@@ -1060,6 +1062,7 @@ impl Compositor {
             degradation_policy: CompositorDegradationPolicy::default(),
             text_rasterizer: None,
             widget_renderer: None,
+            resident_ledger: None,
             zone_animation_states: HashMap::new(),
             prev_active_zones: HashMap::new(),
             portal_tile_anim_states: HashMap::new(),
