@@ -64,12 +64,12 @@ distinguished by which tools you call (`portal_projection_*` vs the zone/widget
 tools), not by separate servers.
 
 A standard MCP client configured this way (Claude Code, the MCP inspector, the
-SDKs) invokes tools through the MCP-standard `tools/call` method —
+SDKs) invokes tools through the primary MCP-standard `tools/call` method —
 `{"method": "tools/call", "params": {"name": "portal_projection_attach",
 "arguments": { ... }}}` — and receives a spec-shaped result (a `content` array
-with `isError`). The runtime also accepts a **bare-method** dialect where the
+with `isError`). The runtime retains a **legacy bare-method fallback** where the
 JSON-RPC `method` is the tool name directly (e.g.
 `{"method": "portal_projection_attach", "params": { ... }}`), returning the
-tool's raw JSON result; the in-process harness and lightweight scripts use that
-form. Both dialects reach the same tool dispatch table, so tool names and
-`arguments`/`params` shapes are identical between them.
+tool's raw JSON result. Both dialects reach the same tool dispatch table, so
+the operation object in `tools/call.params.arguments` is identical to the
+legacy method's direct `params` object.

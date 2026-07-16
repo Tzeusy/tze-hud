@@ -16,7 +16,7 @@ metadata:
     - tze
     - OpenAI Codex
   status: active
-  last_reviewed: "2026-07-16"
+  last_reviewed: "2026-07-17"
 ---
 
 # HUD Projection
@@ -46,11 +46,11 @@ Projection needs a live windowed runtime with MCP enabled. Two standing targets:
   # starting the VM and/or HUD task if down
   ```
 
-  Caveats on the VM: WARP rendering (no GPU fidelity), and until runtime bug
-  hud-d5rcd is fixed, call MCP `create_tab {"name":"Main"}` once before portal
-  work — config `[[tabs]]` alone don't materialize and mutations fail with
-  "No active tab". A registered agent (`agent-alpha`) is pre-provisioned for
-  resident gRPC sessions.
+  Caveats on the VM: WARP rendering (no GPU fidelity). Normal GPU desktop
+  startup materializes every configured `[[tabs]]` entry. VM-only fallback: if
+  the WARP test VM returns `No active tab`, call MCP
+  `create_tab {"name":"Main"}` once before portal work. A registered agent
+  (`agent-alpha`) is pre-provisioned for resident gRPC sessions.
 
 ## Deterministic Client (Preferred Driver)
 
@@ -83,11 +83,11 @@ file without extending the projection's original expiry deadline.
 For a one-command connectivity trial (attach + greeting + poll), use
 `.claude/skills/user-test/scripts/portal_trial.sh`.
 
-**Wire dialect caveat (hud-09emd):** the runtime's MCP HTTP server dispatches
-tool names as bare JSON-RPC methods (`"method": "portal_projection_attach"`)
-and does not implement standard `tools/call`. `portal_client.py` handles both
-(bare-method first, `tools/call` fallback); spec-standard MCP clients will
-fail against it until hud-09emd is fixed.
+**Wire dialect:** standard MCP `tools/call` is the primary supported dialect.
+`portal_client.py` uses it first and falls back to the legacy bare-method shape
+(`"method": "portal_projection_attach"`) only when an older server reports
+`tools/call` as method-not-found. Both dialects reach the same tool dispatch and
+capability gates.
 
 ## Source Of Truth
 
