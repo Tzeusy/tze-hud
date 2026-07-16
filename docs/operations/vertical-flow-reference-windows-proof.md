@@ -15,14 +15,17 @@ none of the SSH, SCP, helper, controller, or proof commands below are.
 The proof exits nonzero and writes a failed JSON verdict if any required fact is
 missing or false:
 
-- the hardware tag is exactly `TzeHouse` and hostname/GPU/driver/OS are present;
-- the claimed Windows display is 4096x2160 and equals the 4096x2160 readback
-  surface, with exactly one RGBA8 frame;
+- the hardware tag is exactly `TzeHouse`, hostname/GPU/driver/OS are present,
+  and the wgpu adapter that produced the frame matches that claimed host GPU
+  (a CPU/WARP adapter cannot be relabelled as reference-GPU evidence);
+- the claimed Windows display is 4096x2160 and independently equals both the
+  runtime-observed HeadlessSurface and the 4096x2160 render/readback extent,
+  with exactly one RGBA8 frame;
 - three flowed child background bands are present at runtime-resolved `y`
   coordinates and do not overlap;
 - each child has glyph pixels contained within its own resolved background;
-- both inter-child gaps and the deliberately wrong source-`y` sentinel remain
-  the runtime clear color.
+- every pixel in both inter-child gaps and in the full deliberately wrong
+  source-`y` child band remains the runtime clear color.
 
 The fixture is local to `render_artifacts`; do not add it to or modify the
 canonical `TestSceneRegistry`.
@@ -83,10 +86,12 @@ scp -i "$HUD_SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
 
 Use a new timestamped output directory so stale artifacts cannot satisfy the
 evidence check. `-AllowProductionStop` records the explicit authority boundary:
-the controller snapshots the exact production process, rejects foreign live GPU
-locks, stops only `C:\tze_hud\tze_hud.exe`, acquires its own PID-owned lock,
-runs the proof, releases only its own lock, and restarts `TzeHudOverlay` only if
-production was running before takeover.
+the controller verifies that `TzeHudOverlay` executes the exact production path
+and that the exact-path production PID owns both canonical listeners before it
+stops anything; it then rejects foreign live GPU locks, stops only that PID,
+removes only locks whose recorded owner is confirmed dead, acquires its own
+PID-owned lock, runs the proof, releases only its own lock, and restarts
+`TzeHudOverlay` only if production was running before takeover.
 
 ```bash
 set -o pipefail
@@ -119,7 +124,11 @@ sha256sum "$LOCAL_OUTPUT"/*
 jq -e '.verdict == "pass" and (.checks | all(.passed))' \
   "$LOCAL_OUTPUT/vertical-flow-readback.json"
 jq -e --arg source "$SOURCE_COMMIT" \
-  '.source_commit == $source and .production_restored == true and .proof_exit_code == 0' \
+  '.source_commit == $source
+   and .production_task_action_verified == true
+   and ((.production_was_running == false) or (.production_listener_ownership_confirmed == true))
+   and .production_restored == true
+   and .proof_exit_code == 0' \
   "$LOCAL_OUTPUT/vertical-flow-controller.json"
 test -s "$LOCAL_OUTPUT/vertical-flow-readback.ppm"
 test "$PROOF_EXIT" -eq 0

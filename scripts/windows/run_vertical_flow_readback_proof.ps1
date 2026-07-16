@@ -41,6 +41,8 @@ $lockAcquired = $false
 $restorationError = $null
 $controllerError = $null
 $proofHash = $null
+$productionTaskVerified = $false
+$productionListenersConfirmed = $false
 
 function Write-ProofLog([string]$Message) {
     Write-Host "[vertical-flow-proof] $Message"
@@ -56,6 +58,27 @@ function Get-ProductionProcess {
                 [System.StringComparison]::OrdinalIgnoreCase
             )
         })
+}
+
+function Assert-ProductionTaskAction {
+    $task = Get-ScheduledTask -TaskName $ProductionTaskName -ErrorAction Stop
+    $actions = @($task.Actions)
+    if ($actions.Count -ne 1 -or
+        -not [string]::Equals(
+            [string]$actions[0].Execute,
+            $ProductionExe,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "scheduled task action does not execute the exact production executable: task=$ProductionTaskName expected=$ProductionExe"
+    }
+    $script:productionTaskVerified = $true
+    return $task
+}
+
+function Get-ListeningPortsOwnedBy([int]$ProcessId) {
+    @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+        Where-Object { $_.OwningProcess -eq $ProcessId } |
+        Select-Object -ExpandProperty LocalPort -Unique)
 }
 
 function Read-GpuLock {
@@ -103,9 +126,7 @@ function Wait-ForRestoredHud([int]$TimeoutSeconds = 30) {
         $restored = @(Get-ProductionProcess)
         if ($restored.Count -eq 1) {
             $pid = [int]$restored[0].ProcessId
-            $ownedPorts = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
-                Where-Object { $_.OwningProcess -eq $pid } |
-                Select-Object -ExpandProperty LocalPort -Unique)
+            $ownedPorts = @(Get-ListeningPortsOwnedBy -ProcessId $pid)
             $requiredPorts = @(50051, 9090)
             if (($requiredPorts | Where-Object { $_ -notin $ownedPorts }).Count -eq 0) {
                 return $pid
@@ -142,7 +163,7 @@ $productionWasRunning = $productionProcesses.Count -eq 1
 $productionPids = @($productionProcesses | ForEach-Object { [int]$_.ProcessId })
 
 try {
-    $null = Get-ScheduledTask -TaskName $ProductionTaskName -ErrorAction Stop
+    $null = Assert-ProductionTaskAction
     $existingLock = Read-GpuLock
     if ($null -ne $existingLock) {
         $lockProcess = Get-Process -Id $existingLock.Pid -ErrorAction SilentlyContinue
@@ -155,6 +176,14 @@ try {
     }
 
     if ($productionWasRunning) {
+        $productionPid = $productionPids[0]
+        $ownedPorts = @(Get-ListeningPortsOwnedBy -ProcessId $productionPid)
+        $requiredPorts = @(50051, 9090)
+        $missingPorts = @($requiredPorts | Where-Object { $_ -notin $ownedPorts })
+        if ($missingPorts.Count -ne 0) {
+            throw "production HUD PID $productionPid does not own canonical listeners before takeover: missing=$($missingPorts -join ',')"
+        }
+        $productionListenersConfirmed = $true
         Write-ProofLog "stopping prior production HUD PID $($productionPids[0])"
         Stop-ScheduledTask -TaskName $ProductionTaskName -ErrorAction SilentlyContinue
         Stop-Process -Id $productionPids -Force
@@ -164,12 +193,10 @@ try {
 
     $staleLock = Read-GpuLock
     if ($null -ne $staleLock) {
-        if ($staleLock.Pid -notin $productionPids) {
-            throw "refusing to remove stale lock not owned by the stopped production HUD PID"
-        }
         if ($null -ne (Get-Process -Id $staleLock.Pid -ErrorAction SilentlyContinue)) {
             throw "refusing to remove GPU lock while its PID is still alive"
         }
+        Write-ProofLog "removing stale GPU lock owned by dead PID $($staleLock.Pid)"
         Remove-Item -LiteralPath $LockFile -Force
     }
 
@@ -273,7 +300,9 @@ $controllerEvidence = [ordered]@{
     started_at = $startedAt.ToString("o")
     completed_at = (Get-Date).ToUniversalTime().ToString("o")
     production_task = $ProductionTaskName
+    production_task_action_verified = $productionTaskVerified
     production_was_running = $productionWasRunning
+    production_listener_ownership_confirmed = $productionListenersConfirmed
     production_stop_confirmed = $productionStopped
     original_production_pids = $productionPids
     production_restored = $productionRestored

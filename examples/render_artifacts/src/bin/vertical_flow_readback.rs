@@ -11,9 +11,10 @@ use std::path::{Path, PathBuf};
 
 use render_artifacts::vertical_flow_proof::{
     ContractCheck, ProofEvidence, ProofReport, ProofVerdict, REFERENCE_HEIGHT, REFERENCE_WIDTH,
-    ReferenceHardware, VerticalFlowFixture, build_fixture, evaluate_evidence, observe_pixels,
-    reference_preflight_passes,
+    ReadbackDimensions, ReferenceHardware, RendererIdentity, VerticalFlowFixture, build_fixture,
+    evaluate_evidence, observe_pixels, reference_preflight_passes,
 };
+use tze_hud_compositor::CompositorSurface;
 use tze_hud_runtime::headless::{HeadlessConfig, HeadlessRuntime};
 
 const REPORT_FILE: &str = "vertical-flow-readback.json";
@@ -167,17 +168,31 @@ async fn capture(
         config_toml: Some(readback_config_toml()),
     })
     .await?;
+    let adapter = runtime.compositor.adapter_info();
+    let renderer = RendererIdentity {
+        backend: adapter.backend.clone(),
+        adapter: adapter.name.clone(),
+        device_type: adapter.device_type.clone(),
+        driver: adapter.driver.clone(),
+        driver_info: adapter.driver_info.clone(),
+    };
     {
         let state = runtime.shared_state().lock().await;
         *state.scene.lock().await = fixture.scene.clone();
     }
+    let (surface_width, surface_height) = runtime.surface.size();
     runtime.render_frame().await;
     let pixels = runtime.read_pixels();
     let evidence = observe_pixels(
         reference,
+        renderer,
         fixture,
-        REFERENCE_WIDTH,
-        REFERENCE_HEIGHT,
+        ReadbackDimensions {
+            surface_width,
+            surface_height,
+            render_width: REFERENCE_WIDTH,
+            render_height: REFERENCE_HEIGHT,
+        },
         &pixels,
     )?;
     Ok((evaluate_evidence(evidence), pixels))
@@ -199,24 +214,50 @@ capabilities = ["create_tiles", "modify_own_tiles"]
 }
 
 fn empty_report(reference: ReferenceHardware, fixture: &VerticalFlowFixture) -> ProofReport {
-    let evidence = observe_pixels(reference, fixture, REFERENCE_WIDTH, REFERENCE_HEIGHT, &[])
-        .unwrap_or_else(|_| ProofEvidence {
-            reference_hardware: ReferenceHardware {
-                tag: String::new(),
-                hostname: String::new(),
-                gpu: String::new(),
-                gpu_driver: String::new(),
-                os: String::new(),
-                display_width: 0,
-                display_height: 0,
-            },
+    let evidence = observe_pixels(
+        reference,
+        RendererIdentity {
+            backend: String::new(),
+            adapter: String::new(),
+            device_type: String::new(),
+            driver: String::new(),
+            driver_info: String::new(),
+        },
+        fixture,
+        ReadbackDimensions {
+            surface_width: REFERENCE_WIDTH,
+            surface_height: REFERENCE_HEIGHT,
             render_width: REFERENCE_WIDTH,
             render_height: REFERENCE_HEIGHT,
-            pixel_buffer_len: 0,
-            children: vec![],
-            gap_samples: vec![],
-            sentinel_sample: None,
-        });
+        },
+        &[],
+    )
+    .unwrap_or_else(|_| ProofEvidence {
+        reference_hardware: ReferenceHardware {
+            tag: String::new(),
+            hostname: String::new(),
+            gpu: String::new(),
+            gpu_driver: String::new(),
+            os: String::new(),
+            display_width: 0,
+            display_height: 0,
+        },
+        renderer: RendererIdentity {
+            backend: String::new(),
+            adapter: String::new(),
+            device_type: String::new(),
+            driver: String::new(),
+            driver_info: String::new(),
+        },
+        surface_width: REFERENCE_WIDTH,
+        surface_height: REFERENCE_HEIGHT,
+        render_width: REFERENCE_WIDTH,
+        render_height: REFERENCE_HEIGHT,
+        pixel_buffer_len: 0,
+        children: vec![],
+        gap_regions: vec![],
+        sentinel_region: None,
+    });
     evaluate_evidence(evidence)
 }
 

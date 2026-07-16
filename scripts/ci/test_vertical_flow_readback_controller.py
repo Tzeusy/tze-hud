@@ -23,6 +23,8 @@ class VerticalFlowReadbackControllerTests(unittest.TestCase):
         self.assertIn("if (-not $AllowProductionStop)", self.controller)
         self.assertIn("live non-production PID", self.controller)
         self.assertIn("Get-Process -Id", self.controller)
+        self.assertIn("removing stale GPU lock owned by dead PID", self.controller)
+        self.assertNotIn("refusing to remove stale lock not owned", self.controller)
 
     def test_controller_acquires_lock_atomically_and_preserves_evidence_reporting(self):
         self.assertIn("[System.IO.FileMode]::CreateNew", self.controller)
@@ -34,6 +36,10 @@ class VerticalFlowReadbackControllerTests(unittest.TestCase):
         self.assertNotIn('Write-Error "restoration failed:', self.controller)
 
     def test_controller_restores_only_prior_runtime_and_verifies_ports(self):
+        self.assertIn("Assert-ProductionTaskAction", self.controller)
+        self.assertIn("scheduled task action", self.controller)
+        self.assertIn("Get-ListeningPortsOwnedBy", self.controller)
+        self.assertIn("before takeover", self.controller)
         self.assertIn("finally {", self.controller)
         self.assertIn("if ($productionWasRunning)", self.controller)
         self.assertIn(

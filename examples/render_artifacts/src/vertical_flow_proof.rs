@@ -70,6 +70,25 @@ pub struct ReferenceHardware {
     pub display_height: u32,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+/// Adapter identity reported by the wgpu runtime that produced the pixels.
+pub struct RendererIdentity {
+    pub backend: String,
+    pub adapter: String,
+    pub device_type: String,
+    pub driver: String,
+    pub driver_info: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+/// Independently observed surface and requested render dimensions.
+pub struct ReadbackDimensions {
+    pub surface_width: u32,
+    pub surface_height: u32,
+    pub render_width: u32,
+    pub render_height: u32,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 /// Integer pixel bounds in the full readback surface.
 pub struct PixelRect {
@@ -109,12 +128,24 @@ pub struct ChildObservation {
 /// Raw reference metadata and pixel-derived observations.
 pub struct ProofEvidence {
     pub reference_hardware: ReferenceHardware,
+    pub renderer: RendererIdentity,
+    pub surface_width: u32,
+    pub surface_height: u32,
     pub render_width: u32,
     pub render_height: u32,
     pub pixel_buffer_len: usize,
     pub children: Vec<ChildObservation>,
-    pub gap_samples: Vec<PixelSample>,
-    pub sentinel_sample: Option<PixelSample>,
+    pub gap_regions: Vec<ClearRegionObservation>,
+    pub sentinel_region: Option<ClearRegionObservation>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+/// A region that must contain only the runtime clear color.
+pub struct ClearRegionObservation {
+    pub name: String,
+    pub rect: PixelRect,
+    pub non_clear_pixels: u64,
+    pub first_non_clear: Option<PixelSample>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -210,7 +241,7 @@ pub fn build_fixture() -> Result<VerticalFlowFixture, Box<dyn std::error::Error>
             }
         })
         .collect();
-    scene.set_tile_root_tree(tile_id, parent, children)?;
+    scene.set_tile_root_tree_checked(tile_id, parent, children, "vertical-flow-proof")?;
 
     Ok(VerticalFlowFixture {
         scene,
@@ -267,11 +298,17 @@ pub fn expected_background_srgb() -> [[u8; 4]; CHILD_COUNT] {
 /// Extracts background, gap, sentinel, and glyph-bound evidence from an RGBA frame.
 pub fn observe_pixels(
     reference_hardware: ReferenceHardware,
+    renderer: RendererIdentity,
     fixture: &VerticalFlowFixture,
-    render_width: u32,
-    render_height: u32,
+    dimensions: ReadbackDimensions,
     pixels: &[u8],
 ) -> Result<ProofEvidence, Box<dyn std::error::Error>> {
+    let ReadbackDimensions {
+        surface_width,
+        surface_height,
+        render_width,
+        render_height,
+    } = dimensions;
     let rects = resolve_background_rects(fixture)?;
     let expected_colors = expected_background_srgb();
     let children = rects
@@ -319,7 +356,7 @@ pub fn observe_pixels(
         })
         .collect::<Vec<_>>();
 
-    let gap_samples = children
+    let gap_regions = children
         .windows(2)
         .enumerate()
         .filter_map(|(index, pair)| {
@@ -327,20 +364,28 @@ pub fn observe_pixels(
             let after = pair[1].background_rect;
             let gap_start = before.bottom();
             let gap_height = after.y.saturating_sub(gap_start);
-            read_sample(
+            observe_clear_region(
                 format!("gap_{}_{}", index + 1, index + 2),
-                before.x + before.width.saturating_sub(8),
-                gap_start + gap_height / 2,
+                PixelRect {
+                    x: before.x,
+                    y: gap_start,
+                    width: before.width,
+                    height: gap_height,
+                },
                 render_width,
                 render_height,
                 pixels,
             )
         })
         .collect();
-    let sentinel_sample = read_sample(
+    let sentinel_region = observe_clear_region(
         "declared_y_sentinel".to_string(),
-        (TILE_X + CHILD_X + CHILD_WIDTH - 8.0) as u32,
-        (TILE_Y + DECLARED_Y_SENTINEL + 8.0) as u32,
+        pixel_rect(
+            TILE_X + CHILD_X,
+            TILE_Y + DECLARED_Y_SENTINEL,
+            CHILD_WIDTH,
+            CHILD_HEIGHT,
+        ),
         render_width,
         render_height,
         pixels,
@@ -348,12 +393,15 @@ pub fn observe_pixels(
 
     Ok(ProofEvidence {
         reference_hardware,
+        renderer,
+        surface_width,
+        surface_height,
         render_width,
         render_height,
         pixel_buffer_len: pixels.len(),
         children,
-        gap_samples,
-        sentinel_sample,
+        gap_regions,
+        sentinel_region,
     })
 }
 
@@ -379,6 +427,28 @@ pub fn evaluate_evidence(evidence: ProofEvidence) -> ProofReport {
             reference.hostname, reference.gpu, reference.gpu_driver, reference.os
         ),
     );
+    let normalized_reference_gpu = normalized_identity(&reference.gpu);
+    let normalized_adapter = normalized_identity(&evidence.renderer.adapter);
+    let renderer_matches_reference = !evidence.renderer.backend.trim().is_empty()
+        && !normalized_reference_gpu.is_empty()
+        && !normalized_adapter.is_empty()
+        && !evidence.renderer.device_type.eq_ignore_ascii_case("cpu")
+        && (normalized_adapter.contains(&normalized_reference_gpu)
+            || normalized_reference_gpu.contains(&normalized_adapter));
+    push_check(
+        &mut checks,
+        "renderer_matches_reference_gpu",
+        renderer_matches_reference,
+        format!(
+            "host_gpu={:?} backend={:?} adapter={:?} device_type={:?} driver={:?} driver_info={:?}",
+            reference.gpu,
+            evidence.renderer.backend,
+            evidence.renderer.adapter,
+            evidence.renderer.device_type,
+            evidence.renderer.driver,
+            evidence.renderer.driver_info
+        ),
+    );
     push_check(
         &mut checks,
         "reference_display",
@@ -391,12 +461,25 @@ pub fn evaluate_evidence(evidence: ProofEvidence) -> ProofReport {
     push_check(
         &mut checks,
         "display_surface_equal",
-        reference.display_width == evidence.render_width
-            && reference.display_height == evidence.render_height,
+        reference.display_width == evidence.surface_width
+            && reference.display_height == evidence.surface_height,
         format!(
-            "display={}x{} render={}x{}",
+            "display={}x{} surface={}x{}",
             reference.display_width,
             reference.display_height,
+            evidence.surface_width,
+            evidence.surface_height
+        ),
+    );
+    push_check(
+        &mut checks,
+        "surface_render_equal",
+        evidence.surface_width == evidence.render_width
+            && evidence.surface_height == evidence.render_height,
+        format!(
+            "surface={}x{} render={}x{}",
+            evidence.surface_width,
+            evidence.surface_height,
             evidence.render_width,
             evidence.render_height
         ),
@@ -423,17 +506,52 @@ pub fn evaluate_evidence(evidence: ProofEvidence) -> ProofReport {
             .children
             .iter()
             .all(|child| child.background_sample.is_some() && child.glyph_bounds.is_some())
-        && evidence.gap_samples.len() == CHILD_COUNT - 1
-        && evidence.sentinel_sample.is_some();
+        && evidence.gap_regions.len() == CHILD_COUNT - 1
+        && evidence.sentinel_region.is_some();
+
+    let expected_fixture = build_fixture()
+        .and_then(|fixture| resolve_background_rects(&fixture))
+        .ok();
+    let fixture_identity = expected_fixture.is_some_and(|rects| {
+        evidence.children.len() == CHILD_COUNT
+            && evidence
+                .children
+                .iter()
+                .zip(CHILD_NAMES)
+                .zip(rects)
+                .zip(expected_background_srgb())
+                .all(|(((child, name), rect), color)| {
+                    child.name == name
+                        && child.background_rect == rect
+                        && child.expected_background_srgb == color
+                })
+    });
+    push_check(
+        &mut checks,
+        "fixture_identity",
+        fixture_identity,
+        format!(
+            "children={:?}",
+            evidence
+                .children
+                .iter()
+                .map(|child| (
+                    &child.name,
+                    child.background_rect,
+                    child.expected_background_srgb
+                ))
+                .collect::<Vec<_>>()
+        ),
+    );
     push_check(
         &mut checks,
         "sample_completeness",
         complete_samples,
         format!(
-            "children={} gaps={} sentinel={}",
+            "children={} gap_regions={} sentinel_region={}",
             evidence.children.len(),
-            evidence.gap_samples.len(),
-            evidence.sentinel_sample.is_some()
+            evidence.gap_regions.len(),
+            evidence.sentinel_region.is_some()
         ),
     );
 
@@ -484,36 +602,45 @@ pub fn evaluate_evidence(evidence: ProofEvidence) -> ProofReport {
         );
     }
 
-    for (index, sample) in evidence.gap_samples.iter().enumerate() {
+    for (index, region) in evidence.gap_regions.iter().enumerate() {
         let between_bands = evidence
             .children
             .get(index)
             .zip(evidence.children.get(index + 1));
         let gap_ok = between_bands.is_some_and(|(before, after)| {
-            sample.y >= before.background_rect.bottom()
-                && sample.y < after.background_rect.y
-                && rgba_near(sample.rgba, CLEAR_SRGB, 8)
+            region.rect.x == before.background_rect.x
+                && region.rect.width == before.background_rect.width
+                && region.rect.y == before.background_rect.bottom()
+                && region.rect.bottom() == after.background_rect.y
+                && region.non_clear_pixels == 0
+                && region.first_non_clear.is_none()
         });
         push_check(
             &mut checks,
             format!("gap_{}_clear", index + 1),
             gap_ok,
-            format!("sample={sample:?}"),
+            format!("region={region:?}"),
         );
     }
 
-    let sentinel_x = (TILE_X + CHILD_X + CHILD_WIDTH - 8.0) as u32;
-    let sentinel_y = (TILE_Y + DECLARED_Y_SENTINEL + 8.0) as u32;
-    let sentinel_ok = evidence.sentinel_sample.as_ref().is_some_and(|sample| {
-        sample.x == sentinel_x && sample.y == sentinel_y && rgba_near(sample.rgba, CLEAR_SRGB, 8)
+    let expected_sentinel = pixel_rect(
+        TILE_X + CHILD_X,
+        TILE_Y + DECLARED_Y_SENTINEL,
+        CHILD_WIDTH,
+        CHILD_HEIGHT,
+    );
+    let sentinel_ok = evidence.sentinel_region.as_ref().is_some_and(|region| {
+        region.rect == expected_sentinel
+            && region.non_clear_pixels == 0
+            && region.first_non_clear.is_none()
     });
     push_check(
         &mut checks,
         "declared_y_sentinel_remains_clear",
         sentinel_ok,
         format!(
-            "sample={:?} expected_coordinate=({sentinel_x},{sentinel_y})",
-            evidence.sentinel_sample
+            "region={:?} expected_rect={expected_sentinel:?}",
+            evidence.sentinel_region
         ),
     );
 
@@ -596,6 +723,14 @@ fn rgba_near(actual: [u8; 4], expected: [u8; 4], tolerance: u8) -> bool {
         .all(|(actual, expected)| actual.abs_diff(expected) <= tolerance)
 }
 
+fn normalized_identity(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 fn read_sample(
     name: String,
     x: u32,
@@ -613,6 +748,45 @@ fn read_pixel(x: u32, y: u32, width: u32, height: u32, pixels: &[u8]) -> Option<
     }
     let offset = ((y * width + x) * 4) as usize;
     pixels.get(offset..offset + 4)?.try_into().ok()
+}
+
+fn observe_clear_region(
+    name: String,
+    rect: PixelRect,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+) -> Option<ClearRegionObservation> {
+    if rect.x + rect.width > width
+        || rect.bottom() > height
+        || pixels.len() != (width * height * 4) as usize
+    {
+        return None;
+    }
+    let mut non_clear_pixels = 0_u64;
+    let mut first_non_clear = None;
+    for y in rect.y..rect.bottom() {
+        for x in rect.x..rect.x + rect.width {
+            let rgba = read_pixel(x, y, width, height, pixels)?;
+            if !rgba_near(rgba, CLEAR_SRGB, 8) {
+                non_clear_pixels += 1;
+                if first_non_clear.is_none() {
+                    first_non_clear = Some(PixelSample {
+                        name: format!("{name}_first_non_clear"),
+                        x,
+                        y,
+                        rgba,
+                    });
+                }
+            }
+        }
+    }
+    Some(ClearRegionObservation {
+        name,
+        rect,
+        non_clear_pixels,
+        first_non_clear,
+    })
 }
 
 fn scan_glyph_bounds(
@@ -681,27 +855,9 @@ mod tests {
     }
 
     fn passing_evidence() -> ProofEvidence {
-        let rects = [
-            PixelRect {
-                x: 300,
-                y: 300,
-                width: 880,
-                height: 220,
-            },
-            PixelRect {
-                x: 300,
-                y: 560,
-                width: 880,
-                height: 220,
-            },
-            PixelRect {
-                x: 300,
-                y: 820,
-                width: 880,
-                height: 220,
-            },
-        ];
-        let colors = [[89, 56, 56, 255], [56, 89, 56, 255], [56, 56, 97, 255]];
+        let fixture = build_fixture().expect("fixture");
+        let rects = resolve_background_rects(&fixture).expect("resolved rects");
+        let colors = expected_background_srgb();
         ProofEvidence {
             reference_hardware: ReferenceHardware {
                 tag: REFERENCE_TAG.to_string(),
@@ -712,19 +868,28 @@ mod tests {
                 display_width: REFERENCE_WIDTH,
                 display_height: REFERENCE_HEIGHT,
             },
+            renderer: RendererIdentity {
+                backend: "Vulkan".into(),
+                adapter: "NVIDIA GeForce RTX 3080".into(),
+                device_type: "DiscreteGpu".into(),
+                driver: "NVIDIA".into(),
+                driver_info: "32.0.15.9636".into(),
+            },
+            surface_width: REFERENCE_WIDTH,
+            surface_height: REFERENCE_HEIGHT,
             render_width: REFERENCE_WIDTH,
             render_height: REFERENCE_HEIGHT,
             pixel_buffer_len: (REFERENCE_WIDTH * REFERENCE_HEIGHT * 4) as usize,
             children: rects
                 .into_iter()
                 .zip(colors)
-                .enumerate()
-                .map(|(index, (rect, color))| ChildObservation {
-                    name: format!("turn_{}", index + 1),
+                .zip(CHILD_NAMES)
+                .map(|((rect, color), name)| ChildObservation {
+                    name: name.into(),
                     background_rect: rect,
                     expected_background_srgb: color,
                     background_sample: Some(sample(
-                        &format!("turn_{}_background", index + 1),
+                        &format!("{name}_background"),
                         rect.x + rect.width - 8,
                         rect.y + 8,
                         color,
@@ -737,16 +902,32 @@ mod tests {
                     }),
                 })
                 .collect(),
-            gap_samples: vec![
-                sample("gap_1_2", 400, 540, CLEAR_SRGB),
-                sample("gap_2_3", 400, 800, CLEAR_SRGB),
-            ],
-            sentinel_sample: Some(sample(
-                "declared_y_sentinel",
-                (TILE_X + CHILD_X + CHILD_WIDTH - 8.0) as u32,
-                (TILE_Y + DECLARED_Y_SENTINEL + 8.0) as u32,
-                CLEAR_SRGB,
-            )),
+            gap_regions: rects
+                .windows(2)
+                .enumerate()
+                .map(|(index, pair)| ClearRegionObservation {
+                    name: format!("gap_{}_{}", index + 1, index + 2),
+                    rect: PixelRect {
+                        x: pair[0].x,
+                        y: pair[0].bottom(),
+                        width: pair[0].width,
+                        height: pair[1].y - pair[0].bottom(),
+                    },
+                    non_clear_pixels: 0,
+                    first_non_clear: None,
+                })
+                .collect(),
+            sentinel_region: Some(ClearRegionObservation {
+                name: "declared_y_sentinel".into(),
+                rect: pixel_rect(
+                    TILE_X + CHILD_X,
+                    TILE_Y + DECLARED_Y_SENTINEL,
+                    CHILD_WIDTH,
+                    CHILD_HEIGHT,
+                ),
+                non_clear_pixels: 0,
+                first_non_clear: None,
+            }),
         }
     }
 
@@ -776,6 +957,17 @@ mod tests {
                 "flowed backgrounds overlap: {pair:?}"
             );
         }
+        let sentinel = pixel_rect(
+            TILE_X + CHILD_X,
+            TILE_Y + DECLARED_Y_SENTINEL,
+            CHILD_WIDTH,
+            CHILD_HEIGHT,
+        );
+        assert!(
+            rects.last().unwrap().bottom() < sentinel.y,
+            "wrong-y sentinel must not intersect the expected flow stack"
+        );
+        assert!(sentinel.bottom() <= REFERENCE_HEIGHT);
     }
 
     #[test]
@@ -801,10 +993,38 @@ mod tests {
     }
 
     #[test]
+    fn software_renderer_cannot_be_relabelled_as_reference_gpu_evidence() {
+        let mut evidence = passing_evidence();
+        evidence.renderer.adapter = "Microsoft Basic Render Driver (WARP)".into();
+        evidence.renderer.device_type = "Cpu".into();
+        let report = evaluate_evidence(evidence);
+        let check = report
+            .checks
+            .iter()
+            .find(|check| check.code == "renderer_matches_reference_gpu")
+            .expect("report must bind the runtime adapter to the claimed reference GPU");
+        assert!(!check.passed);
+        assert_eq!(report.verdict, ProofVerdict::Fail);
+    }
+
+    #[test]
+    fn child_identity_cannot_be_swapped_in_an_otherwise_passing_artifact() {
+        let mut evidence = passing_evidence();
+        evidence.children.swap(0, 1);
+        let report = evaluate_evidence(evidence);
+        let check = report
+            .checks
+            .iter()
+            .find(|check| check.code == "fixture_identity")
+            .expect("report must bind observations to the canonical fixture order");
+        assert!(!check.passed);
+        assert_eq!(report.verdict, ProofVerdict::Fail);
+    }
+
+    #[test]
     fn unequal_display_and_render_surfaces_fail_with_dedicated_check() {
         let mut evidence = passing_evidence();
-        evidence.render_width -= 1;
-        evidence.pixel_buffer_len = (evidence.render_width * evidence.render_height * 4) as usize;
+        evidence.surface_width -= 1;
         let report = evaluate_evidence(evidence);
         let check = report
             .checks
@@ -812,6 +1032,21 @@ mod tests {
             .find(|check| check.code == "display_surface_equal")
             .expect("report must expose display/surface equality separately");
         assert!(!check.passed, "unequal surfaces must fail closed");
+        assert_eq!(report.verdict, ProofVerdict::Fail);
+    }
+
+    #[test]
+    fn unequal_runtime_surface_and_render_fail_with_dedicated_check() {
+        let mut evidence = passing_evidence();
+        evidence.render_width -= 1;
+        evidence.pixel_buffer_len = (evidence.render_width * evidence.render_height * 4) as usize;
+        let report = evaluate_evidence(evidence);
+        let check = report
+            .checks
+            .iter()
+            .find(|check| check.code == "surface_render_equal")
+            .expect("report must expose actual surface/render equality separately");
+        assert!(!check.passed, "unequal surface and render must fail closed");
         assert_eq!(report.verdict, ProofVerdict::Fail);
     }
 
@@ -827,6 +1062,20 @@ mod tests {
         let mut evidence = passing_evidence();
         evidence.render_width = 1920;
         assert_eq!(evaluate_evidence(evidence).verdict, ProofVerdict::Fail);
+    }
+
+    #[test]
+    fn rgba_buffer_length_must_equal_render_width_times_height_times_four() {
+        let mut evidence = passing_evidence();
+        evidence.pixel_buffer_len -= 4;
+        let report = evaluate_evidence(evidence);
+        let check = report
+            .checks
+            .iter()
+            .find(|check| check.code == "render_surface")
+            .expect("report must expose the exact RGBA length contract");
+        assert!(!check.passed);
+        assert_eq!(report.verdict, ProofVerdict::Fail);
     }
 
     #[test]
@@ -847,8 +1096,35 @@ mod tests {
     fn absent_samples_fail_closed() {
         let mut evidence = passing_evidence();
         evidence.children[2].background_sample = None;
-        evidence.gap_samples.clear();
-        evidence.sentinel_sample = None;
+        evidence.gap_regions.clear();
+        evidence.sentinel_region = None;
+        assert_eq!(evaluate_evidence(evidence).verdict, ProofVerdict::Fail);
+    }
+
+    #[test]
+    fn non_clear_wrong_y_region_fails_even_when_the_old_point_is_clear() {
+        let mut evidence = passing_evidence();
+        let sentinel = evidence.sentinel_region.as_mut().unwrap();
+        sentinel.non_clear_pixels = 1;
+        sentinel.first_non_clear = Some(sample(
+            "declared_y_sentinel_non_clear",
+            (TILE_X + CHILD_X + 12.0) as u32,
+            (TILE_Y + DECLARED_Y_SENTINEL + 12.0) as u32,
+            [240, 240, 240, 255],
+        ));
+        assert_eq!(evaluate_evidence(evidence).verdict, ProofVerdict::Fail);
+    }
+
+    #[test]
+    fn any_non_clear_pixel_in_a_gap_fails_closed() {
+        let mut evidence = passing_evidence();
+        evidence.gap_regions[0].non_clear_pixels = 1;
+        evidence.gap_regions[0].first_non_clear = Some(sample(
+            "gap_1_2_first_non_clear",
+            312,
+            532,
+            [89, 56, 56, 255],
+        ));
         assert_eq!(evaluate_evidence(evidence).verdict, ProofVerdict::Fail);
     }
 
@@ -876,9 +1152,14 @@ mod tests {
         }
         let evidence = observe_pixels(
             passing_evidence().reference_hardware,
+            passing_evidence().renderer,
             &fixture,
-            REFERENCE_WIDTH,
-            REFERENCE_HEIGHT,
+            ReadbackDimensions {
+                surface_width: REFERENCE_WIDTH,
+                surface_height: REFERENCE_HEIGHT,
+                render_width: REFERENCE_WIDTH,
+                render_height: REFERENCE_HEIGHT,
+            },
             &pixels,
         )
         .expect("pixel observation must succeed");
@@ -921,9 +1202,14 @@ mod tests {
 
         let evidence = observe_pixels(
             passing_evidence().reference_hardware,
+            passing_evidence().renderer,
             &fixture,
-            REFERENCE_WIDTH,
-            REFERENCE_HEIGHT,
+            ReadbackDimensions {
+                surface_width: REFERENCE_WIDTH,
+                surface_height: REFERENCE_HEIGHT,
+                render_width: REFERENCE_WIDTH,
+                render_height: REFERENCE_HEIGHT,
+            },
             &pixels,
         )
         .expect("pixel observation must succeed");
