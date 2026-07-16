@@ -44,8 +44,17 @@ class WindowedOverlayPerfScriptTests(unittest.TestCase):
         self.assertNotIn('[int]$Width = 1920', self.script)
         self.assertNotIn('[int]$Height = 1080', self.script)
         self.assertIn('$surfaceArgs = @()', self.script)
-        self.assertNotIn('"-Width",', self.workflow)
-        self.assertNotIn('"-Height",', self.workflow)
+        default_args = self.workflow.split("$args = @(", 1)[1].split(")", 1)[0]
+        self.assertNotIn('"-Width",', default_args)
+        self.assertNotIn('"-Height",', default_args)
+
+    def test_workflow_preserves_paired_explicit_surface_opt_in(self) -> None:
+        self.assertIn("      width:\n", self.workflow)
+        self.assertIn("      height:\n", self.workflow)
+        self.assertIn('$surfaceWidth = "${{ github.event.inputs.width }}"', self.workflow)
+        self.assertIn('$surfaceHeight = "${{ github.event.inputs.height }}"', self.workflow)
+        self.assertIn("if ($hasWidth -xor $hasHeight)", self.workflow)
+        self.assertIn('$args += @("-Width", $surfaceWidth, "-Height", $surfaceHeight)', self.workflow)
 
     def test_effective_surface_validation_precedes_delta_calculation(self) -> None:
         validation = self.script.index("$effectiveSurface = Assert-ComparableEffectiveSurfaces")
@@ -64,6 +73,8 @@ class WindowedOverlayPerfScriptTests(unittest.TestCase):
         self.assertIn("malformed window.width", self.powershell_test)
         self.assertIn("malformed window.height", self.powershell_test)
         self.assertIn('Width "3840"', self.powershell_test)
+        self.assertIn("Width 0", self.powershell_test)
+        self.assertIn("Height (-1)", self.powershell_test)
         self.assertIn("effective surface mismatch", self.powershell_test)
         self.assertIn("test-windowed-fullscreen-overlay-perf.ps1", self.ci_workflow)
 

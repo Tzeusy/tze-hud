@@ -11,6 +11,14 @@ on:
         description: "Warmup frames per mode"
         required: false
         default: "120"
+      width:
+        description: "Benchmark surface width (blank uses monitor auto-size)"
+        required: false
+        default: ""
+      height:
+        description: "Benchmark surface height (blank uses monitor auto-size)"
+        required: false
+        default: ""
       fail_on_budget:
         description: "Fail the job when overlay p99 delta exceeds +0.5 ms"
         required: false
@@ -63,6 +71,16 @@ jobs:
             "-Frames", "${{ github.event.inputs.frames || '600' }}",
             "-WarmupFrames", "${{ github.event.inputs.warmup_frames || '120' }}"
           )
+          $surfaceWidth = "${{ github.event.inputs.width }}"
+          $surfaceHeight = "${{ github.event.inputs.height }}"
+          $hasWidth = -not [string]::IsNullOrWhiteSpace($surfaceWidth)
+          $hasHeight = -not [string]::IsNullOrWhiteSpace($surfaceHeight)
+          if ($hasWidth -xor $hasHeight) {
+            throw "width and height workflow inputs must be supplied together"
+          }
+          if ($hasWidth) {
+            $args += @("-Width", $surfaceWidth, "-Height", $surfaceHeight)
+          }
           if ("${{ github.event.inputs.fail_on_budget || 'false' }}" -eq "true") {
             $args += "-FailOnBudget"
           }

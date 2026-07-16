@@ -105,6 +105,16 @@ Assert-ThrowsMatching `
     -Action { Assert-ComparableEffectiveSurfaces -FullscreenArtifact $malformedHeight -OverlayArtifact $validOverlay } `
     -Pattern "malformed window.height"
 
+$zeroWidth = New-BenchmarkArtifact -Width 0 -Height 2160
+Assert-ThrowsMatching `
+    -Action { Assert-ComparableEffectiveSurfaces -FullscreenArtifact $zeroWidth -OverlayArtifact $validOverlay } `
+    -Pattern "malformed window.width"
+
+$negativeHeight = New-BenchmarkArtifact -Width 3840 -Height (-1)
+Assert-ThrowsMatching `
+    -Action { Assert-ComparableEffectiveSurfaces -FullscreenArtifact $negativeHeight -OverlayArtifact $validOverlay } `
+    -Pattern "malformed window.height"
+
 $unequalOverlay = New-BenchmarkArtifact -Width 1920 -Height 1080
 Assert-ThrowsMatching `
     -Action { Assert-ComparableEffectiveSurfaces -FullscreenArtifact $validFullscreen -OverlayArtifact $unequalOverlay } `
