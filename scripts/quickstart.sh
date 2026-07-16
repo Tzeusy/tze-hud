@@ -4,7 +4,7 @@
 # Goal: get a fresh user from "I cloned the repo" to "a Claude/Codex session is
 # projecting onto my screen" with a single command and zero tribal knowledge.
 #
-# What it does (all idempotent):
+# What it does (scaffolding is idempotent; secret-bearing output never clobbers):
 #   1. Locates (or, with --build, builds) the canonical `tze_hud` binary.
 #   2. Generates a minimal, valid `tze_hud.toml` if none exists (portal-primary:
 #      just [runtime] + a default [[tabs]] — the portal renders into the Main tab
@@ -15,7 +15,9 @@
 #      rule, and a ready-to-paste MCP `settings.json` snippet — by delegating to
 #      the runtime's own `tze_hud --print-attach-info` flag so there is a single
 #      source of truth (a built-in fallback covers a not-yet-built binary).
-#   5. Launches the runtime (unless --print-attach-info / --no-launch).
+#   5. Optionally emits a bearer-wired MCP client JSON document to stdout or a
+#      new mode-600 file (`--emit-mcp-config[=path]`).
+#   6. Launches the runtime (unless an emission/headless mode was requested).
 #
 # Doctrine: cooperative opt-in projection; the screen-sovereign runtime owns the
 # pixels. This script only wires up config + credentials + discovery; the LLM
@@ -24,6 +26,8 @@
 # Usage:
 #   scripts/quickstart.sh                      # scaffold + launch (fullscreen)
 #   scripts/quickstart.sh --window-mode overlay
+#   scripts/quickstart.sh --emit-mcp-config
+#   scripts/quickstart.sh --emit-mcp-config=tze-hud.mcp.json
 #   scripts/quickstart.sh --print-attach-info  # scaffold + print attach block, do NOT launch
 #   scripts/quickstart.sh --build              # cargo build --bin tze_hud --release first
 #
@@ -37,9 +41,18 @@
 #   --host <host>           Host shown in the attach URL  (default: 127.0.0.1)
 #   --bin <path>            Explicit tze_hud binary path
 #   --build                 Build the binary before launching
+#   --emit-mcp-config[=path]
+#                           Emit wired JSON to stdout and exit, or create path (mode 600)
 #   --print-attach-info     Scaffold + print attach block, then exit (no launch)
 #   --no-launch             Alias for --print-attach-info
 #   -h, --help              Show this help
+#
+# MCP config emission semantics:
+#   Side effects: scaffolds config/PSK; bare form writes JSON to stdout, path form
+#                 creates a new owner-only file; neither form launches the runtime.
+#   State: reads the resolved endpoint and stable PSK used by this quickstart.
+#   Idempotency: scaffold reuse is stable; an existing MCP config is never overwritten.
+#   Failure: incompatible redacted stdout or an unsafe/unwritable path exits 1.
 #
 # Exit codes: 0 ok · 1 usage · 2 binary not found · 3 build failed
 
@@ -59,6 +72,9 @@ BIN_PATH=""
 USER_BIN=0        # 1 when --bin was passed explicitly
 DO_BUILD=0
 LAUNCH=1
+PRINT_ATTACH_INFO=0
+EMIT_MCP_CONFIG=0
+MCP_CONFIG_PATH=""
 
 # Print the contiguous leading comment block as help (skip the shebang, stop at
 # the first non-comment line). Robust to header edits — no hardcoded line range.
@@ -75,13 +91,43 @@ while [[ $# -gt 0 ]]; do
     --host)             HOST="${2:?--host requires a value}";                shift 2 ;;
     --bin)              BIN_PATH="${2:?--bin requires a path}"; USER_BIN=1;  shift 2 ;;
     --build)            DO_BUILD=1;                                          shift ;;
-    --print-attach-info|--no-launch) LAUNCH=0;                              shift ;;
+    --emit-mcp-config)  EMIT_MCP_CONFIG=1; LAUNCH=0;                         shift ;;
+    --emit-mcp-config=*)
+                        EMIT_MCP_CONFIG=1
+                        LAUNCH=0
+                        MCP_CONFIG_PATH="${1#*=}"
+                        if [[ -z "$MCP_CONFIG_PATH" ]]; then
+                          echo "quickstart: --emit-mcp-config= requires a non-empty path" >&2
+                          exit 1
+                        fi
+                        shift ;;
+    --print-attach-info|--no-launch) LAUNCH=0; PRINT_ATTACH_INFO=1;           shift ;;
     -h|--help)          usage; exit 0 ;;
     *) echo "quickstart: unknown argument: $1 (see --help)" >&2; exit 1 ;;
   esac
 done
 
-info() { printf '\033[1;36m[quickstart]\033[0m %s\n' "$*"; }
+# `--print-attach-info` is intentionally redacted. A bare emit writes the real
+# bearer to stdout, so combining those modes would violate the headless output
+# contract. The path form remains valid because its secret-bearing artifact is
+# created privately and stdout stays redacted.
+if [[ "$PRINT_ATTACH_INFO" == "1" && "$EMIT_MCP_CONFIG" == "1" && -z "$MCP_CONFIG_PATH" ]]; then
+  echo "quickstart: bare --emit-mcp-config would reveal the PSK in redacted --print-attach-info mode; use --emit-mcp-config=<path>" >&2
+  exit 1
+fi
+
+if [[ -n "$MCP_CONFIG_PATH" && ( -e "$MCP_CONFIG_PATH" || -L "$MCP_CONFIG_PATH" ) ]]; then
+  echo "quickstart: refusing to overwrite existing MCP client config: ${MCP_CONFIG_PATH}" >&2
+  exit 1
+fi
+
+info() {
+  if [[ "$EMIT_MCP_CONFIG" == "1" && -z "$MCP_CONFIG_PATH" ]]; then
+    printf '\033[1;36m[quickstart]\033[0m %s\n' "$*" >&2
+  else
+    printf '\033[1;36m[quickstart]\033[0m %s\n' "$*"
+  fi
+}
 warn() { printf '\033[1;33m[quickstart]\033[0m %s\n' "$*" >&2; }
 
 # ── 1. Locate or build the binary ─────────────────────────────────────────────
@@ -112,8 +158,10 @@ if [[ -z "$BIN_PATH" || ! -x "$BIN_PATH" ]]; then
     warn "or re-run:       scripts/quickstart.sh --build"
     exit 2
   fi
-  warn "No tze_hud binary yet — scaffolding config + PSK and printing a fallback attach block."
-  warn "Build it (cargo build --bin tze_hud --release) for the authoritative --print-attach-info block."
+  if [[ "$PRINT_ATTACH_INFO" == "1" ]]; then
+    warn "No tze_hud binary yet — scaffolding config + PSK and printing a fallback attach block."
+    warn "Build it (cargo build --bin tze_hud --release) for the authoritative --print-attach-info block."
+  fi
   BIN_PATH=""   # signal step 4 to use the fallback rather than a stale/invalid path
 else
   info "Binary: ${BIN_PATH}"
@@ -182,6 +230,83 @@ export TZE_HUD_PSK="$PSK"
 export TZE_HUD_MCP_RESIDENT_PRINCIPAL="$PSK"
 
 MCP_URL="http://${HOST}:${MCP_PORT}/mcp"
+
+# JSON-escape the operator-controlled URL and bearer without introducing a jq
+# or Python dependency into the one-command bootstrap path.
+json_escape() {
+  local value="$1" char code i
+  local LC_ALL=C
+  for (( i = 0; i < ${#value}; i++ )); do
+    char="${value:i:1}"
+    case "$char" in
+      '"')  printf '\\"' ;;
+      \\)   printf '\\\\' ;;
+      $'\b') printf '\\b' ;;
+      $'\f') printf '\\f' ;;
+      $'\n') printf '\\n' ;;
+      $'\r') printf '\\r' ;;
+      $'\t') printf '\\t' ;;
+      *)
+        printf -v code '%d' "'$char"
+        if (( code < 32 )); then
+          printf '\\u%04x' "$code"
+        else
+          printf '%s' "$char"
+        fi
+        ;;
+    esac
+  done
+}
+
+render_mcp_config() {
+  local escaped_url escaped_authorization
+  escaped_url="$(json_escape "$MCP_URL")"
+  escaped_authorization="$(json_escape "Bearer ${PSK}")"
+  cat <<JSON
+{
+  "mcpServers": {
+    "tze-hud-runtime": {
+      "type": "url",
+      "url": "${escaped_url}",
+      "headers": {
+        "Authorization": "${escaped_authorization}"
+      }
+    }
+  }
+}
+JSON
+}
+
+emit_mcp_config() {
+  if [[ -z "$MCP_CONFIG_PATH" ]]; then
+    render_mcp_config
+    return 0
+  fi
+
+  local parent_dir
+  parent_dir="$(dirname "$MCP_CONFIG_PATH")"
+  if [[ ! -d "$parent_dir" ]]; then
+    warn "MCP client config parent directory does not exist: ${parent_dir}"
+    return 1
+  fi
+
+  # noclobber closes the race between the early safety check and creation;
+  # umask keeps the bearer owner-readable only from the first written byte.
+  if ! ( set -o noclobber; umask 077; render_mcp_config > "$MCP_CONFIG_PATH" ) 2>/dev/null; then
+    warn "refusing to overwrite existing MCP client config: ${MCP_CONFIG_PATH}"
+    return 1
+  fi
+  chmod 600 "$MCP_CONFIG_PATH"
+  info "Wrote MCP client config (mode 600): ${MCP_CONFIG_PATH}"
+}
+
+# MCP emission is a standalone setup operation unless the caller also asked
+# for redacted attach info. The bare form keeps stdout to exactly one JSON
+# document; the path form creates only the protected artifact.
+if [[ "$EMIT_MCP_CONFIG" == "1" && "$PRINT_ATTACH_INFO" == "0" ]]; then
+  emit_mcp_config
+  exit 0
+fi
 
 # ── 4. Print the ATTACH INFO discovery block ──────────────────────────────────
 # Single source of truth: the runtime's own `--print-attach-info` flag
@@ -264,6 +389,10 @@ BANNER
 }
 
 print_attach_block
+
+if [[ "$EMIT_MCP_CONFIG" == "1" ]]; then
+  emit_mcp_config
+fi
 
 # This script already exported TZE_HUD_PSK and TZE_HUD_MCP_RESIDENT_PRINCIPAL
 # (both equal to your PSK, stored chmod 600 in ${PSK_FILE}) for the launch below,
