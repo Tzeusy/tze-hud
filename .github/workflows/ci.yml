@@ -15,9 +15,8 @@
 #   constrained-envelope-budget — llvmpipe proxy, exactly two logical CPUs, same normalized ceilings
 #   release-artifact-provenance-smoke — cross-build tze_hud.exe and verify uploaded checksum round-trip
 #   vocabulary-lint — scripts/check_canonical_vocabulary.sh
-#   user-test-python-suite — pytest over .claude/skills/user-test/{tests,scripts}/
-#     pure-Python suite (Rust<->Python token/geometry drift-guards); no GPU, no
-#     Windows, no live HUD runtime, no external network (hud-43z24)
+#   user-test-python-suite — pytest over the user-test and repo script suites;
+#     pure-Python tests only, with no GPU, Windows, live HUD runtime, or network
 #   dev-mode-guard  — verifies dev-mode feature is NOT compiled into release binary
 #   v2-preview      — cargo check/clippy/test with --features v2_preview (gated state machines)
 #
@@ -714,6 +713,7 @@ jobs:
           python3 -m pytest \
             .claude/skills/user-test/tests/ \
             .claude/skills/user-test/scripts/test_hud_grpc_client.py \
+            scripts/tests/ \
             -q
 
   # ── Dev-mode guard ──────────────────────────────────────────────────────────

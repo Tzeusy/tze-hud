@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shlex
 import stat
 import subprocess
 import tempfile
@@ -75,6 +76,8 @@ class QuickstartMcpConfigTests(unittest.TestCase):
         result = self.run_quickstart(
             "--psk",
             secret,
+            "--bin",
+            str(self.temp_dir / "missing-tze-hud"),
             "--print-attach-info",
             f"--emit-mcp-config={output_path}",
         )
@@ -121,7 +124,7 @@ class QuickstartMcpConfigTests(unittest.TestCase):
         self.assertIn("--emit-mcp-config=<path>", result.stderr)
 
     def test_emitted_json_escapes_operator_provided_psk(self) -> None:
-        secret = 'quote" slash\\ and control\x01 remain valid'
+        secret = 'quote" slash\\ unicode ☃ controls\b\f\n\r\t\x01 remain valid'
 
         result = self.run_quickstart(
             "--psk",
@@ -135,6 +138,23 @@ class QuickstartMcpConfigTests(unittest.TestCase):
             "Authorization"
         ]
         self.assertEqual(authorization, f"Bearer {secret}")
+        self.assertNotIn(secret, result.stderr)
+
+    def test_emit_rejects_disabled_or_invalid_mcp_ports(self) -> None:
+        for port in ("0", "not-a-port", "65536"):
+            with self.subTest(port=port):
+                result = self.run_quickstart(
+                    "--psk",
+                    "port-validation-secret",
+                    "--mcp-port",
+                    port,
+                    "--emit-mcp-config",
+                )
+
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertNotIn("port-validation-secret", result.stderr)
+                self.assertIn("--mcp-port must be an integer from 1 to 65535", result.stderr)
 
     def test_path_option_preserves_existing_client_config(self) -> None:
         output_path = self.temp_dir / "existing.json"
@@ -150,6 +170,103 @@ class QuickstartMcpConfigTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(output_path.read_text(encoding="utf-8"), original)
         self.assertIn("refusing to overwrite", result.stderr)
+
+    def test_path_option_refuses_existing_symlink_without_touching_target(self) -> None:
+        target_path = self.temp_dir / "target.json"
+        target_path.write_text('{"keep": "target"}\n', encoding="utf-8")
+        output_path = self.temp_dir / "linked.json"
+        output_path.symlink_to(target_path)
+
+        result = self.run_quickstart(
+            "--psk",
+            "symlink-secret",
+            f"--emit-mcp-config={output_path}",
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(
+            target_path.read_text(encoding="utf-8"), '{"keep": "target"}\n'
+        )
+        self.assertTrue(output_path.is_symlink())
+        self.assertNotIn("symlink-secret", result.stdout)
+        self.assertNotIn("symlink-secret", result.stderr)
+
+    def test_existing_print_attach_info_mode_stays_redacted_without_binary(self) -> None:
+        secret = "existing-headless-secret"
+
+        result = self.run_quickstart(
+            "--psk",
+            secret,
+            "--bin",
+            str(self.temp_dir / "missing-tze-hud"),
+            "--print-attach-info",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ATTACH INFO", result.stdout)
+        self.assertIn("Authorization: Bearer <your PSK", result.stdout)
+        self.assertNotIn(secret, result.stdout)
+        self.assertNotIn(secret, result.stderr)
+
+    def test_existing_launch_mode_still_forwards_runtime_args_and_secret_env(self) -> None:
+        args_path = self.temp_dir / "runtime.args"
+        psk_path = self.temp_dir / "runtime.psk"
+        fake_binary = self.temp_dir / "fake-tze-hud"
+        fake_binary.write_text(
+            "#!/usr/bin/env bash\n"
+            f"printf '%s\\n' \"$@\" > {shlex.quote(str(args_path))}\n"
+            f"printf '%s' \"$TZE_HUD_PSK\" > {shlex.quote(str(psk_path))}\n",
+            encoding="utf-8",
+        )
+        fake_binary.chmod(0o700)
+        secret = "legacy-launch-secret"
+
+        result = self.run_quickstart(
+            "--psk",
+            secret,
+            "--bin",
+            str(fake_binary),
+            "--window-mode",
+            "overlay",
+            "--mcp-port",
+            "9191",
+            "--grpc-port",
+            "5252",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            args_path.read_text(encoding="utf-8").splitlines(),
+            [
+                "--config",
+                str(self.temp_dir / "tze_hud.toml"),
+                "--window-mode",
+                "overlay",
+                "--mcp-port",
+                "9191",
+                "--grpc-port",
+                "5252",
+            ],
+        )
+        self.assertEqual(psk_path.read_text(encoding="utf-8"), secret)
+        self.assertNotIn(secret, result.stdout)
+        self.assertNotIn(secret, result.stderr)
+
+    def test_help_documents_both_emit_forms_without_scaffolding(self) -> None:
+        result = subprocess.run(
+            ["bash", str(QUICKSTART), "--help"],
+            cwd=self.temp_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--emit-mcp-config[=path]", result.stdout)
+        self.assertIn("bare form writes JSON to stdout", result.stdout)
+        self.assertIn("existing MCP config is never overwritten", result.stdout)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(list(self.temp_dir.iterdir()), [])
 
 
 if __name__ == "__main__":

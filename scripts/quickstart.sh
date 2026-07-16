@@ -116,6 +116,13 @@ if [[ "$PRINT_ATTACH_INFO" == "1" && "$EMIT_MCP_CONFIG" == "1" && -z "$MCP_CONFI
   exit 1
 fi
 
+if [[ "$EMIT_MCP_CONFIG" == "1" ]] &&
+   { [[ ! "$MCP_PORT" =~ ^[0-9]{1,5}$ ]] ||
+     (( 10#$MCP_PORT < 1 || 10#$MCP_PORT > 65535 )); }; then
+  echo "quickstart: --mcp-port must be an integer from 1 to 65535 when emitting MCP config" >&2
+  exit 1
+fi
+
 if [[ -n "$MCP_CONFIG_PATH" && ( -e "$MCP_CONFIG_PATH" || -L "$MCP_CONFIG_PATH" ) ]]; then
   echo "quickstart: refusing to overwrite existing MCP client config: ${MCP_CONFIG_PATH}" >&2
   exit 1
@@ -296,7 +303,6 @@ emit_mcp_config() {
     warn "refusing to overwrite existing MCP client config: ${MCP_CONFIG_PATH}"
     return 1
   fi
-  chmod 600 "$MCP_CONFIG_PATH"
   info "Wrote MCP client config (mode 600): ${MCP_CONFIG_PATH}"
 }
 
