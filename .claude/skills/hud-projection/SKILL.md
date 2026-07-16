@@ -1,14 +1,22 @@
 ---
 name: hud-projection
-description: Use when an already-running LLM session (Codex, Claude, opencode, or other) should project itself onto the HUD — attach to a text-stream portal, publish live transcript/status, poll and acknowledge HUD-originated operator input, detach, or clean up. Trigger phrases — "project this session to the HUD", "attach this agent to HUD", "show this LLM session in a text-stream portal", "check HUD input". Not for terminal/PTY/tmux capture, process hosting, or one-shot zone publishing (use th-hud-publish for that).
-compatibility: Requires the tze_hud windowed runtime running with MCP enabled (mcp_port > 0). All seven ops — `attach`, `publish_output`, `publish_status`, `get_pending_input`, `acknowledge_input`, `detach`, `cleanup` — are served in-process by the runtime MCP server's `portal_projection_*` tools, which forward to the ProjectionAuthority. They are Resident tools: reach them as the resident principal by setting `TZE_HUD_MCP_RESIDENT_PRINCIPAL` equal to the PSK and sending the PSK as the MCP bearer.
+description: >-
+  Use when an already-running LLM session should project itself onto the HUD,
+  attach to a text-stream portal, publish live output, consume HUD input, or
+  detach. Trigger phrases include project this session to the HUD, attach this
+  agent to HUD, and check HUD input. Not for terminal capture, process hosting,
+  or one-shot zone publishing.
+compatibility: >-
+  Requires the tze_hud windowed runtime with MCP enabled. Projection operations
+  are Resident tools; the configured resident principal, PSK, and MCP bearer
+  must match.
 metadata:
   owner: tze
   authors:
     - tze
     - OpenAI Codex
   status: active
-  last_reviewed: "2026-06-21"
+  last_reviewed: "2026-07-16"
 ---
 
 # HUD Projection
@@ -19,7 +27,7 @@ Hard boundaries:
 - This is cooperative opt-in. The current session intentionally calls projection operations.
 - This is not PTY, tmux, shell, stdin/stdout, or terminal byte-stream capture.
 - The `ProjectionAuthority` runs **in-process** inside the tze_hud runtime (not as an external daemon). It owns projection state outside the LLM token context: HUD connection metadata, advisory portal lease identity, bounded transcript/window state, pending HUD input, acknowledgement state, lifecycle state, unread state, privacy classification, and reconnect bookkeeping.
-- The `portal_projection_*` tools are a projection facade into that in-process authority — distinct from the runtime's zone/widget publishing tools (`th-hud-publish`). They are Resident tools; reach them as the resident principal (see `references/mcp-facade.md` for the auth wiring and code paths).
+- The `portal_projection_*` tools are a projection facade into that in-process authority — distinct from the runtime's zone/widget publishing tools (`th-hud-publish`). They are Resident tools; reach them as the resident principal (see [MCP facade](references/mcp-facade.md) for the auth wiring and code paths).
 
 ## Choosing A Target Runtime
 
@@ -46,7 +54,7 @@ Projection needs a live windowed runtime with MCP enabled. Two standing targets:
 
 ## Deterministic Client (Preferred Driver)
 
-Do not hand-roll MCP calls: `scripts/portal_client.py` wraps all seven
+Do not hand-roll MCP calls: [`scripts/portal_client.py`](scripts/portal_client.py) wraps all seven
 operations as subcommands with the contract boilerplate, auth, and owner-token
 custody built in. Resolve env first (either target), then drive:
 
@@ -68,7 +76,9 @@ rule below without manual handling. `poll` prints received items as NDJSON
 and exits 3 when no input arrived (deterministic signal); `--ack handled`
 auto-acknowledges receipt, but prefer explicit `ack` with a meaningful message
 after actually acting on an input. Re-running `attach` with the same
-projection id is safe (idempotent; the token on file stays valid).
+projection id and the same non-empty idempotency key is safe: it rotates the
+owner token, atomically invalidates the prior token, and replaces the token
+file without extending the projection's original expiry deadline.
 
 For a one-command connectivity trial (attach + greeting + poll), use
 `.claude/skills/user-test/scripts/portal_trial.sh`.
@@ -112,12 +122,12 @@ The normative operations are:
 - `detach`
 - `cleanup`
 
-Read `references/operation-examples.md` for compact JSON examples of every operation, including Codex, Claude, and opencode attach examples.
+Read [operation examples](references/operation-examples.md) for compact JSON examples of every operation, including Codex, Claude, and opencode attach examples.
 
 ## Workflow
 
 1. **Attach once.** Choose a stable `projection_id`, set `provider_kind` to `codex`, `claude`, `opencode`, or `other`, and include a human-readable `display_name`. Default missing or uncertain classification to `private`.
-2. **Store the owner token securely and immediately.** A successful attach returns `owner_token`; no other operation response will ever return it. Store it in a tool-call result or session variable, never in transcript text, assistant-visible output, or log lines. If it is lost before detach, you must treat the projection as unrecoverable and wait for operator cleanup or TTL expiry. Do not request the token again — there is no retrieval path.
+2. **Store the owner token securely and immediately.** Every successful attach returns `owner_token`; no non-attach operation response will ever return it. Store it in a tool-call result or session variable, never in transcript text, assistant-visible output, or log lines. If it is lost before detach, repeat attach through the authenticated Resident MCP surface with the same non-empty idempotency key used by the original attach. That replay returns a fresh token, invalidates the lost token, and preserves the original expiry deadline. A missing or unrelated key is rejected and does not rotate ownership.
 3. **Publish intentionally.** Call `publish_output` for assistant-visible transcript/status fragments and `publish_status` for lifecycle updates such as `active`, `degraded`, or `detached`.
 
    **Accepted `lifecycle_state` values** (snake_case strings; any other value is rejected):
@@ -163,8 +173,8 @@ isolated process with **no** connection to the live runtime, so its output never
 reaches the screen. Use the MCP facade for real on-screen projection.
 
 References:
-- `references/operation-examples.md` — per-operation JSON payloads (the contract).
-- `references/mcp-facade.md` — facade requirements, boundary rules, auth wiring, code paths, and the config template.
+- [Operation examples](references/operation-examples.md) — per-operation JSON payloads (the contract).
+- [MCP facade](references/mcp-facade.md) — facade requirements, boundary rules, auth wiring, code paths, and the config template.
 - `settings.template.json` — expected configuration shape.
 
 ## Safety Notes
@@ -172,7 +182,7 @@ References:
 - Keep operation responses bounded; do not request unbounded transcripts, inbox history, or raw scene state.
 - Do not publish secrets or owner tokens into the transcript window or any user-visible output.
 - Treat `owner_token` as attach-only response material; it must never be returned by publish, input, acknowledgement, detach, or cleanup responses. If a response includes `owner_token` outside an `attach` success, treat that as a protocol error and do not use or forward the value.
-- **Owner-token loss is unrecoverable.** If the token is lost (session crash, transcript cleared), there is no retrieval path. The only recovery options are operator cleanup (requires separate operator authority, not the owner token) or waiting for the projection's TTL to expire. Do not attempt to re-attach with the same `projection_id` without the idempotency key — the authority will reject it with `PROJECTION_ALREADY_ATTACHED`.
+- **Owner-token loss requires authenticated rotation, never retrieval.** Re-attach through the Resident MCP surface with the same non-empty idempotency key to receive a fresh token. This immediately invalidates every previously issued token and does not extend the original expiry deadline. Without the matching key, the authority rejects the attach with `PROJECTION_ALREADY_ATTACHED`; after expiry, attach creates a new session under the normal authorization path.
 - **Do not embed `owner_token` in `publish_output` text, `status_text`, `ack_message`, or `reason` fields.** These fields are readable by audit records and portal rendering; tokens in them constitute a credential leak.
 - Treat `PROJECTION_UNAUTHORIZED`, `PROJECTION_TOKEN_EXPIRED`, and `PROJECTION_STATE_CONFLICT` as hard stops unless the user explicitly authorizes reattach or operator cleanup.
 - If the runtime restarts, prior transcript text, pending input text, owner tokens, and cached lease identity are gone. Attach again and receive a fresh owner token — the old token is permanently invalid after a restart.

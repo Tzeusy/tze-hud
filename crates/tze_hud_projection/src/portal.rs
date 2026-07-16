@@ -152,6 +152,11 @@ impl ExternalAgentProjectionAuthority {
             .ok_or(ProjectionErrorCode::ProjectionInvalidArgument)?
             .clone();
 
+        self.expire_token_expired_sessions(server_timestamp_wall_us);
+        if self.managed_sessions.contains_key(&request.projection_id) {
+            return Err(ProjectionErrorCode::ProjectionAlreadyAttached);
+        }
+
         let attach = AttachRequest {
             envelope: OperationEnvelope {
                 operation: ProjectionOperation::Attach,

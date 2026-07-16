@@ -58,6 +58,23 @@ fn output_request(
     }
 }
 
+fn status_request(
+    projection_id: &str,
+    owner_token: &str,
+    request_id: &str,
+) -> PublishStatusRequest {
+    PublishStatusRequest {
+        envelope: envelope(
+            ProjectionOperation::PublishStatus,
+            projection_id,
+            request_id,
+        ),
+        owner_token: owner_token.to_string(),
+        lifecycle_state: ProjectionLifecycleState::Active,
+        status_text: Some("working".to_string()),
+    }
+}
+
 fn connection_metadata(grants: &[&str]) -> HudConnectionMetadata {
     HudConnectionMetadata {
         connection_id: "connection-1".to_string(),
@@ -272,6 +289,50 @@ fn external_authority_route_plans_redact_credentials_and_expose_no_capture_autho
             "route plan must not expose {forbidden} authority"
         );
     }
+}
+
+#[test]
+fn external_authority_duplicate_manage_preserves_active_owner_token() {
+    let mut authority = ExternalAgentProjectionAuthority::default();
+    authority
+        .register_windows_target(windows_target())
+        .expect("target is valid");
+
+    let first = authority
+        .manage_session(managed_zone_session("agent-status"), "manager", 10)
+        .expect("initial managed session is accepted");
+    let verifier_before = authority
+        .projection_authority()
+        .owner_token_verifier_for_test("agent-status")
+        .expect("managed session stores an owner-token verifier")
+        .to_string();
+
+    assert_eq!(
+        authority.manage_session(managed_zone_session("agent-status"), "manager", 11),
+        Err(ProjectionErrorCode::ProjectionAlreadyAttached),
+        "duplicate management must not rotate ownership away from the active provider"
+    );
+    assert_eq!(
+        authority
+            .projection_authority()
+            .owner_token_verifier_for_test("agent-status"),
+        Some(verifier_before.as_str())
+    );
+    assert!(
+        authority
+            .projection_authority_mut()
+            .handle_publish_status(
+                status_request(
+                    "agent-status",
+                    &first.owner_token,
+                    "req-original-managed-owner",
+                ),
+                "manager",
+                12,
+            )
+            .accepted,
+        "the provider's original owner token must remain current"
+    );
 }
 
 #[test]
@@ -715,7 +776,7 @@ fn attach_materializes_content_layer_projected_portal_and_reuses_idempotently() 
 
     let replay = authority.handle_attach(attach_request("projection-a", "req-b"), "caller-a", 11);
     assert!(replay.accepted);
-    assert!(replay.owner_token.is_none());
+    assert!(replay.owner_token.is_some());
     assert_eq!(
         authority
             .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
@@ -787,15 +848,98 @@ fn successful_attach_issues_high_entropy_token_and_stores_only_verifier() {
 }
 
 #[test]
-fn attach_conflict_is_deterministic_and_idempotent_replay_does_not_expose_token() {
+fn idempotent_attach_replay_rotates_owner_token_and_invalidates_previous_token() {
     let mut authority = ProjectionAuthority::default();
     let first = authority.handle_attach(attach_request("projection-a", "req-a"), "caller-a", 10);
     assert!(first.accepted);
-    assert!(first.owner_token.is_some());
+    let first_token = first.owner_token.expect("initial attach returns a token");
 
     let replay = authority.handle_attach(attach_request("projection-a", "req-b"), "caller-a", 11);
     assert!(replay.accepted);
-    assert!(replay.owner_token.is_none());
+    let replay_token = replay
+        .owner_token
+        .expect("matching replay returns a fresh token");
+    assert_ne!(replay_token, first_token);
+
+    let stale = authority.handle_publish_status(
+        status_request("projection-a", &first_token, "req-stale"),
+        "caller-a",
+        12,
+    );
+    assert!(!stale.accepted);
+    assert_eq!(
+        stale.error_code,
+        Some(ProjectionErrorCode::ProjectionUnauthorized)
+    );
+
+    let current = authority.handle_publish_status(
+        status_request("projection-a", &replay_token, "req-current"),
+        "caller-a",
+        13,
+    );
+    assert!(current.accepted);
+}
+
+#[test]
+fn repeated_idempotent_attach_replays_leave_exactly_one_current_verifier() {
+    let mut authority = ProjectionAuthority::default();
+    let first = authority.handle_attach(attach_request("projection-a", "req-a"), "caller-a", 10);
+    let first_token = first.owner_token.expect("initial attach returns a token");
+
+    let replay_one = authority.handle_attach(
+        attach_request("projection-a", "req-replay-1"),
+        "caller-a",
+        11,
+    );
+    let replay_one_token = replay_one
+        .owner_token
+        .expect("first serialized replay returns a token");
+    let replay_two = authority.handle_attach(
+        attach_request("projection-a", "req-replay-2"),
+        "caller-a",
+        12,
+    );
+    let replay_two_token = replay_two
+        .owner_token
+        .expect("second serialized replay returns a token");
+
+    assert_ne!(first_token, replay_one_token);
+    assert_ne!(replay_one_token, replay_two_token);
+    for (request_id, stale_token) in [
+        ("req-first-stale", first_token),
+        ("req-replay-one-stale", replay_one_token),
+    ] {
+        let stale = authority.handle_publish_status(
+            status_request("projection-a", &stale_token, request_id),
+            "caller-a",
+            13,
+        );
+        assert!(!stale.accepted);
+        assert_eq!(
+            stale.error_code,
+            Some(ProjectionErrorCode::ProjectionUnauthorized)
+        );
+    }
+    assert!(
+        authority
+            .handle_publish_status(
+                status_request("projection-a", &replay_two_token, "req-latest"),
+                "caller-a",
+                13,
+            )
+            .accepted
+    );
+}
+
+#[test]
+fn unrelated_attach_keys_cannot_rotate_or_mint_owner_tokens() {
+    let mut authority = ProjectionAuthority::default();
+    let first = authority.handle_attach(attach_request("projection-a", "req-a"), "caller-a", 10);
+    let first_token = first.owner_token.expect("initial attach returns a token");
+    let initial_verifier = authority
+        .owner_token_verifier_for_test("projection-a")
+        .expect("session stores verifier")
+        .to_string();
 
     let mut conflicting = attach_request("projection-a", "req-c");
     conflicting.idempotency_key = Some("different-key".to_string());
@@ -805,6 +949,133 @@ fn attach_conflict_is_deterministic_and_idempotent_replay_does_not_expose_token(
         conflict.error_code,
         Some(ProjectionErrorCode::ProjectionAlreadyAttached)
     );
+    assert!(conflict.owner_token.is_none());
+
+    let mut missing_key = attach_request("projection-a", "req-d");
+    missing_key.idempotency_key = None;
+    let missing_key_conflict = authority.handle_attach(missing_key, "caller-b", 13);
+    assert!(!missing_key_conflict.accepted);
+    assert_eq!(
+        missing_key_conflict.error_code,
+        Some(ProjectionErrorCode::ProjectionAlreadyAttached)
+    );
+    assert!(missing_key_conflict.owner_token.is_none());
+    assert_eq!(
+        authority.owner_token_verifier_for_test("projection-a"),
+        Some(initial_verifier.as_str())
+    );
+    assert!(
+        authority
+            .handle_publish_status(
+                status_request("projection-a", &first_token, "req-original-still-current"),
+                "caller-a",
+                14,
+            )
+            .accepted
+    );
+}
+
+#[test]
+fn idempotent_attach_replay_preserves_original_token_expiry() {
+    let mut authority = ProjectionAuthority::new(ProjectionBounds {
+        owner_token_ttl_wall_us: 20,
+        ..ProjectionBounds::default()
+    })
+    .unwrap();
+    let first = authority.handle_attach(attach_request("projection-a", "req-a"), "caller-a", 10);
+    let first_token = first.owner_token.expect("initial attach returns a token");
+
+    let replay =
+        authority.handle_attach(attach_request("projection-a", "req-replay"), "caller-a", 29);
+    let replay_token = replay
+        .owner_token
+        .expect("matching replay before expiry returns a fresh token");
+    assert_ne!(replay_token, first_token);
+    assert!(
+        authority
+            .handle_publish_status(
+                status_request("projection-a", &replay_token, "req-before-expiry"),
+                "caller-a",
+                29,
+            )
+            .accepted
+    );
+
+    let expired = authority.handle_publish_status(
+        status_request("projection-a", &replay_token, "req-at-original-expiry"),
+        "caller-a",
+        30,
+    );
+    assert!(!expired.accepted);
+    assert_eq!(
+        expired.error_code,
+        Some(ProjectionErrorCode::ProjectionTokenExpired)
+    );
+    assert!(!authority.has_projection("projection-a"));
+}
+
+#[test]
+fn attach_at_expiry_starts_fresh_session_with_fresh_ttl() {
+    let mut authority = ProjectionAuthority::new(ProjectionBounds {
+        owner_token_ttl_wall_us: 20,
+        ..ProjectionBounds::default()
+    })
+    .unwrap();
+    let first = authority.handle_attach(attach_request("projection-a", "req-a"), "caller-a", 10);
+    let first_token = first.owner_token.expect("initial attach returns a token");
+    assert!(
+        authority
+            .handle_publish_output(
+                output_request("projection-a", &first_token, "req-old-output"),
+                "caller-a",
+                20,
+            )
+            .accepted
+    );
+
+    let fresh = authority.handle_attach(
+        attach_request("projection-a", "req-after-expiry"),
+        "caller-a",
+        30,
+    );
+    assert!(fresh.accepted);
+    let fresh_token = fresh
+        .owner_token
+        .expect("attach at the old deadline starts a fresh session");
+    assert_ne!(fresh_token, first_token);
+    assert!(
+        authority
+            .visible_transcript_window("projection-a")
+            .expect("fresh session exists")
+            .is_empty(),
+        "expired session state must not survive a fresh attach"
+    );
+    assert!(
+        authority
+            .handle_publish_status(
+                status_request("projection-a", &fresh_token, "req-fresh-current"),
+                "caller-a",
+                49,
+            )
+            .accepted,
+        "fresh attach receives a full TTL from its own attach timestamp"
+    );
+}
+
+#[test]
+fn idempotent_attach_replay_audit_never_contains_owner_tokens() {
+    let mut authority = ProjectionAuthority::default();
+    let first = authority.handle_attach(attach_request("projection-a", "req-a"), "caller-a", 10);
+    let first_token = first.owner_token.expect("initial attach returns a token");
+    let replay =
+        authority.handle_attach(attach_request("projection-a", "req-replay"), "caller-a", 11);
+    let replay_token = replay
+        .owner_token
+        .expect("matching replay returns a fresh token");
+
+    let audit_json = serde_json::to_string(authority.audit_log()).expect("audit serializes");
+    assert!(!audit_json.contains(&first_token));
+    assert!(!audit_json.contains(&replay_token));
 }
 
 #[test]

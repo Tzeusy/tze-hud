@@ -193,8 +193,10 @@ call the tools directly:
 
 1. `portal_projection_attach` — choose a stable `projection_id`, set
    `provider_kind` (`claude` / `codex` / `opencode` / `other`) and a
-   `display_name`. **Store the returned `owner_token`** — no other response ever
-   returns it, and it is unrecoverable if lost.
+   `display_name`. **Store the most recently returned `owner_token`**. An
+   authenticated re-attach with the matching `idempotency_key` returns a fresh
+   token and immediately invalidates the previous one without extending its
+   original expiry deadline; other operations never return the token.
 2. `portal_projection_publish` — publish transcript/output fragments; they render
    in the portal on screen.
 3. `portal_projection_get_pending_input` / `portal_projection_acknowledge_input`

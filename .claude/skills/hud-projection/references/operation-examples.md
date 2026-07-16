@@ -61,7 +61,7 @@ opencode:
 }
 ```
 
-Successful attach responses include `owner_token`, `request_id`, `projection_id`, `accepted`, `error_code`, `server_timestamp_wall_us`, bounded `status_summary`, and initial lifecycle state. The `owner_token` is returned only by successful `attach`; later operation responses must not return it.
+Successful attach responses include `owner_token`, `request_id`, `projection_id`, `accepted`, `error_code`, `server_timestamp_wall_us`, bounded `status_summary`, and lifecycle state. The `owner_token` is returned only by successful `attach`; later operation responses must not return it. Repeating attach for a live projection through the authenticated Resident MCP surface with the same non-empty `idempotency_key` rotates and returns a fresh token, invalidates the prior token, and preserves the original expiry deadline. Missing or unrelated keys do not rotate ownership.
 
 ## Publish Output
 

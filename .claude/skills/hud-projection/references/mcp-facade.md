@@ -10,6 +10,7 @@ The production ingress must:
 - Accept only the cooperative operation contract from `operation-examples.md`.
 - Authenticate callers through an MCP bearer token, OS-protected IPC, or another unguessable credential.
 - Bind owner-scoped non-attach operations to `projection_id` plus `owner_token`; bind operator cleanup to separate explicit operator authority.
+- Treat a matching-key attach replay as authenticated token rotation: return a fresh token, atomically replace the sole verifier, invalidate every prior token, and preserve the original expiry deadline. The idempotency key never substitutes for Resident MCP authorization.
 - Return bounded operation responses only: no unbounded transcript, unbounded inbox history, `owner_token` outside a successful `attach` response, owner-token verifier, or raw runtime scene graph.
 - Emit audit records without transcript text, HUD input text, or owner tokens.
 - Route operations to the in-process `ProjectionAuthority` in `tze_hud_runtime`, not to a separate projection process.

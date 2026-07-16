@@ -92,7 +92,8 @@ pub enum PortalOp {
         projection_id: String,
         /// Human-readable name for the session.
         display_name: String,
-        /// Optional idempotency key for replay-safe re-attach.
+        /// Optional idempotency key for replay-safe re-attach. A matching replay
+        /// rotates the owner token without extending its original expiry.
         idempotency_key: Option<String>,
         /// LLM provider kind as a snake_case string (`codex`, `claude`,
         /// `opencode`, `other`). `None` defaults to `other`. An unrecognized

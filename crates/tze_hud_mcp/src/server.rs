@@ -1294,6 +1294,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_nonresident_callers_cannot_reach_projection_attach_token_issuance() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        let server = test_server(SceneGraph::new(1920.0, 1080.0)).with_portal_op_tx(tx);
+        let request = r#"{"jsonrpc":"2.0","method":"portal_projection_attach","params":{"projection_id":"p1","display_name":"Projection","idempotency_key":"stable-key"},"id":15}"#;
+
+        let guest_raw = server.dispatch(request, &guest()).await;
+        let guest_response = parse_response(&guest_raw);
+        assert_eq!(guest_response["error"]["code"], -32603);
+        assert_eq!(
+            guest_response["error"]["data"]["error_code"],
+            "CAPABILITY_REQUIRED"
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        let unauthenticated_raw = server.dispatch(request, &CallerContext::guest()).await;
+        let unauthenticated_response = parse_response(&unauthenticated_raw);
+        assert_eq!(unauthenticated_response["error"]["code"], -32004);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
     async fn test_resident_portal_projection_cleanup_dispatches_to_op_channel() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
         let server = test_server(SceneGraph::new(1920.0, 1080.0)).with_portal_op_tx(tx);

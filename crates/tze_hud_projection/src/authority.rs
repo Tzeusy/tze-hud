@@ -709,24 +709,60 @@ impl ProjectionAuthority {
             );
         }
 
-        if let Some(existing) = self.sessions.get(&request.envelope.projection_id) {
-            if request.idempotency_key.is_some()
-                && request.idempotency_key == existing.attach_idempotency_key
-            {
+        if self
+            .sessions
+            .get(&request.envelope.projection_id)
+            .is_some_and(|existing| {
+                server_timestamp_wall_us >= existing.owner_token_expires_at_wall_us
+            })
+        {
+            self.expire_projection(&request.envelope.projection_id);
+        }
+
+        if let Some(idempotent_replay) =
+            self.sessions
+                .get(&request.envelope.projection_id)
+                .map(|existing| {
+                    request.idempotency_key.is_some()
+                        && request.idempotency_key == existing.attach_idempotency_key
+                })
+        {
+            if idempotent_replay {
+                let owner_token = match generate_owner_token() {
+                    Ok(token) => token,
+                    Err(error) => {
+                        return self.validation_denial(
+                            &request.envelope,
+                            caller_identity,
+                            server_timestamp_wall_us,
+                            error,
+                            ProjectionAuditCategory::AuthDenied,
+                        );
+                    }
+                };
+                let lifecycle_state = {
+                    let existing = self
+                        .sessions
+                        .get_mut(&request.envelope.projection_id)
+                        .expect("session existence checked above");
+                    existing.owner_token_verifier = verifier_for_secret(&owner_token);
+                    existing.lifecycle_state
+                };
                 let mut response = ProjectionResponse::accepted(
                     &request.envelope.request_id,
                     &request.envelope.projection_id,
                     server_timestamp_wall_us,
-                    "projection already attached for matching idempotency key",
+                    "projection ownership refreshed for matching idempotency key",
                 );
-                response.lifecycle_state = Some(existing.lifecycle_state);
+                response.owner_token = Some(owner_token);
+                response.lifecycle_state = Some(lifecycle_state);
                 self.audit(ProjectionAuditEvent {
                     envelope: &request.envelope,
                     caller_identity,
                     server_timestamp_wall_us,
                     accepted: true,
                     error_code: None,
-                    reason: "idempotent attach replay",
+                    reason: "idempotent attach replay rotated owner token",
                     category: ProjectionAuditCategory::Attach,
                 });
                 return response;

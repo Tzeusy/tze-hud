@@ -136,6 +136,8 @@ Every LLM-facing projection operation SHALL be authenticated, bound to the ownin
 
 Successful attach SHALL issue an owner token with at least 128 bits of entropy; the v1 implementation issues 256-bit tokens (`OWNER_TOKEN_ENTROPY_BITS = 256`, `crates/tze_hud_projection/src/lib.rs`). The projection authority SHALL store only a verifier or protected representation of the token. Every non-attach owner operation SHALL present the owner token. Owner cleanup SHALL require the owner token. Operator cleanup or override SHALL use a separate explicit operator-authority credential or local override path, SHALL NOT require the owner token, and SHALL be audited distinctly from owner cleanup. Owner tokens SHALL expire or rotate on detach, owner cleanup, operator cleanup, projection expiry, host restart, and explicit operator revocation. Same-OS-user execution alone SHALL NOT authorize cross-projection reads or mutations.
 
+An attach replay for a live projection that passes the existing attach transport authentication and presents the same non-empty idempotency key as the original attach SHALL rotate ownership: the authority SHALL return a fresh owner token, atomically replace the single stored verifier, and immediately invalidate every previously issued owner token for that projection. The replay SHALL preserve the original attach-time owner-token expiry deadline and SHALL NOT recreate or otherwise extend the projection session. The idempotency key SHALL NOT independently authorize attach; callers still require the deployment's existing resident attach authorization. A missing or unrelated idempotency key SHALL follow the deterministic attach-conflict behavior and SHALL NOT mint or rotate a token.
+
 Every owner token SHALL also carry a wall-clock expiry deadline established at attach time as `server_timestamp_wall_us + owner_token_ttl_wall_us`. The TTL SHALL be a configurable, non-zero bound; unless deployment configuration sets a different value, the v1 default SHALL be 24 hours (`owner_token_ttl_wall_us = 86_400_000_000`, from `DEFAULT_OWNER_TOKEN_TTL_WALL_US`; configurable via `ProjectionBounds.owner_token_ttl_wall_us`, validated non-zero alongside the other projection bounds). After the deadline, the projection authority SHALL reject any non-attach owner operation with `PROJECTION_TOKEN_EXPIRED` and SHALL purge the expired projection's transcript text, pending input text, and owner-token verifier under the memory-only retention rule, requiring the session to attach again for a fresh token. The TTL deadline SHALL be enforced independently of the per-projection update-rate window and of lease grace expiry.
 
 #### Scenario: cross-projection input read is denied
@@ -158,6 +160,18 @@ Every owner token SHALL also carry a wall-clock expiry deadline established at a
 - **THEN** the projection authority SHALL reject the operation with `PROJECTION_TOKEN_EXPIRED`
 - **AND** it SHALL purge the expired projection's transcript text, pending input text, and owner-token verifier
 - **AND** the session SHALL attach again to receive a fresh owner token before publishing or reading input
+
+#### Scenario: authenticated idempotent attach replay rotates ownership without extending expiry
+- **WHEN** an attach-authorized caller replays `attach` for a live projection with its matching non-empty idempotency key
+- **THEN** the authority SHALL accept the replay and return a fresh owner token
+- **AND** the prior owner token SHALL immediately fail owner authorization while the fresh token succeeds
+- **AND** exactly one current verifier SHALL remain after repeated serialized replays
+- **AND** the original attach-time owner-token expiry deadline and existing projection state SHALL remain unchanged
+
+#### Scenario: idempotency key is not standalone attach authority
+- **WHEN** an unauthenticated or non-resident caller presents a matching idempotency key
+- **THEN** the deployment SHALL reject the attach before it reaches projection token issuance
+- **AND** the stored owner-token verifier SHALL remain unchanged
 
 ### Requirement: HUD Input Inbox Delivery
 HUD-originated text input for a projected session SHALL be stored as ordered pending inbox items in the projection daemon. Each inbox item SHALL include an opaque input ID, projection ID, submission text, submitted_at_wall_us timestamp, expires_at_wall_us timestamp, delivery state, optional interaction metadata, and content classification. The daemon SHALL deliver input to the LLM session only through the cooperative operation contract. The LLM session SHALL acknowledge each item only as handled, deferred, or rejected; expiration is owned by the projection authority.
