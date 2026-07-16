@@ -1481,8 +1481,13 @@ async fn build_windowed_frame_decoupled_from_surface_then_presents() {
     let _ = build.drag_handle_vertex_count();
 
     // ── Present phase: consumes the build against the surface ──────────────
-    let telemetry = compositor
-        .present_windowed_frame(build, &surface as &dyn crate::surface::CompositorSurface);
+    let outcome = compositor.present_windowed_frame_with_outcome(
+        build,
+        &surface as &dyn crate::surface::CompositorSurface,
+    );
+    assert!(outcome.surface_acquired);
+    assert!(outcome.gpu_submitted);
+    let telemetry = outcome.telemetry;
     assert!(
         telemetry.frame_time_us > 0,
         "present must record a frame time"

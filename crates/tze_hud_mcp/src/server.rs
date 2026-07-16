@@ -943,6 +943,18 @@ impl McpServer {
     }
 }
 
+impl Drop for McpServer {
+    fn drop(&mut self) {
+        // Channel closure is presentation-relevant: the winit owner marks all
+        // still-attached projections disconnected when it observes this sender
+        // disappear. Close the channel before notifying so the awakened drain
+        // cannot race ahead and observe an empty-but-still-connected receiver.
+        if self.portal_op_tx.take().is_some() {
+            self.render_wake.notify();
+        }
+    }
+}
+
 fn tool_creates_render_work(method: &str) -> bool {
     matches!(
         method,
@@ -2960,5 +2972,28 @@ mod tests {
             2,
             "the accepted operation must also wake for resulting render work"
         );
+    }
+
+    #[test]
+    fn dropping_portal_ingress_closes_then_wakes_the_owner() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let calls = Arc::new(AtomicU64::new(0));
+        let callback_calls = Arc::clone(&calls);
+        let notifier = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+            callback_calls.fetch_add(1, Ordering::Relaxed);
+        });
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let server = test_server(SceneGraph::new(1920.0, 1080.0))
+            .with_portal_op_tx(tx)
+            .with_render_wake_notifier(notifier);
+
+        drop(server);
+
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 }

@@ -159,6 +159,7 @@ pub(super) struct RuntimeWakeEvent;
 pub(super) struct WindowedWake {
     proxy: Option<EventLoopProxy<RuntimeWakeEvent>>,
     proxy_event_pending: Arc<AtomicBool>,
+    main_work_pending: Arc<AtomicBool>,
     main_source: Arc<Mutex<RuntimeWakeupSource>>,
     compositor: CompositorWake,
     counters: Arc<IdleEfficiencyCounters>,
@@ -169,6 +170,7 @@ impl WindowedWake {
         Self {
             proxy: Some(proxy),
             proxy_event_pending: Arc::new(AtomicBool::new(false)),
+            main_work_pending: Arc::new(AtomicBool::new(false)),
             main_source: Arc::new(Mutex::new(RuntimeWakeupSource::SceneChange)),
             compositor: CompositorWake::default(),
             counters: Arc::new(IdleEfficiencyCounters::default()),
@@ -180,6 +182,7 @@ impl WindowedWake {
         Self {
             proxy: None,
             proxy_event_pending: Arc::new(AtomicBool::new(false)),
+            main_work_pending: Arc::new(AtomicBool::new(false)),
             main_source: Arc::new(Mutex::new(RuntimeWakeupSource::SceneChange)),
             compositor: CompositorWake::default(),
             counters: Arc::new(IdleEfficiencyCounters::default()),
@@ -194,8 +197,37 @@ impl WindowedWake {
     }
 
     pub(super) fn notify(&self, source: RuntimeWakeupSource) {
+        // Cross-thread render notifications can wake the compositor before the
+        // winit thread drains the producer's channel and creates the actual
+        // scene work. Remember that a post-drain notification is still owed.
+        self.main_work_pending.store(true, Ordering::Release);
         self.compositor.notify(source);
         self.notify_main(source);
+    }
+
+    pub(super) fn mark_main_work_pending(&self) {
+        self.main_work_pending.store(true, Ordering::Release);
+    }
+
+    /// Publish work created by the main thread after it drained an async
+    /// producer or serviced a main-owned deadline.
+    pub(super) fn finish_main_work(&self, source: RuntimeWakeupSource) -> bool {
+        if self.main_work_pending.swap(false, Ordering::AcqRel) {
+            self.compositor.notify(source);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(super) fn post_main_mutation_wake(
+        &self,
+        source: RuntimeWakeupSource,
+    ) -> PostMainMutationWake {
+        PostMainMutationWake {
+            wake: self.clone(),
+            source,
+        }
     }
 
     pub(super) fn notify_main(&self, source: RuntimeWakeupSource) {
@@ -218,12 +250,20 @@ impl WindowedWake {
         self.compositor.notify(source);
     }
 
+    pub(super) fn has_pending_proxy_event(&self) -> bool {
+        self.proxy_event_pending.load(Ordering::Acquire)
+    }
+
     pub(super) fn take_main_source(&self) -> RuntimeWakeupSource {
-        self.proxy_event_pending.store(false, Ordering::Release);
-        *self
+        let source = self
             .main_source
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Clear the coalescing bit while holding the source lock. A concurrent
+        // notifier must either be represented by this source or enqueue a new
+        // proxy event; it cannot overwrite the source between clear and read.
+        self.proxy_event_pending.store(false, Ordering::Release);
+        *source
     }
 
     pub(super) fn compositor(&self) -> &CompositorWake {
@@ -235,13 +275,24 @@ impl WindowedWake {
     }
 }
 
+pub(super) struct PostMainMutationWake {
+    wake: WindowedWake,
+    source: RuntimeWakeupSource,
+}
+
+impl Drop for PostMainMutationWake {
+    fn drop(&mut self) {
+        self.wake.notify_compositor(self.source);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
 
     use crate::idle_efficiency::{IdleEfficiencyCounters, RuntimeWakeupSource};
 
-    use super::{CompositorWake, Deadline, control_flow_for_deadlines};
+    use super::{CompositorWake, Deadline, WindowedWake, control_flow_for_deadlines};
 
     #[test]
     fn static_idle_selects_wait_without_a_bounded_poll() {
@@ -360,5 +411,37 @@ mod tests {
         );
         assert_eq!(observed.source, RuntimeWakeupSource::TtlDeadline);
         assert!(observed.timed_out);
+    }
+
+    #[test]
+    fn main_owned_work_gets_a_post_mutation_compositor_generation() {
+        let wake = WindowedWake::disconnected();
+        let before_producer = wake.compositor().checkpoint();
+        wake.notify(RuntimeWakeupSource::SceneChange);
+        let producer_wake = wake.compositor().wait(before_producer, None);
+
+        let before_main_mutation = producer_wake.generation;
+        assert!(wake.finish_main_work(RuntimeWakeupSource::SceneChange));
+        let post_mutation = wake.compositor().wait(before_main_mutation, None);
+        assert!(post_mutation.generation > before_main_mutation);
+    }
+
+    #[test]
+    fn frame_ready_does_not_bypass_the_next_compositor_deadline() {
+        let wake = WindowedWake::disconnected();
+        wake.notify_main(RuntimeWakeupSource::FrameReady);
+        assert!(!wake.finish_main_work(RuntimeWakeupSource::FrameReady));
+    }
+
+    #[test]
+    fn os_event_guard_notifies_after_the_main_mutation_scope() {
+        let wake = WindowedWake::disconnected();
+        let checkpoint = wake.compositor().checkpoint();
+        {
+            let _post_mutation = wake.post_main_mutation_wake(RuntimeWakeupSource::SceneChange);
+            assert_eq!(wake.compositor().checkpoint(), checkpoint);
+        }
+        let observed = wake.compositor().wait(checkpoint, None);
+        assert!(observed.generation > checkpoint);
     }
 }

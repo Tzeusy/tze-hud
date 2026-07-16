@@ -619,16 +619,25 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
                         .counters()
                         .record_main_wakeup(deadline.source);
                     // Main-owned deadlines (portal liveness/cadence, hover, and
-                    // chrome expiry) may mutate the scene in `about_to_wait`.
-                    // Wake the independently parked compositor for that work.
-                    self.state.wake.notify_compositor(deadline.source);
+                    // chrome expiry) mutate the scene later in `about_to_wait`.
+                    // Mark a post-mutation compositor notification as owed; a
+                    // pre-mutation wake can otherwise be consumed against the
+                    // old scene and strand the newly-created work.
+                    self.state.wake.mark_main_work_pending();
                 }
             }
-            StartCause::WaitCancelled { .. } => self
-                .state
-                .wake
-                .counters()
-                .record_excluded_operating_system_wakeup(),
+            StartCause::WaitCancelled { .. } => {
+                // EventLoopProxy delivery also cancels a parked wait, but that
+                // wake is runtime-requested and is counted by `user_event`.
+                // Only an unattributed cancellation belongs in the separate
+                // operating-system bucket.
+                if !self.state.wake.has_pending_proxy_event() {
+                    self.state
+                        .wake
+                        .counters()
+                        .record_excluded_operating_system_wakeup();
+                }
+            }
             StartCause::Init | StartCause::Poll => {}
         }
     }
@@ -787,6 +796,9 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
         let next = deadlines.iter().copied().min_by_key(|deadline| deadline.at);
         self.state.scheduled_main_deadline = next;
         event_loop.set_control_flow(control_flow_for_deadlines(now, deadlines));
+        self.state
+            .wake
+            .finish_main_work(crate::idle_efficiency::RuntimeWakeupSource::SceneChange);
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -1525,8 +1537,17 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
                             drop(scene);
 
                             // ── Stage 6–7: Present lock-free ──────────────────
-                            let compositor_telemetry = compositor
-                                .present_windowed_frame(build, surface_for_compositor.as_ref());
+                            let present_outcome = compositor.present_windowed_frame_with_outcome(
+                                build,
+                                surface_for_compositor.as_ref(),
+                            );
+                            if present_outcome.surface_acquired {
+                                compositor_wake.counters().record_surface_acquisition();
+                            }
+                            if present_outcome.gpu_submitted {
+                                compositor_wake.counters().record_gpu_submission();
+                            }
+                            let compositor_telemetry = present_outcome.telemetry;
                             let frame_submitted = compositor_telemetry.stage7_gpu_submit_us > 0;
                             let degradation_work_time_us =
                                 degradation_work_start.elapsed().as_micros() as u64;
@@ -1538,8 +1559,6 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
                             // surface.present()."
                             if frame_submitted {
                                 let _ = frame_ready_tx.send(true);
-                                compositor_wake.counters().record_surface_acquisition();
-                                compositor_wake.counters().record_gpu_submission();
                                 compositor_wake.notify_main(
                                     crate::idle_efficiency::RuntimeWakeupSource::FrameReady,
                                 );
@@ -1757,7 +1776,11 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
             WindowEvent::CloseRequested => crate::idle_efficiency::RuntimeWakeupSource::Shutdown,
             _ => crate::idle_efficiency::RuntimeWakeupSource::SceneChange,
         };
-        self.state.wake.notify_compositor(wake_source);
+        // Notify on every exit from this callback, after the OS event's scene
+        // and out-of-band compositor state mutations have completed. Waking at
+        // callback entry permits the compositor to consume the generation and
+        // park against the old state while the main thread is still mutating.
+        let _post_main_mutation_wake = self.state.wake.post_main_mutation_wake(wake_source);
         match event {
             // ── Close ──────────────────────────────────────────────────────
             WindowEvent::CloseRequested => {
