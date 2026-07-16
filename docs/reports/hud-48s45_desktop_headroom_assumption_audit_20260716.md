@@ -73,7 +73,7 @@ Doctrine anchors:
 | F3 | Dirty-frame scene work and transient allocation | **needs-degradation-path** | Any dirty/animated frame calls `build_windowed_frame`, which rebuilds geometry, text inputs, drag/focus/context-menu geometry, widget quads, and owned vectors for the complete visible scene (`crates/tze_hud_compositor/src/renderer/frame.rs:405-589`). `build_frame_vertices` sorts all visible tiles, creates fresh vertex/texture-command vectors, and recursively visits each root (`crates/tze_hud_compositor/src/renderer/frame.rs:94-125,185-210`). The encode path creates a fresh full vertex buffer and command encoder (`crates/tze_hud_compositor/src/renderer/mod.rs:2031-2050`). | Specify retained per-tile draw artifacts or dirty-region rebuild semantics so one-node changes are proportional to changed content. Keep a bounded full rebuild as fallback; do not prescribe an implementation before measurements. |
 | F4 | Expensive-content caching and lifetime hygiene | **fine** | Markdown/truncation primes are scene-version gated before render (`crates/tze_hud_runtime/src/windowed/mod.rs:1122-1142`); widget textures are dirty-synced before acquisition (`crates/tze_hud_compositor/src/renderer/frame.rs:541-551`); image textures unused by the current scene are evicted (`crates/tze_hud_compositor/src/renderer/image_cache.rs:774-784`); widget raster caches are bounded LRU stores (`crates/tze_hud_compositor/src/widget.rs:1769-1878`). | Preserve cache correctness and eviction tests. Capacity policy belongs to F5. |
 | F5 | Texture/resource/cache watermarks | **needs-degradation-path** | Per-agent defaults allow 256 MiB of textures and a 2 GiB hard maximum (`crates/tze_hud_scene/src/types.rs:587-657`; `crates/tze_hud_runtime/src/session.rs:27-59`). The resource store defaults to 64 MiB per decoded texture and 512 MiB total (`crates/tze_hud_resource/src/types.rs:165-183,210-245`). Five process-global widget pixmap caches have fixed 32-48 MiB caps totaling 208 MiB (`crates/tze_hud_compositor/src/widget.rs:1776-1778,1957-1965`). The bounds prevent unbounded growth, but they are fragmented and desktop-sized rather than one profile/pressure-governed envelope. | Future profile specs should define one aggregate CPU/GPU/cache budget, per-cache shares, pressure-triggered eviction/quality reduction, and admission failure semantics. Current Windows work may expose/account these totals without activating a device profile. |
-| F6 | Display profile as an operational envelope | **architectural-risk** | `RuntimeContext` stores the resolved profile as the configuration source of truth (`crates/tze_hud_runtime/src/runtime_context.rs:108-170`), but the windowed cadence comes independently from CLI/env `opts.fps` (`app/tze_hud_app/src/main.rs:1023-1051`). A repository-wide consumer search finds `runtime_context.profile` used only for headless truncation input size, not windowed `target_fps`, tile/texture/agent ceilings, or compositor degradation. | Reconcile configuration/runtime specs so the selected profile feeds one immutable operational envelope consumed by admission, caches, cadence, and degradation. This is also a current spec-to-code seam because RFC 0006 says profiles shape what the runtime enforces (`about/legends-and-lore/rfcs/0006-configuration.md:901-919`). |
+| F6 | Display profile as an operational envelope | **architectural-risk** | `RuntimeContext` stores the resolved profile as the configuration source of truth (`crates/tze_hud_runtime/src/runtime_context.rs:108-170`), but the windowed cadence comes independently from CLI/env `opts.fps` (`app/tze_hud_app/src/main.rs:1023-1051`). The profile's truncation-input bound is consumed in both windowed and headless compositor setup (`crates/tze_hud_runtime/src/windowed/mod.rs:883-891`; `crates/tze_hud_runtime/src/headless.rs:288-291`), and config loading rejects registered-agent tile/texture/update overrides above the active profile (`crates/tze_hud_config/src/loader.rs:694-770`). Those consumers do not yet make the profile one operational runtime envelope: windowed `target_fps`, compositor degradation, cache totals, and runtime admission defaults remain independently sourced. | Reconcile configuration/runtime specs so the selected profile feeds one immutable operational envelope consumed by admission, caches, cadence, and degradation. This is also a current spec-to-code seam because RFC 0006 says profiles shape what the runtime enforces (`about/legends-and-lore/rfcs/0006-configuration.md:901-919`). |
 | F7 | Refresh-rate-derived frame budgets | **architectural-risk** | Pipeline constants fix total time to 16.6 ms and input-to-next-present to 33 ms (`crates/tze_hud_runtime/src/pipeline.rs:72-99`). Degradation fixes 14/12 ms thresholds and 10/30-frame windows explicitly described at 60 fps (`crates/tze_hud_runtime/src/degradation.rs:27-48`). The controller itself has no production consumer outside its definition/re-export, so compositor level remains nominal. At 90/120 Hz, frame periods are about 11.1/8.3 ms, making the current trigger later than a missed-frame boundary. | Define budgets as functions of negotiated presentation cadence (with absolute local-input ceilings retained), express hysteresis windows in time, and specify production wiring from telemetry to compositor quality/shedding. Do not add a 90/120 Hz lane until device scope reopens. |
 | F8 | Output-view model (monoscopic/single surface) | **architectural-risk** | `CompositorFrame` owns exactly one `TextureView`; `CompositorSurface` acquires one frame and reports one width/height pair (`crates/tze_hud_compositor/src/surface.rs:88-130`). `Compositor` stores scalar width/height (`crates/tze_hud_compositor/src/renderer/mod.rs:86-121`), and render passes bind one color attachment (`crates/tze_hud_compositor/src/renderer/mod.rs:2061-2079`). There is no view/eye identity or array-layer contract at the compositor boundary. | A future device-profile change must decide explicitly between local multiview/stereo composition and upstream precomposition. Either choice needs a view-set/presentation contract before code; do not infer that two compositor instances are coherent. |
 | F9 | GPU submission/pipelining | **architectural-risk** | The windowed path submits one command buffer and immediately calls `device.poll(wgpu::Maintain::Wait)` before releasing the frame (`crates/tze_hud_compositor/src/renderer/frame.rs:681-699`). This serializes CPU progress behind GPU completion and leaves no declared frames-in-flight policy. | Specify bounded frames in flight, ownership/present acknowledgements, and backpressure for high-refresh envelopes. Validate that any asynchronous path preserves surface-lifetime safety and input/present telemetry. |
@@ -136,23 +136,41 @@ The future change should use the existing `configuration`, `runtime-kernel`,
 `input-model`, `resource-store`, and `validation-framework` capabilities. It
 should not revive the parked v2 change wholesale.
 
+Tracker routing is deliberately deduplicated:
+
+- `hud-le1e0` already owns the efficiency-budget delta for bounded idle CPU
+  wakeups and change-proportional/damage-scoped work; `hud-hnigs` owns its idle
+  GPU/wakeup telemetry and CI enforcement. F2/F3 should feed those beads rather
+  than create a parallel requirements change. `hud-0jfqd` is the existing RFC
+  0002 timing-reconciliation decision that gates the quiescence contract.
+- F5/F6/F7/F11 identify a distinct current configuration/runtime/input
+  reconciliation seam: prove that the resolved profile, degradation controller,
+  and command-input abstraction have the required production consumers. This
+  should be tracked separately from the idle-work delta.
+- F8/F9 and the device-envelope portions of F5/F7/F11 remain future spec inputs
+  only. Do not create device implementation work until the owner reopens that
+  lane.
+
 ## Reproduction Pointers
 
 Read-only commands used to verify production consumers and absence claims at
 `origin/main` commit `d33ad12f`:
 
 ```bash
-rg -n 'runtime_context\.profile|\.profile\.(target_fps|min_fps|max_tiles|max_texture_mb|max_agents|max_agent_update_hz)' \
+rg -n -U 'runtime_context\s*\.profile|\.profile\.(target_fps|min_fps|max_tiles|max_texture_mb|max_agents|max_agent_update_hz|max_truncation_input_bytes)' \
   crates/tze_hud_runtime app/tze_hud_app --glob '*.rs'
 rg -n 'DegradationController' --glob '*.rs' \
   --glob '!crates/tze_hud_runtime/src/degradation.rs' .
-rg -n 'CommandProcessor|RawCommandEvent|CommandAction|CommandSource' \
+rg -n 'CommandProcessor|RawCommandEvent' \
   --glob '*.rs' --glob '!crates/tze_hud_input/src/command.rs' .
 rg -n 'ControlFlow::Poll|frame_interval|Maintain::Wait|build_windowed_frame|Vec::new' \
   crates/tze_hud_runtime crates/tze_hud_compositor --glob '*.rs'
 ```
 
-The first search returns only headless truncation-size consumers for
-`runtime_context.profile`. The second returns only the public re-export. The
-third returns integration/protocol/example consumers, not a production runtime
-producer for command input.
+The first search returns the windowed and headless truncation-size production
+consumers plus `runtime_context.rs` tests, but no windowed cadence,
+compositor-degradation, cache-total, or admission-default consumer. Config-load
+validation separately consumes profile ceilings for registered-agent overrides.
+The second search returns only the public re-export. The third returns the public
+re-export and integration tests, not a production runtime producer for command
+input.
