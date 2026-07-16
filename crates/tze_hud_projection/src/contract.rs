@@ -249,6 +249,9 @@ pub struct ProjectionBounds {
     pub max_seen_logical_units: usize,
     pub max_audit_records: usize,
     pub owner_token_ttl_wall_us: u64,
+    /// Maximum wall-clock gap between authenticated owner operations before the
+    /// projection is presented as stale. Applied when the authority is built.
+    pub agent_liveness_degraded_after_wall_us: u64,
 }
 
 impl Default for ProjectionBounds {
@@ -267,6 +270,8 @@ impl Default for ProjectionBounds {
             max_seen_logical_units: crate::DEFAULT_MAX_SEEN_LOGICAL_UNITS,
             max_audit_records: crate::DEFAULT_MAX_AUDIT_RECORDS,
             owner_token_ttl_wall_us: crate::DEFAULT_OWNER_TOKEN_TTL_WALL_US,
+            agent_liveness_degraded_after_wall_us:
+                crate::DEFAULT_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US,
         }
     }
 }
@@ -295,6 +300,16 @@ impl ProjectionBounds {
             return Err(ProjectionContractError::InvalidArgument(
                 "visible transcript bound cannot exceed retained transcript bound".to_string(),
             ));
+        }
+        if !(crate::MIN_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US
+            ..=crate::MAX_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US)
+            .contains(&self.agent_liveness_degraded_after_wall_us)
+        {
+            return Err(ProjectionContractError::InvalidArgument(format!(
+                "agent liveness threshold must be within {}..={} wall-clock microseconds",
+                crate::MIN_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US,
+                crate::MAX_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US
+            )));
         }
         Ok(())
     }

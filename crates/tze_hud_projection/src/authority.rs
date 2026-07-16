@@ -47,6 +47,9 @@ struct ProjectionSession {
     hud_connection: Option<HudConnectionMetadata>,
     advisory_lease: Option<AdvisoryLeaseIdentity>,
     reconnect: ReconnectBookkeeping,
+    /// Set only by the runtime-owned liveness sweep, so automatic staleness can
+    /// recover independently of an owner-authored `Degraded` status.
+    agent_liveness_degraded_since_wall_us: Option<u64>,
     retained_transcript: VecDeque<TranscriptUnit>,
     retained_transcript_bytes: usize,
     /// The viewer's own accepted submissions (the INPUT history), held as a
@@ -385,8 +388,7 @@ impl ProjectionAuthority {
         {
             return Err(ProjectionErrorCode::ProjectionStateConflict);
         }
-        session.reconnect.last_heartbeat_wall_us = Some(heartbeat_wall_us);
-        promote_to_active_if_recovering(session);
+        record_authenticated_agent_liveness(session, heartbeat_wall_us);
         Ok(())
     }
 
@@ -622,6 +624,45 @@ impl ProjectionAuthority {
         before - self.sessions.len()
     }
 
+    /// Mark attached projections stale after a bounded gap in authenticated
+    /// owner traffic. Presentation cadence and lease-grace cleanup remain owned
+    /// by the runtime caller; this returns only newly transitioned IDs.
+    pub fn sweep_agent_liveness_degradation(
+        &mut self,
+        server_timestamp_wall_us: u64,
+    ) -> Vec<String> {
+        let threshold = self.bounds.agent_liveness_degraded_after_wall_us;
+        let mut degraded = Vec::new();
+        for (projection_id, session) in &mut self.sessions {
+            if session.agent_liveness_degraded_since_wall_us.is_some()
+                || !matches!(
+                    session.lifecycle_state,
+                    ProjectionLifecycleState::Attached | ProjectionLifecycleState::Active
+                )
+            {
+                continue;
+            }
+            let Some(last_liveness_wall_us) = session.reconnect.last_heartbeat_wall_us else {
+                continue;
+            };
+            if server_timestamp_wall_us.saturating_sub(last_liveness_wall_us) < threshold {
+                continue;
+            }
+            session.agent_liveness_degraded_since_wall_us = Some(server_timestamp_wall_us);
+            session.lifecycle_state = ProjectionLifecycleState::Degraded;
+            degraded.push(projection_id.clone());
+        }
+        degraded.sort_unstable();
+        degraded
+    }
+
+    /// Whether this projection's stale state was opened by the liveness sweep.
+    pub fn is_agent_liveness_degraded(&self, projection_id: &str) -> bool {
+        self.sessions
+            .get(projection_id)
+            .is_some_and(|session| session.agent_liveness_degraded_since_wall_us.is_some())
+    }
+
     #[cfg(test)]
     pub fn owner_token_verifier_for_test(&self, projection_id: &str) -> Option<&str> {
         self.sessions
@@ -746,6 +787,7 @@ impl ProjectionAuthority {
                         .get_mut(&request.envelope.projection_id)
                         .expect("session existence checked above");
                     existing.owner_token_verifier = verifier_for_secret(&owner_token);
+                    record_authenticated_agent_liveness(existing, server_timestamp_wall_us);
                     existing.lifecycle_state
                 };
                 let mut response = ProjectionResponse::accepted(
@@ -823,7 +865,11 @@ impl ProjectionAuthority {
                 attach_idempotency_key: request.idempotency_key,
                 hud_connection: None,
                 advisory_lease: None,
-                reconnect: ReconnectBookkeeping::default(),
+                reconnect: ReconnectBookkeeping {
+                    last_heartbeat_wall_us: Some(server_timestamp_wall_us),
+                    ..ReconnectBookkeeping::default()
+                },
+                agent_liveness_degraded_since_wall_us: None,
                 retained_transcript: VecDeque::new(),
                 retained_transcript_bytes: 0,
                 input_history: VecDeque::new(),
@@ -1588,6 +1634,7 @@ impl ProjectionAuthority {
         if !constant_time_eq(&session.owner_token_verifier, &presented) {
             return Err(ProjectionErrorCode::ProjectionUnauthorized);
         }
+        record_authenticated_agent_liveness(session, server_timestamp_wall_us);
         Ok(session)
     }
 
@@ -1739,20 +1786,13 @@ fn projected_portal_state(
     // without any transcript/identity leak. The richer `lifecycle_state` below
     // stays redaction-gated.
     //
-    // The signal is keyed off `hud_connection`/`last_disconnect_wall_us`, NOT
-    // `lifecycle_state`, because owner traffic clears the lifecycle latch but not
-    // the connection: `handle_publish_output` accepts owner publishes while the
-    // HUD is gone (`hud_connection == None`) and `append_transcript_unit`
-    // promotes `HudUnavailable` back to `Active`. Deriving from `lifecycle_state`
-    // would silently drop the stale treatment during the orphan/grace window even
-    // though `authorize_portal_republish` still fails — the surface would un-dim
-    // and re-enable input without the HUD ever reconnecting. Only
-    // `record_hud_connection` restores `hud_connection = Some`, so this latch
-    // clears exactly on a genuine reconnect. `last_disconnect_wall_us.is_some()`
-    // gates out a freshly-attached, never-connected portal (which is "connecting",
-    // not "disconnected").
-    let connection_degraded =
-        session.hud_connection.is_none() && session.reconnect.last_disconnect_wall_us.is_some();
+    // HUD-side drops are keyed off connection bookkeeping rather than lifecycle,
+    // because owner traffic can mutate lifecycle while the HUD is still gone.
+    // Agent-side silence uses its dedicated runtime-owned marker so an explicit
+    // owner-authored Degraded status remains semantically distinct.
+    let connection_degraded = session.agent_liveness_degraded_since_wall_us.is_some()
+        || (session.hud_connection.is_none()
+            && session.reconnect.last_disconnect_wall_us.is_some());
     // Content-free "ever connected" signal (portal-chat-grade-affordances
     // §Connecting State Distinction). True once the session has a live HUD
     // connection OR has recorded a disconnect (connected-then-dropped still
@@ -2166,6 +2206,30 @@ fn promote_to_active_if_recovering(session: &mut ProjectionSession) {
         session.lifecycle_state,
         ProjectionLifecycleState::Attached | ProjectionLifecycleState::HudUnavailable
     ) {
+        session.lifecycle_state = ProjectionLifecycleState::Active;
+    }
+}
+
+/// Refresh server-observed agent recency only after authentication succeeds.
+/// Automatic liveness degradation recovers to Active; owner-authored Degraded
+/// has no liveness marker and is preserved.
+fn record_authenticated_agent_liveness(
+    session: &mut ProjectionSession,
+    server_timestamp_wall_us: u64,
+) {
+    session.reconnect.last_heartbeat_wall_us = Some(
+        session
+            .reconnect
+            .last_heartbeat_wall_us
+            .map_or(server_timestamp_wall_us, |last| {
+                last.max(server_timestamp_wall_us)
+            }),
+    );
+    if session
+        .agent_liveness_degraded_since_wall_us
+        .take()
+        .is_some()
+    {
         session.lifecycle_state = ProjectionLifecycleState::Active;
     }
 }
