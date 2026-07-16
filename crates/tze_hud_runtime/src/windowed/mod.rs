@@ -452,6 +452,12 @@ struct WindowedRuntimeState {
     /// key-down inserts the chord here, the matching key-up removes it instead of
     /// resizing again.
     consumed_portal_resize_keydowns: std::collections::HashSet<String>,
+    /// Focused nodes holding local pressed feedback from a keyboard ACTIVATE,
+    /// keyed by physical key identity until the matching key release.
+    keyboard_activation_nodes: std::collections::HashMap<String, tze_hud_scene::SceneId>,
+    /// Non-navigation command bindings whose raw key-down was replaced by a
+    /// `CommandInputEvent`; their matching raw key-up must be swallowed too.
+    consumed_command_keydowns: std::collections::HashSet<String>,
     /// Shared local composer echo state for the compositor thread (hud-r3ax6).
     ///
     /// Written by the input-event thread (this thread) on every keystroke that
@@ -2333,6 +2339,8 @@ impl WindowedRuntime {
             composer_pointer_drag_anchor: None,
             portal_resize_states: std::collections::HashMap::new(),
             consumed_portal_resize_keydowns: std::collections::HashSet::new(),
+            keyboard_activation_nodes: std::collections::HashMap::new(),
+            consumed_command_keydowns: std::collections::HashSet::new(),
             // Placeholder; replaced in resumed() with the Arc cloned from the
             // compositor.  Separate Arc so it works before compositor is created.
             local_composer_state: Arc::new(StdMutex::new(None)),

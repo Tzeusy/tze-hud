@@ -2027,6 +2027,8 @@ mod tests {
             composer_pointer_drag_anchor: None,
             portal_resize_states: std::collections::HashMap::new(),
             consumed_portal_resize_keydowns: std::collections::HashSet::new(),
+            keyboard_activation_nodes: std::collections::HashMap::new(),
+            consumed_command_keydowns: std::collections::HashSet::new(),
             local_composer_state: Arc::new(StdMutex::new(None)),
             viewer_echo_queue: Arc::new(StdMutex::new(Vec::new())),
             focus_ring_owner_state: Arc::new(StdMutex::new(None)),
@@ -3201,16 +3203,18 @@ mod tests {
             tze_hud_input::FocusOwner::None,
             "Escape on a composer-less stop must clear focus to None"
         );
-        // A FocusLost event was broadcast for the released node.
-        let (_ns, batch) = rx
-            .try_recv()
-            .expect("clearing focus must broadcast a FocusLost event");
+        // A FocusLost event was broadcast for the released node. CANCEL is
+        // intentionally delivered first while the old owner is still the
+        // command target, so inspect the whole resulting event sequence.
+        let mut events = Vec::new();
+        while let Ok((_namespace, batch)) = rx.try_recv() {
+            events.extend(batch.events.into_iter().filter_map(|event| event.event));
+        }
         assert!(
-            matches!(
-                batch.events.first().and_then(|e| e.event.as_ref()),
-                Some(InputEvent::FocusLost(_))
-            ),
-            "the broadcast must be a FocusLost for the released control"
+            events
+                .iter()
+                .any(|event| matches!(event, InputEvent::FocusLost(_))),
+            "the broadcasts must include FocusLost for the released control; got {events:?}"
         );
     }
 

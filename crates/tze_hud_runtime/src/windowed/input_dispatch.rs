@@ -158,6 +158,80 @@ pub(super) fn dispatch_keyboard_event(
     let _ = tx.send((dispatch.namespace, batch));
 }
 
+/// Broadcast an abstract command produced by the production input adapter.
+///
+/// Command events are transactional RFC 0004 input events. They use the same
+/// namespace-addressed `INPUT_EVENTS` channel as keyboard and pointer input;
+/// the session handler applies the capability/subscription filter.
+pub(super) fn dispatch_command_event(
+    tx: &Option<tokio::sync::broadcast::Sender<(String, EventBatch)>>,
+    dispatch: tze_hud_input::CommandDispatch,
+) {
+    let Some(tx) = tx else { return };
+
+    debug_assert!(
+        dispatch.is_transactional,
+        "CommandInputEvent must always be transactional"
+    );
+
+    let action = match dispatch.event.action {
+        tze_hud_input::CommandAction::NavigateNext => {
+            tze_hud_protocol::proto::CommandAction::NavigateNext
+        }
+        tze_hud_input::CommandAction::NavigatePrev => {
+            tze_hud_protocol::proto::CommandAction::NavigatePrev
+        }
+        tze_hud_input::CommandAction::Activate => tze_hud_protocol::proto::CommandAction::Activate,
+        tze_hud_input::CommandAction::Cancel => tze_hud_protocol::proto::CommandAction::Cancel,
+        tze_hud_input::CommandAction::Context => tze_hud_protocol::proto::CommandAction::Context,
+        tze_hud_input::CommandAction::ScrollUp => tze_hud_protocol::proto::CommandAction::ScrollUp,
+        tze_hud_input::CommandAction::ScrollDown => {
+            tze_hud_protocol::proto::CommandAction::ScrollDown
+        }
+    };
+    let source = match dispatch.event.source {
+        tze_hud_input::CommandSource::Keyboard => tze_hud_protocol::proto::CommandSource::Keyboard,
+        tze_hud_input::CommandSource::Dpad => tze_hud_protocol::proto::CommandSource::Dpad,
+        tze_hud_input::CommandSource::Voice => tze_hud_protocol::proto::CommandSource::Voice,
+        tze_hud_input::CommandSource::RemoteClicker => {
+            tze_hud_protocol::proto::CommandSource::RemoteClicker
+        }
+        tze_hud_input::CommandSource::RotaryDial => {
+            tze_hud_protocol::proto::CommandSource::RotaryDial
+        }
+        tze_hud_input::CommandSource::Programmatic => {
+            tze_hud_protocol::proto::CommandSource::Programmatic
+        }
+    };
+
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64;
+    let event = tze_hud_protocol::proto::input_envelope::Event::CommandInput(
+        tze_hud_protocol::proto::CommandInputEvent {
+            tile_id: dispatch.event.tile_id.as_uuid().as_bytes().to_vec(),
+            node_id: dispatch
+                .event
+                .node_id
+                .map(|id| id.as_uuid().as_bytes().to_vec())
+                .unwrap_or_default(),
+            interaction_id: dispatch.event.interaction_id,
+            timestamp_mono_us: dispatch.event.timestamp_mono_us.0,
+            device_id: dispatch.event.device_id,
+            action: action as i32,
+            source: source as i32,
+        },
+    );
+    let batch = EventBatch {
+        frame_number: 0,
+        batch_ts_us: now_us,
+        events: vec![InputEnvelope { event: Some(event) }],
+    };
+
+    let _ = tx.send((dispatch.namespace, batch));
+}
+
 /// Deliver a [`tze_hud_input::DraftNotificationBatch`] to the owning adapter
 /// via the `INPUT_EVENTS` gRPC broadcast channel (hud-ygbcy).
 ///

@@ -198,6 +198,18 @@ OS / winit           tze_hud_runtime::windowed      tze_hud_input              C
 Rollback: only on explicit agent rejection (100ms reverse). Silence/latency
 does not trigger rollback.
 
+Pointer-free command input shares this production path. After safe-mode,
+shell-reserved, portal-control, and composer precedence, the windowed keyboard
+drain translates RFC 0004 default bindings into `RawCommandEvent`. Focus-cycle
+commands move focus first; `CommandProcessor` then applies local feedback and
+constructs a transactional dispatch for the new/current focus owner.
+`input_dispatch::dispatch_command_event` serializes that dispatch as the
+existing protobuf `CommandInputEvent` on the owning namespace's `INPUT_EVENTS`
+subscription. A matching activation-key release clears the recorded node's
+pressed state even if focus moved in the meantime. Future D-pad, voice,
+clicker, and rotary adapters enter at `RawCommandEvent` and reuse the same
+processor and protocol conversion.
+
 **Key files:** `crates/tze_hud_runtime/src/windowed/lifecycle.rs`,
 `crates/tze_hud_runtime/src/windowed/input_dispatch.rs`,
 `crates/tze_hud_runtime/src/windowed/keyboard.rs`,
