@@ -1355,6 +1355,139 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_bare_projection_token_expiry_is_actionable_and_redacted() {
+        use tze_hud_projection::ProjectionErrorCode;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        let server = test_server(SceneGraph::new(1920.0, 1080.0)).with_portal_op_tx(tx);
+        let responder = tokio::spawn(async move {
+            match rx.recv().await.expect("publish op must be forwarded") {
+                crate::portal_op::PortalOp::PublishOutput { reply, .. } => {
+                    reply
+                        .send(Err(crate::portal_op::PortalOpRejection::new(
+                            ProjectionErrorCode::ProjectionTokenExpired,
+                            "owner token secret-token expired beside private text TOP-SECRET",
+                        )))
+                        .expect("publish rejection must send");
+                }
+                other => panic!("unexpected portal op: {other:?}"),
+            }
+        });
+
+        let raw = server
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"portal_projection_publish","params":{"projection_id":"p1","owner_token":"secret-token","output_text":"private"},"id":17}"#,
+                &resident(),
+            )
+            .await;
+        responder.await.expect("responder must complete");
+
+        assert!(!raw.contains("secret-token"), "owner token leaked: {raw}");
+        assert!(!raw.contains("TOP-SECRET"), "private detail leaked: {raw}");
+        let resp = parse_response(&raw);
+        assert_eq!(resp["error"]["code"], -32103, "{resp:#}");
+        assert_eq!(
+            resp["error"]["data"]["error_code"],
+            "PROJECTION_TOKEN_EXPIRED"
+        );
+        assert_eq!(
+            resp["error"]["data"]["context"]["operation"],
+            "portal_projection_publish"
+        );
+        assert_eq!(
+            resp["error"]["data"]["hint"]["recovery_operation"],
+            "portal_projection_attach"
+        );
+        let resolution = resp["error"]["data"]["hint"]["resolution"]
+            .as_str()
+            .expect("resolution is text");
+        assert!(resolution.contains("authenticated"), "{resolution}");
+        assert!(resolution.contains("original idempotency_key"), "{resolution}");
+        assert!(resolution.contains("rotate the owner token"), "{resolution}");
+    }
+
+    #[tokio::test]
+    async fn test_tools_call_projection_unauthorized_keeps_structured_recovery() {
+        use tze_hud_projection::ProjectionErrorCode;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        let server = test_server(SceneGraph::new(1920.0, 1080.0)).with_portal_op_tx(tx);
+        let responder = tokio::spawn(async move {
+            match rx.recv().await.expect("poll op must be forwarded") {
+                crate::portal_op::PortalOp::GetPendingInput { reply, .. } => {
+                    reply
+                        .send(Err(crate::portal_op::PortalOpRejection::new(
+                            ProjectionErrorCode::ProjectionUnauthorized,
+                            "wrong owner token secret-token for private projection",
+                        )))
+                        .expect("poll rejection must send");
+                }
+                other => panic!("unexpected portal op: {other:?}"),
+            }
+        });
+
+        let request = json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": "portal_projection_get_pending_input",
+                "arguments": {
+                    "projection_id": "p1",
+                    "owner_token": "secret-token",
+                    "wait_ms": 0
+                }
+            },
+            "id": 18
+        });
+        let raw = server.dispatch(&request.to_string(), &resident()).await;
+        responder.await.expect("responder must complete");
+
+        assert!(!raw.contains("secret-token"), "owner token leaked: {raw}");
+        assert!(
+            parse_response(&raw)["error"].is_null(),
+            "tools/call execution failures remain MCP results: {raw}"
+        );
+        let resp = parse_response(&raw);
+        assert_eq!(resp["result"]["isError"], true);
+        let structured = &resp["result"]["structuredContent"];
+        assert_eq!(structured["error_code"], "PROJECTION_UNAUTHORIZED");
+        assert_eq!(
+            structured["context"]["operation"],
+            "portal_projection_get_pending_input"
+        );
+        assert_eq!(
+            structured["hint"]["recovery_operation"],
+            "portal_projection_attach"
+        );
+        let text: serde_json::Value = serde_json::from_str(
+            resp["result"]["content"][0]["text"]
+                .as_str()
+                .expect("projection error text block is JSON"),
+        )
+        .expect("projection error text is machine-readable JSON");
+        assert_eq!(text, *structured);
+    }
+
+    #[tokio::test]
+    async fn test_projection_authority_not_wired_remains_internal_runtime_fault() {
+        let server = test_server(SceneGraph::new(1920.0, 1080.0));
+        let raw = server
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"portal_projection_publish","params":{"projection_id":"p1","owner_token":"token","output_text":"hello"},"id":19}"#,
+                &resident(),
+            )
+            .await;
+        let resp = parse_response(&raw);
+        assert_eq!(resp["error"]["code"], -32603, "{resp:#}");
+        assert!(resp["error"]["data"]["error_code"].is_null());
+        assert!(
+            resp["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("authority not wired"))
+        );
+    }
+
+    #[tokio::test]
     async fn test_guest_cannot_call_create_tab() {
         let server = test_server(SceneGraph::new(1920.0, 1080.0));
         let raw = server

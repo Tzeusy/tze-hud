@@ -6562,11 +6562,16 @@ mod tests {
             other => panic!("expected ProjectionRejected, got {other:?}"),
         }
 
-        // On the wire: error.data.error_code is the stable PROJECTION_* string.
+        // On the wire: the rejection has its dedicated application code plus
+        // deterministic recovery guidance, rather than JSON-RPC Internal.
         let wire: crate::error::JsonRpcError = err.into();
-        assert_eq!(wire.code, crate::error::codes::INTERNAL_ERROR);
+        assert_eq!(wire.code, -32103);
         let data = wire.data.expect("rejection must carry structured data");
         assert_eq!(data["error_code"], "PROJECTION_TOKEN_EXPIRED");
+        assert_eq!(
+            data["hint"]["recovery_operation"],
+            "portal_projection_attach"
+        );
     }
 
     #[tokio::test]

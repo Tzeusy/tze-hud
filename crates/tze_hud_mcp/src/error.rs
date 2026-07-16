@@ -221,3 +221,91 @@ impl From<tze_hud_scene::ValidationError> for McpError {
         McpError::SceneError(e.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use tze_hud_projection::INITIAL_ERROR_CODES;
+
+    #[test]
+    fn projection_error_mapping_is_total_distinct_and_deterministic() {
+        let expected_json_rpc_codes = [
+            -32100, -32101, -32102, -32103, -32104, -32105, -32106, -32107, -32108,
+            -32109, -32110, -32111,
+        ];
+        let mut observed_codes = HashSet::new();
+
+        for (error_code, expected_json_rpc_code) in INITIAL_ERROR_CODES
+            .into_iter()
+            .zip(expected_json_rpc_codes)
+        {
+            let first = JsonRpcError::projection_rejected(
+                error_code,
+                "portal_projection_publish",
+            );
+            let second = JsonRpcError::projection_rejected(
+                error_code,
+                "portal_projection_publish",
+            );
+
+            assert_eq!(first.code, expected_json_rpc_code, "{error_code}");
+            assert!(
+                observed_codes.insert(first.code),
+                "{error_code} reused JSON-RPC code {}",
+                first.code
+            );
+            assert_eq!(first.code, second.code, "{error_code}");
+            assert_eq!(first.message, second.message, "{error_code}");
+            assert!(
+                !first.message.is_empty() && first.message.len() <= 160,
+                "{error_code} message must be bounded and self-describing: {:?}",
+                first.message
+            );
+
+            let data = first.data.expect("projection errors carry structured data");
+            assert_eq!(data["error_code"], error_code.as_str(), "{error_code}");
+            assert_eq!(
+                data["context"]["operation"],
+                "portal_projection_publish",
+                "{error_code} must name the failed operation"
+            );
+            assert_eq!(data["context"]["subsystem"], "portal_projection");
+            assert!(
+                data["hint"]["recovery_operation"].is_string(),
+                "{error_code} must name a recovery operation"
+            );
+            assert!(
+                data["hint"]["resolution"].is_string(),
+                "{error_code} must prescribe a resolution"
+            );
+        }
+
+        assert_eq!(observed_codes.len(), INITIAL_ERROR_CODES.len());
+    }
+
+    #[test]
+    fn owner_token_rejections_prescribe_authenticated_idempotent_reattach() {
+        for error_code in [
+            ProjectionErrorCode::ProjectionUnauthorized,
+            ProjectionErrorCode::ProjectionTokenExpired,
+        ] {
+            let wire = JsonRpcError::projection_rejected(
+                error_code,
+                "portal_projection_get_pending_input",
+            );
+            assert_ne!(wire.code, codes::INTERNAL_ERROR, "{error_code}");
+            let data = wire.data.expect("owner-token rejection has recovery data");
+            assert_eq!(
+                data["hint"]["recovery_operation"],
+                "portal_projection_attach"
+            );
+            let resolution = data["hint"]["resolution"]
+                .as_str()
+                .expect("resolution is text");
+            assert!(resolution.contains("authenticated"), "{resolution}");
+            assert!(resolution.contains("original idempotency_key"), "{resolution}");
+            assert!(resolution.contains("rotate the owner token"), "{resolution}");
+        }
+    }
+}
