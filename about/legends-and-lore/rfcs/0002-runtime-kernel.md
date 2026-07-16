@@ -243,7 +243,7 @@ A dedicated `std::thread` spawned at startup. Runs a tightly controlled loop:
 
 The compositor thread owns the `wgpu::Device` and `wgpu::Queue`. No other thread touches the device. The main thread holds the surface handle and is the only thread that calls `surface.present()`. This split is an intentional architectural decision driven by platform constraints (macOS/Metal requires presentation on the main thread) and frame-budget separation (GPU submission must not block input drain). See §2.7 for the full ADR.
 
-The compositor loop runs at the display refresh rate (default 60Hz). If a frame takes longer than the budget, the pipeline is marked as overbudget and the frame-time guardian evaluates degradation (§5.2).
+While presentation-relevant work is active, the windowed compositor loop runs at the display refresh rate (default 60Hz). Headless scheduling follows §8.4: normal operation is event/deadline-driven, and fixed-cadence pacing is available only as an explicit active benchmark/test mode. Neither mode may submit or present frames merely to satisfy a configured target rate after the runtime becomes quiescent. If an active frame takes longer than the budget, the pipeline is marked as overbudget and the frame-time guardian evaluates degradation (§5.2).
 
 ### 2.4 Network Thread(s)
 
@@ -967,7 +967,9 @@ In CI, `HEADLESS_FORCE_SOFTWARE=1` is set to ensure tests use llvmpipe/WARP rega
 
 ### 8.4 Headless Timing
 
-Without a display refresh signal (vsync), the headless compositor runs at a configurable frame rate (default: 60fps target, driven by a `tokio::time::interval`). Frame timing is less precise than vsync-driven rendering, but is sufficient for correctness testing and performance benchmarking (with appropriate normalization per validation.md).
+Without a display refresh signal (vsync), normal headless operation is event/deadline-driven. Scene mutations, input-local-state changes, animation or TTL deadlines, media-frame arrivals, resizes, readbacks, operator-requested captures, and shutdown signals wake the relevant main/compositor work. The scheduler waits until the next eligible event or presentation deadline; it does not maintain a periodic frame timer while no presentation-relevant work is pending. A configured `target_fps` is an active-work ceiling and target, not permission to acquire, submit, or present idle frames.
+
+Tests and benchmarks that need a stable synthetic cadence may opt into an explicit fixed-cadence mode. That mode is active-work instrumentation, defaults to a 60fps target when selected, and may use a `tokio::time::interval` or a more precise equivalent. Its artifacts MUST identify the pacing mode and requested cadence. A fixed-cadence run is not quiescent and MUST NOT supply evidence for an idle-zero-work gate. Frame timing in this explicit mode is less precise than vsync-driven rendering and requires the hardware normalization defined in validation.md.
 
 ### 8.5 Test Assertions
 
@@ -1021,7 +1023,7 @@ All budgets are p99 unless otherwise noted. "Normalized" means hardware-normaliz
 
 2. **Render encoder parallelism.** Stage 6 (Render Encode) is currently single-threaded on the compositor thread. For scenes with many tiles, parallel encoder creation with multiple `CommandEncoder` instances (recorded in parallel, submitted in order) could reduce Stage 6 time. The tradeoff: complexity vs. budget headroom. Deferred to profiling data.
 
-3. **Frame pacing on headless.** `tokio::time::interval` has jitter under load. An alternative is a spin-wait with yield for tighter frame pacing in headless benchmarks. Decision deferred to validation results.
+3. **Fixed-cadence benchmark precision.** Normal headless operation is event/deadline-driven (§8.4). Explicit fixed-cadence benchmark/test mode may use `tokio::time::interval`, which has jitter under load; whether that mode needs a spin-wait with yield or another precision mechanism remains deferred to validation results.
 
 4. **Telemetry sink protocol.** File, stdout, or remote endpoint are all specified. For remote telemetry (production deployment), a simple UDP or TCP line-protocol sink is likely sufficient. The exact wire format for remote emission is deferred to the Telemetry RFC.
 
@@ -1136,3 +1138,4 @@ pub struct FrameTimingRecord {
 | Round | Date | Reviewer | Focus | Changes |
 |-------|------|----------|-------|---------|
 | A1 | 2026-04-19 | hud-ora8.1.9 | Amendment: media worker lifecycle | Converted RFC 0002 §2.8 ("Future: Media Worker Boundary") from reservation to normative lifecycle spec. Added worker state machine (SPAWNING → RUNNING → DRAINING → TERMINATED; FAILED terminal state). Defined three-condition activation gate: capability grant (RFC 0008 A1 `media-ingress`), budget headroom check (pool slot, per-session stream cap, global texture headroom), and role-authority re-check (RFC 0009 A1: owner or admin). Specified shared worker pool: N = 2–4 slots, priority-based preemption (lease_priority sort per RFC 0008 §2.2), budget-pressure contraction to 1 slot at degradation Level 2+. Defined degradation trigger authority: runtime-automatic (ladder advance), watchdog-automatic (per-worker threshold), operator-manual (Level 0 override); agents may only self-close, not demand degradation. Specified watchdog targets: CPU time (200ms/10s), GPU texture occupancy (256 MiB), ring-buffer occupancy (75%/30-frame sustained), decoder lifetime (24h), leases held (per §4.3 envelope). Documented in-process tokio task model (E24 COMPATIBLE verdict, `docs/decisions/e24-in-process-worker-posture.md`): session coordinator + watchdog tasks on network tokio runtime; GStreamer pipeline pool as black box; GPU device ownership invariant unchanged from §2.8; cross-agent isolation via session_id tagging on DecodedFrameReady. Added RFC 0014 forward cross-references. Full amendment document: `about/legends-and-lore/rfcs/reviews/0002-amendment-media-worker-lifecycle.md` (issue hud-ora8.1.9). |
+| A2 | 2026-07-16 | hud-sjqqv / owner decisions hud-0jfqd and hud-sm6uh | Headless quiescence and pacing authority | Reconciled the stale default-60fps headless timer with efficiency doctrine and the `efficiency-budgets` delta. Normal headless operation is event/deadline-driven; fixed 60fps pacing is explicit benchmark/test-only active work, carries pacing identity, and cannot satisfy quiescent-idle evidence. Clarified that configured target fps does not authorize idle GPU submissions or presents. |

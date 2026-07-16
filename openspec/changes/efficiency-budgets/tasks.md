@@ -1,11 +1,11 @@
 ## 1. Owner Gate and Measurement Contracts
 
-- [ ] 1.1 Obtain explicit owner approval of the idle settling/window values, two-wakeup-per-second ceiling, constrained-envelope definition, canonical-flow vector, and five-percent byte/token regression threshold before implementation beads unblock.
-- [ ] 1.2 Define versioned structured artifact schemas for quiescent counters, invalidation closures and work amplification, constrained-profile identity, and canonical-flow byte/token measurements, including fail-closed missing-field validation.
+- [x] 1.1 Obtain explicit owner approval of the idle settling/window values, two-wakeup-per-second ceiling, constrained-envelope definition, canonical-flow vector, and five-percent byte/token regression threshold before implementation beads unblock. Owner decisions: `hud-0jfqd = A`; `hud-sm6uh = A`, conditional on RFC 0002 reconciliation and fresh exact-head green CI.
+- [ ] 1.2 Define versioned structured artifact schemas for pacing identity, combined and per-loop quiescent counters, typed per-category unique closure-work-item and actual-operation counts, constrained-profile identity, and per-operation/per-flow canonical byte/token measurements and baselines, including fail-closed missing-field validation.
 
 ## 2. Idle and Change-Proportional Runtime Instrumentation
 
-- [ ] 2.1 Instrument runtime-driven main/compositor wakeups, GPU queue submissions, surface acquisitions, and presents with source attribution that excludes benchmark sampling and external operating-system events.
+- [ ] 2.1 Instrument combined and per-loop runtime-driven main/compositor wakeups, GPU queue submissions, surface acquisitions, and presents with pacing identity and source attribution that excludes benchmark sampling and external operating-system events.
 - [ ] 2.2 Implement quiescence detection and the canonical 5-second-settle plus 60-second idle scenario for both overlay and headless paths, with tests enforcing zero GPU work and at most 120 runtime-driven wakeups.
 - [ ] 2.3 Implement typed invalidation-closure accounting across layout, raster, texture upload, render encoding, and composition damage, including structured full-surface fallback reasons.
 - [ ] 2.4 Add the canonical one-node change in a 50-tile scene and dependency-expansion scenarios, with diagnostic gates rejecting all unrelated out-of-closure work.

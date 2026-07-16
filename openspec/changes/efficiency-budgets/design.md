@@ -25,7 +25,7 @@ This change is a contract-only bridge from doctrine to later implementation bead
 
 ### D1: Idle is a state transition followed by a fixed observation window
 
-**Choice:** A scene becomes contractually quiescent no later than five seconds after its final presentation-relevant event. The gate then observes a controlled 60-second interval. During that interval GPU submissions, surface acquisitions, and presents are exactly zero, while runtime-driven main/compositor wakeups are at most 120.
+**Choice:** A scene becomes contractually quiescent no later than five seconds after its final presentation-relevant event. The gate then observes a controlled 60-second interval. During that interval GPU submissions, surface acquisitions, and presents are exactly zero, while the combined runtime-driven main-plus-compositor wakeup count is at most 120. Normal headless operation is event/deadline-driven; fixed-cadence pacing is an explicit active benchmark/test mode, is recorded in artifacts, and cannot produce quiescent evidence.
 
 **Rationale:** A five-second deadline is generous enough for bounded fades, caret state, TTL work, and queued telemetry to settle without allowing a permanent 60 Hz loop to masquerade as startup work. Sixty seconds converts the CPU ceiling into an unambiguous count and is long enough to reveal periodic pacing timers. Two wakeups per second allows bounded housekeeping while rejecting frame-rate polling by two orders of magnitude. Source attribution prevents the measurement sampler or unrelated operating-system activity from being charged to the runtime.
 
@@ -37,7 +37,7 @@ This change is a contract-only bridge from doctrine to later implementation bead
 
 ### D2: Proportionality is proved by an invalidation closure, not elapsed time
 
-**Choice:** Every presentation-relevant change produces a typed invalidation closure. Layout, raster, upload, encoding, and damaged pixels are attributed to the closure, with actual-work and closure cardinalities emitted together. Out-of-closure layout/raster/upload is forbidden. Full-surface work is allowed only with a structured reason and does not count as ordinary proportional damage.
+**Choice:** Every presentation-relevant change produces a typed invalidation closure. Layout, raster, upload, render encoding, and damaged pixels are attributed to separate per-category work-item identities, with actual-operation and closure cardinalities emitted together. Closure cardinality counts unique eligible work items; actual work counts every execution, including repeated processing of one eligible item. Encoded draw calls remain a companion metric, not a proxy for all encoding work. Out-of-closure work in any category is forbidden. Full-surface work is allowed only with a structured reason and does not count as ordinary proportional damage.
 
 **Rationale:** Timing can remain green while a fast desktop GPU redraws the world. Closure accounting directly answers whether unchanged content was touched and remains meaningful across hardware. Including dependency reasons handles legitimate expansion through parent layout, transparent overlap, and runtime chrome without silently redefining every full redraw as "affected."
 
@@ -73,7 +73,7 @@ This change is a contract-only bridge from doctrine to later implementation bead
 
 ### D5: Compatible baselines fail above five percent and surface every increase
 
-**Choice:** Each flow has a checked-in owner-approved baseline. Any compatible request, response, or total byte/token increase above 5 percent fails. Increases up to 5 percent may pass only with a structured warning. Fixture, schema, or tokenizer drift yields `baseline_incompatible`; a newly versioned baseline cannot become authoritative without owner approval.
+**Choice:** Each flow has a checked-in owner-approved baseline containing every per-operation and per-flow request, response, and total byte/token value emitted by the calibration artifact. Any compatible value increase above 5 percent fails. Increases up to 5 percent may pass only with a structured warning. Fixture, schema, or tokenizer drift yields `baseline_incompatible`; a newly versioned baseline cannot become authoritative without owner approval.
 
 **Rationale:** Deterministic fixtures need no statistical noise allowance, but a small reviewable band avoids turning additive protocol evolution into an automatic emergency. Comparing each direction as well as totals prevents a response regression from being hidden by a request reduction. Fail-closed compatibility and approval stop baseline regeneration from laundering a regression.
 

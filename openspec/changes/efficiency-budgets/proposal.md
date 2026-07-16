@@ -4,8 +4,8 @@ The efficiency doctrine now makes idle compute, change-proportional work, constr
 
 ## What Changes
 
-- Require a quiescent scene to produce zero render-driven GPU submissions or presents and no more than two runtime-driven event-loop wakeups per second after a defined settling period.
-- Require layout, raster, upload, and composition work to stay inside the invalidation closure of an observed scene change, with structured amplification metrics that reject unchanged out-of-closure work.
+- Require a quiescent scene to produce zero runtime-driven GPU submissions, surface acquisitions, or presents and no more than 120 combined main-plus-compositor runtime-driven wakeups over a 60-second interval after a five-second settling deadline; normal headless pacing is event/deadline-driven, while fixed cadence is explicit benchmark/test-only active work.
+- Require layout, raster, upload, render encoding/draw, and composition work to stay inside the typed invalidation closure of an observed scene change, with structured amplification metrics that reject unchanged out-of-closure work.
 - Extend the hardware-calibration vector with a gating constrained-envelope lane using a software renderer and a two-logical-CPU execution limit, while retaining the existing normalized performance ceilings.
 - Add deterministic byte and token calibration for canonical `publish_to_zone`, text-stream portal turn, and `publish_to_widget` flows, with checked-in owner-approved baselines and explicit regression thresholds.
 - Keep smart-glasses/VR device implementation, renderer selection, and implementation mechanics out of scope. This change defines contracts and validation gates only.
