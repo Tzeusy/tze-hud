@@ -506,3 +506,15 @@ Scope: post-v1
 #### Scenario: Deferred marker
 - **WHEN** video, audio, or WASM resources are needed
 - **THEN** these types MUST NOT be available in v1; uploads MUST be rejected with RESOURCE_UNSUPPORTED_TYPE until corresponding node types ship
+
+---
+
+### Requirement: Physical Resident Allocation Accounting
+Resident resource, widget-source, widget-raster, and font allocations MUST be
+charged to the runtime-owned resident ledger by physical allocation identity.
+Shared physical allocations are charged once; distinct CPU and GPU copies are
+charged separately. Logical per-agent texture references remain separate.
+
+#### Scenario: CPU and GPU copies are separate
+- **WHEN** one resource has both retained CPU bytes and a GPU texture
+- **THEN** both physical allocations are charged independently

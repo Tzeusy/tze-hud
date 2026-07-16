@@ -1904,6 +1904,7 @@ impl WindowedRuntime {
         let cfg = self.config;
         let (runtime_context, fallback_unrestricted): (SharedRuntimeContext, bool) =
             build_runtime_context(&cfg);
+        tracing::info!(target: "tze_hud::resident_accounting", snapshot = %runtime_context.resident_accounting_snapshot(), "runtime resident accounting initialized");
 
         // Resolve the effective window mode, applying platform fallback checks.
         // Spec §Unsupported overlay fallback (line 185): if overlay is requested
@@ -2021,23 +2022,20 @@ impl WindowedRuntime {
         // side) so composer echo never try_locks the scene mutex.
         let active_tab_mirror = Arc::new(std::sync::Mutex::new(None));
         let chrome_state = Arc::new(std::sync::RwLock::new(crate::shell::ChromeState::new()));
-        let resident_memory = &runtime_context.operational_envelope.resident_memory;
-        let resource_limit =
-            usize::try_from(resident_memory.max_resource_bytes).unwrap_or(usize::MAX);
-        let font_limit = usize::try_from(resident_memory.max_font_bytes).unwrap_or(usize::MAX);
+        let resident_limits = runtime_context.resident_store_limits();
         let shared_state = Arc::new(Mutex::new(SharedState {
             scene: Arc::clone(&shared_scene),
             sessions,
             resource_store: tze_hud_resource::ResourceStore::new(
                 tze_hud_resource::ResourceStoreConfig {
-                    max_total_texture_bytes: resource_limit,
-                    max_font_cache_bytes: font_limit,
+                    max_total_texture_bytes: resident_limits.resource_bytes,
+                    max_font_cache_bytes: resident_limits.font_bytes,
                     ..tze_hud_resource::ResourceStoreConfig::default()
                 },
             ),
             widget_asset_store: tze_hud_protocol::session::WidgetAssetStore::new_with_limits(
-                resident_memory.max_widget_asset_bytes,
-                resident_memory.max_widget_asset_bytes.min(16 * 1024 * 1024),
+                resident_limits.widget_source_bytes,
+                resident_limits.widget_namespace_bytes,
             ),
             runtime_widget_store: runtime_widget_store.clone(),
             element_store: startup_element_store,

@@ -49,6 +49,7 @@ pub(super) fn authorization_scope_for_agent(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_session_init(
     state: &Arc<Mutex<SharedState>>,
     psk: &str,
@@ -328,6 +329,7 @@ pub(super) async fn handle_session_init(
 ///    subscription/capability state.
 /// 4. The caller (main session loop) sends a [`SceneSnapshot`] immediately
 ///    after this function returns (same mechanism as new connections).
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_session_resume(
     state: &Arc<Mutex<SharedState>>,
     psk: &str,

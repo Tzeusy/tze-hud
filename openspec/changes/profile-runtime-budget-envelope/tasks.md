@@ -25,6 +25,6 @@
 
 ## 5. Observability and Verification
 
-- [ ] 5.1 Emit a machine-readable startup/accounting snapshot from the enforcement objects and add exact production-consumer coverage tests, including the gRPC widget fallback store, MCP widget registry, and retained widget source copies.
-- [ ] 5.2 Update configuration, runtime, resource, topology, and operator documentation with the approved ownership model.
-- [ ] 5.3 Run focused crate tests, `cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and the relevant integration/headless gates.
+- [x] 5.1 Emit a machine-readable startup/accounting snapshot from the enforcement objects and add exact production-consumer coverage tests, including the gRPC widget fallback store, MCP widget registry, and retained widget source copies.
+- [x] 5.2 Update configuration, runtime, resource, topology, and operator documentation with the approved ownership model.
+- [x] 5.3 Run focused crate tests, `cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and the relevant non-GPU gates; GPU/headless rendering gates were intentionally omitted per operator instruction.

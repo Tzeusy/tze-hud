@@ -125,6 +125,15 @@ pub struct ResidentMemoryEnvelope {
     pub max_font_bytes: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeResidentStoreLimits {
+    pub resource_bytes: usize,
+    pub widget_source_bytes: u64,
+    pub widget_namespace_bytes: u64,
+    pub widget_raster_bytes: u64,
+    pub font_bytes: usize,
+}
+
 /// Immutable profile-derived limits consumed by runtime admission paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationalRuntimeEnvelope {
@@ -388,6 +397,42 @@ impl RuntimeContext {
     /// Return the frozen budget used for unregistered/guest agents.
     pub fn fallback_resource_budget(&self) -> ResourceBudget {
         self.effective_resource_budget_for("")
+    }
+
+    /// Exact startup limits consumed by production cache/store constructors.
+    pub fn resident_store_limits(&self) -> RuntimeResidentStoreLimits {
+        let resident = &self.operational_envelope.resident_memory;
+        RuntimeResidentStoreLimits {
+            resource_bytes: usize::try_from(resident.max_resource_bytes).unwrap_or(usize::MAX),
+            widget_source_bytes: resident.max_widget_asset_bytes,
+            widget_namespace_bytes: resident.max_widget_asset_bytes.min(16 * MIB_BYTES),
+            widget_raster_bytes: resident.max_widget_raster_bytes,
+            font_bytes: usize::try_from(resident.max_font_bytes).unwrap_or(usize::MAX),
+        }
+    }
+
+    /// Machine-readable startup snapshot for operators and tests.
+    pub fn resident_accounting_snapshot(&self) -> serde_json::Value {
+        let limits = self.resident_ledger.limits();
+        let usage = self.resident_ledger.snapshot();
+        serde_json::json!({
+            "profile": self.operational_envelope.profile_name,
+            "limits": {
+                "aggregate_bytes": limits.aggregate_bytes,
+                "resource_bytes": limits.resource_bytes,
+                "widget_source_bytes": limits.widget_source_bytes,
+                "widget_raster_bytes": limits.widget_raster_bytes,
+                "font_bytes": limits.font_bytes,
+            },
+            "usage": {
+                "aggregate_bytes": usage.aggregate_bytes,
+                "resource_bytes": usage.resource_bytes,
+                "widget_source_bytes": usage.widget_source_bytes,
+                "widget_raster_bytes": usage.widget_raster_bytes,
+                "font_bytes": usage.font_bytes,
+                "allocation_count": usage.allocation_count,
+            }
+        })
     }
 
     /// Return validated startup budget overrides for a registered agent.
@@ -926,5 +971,23 @@ mod tests {
                 .evaluate_capability_request(&["overlay_privileges".to_string()])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn headless_production_consumers_share_exact_store_limits() {
+        let ctx = RuntimeContext::headless_default();
+        assert_eq!(
+            ctx.resident_store_limits(),
+            RuntimeResidentStoreLimits {
+                resource_bytes: 256 * 1024 * 1024,
+                widget_source_bytes: 64 * 1024 * 1024,
+                widget_namespace_bytes: 16 * 1024 * 1024,
+                widget_raster_bytes: 128 * 1024 * 1024,
+                font_bytes: 64 * 1024 * 1024,
+            }
+        );
+        let snapshot = ctx.resident_accounting_snapshot();
+        assert_eq!(snapshot["limits"]["aggregate_bytes"], 512 * 1024 * 1024_u64);
+        assert_eq!(snapshot["usage"]["allocation_count"], 0);
     }
 }
