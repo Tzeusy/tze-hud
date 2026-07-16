@@ -18,6 +18,7 @@ mod calibration {
     };
 
     const PSK: &str = "token-calibration-resident-psk";
+    const CANONICAL_FLOW_VERSION: u32 = 1;
     const VOCAB_FINGERPRINT: &str =
         "sha256:446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d";
 
@@ -48,6 +49,7 @@ mod calibration {
 
     #[derive(Debug, Serialize)]
     struct FlowMeasurement {
+        flow_version: u32,
         flow_fingerprint: String,
         operations: BTreeMap<String, OperationMeasurement>,
         total: Counts,
@@ -254,6 +256,7 @@ mod calibration {
             flows.insert(
                 flow_name,
                 FlowMeasurement {
+                    flow_version: CANONICAL_FLOW_VERSION,
                     flow_fingerprint: fingerprint(flow_parts),
                     operations,
                     total: flow_total,

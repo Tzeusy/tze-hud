@@ -284,7 +284,10 @@ jobs:
             --test drag_reposition \
             --test movable_elements_e2e
       - name: Test token-footprint gate contract
-        run: python3 -m unittest scripts/ci/test_check_token_footprint.py
+        run: >-
+          python3 -m unittest
+          scripts.ci.test_check_token_footprint
+          scripts.ci.test_token_footprint_flow
       - name: Calibrate deterministic LLM-facing token footprint
         env:
           HEADLESS_FORCE_SOFTWARE: "1"

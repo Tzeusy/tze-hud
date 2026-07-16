@@ -8,55 +8,58 @@
     "vocab_fingerprint": "sha256:446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d",
     "counting_policy": "each canonical JSON-RPC body independently; UTF-8 bytes; encode_with_special_tokens; operation and flow totals are integer sums"
   },
-  "fixture_fingerprint": "blake3:2eb5b26b70f47913fc494dd716d93b62d1263aa82882372c4228687e2ed81f81",
+  "fixture_fingerprint": "blake3:86774ba0b39a5d1e812a9705fe0221d3071425d3b73a2ad07aada041530c1601",
   "flows": {
     "portal_projection": {
-      "flow_fingerprint": "blake3:2bba2d14ffefce463c82b4abaad682ceacbabe48c3f7c5587814438066e8c946",
+      "flow_version": 1,
+      "flow_fingerprint": "blake3:a0286e519a10f45b00ff6e578c6c81b95e9e2690d523293df89fc4c2c55273b3",
       "operations": {
         "portal_projection_acknowledge_input": {
-          "request": {"bytes": 385, "tokens": 105},
+          "request": {"bytes": 419, "tokens": 114},
           "response": {"bytes": 89, "tokens": 25},
-          "total": {"bytes": 474, "tokens": 130}
+          "total": {"bytes": 508, "tokens": 139}
         },
         "portal_projection_attach": {
-          "request": {"bytes": 512, "tokens": 142},
+          "request": {"bytes": 535, "tokens": 148},
           "response": {"bytes": 120, "tokens": 33},
-          "total": {"bytes": 632, "tokens": 175}
+          "total": {"bytes": 655, "tokens": 181}
         },
         "portal_projection_get_pending_input": {
-          "request": {"bytes": 334, "tokens": 99},
+          "request": {"bytes": 368, "tokens": 107},
           "response": {"bytes": 416, "tokens": 103},
-          "total": {"bytes": 750, "tokens": 202}
+          "total": {"bytes": 784, "tokens": 210}
         },
         "portal_projection_publish": {
-          "request": {"bytes": 458, "tokens": 118},
+          "request": {"bytes": 489, "tokens": 125},
           "response": {"bytes": 105, "tokens": 28},
-          "total": {"bytes": 563, "tokens": 146}
+          "total": {"bytes": 594, "tokens": 153}
         }
       },
-      "total": {"bytes": 2419, "tokens": 653}
+      "total": {"bytes": 2541, "tokens": 683}
     },
     "publish_to_widget": {
-      "flow_fingerprint": "blake3:34d8d5dce48b7552b3c43e3bf3723d33bdb549960bfaaf12d884afdc425f9092",
+      "flow_version": 1,
+      "flow_fingerprint": "blake3:e37e93be69e0e0855bc099e25c970fdfdb2192baa22dcb8caa4af511b80232cd",
       "operations": {
         "publish_to_widget": {
-          "request": {"bytes": 320, "tokens": 100},
-          "response": {"bytes": 117, "tokens": 36},
-          "total": {"bytes": 437, "tokens": 136}
+          "request": {"bytes": 357, "tokens": 112},
+          "response": {"bytes": 182, "tokens": 56},
+          "total": {"bytes": 539, "tokens": 168}
         }
       },
-      "total": {"bytes": 437, "tokens": 136}
+      "total": {"bytes": 539, "tokens": 168}
     },
     "publish_to_zone": {
-      "flow_fingerprint": "blake3:9a4759392799d9def4aa0193a5b4e4b4675b28628800e10532420e3cd53ba490",
+      "flow_version": 1,
+      "flow_fingerprint": "blake3:82a47f35fb8516932e604a1148198cc7b1e5c4e35b33d5e366432cffba7de51e",
       "operations": {
         "publish_to_zone": {
-          "request": {"bytes": 440, "tokens": 129},
-          "response": {"bytes": 127, "tokens": 39},
-          "total": {"bytes": 567, "tokens": 168}
+          "request": {"bytes": 477, "tokens": 141},
+          "response": {"bytes": 192, "tokens": 56},
+          "total": {"bytes": 669, "tokens": 197}
         }
       },
-      "total": {"bytes": 567, "tokens": 168}
+      "total": {"bytes": 669, "tokens": 197}
     }
   },
   "approval": {
