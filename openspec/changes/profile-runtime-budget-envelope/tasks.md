@@ -1,6 +1,6 @@
 ## 1. Contract Gate
 
-- [ ] 1.1 Obtain owner approval for the resident-cache profile schema (design option 2) and record exact full-display/headless aggregate and per-class values; status quo is the default if unanswered.
+- [x] 1.1 Obtain owner approval for the resident-cache profile schema (design option 2) and record exact full-display/headless aggregate and per-class values; approved 2026-07-17 with strict disjoint ceilings/no borrowing and separate durable-disk/logical-agent texture domains.
 - [x] 1.2 Reconcile the existing headless `max_agent_update_hz` value across RFC 0006 §3.4, the canonical configuration spec, and `DisplayProfile::headless()` before admission wiring. Resolved at 60 Hz; exact boundary tests cover acceptance at 60 and rejection above 60.
 - [x] 1.3 Re-run `openspec validate profile-runtime-budget-envelope --strict` after the headless authority correction.
 
