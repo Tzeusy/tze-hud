@@ -867,6 +867,27 @@ impl SceneGraph {
         total_removed
     }
 
+    /// Earliest absolute wall-clock expiry across active zone and widget
+    /// publications. The windowed scheduler uses this to arm one exact wake
+    /// instead of polling the expiry sweeps every display interval.
+    pub fn next_publication_expiry_wall_us(&self) -> Option<u64> {
+        let zone_expiry = self
+            .zone_registry
+            .active_publishes
+            .values()
+            .flatten()
+            .filter_map(|record| record.expires_at_wall_us)
+            .min();
+        let widget_expiry = self
+            .widget_registry
+            .active_publishes
+            .values()
+            .flatten()
+            .filter_map(|record| record.expires_at_wall_us)
+            .min();
+        zone_expiry.into_iter().chain(widget_expiry).min()
+    }
+
     // ─── Widget publication expiry ───────────────────────────────────────
 
     /// Remove widget publications whose `expires_at_wall_us` has passed.

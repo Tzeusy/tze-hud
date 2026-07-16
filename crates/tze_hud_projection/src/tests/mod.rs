@@ -2642,6 +2642,29 @@ fn agent_liveness_gap_degrades_portal_without_escalating_attention() {
 }
 
 #[test]
+fn agent_liveness_deadline_exposes_the_first_required_idle_sweep() {
+    let mut authority = ProjectionAuthority::new(ProjectionBounds {
+        agent_liveness_degraded_after_wall_us: 1_000_000,
+        ..ProjectionBounds::default()
+    })
+    .unwrap();
+    attach(&mut authority, "projection-a");
+
+    assert_eq!(
+        authority.next_agent_liveness_deadline_wall_us(),
+        Some(1_000_010),
+        "the event loop must wake exactly when the attached projection becomes stale"
+    );
+
+    authority.sweep_agent_liveness_degradation(1_000_010);
+    assert_eq!(
+        authority.next_agent_liveness_deadline_wall_us(),
+        None,
+        "an already-degraded session must not leave a periodic liveness wake behind"
+    );
+}
+
+#[test]
 fn agent_liveness_authenticated_projection_operations_refresh_and_recover() {
     let mut authority = ProjectionAuthority::new(ProjectionBounds {
         agent_liveness_degraded_after_wall_us: 1_000_000,

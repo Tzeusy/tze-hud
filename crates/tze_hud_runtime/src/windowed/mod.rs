@@ -84,7 +84,7 @@ use std::time::Instant;
 
 use tokio::sync::Mutex;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel};
 
@@ -110,7 +110,7 @@ use crate::channels::{
     frame_ready_channel,
 };
 use crate::element_store::bootstrap_scene_element_store;
-use crate::mcp::{McpServerConfig, start_mcp_http_server};
+use crate::mcp::{McpServerConfig, start_mcp_http_server_with_render_wake};
 use crate::pipeline::FramePipeline;
 use crate::runtime_context::SharedRuntimeContext;
 use crate::threads::{CompositorReady, NetworkRuntime, ShutdownToken, spawn_compositor_thread};
@@ -183,6 +183,7 @@ mod keyboard;
 mod lifecycle;
 mod network;
 mod portal;
+mod wake;
 mod widgets;
 
 #[cfg(test)]
@@ -209,8 +210,13 @@ use self::lifecycle::{
     windowed_frame_needs_render,
 };
 pub use self::network::render_attach_info;
-use self::network::{build_runtime_context, render_startup_banner, start_network_services};
+use self::network::{
+    build_runtime_context, render_startup_banner, start_network_services_with_render_wake,
+};
 use self::portal::build_portal_projection_driver;
+use self::wake::{
+    Deadline, RuntimeWakeEvent, WindowedWake, control_flow_for_deadlines, deadline_from_wall_us,
+};
 
 fn publish_degradation_transition(
     controller: &crate::degradation::DegradationController,
@@ -251,6 +257,8 @@ fn publish_degradation_transition(
 #[allow(dead_code)] // several fields are read by the compositor/shutdown path; not all are used yet
 struct WindowedRuntimeState {
     config: WindowedConfig,
+    wake: WindowedWake,
+    scheduled_main_deadline: Option<Deadline>,
     /// Compositor thread handle (stored so it can be joined on shutdown).
     compositor_handle: Option<std::thread::JoinHandle<()>>,
     /// Network runtime for gRPC / MCP.
@@ -601,7 +609,35 @@ struct WinitApp {
     state: WindowedRuntimeState,
 }
 
-impl ApplicationHandler for WinitApp {
+impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
+        match cause {
+            StartCause::ResumeTimeReached { .. } => {
+                if let Some(deadline) = self.state.scheduled_main_deadline.take() {
+                    self.state
+                        .wake
+                        .counters()
+                        .record_main_wakeup(deadline.source);
+                    // Main-owned deadlines (portal liveness/cadence, hover, and
+                    // chrome expiry) may mutate the scene in `about_to_wait`.
+                    // Wake the independently parked compositor for that work.
+                    self.state.wake.notify_compositor(deadline.source);
+                }
+            }
+            StartCause::WaitCancelled { .. } => self
+                .state
+                .wake
+                .counters()
+                .record_excluded_operating_system_wakeup(),
+            StartCause::Init | StartCause::Poll => {}
+        }
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: RuntimeWakeEvent) {
+        let source = self.state.wake.take_main_source();
+        self.state.wake.counters().record_main_wakeup(source);
+    }
+
     /// Called by winit when the event loop has processed all pending events for
     /// the current iteration.  We use this to apply any pending mode switch:
     /// tearing down the current window/compositor and re-initialising with the
@@ -679,9 +715,8 @@ impl ApplicationHandler for WinitApp {
         // ── Per-frame ticks + present poll (hud-ilivg) ────────────────────
         // Moved here from the `RedrawRequested` handler so the main loop no
         // longer self-perpetuates a `request_redraw` every frame purely to drive
-        // these.  `about_to_wait` already fires every event-loop iteration under
-        // `ControlFlow::Poll` (it hosts the per-iteration portal/input draining
-        // above), so these continue at the same cadence.  `maybe_present_frame`
+        // these. `about_to_wait` fires after each explicit event or scheduled
+        // deadline (and hosts portal/input draining above). `maybe_present_frame`
         // is a cheap watch-channel poll that presents only when the compositor
         // signalled a new frame — with the compositor render gate that now
         // happens only when the scene changed or an animation is in flight.
@@ -690,6 +725,68 @@ impl ApplicationHandler for WinitApp {
         // Auto-dismiss the drag-handle context menu after 3 seconds.
         self.tick_context_menu_auto_dismiss();
         self.maybe_present_frame();
+
+        let now = Instant::now();
+        let mut deadlines = Vec::new();
+        if let Some(at) =
+            crate::widget_hover::next_hover_deadline(&self.state.widget_hover_trackers)
+        {
+            deadlines.push(Deadline::new(
+                at,
+                crate::idle_efficiency::RuntimeWakeupSource::AnimationDeadline,
+            ));
+        }
+        let mut inspected_scene_deadlines = false;
+        if let Ok(state) = self.state.shared_state.try_lock()
+            && let Ok(scene) = state.scene.try_lock()
+        {
+            inspected_scene_deadlines = true;
+            if let Some(wall_us) = self
+                .state
+                .portal_projection_driver
+                .next_wake_deadline_wall_us(&scene)
+            {
+                let mut deadline = deadline_from_wall_us(
+                    wall_us,
+                    crate::idle_efficiency::RuntimeWakeupSource::TtlDeadline,
+                );
+                if deadline.at <= now {
+                    deadline.at = now + std::time::Duration::from_millis(1);
+                }
+                deadlines.push(deadline);
+            }
+            if let Some(menu) = &scene.overlay.drag_handle_context_menu {
+                const AUTO_DISMISS_NS: u64 = 3_000_000_000;
+                let remaining_ns = menu
+                    .shown_at_ns
+                    .saturating_add(AUTO_DISMISS_NS)
+                    .saturating_sub(nanoseconds_since_start());
+                deadlines.push(Deadline::new(
+                    now + std::time::Duration::from_nanos(remaining_ns),
+                    crate::idle_efficiency::RuntimeWakeupSource::TtlDeadline,
+                ));
+            }
+        }
+        if !inspected_scene_deadlines {
+            // Never park indefinitely when lock contention prevented deadline
+            // discovery. The producer may have completed before this callback,
+            // so there need not be another notification after the lock drops.
+            deadlines.push(Deadline::new(
+                now + std::time::Duration::from_millis(1),
+                crate::idle_efficiency::RuntimeWakeupSource::SceneChange,
+            ));
+        }
+        if !self.state.pending_input_capture_commands.is_empty()
+            || !self.state.pending_keyboard_events.is_empty()
+        {
+            deadlines.push(Deadline::new(
+                now + std::time::Duration::from_millis(1),
+                crate::idle_efficiency::RuntimeWakeupSource::SceneChange,
+            ));
+        }
+        let next = deadlines.iter().copied().min_by_key(|deadline| deadline.at);
+        self.state.scheduled_main_deadline = next;
+        event_loop.set_control_flow(control_flow_for_deadlines(now, deadlines));
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -1026,6 +1123,7 @@ impl ApplicationHandler for WinitApp {
         let degradation_shared_state = Arc::clone(&self.state.shared_state);
         let shutdown = self.state.shutdown.clone();
         let benchmark_failed = self.state.benchmark_failed.clone();
+        let compositor_wake = self.state.wake.clone();
         let telemetry_collector = TelemetryCollector::new();
         let surface_for_compositor = window_surface.clone();
         let mut benchmark_state = cfg.benchmark.clone().map(|benchmark| {
@@ -1111,6 +1209,13 @@ impl ApplicationHandler for WinitApp {
                 );
 
                 loop {
+                    // Checkpoint before inspecting any source of render work.
+                    // A producer notification that races with this iteration
+                    // advances the generation and prevents the final wait from
+                    // parking on stale observations.
+                    let wake_checkpoint = compositor_wake.compositor().checkpoint();
+                    let mut continue_at_cadence = benchmark_state.is_some();
+                    let mut timed_deadline: Option<Deadline> = None;
                     // Check for shutdown.
                     match shutdown_rx.try_recv() {
                         Ok(_) => {
@@ -1145,6 +1250,9 @@ impl ApplicationHandler for WinitApp {
                                         "windowed benchmark artifact written; shutting down"
                                     );
                                     shutdown_tok.trigger(crate::threads::ShutdownReason::Clean);
+                                    compositor_wake.notify_main(
+                                        crate::idle_efficiency::RuntimeWakeupSource::Shutdown,
+                                    );
                                     break;
                                 }
                                 Err(err) => {
@@ -1156,6 +1264,9 @@ impl ApplicationHandler for WinitApp {
                                     benchmark_failed
                                         .store(true, std::sync::atomic::Ordering::Release);
                                     shutdown_tok.trigger(crate::threads::ShutdownReason::Clean);
+                                    compositor_wake.notify_main(
+                                        crate::idle_efficiency::RuntimeWakeupSource::Shutdown,
+                                    );
                                     break;
                                 }
                             }
@@ -1224,6 +1335,7 @@ impl ApplicationHandler for WinitApp {
                         // publications MUST be cleared before the next frame.
                         scene.drain_expired_zone_publications();
                         scene.drain_expired_widget_publications();
+                        scene.expire_leases();
 
                         // Snapshot identity, priority, z-order, and selected
                         // policy atomically under this frame's scene lock.
@@ -1310,6 +1422,7 @@ impl ApplicationHandler for WinitApp {
                             composer_needs_render,
                             benchmark_state.is_some(),
                         );
+                        continue_at_cadence |= needs_render;
 
                         // A successful try_lock means we are NOT lock-starved,
                         // whether or not we present this frame — reset the
@@ -1327,6 +1440,17 @@ impl ApplicationHandler for WinitApp {
                             // Idle: scene unchanged and nothing animating. Release
                             // the lock without building vertices, encoding, or
                             // signalling the main thread to present.
+                            let scene_deadline_wall_us = scene
+                                .next_publication_expiry_wall_us()
+                                .into_iter()
+                                .chain(
+                                    scene
+                                        .next_lease_deadline_ms(
+                                            tze_hud_scene::graph::SceneGraph::DEFAULT_MAX_SUSPENSION_MS,
+                                        )
+                                        .map(|ms| ms.saturating_mul(1_000)),
+                                )
+                                .min();
                             drop(scene);
                             let now_us = degradation_clock_start.elapsed().as_micros() as u64;
                             if let Some(event) = degradation_controller.record_quiescent_at(now_us)
@@ -1337,6 +1461,25 @@ impl ApplicationHandler for WinitApp {
                                     degradation_notices.as_ref(),
                                     &degradation_shared_state,
                                 );
+                            }
+                            if let Some(recover_at_us) =
+                                degradation_controller.next_quiescent_recovery_at_us()
+                            {
+                                timed_deadline = Some(Deadline::new(
+                                    degradation_clock_start
+                                        + std::time::Duration::from_micros(recover_at_us),
+                                    crate::idle_efficiency::RuntimeWakeupSource::AnimationDeadline,
+                                ));
+                            }
+                            if let Some(wall_us) = scene_deadline_wall_us {
+                                let deadline = deadline_from_wall_us(
+                                    wall_us,
+                                    crate::idle_efficiency::RuntimeWakeupSource::TtlDeadline,
+                                );
+                                timed_deadline = timed_deadline
+                                    .into_iter()
+                                    .chain(Some(deadline))
+                                    .min_by_key(|candidate| candidate.at);
                             }
                         } else {
                             // ── Stage 5: Build under the scene lock (hud-uyhpn) ─
@@ -1395,6 +1538,11 @@ impl ApplicationHandler for WinitApp {
                             // surface.present()."
                             if frame_submitted {
                                 let _ = frame_ready_tx.send(true);
+                                compositor_wake.counters().record_surface_acquisition();
+                                compositor_wake.counters().record_gpu_submission();
+                                compositor_wake.notify_main(
+                                    crate::idle_efficiency::RuntimeWakeupSource::FrameReady,
+                                );
                                 last_present_at = std::time::Instant::now();
                                 // Advance the idle gate only after a completed
                                 // submit. A failed acquire must retry instead of
@@ -1495,6 +1643,7 @@ impl ApplicationHandler for WinitApp {
                         // (hud-3qpgv.2).  This branch has zero cost on the
                         // success path.
                         scene_lock_miss_count = scene_lock_miss_count.saturating_add(1);
+                        continue_at_cadence = true;
                         // hud-pi5wx: sustained Stage-4 misses => a handler is holding
                         // the scene lock and never releasing it (HB-1 lock starvation).
                         consecutive_misses = consecutive_misses.saturating_add(1);
@@ -1540,17 +1689,27 @@ impl ApplicationHandler for WinitApp {
                         }
                         benchmark_failed.store(true, std::sync::atomic::Ordering::Release);
                         shutdown_tok.trigger(crate::threads::ShutdownReason::Clean);
+                        compositor_wake
+                            .notify_main(crate::idle_efficiency::RuntimeWakeupSource::Shutdown);
                         break;
                     }
 
-                    // Frame rate control. Granularity is bounded to ~1 ms by the
-                    // `_frame_timer_guard` (timeBeginPeriod(1)) held above, so
-                    // this sleep lands within the present budget on Windows
-                    // instead of overshooting on the default ~15.6 ms timer.
-                    let elapsed = frame_start.elapsed();
-                    if elapsed < frame_interval {
-                        std::thread::sleep(frame_interval - elapsed);
-                    }
+                    let cadence_deadline = continue_at_cadence.then(|| {
+                        Deadline::new(
+                            frame_start + frame_interval,
+                            crate::idle_efficiency::RuntimeWakeupSource::AnimationDeadline,
+                        )
+                    });
+                    let next_deadline = cadence_deadline
+                        .into_iter()
+                        .chain(timed_deadline)
+                        .min_by_key(|candidate| candidate.at);
+                    let observed = compositor_wake
+                        .compositor()
+                        .wait(wake_checkpoint, next_deadline);
+                    compositor_wake
+                        .counters()
+                        .record_compositor_wakeup(observed.source);
                 }
 
                 tracing::info!("compositor thread: frame loop exited");
@@ -1593,6 +1752,12 @@ impl ApplicationHandler for WinitApp {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        let wake_source = match &event {
+            WindowEvent::Resized(_) => crate::idle_efficiency::RuntimeWakeupSource::Resize,
+            WindowEvent::CloseRequested => crate::idle_efficiency::RuntimeWakeupSource::Shutdown,
+            _ => crate::idle_efficiency::RuntimeWakeupSource::SceneChange,
+        };
+        self.state.wake.notify_compositor(wake_source);
         match event {
             // ── Close ──────────────────────────────────────────────────────
             WindowEvent::CloseRequested => {
@@ -1906,6 +2071,11 @@ impl WindowedRuntime {
         let (runtime_context, fallback_unrestricted): (SharedRuntimeContext, bool) =
             build_runtime_context(&cfg);
 
+        let event_loop = EventLoop::<RuntimeWakeEvent>::with_user_event().build()?;
+        event_loop.set_control_flow(ControlFlow::Wait);
+        let wake = WindowedWake::new(event_loop.create_proxy());
+        let render_wake = wake.render_notifier();
+
         // Resolve the effective window mode, applying platform fallback checks.
         // Spec §Unsupported overlay fallback (line 185): if overlay is requested
         // on GNOME Wayland (no layer-shell), fall back to fullscreen with a
@@ -2103,13 +2273,14 @@ impl WindowedRuntime {
             frame_presented_tx,
             degradation_notices,
             grpc_bound_addr,
-        ) = start_network_services(
+        ) = start_network_services_with_render_wake(
             cfg.grpc_port,
             &cfg.psk,
             shared_state.clone(),
             Arc::clone(&runtime_context),
             fallback_unrestricted,
             bind_all,
+            render_wake.clone(),
         )?;
 
         // ── MCP HTTP server ────────────────────────────────────────────────────
@@ -2197,12 +2368,13 @@ impl WindowedRuntime {
                     resident_principal,
                 };
                 let mcp_shutdown = shutdown.clone();
-                match rt.rt.block_on(start_mcp_http_server(
+                match rt.rt.block_on(start_mcp_http_server_with_render_wake(
                     Arc::clone(&shared_scene),
                     mcp_config,
                     mcp_shutdown,
                     Some(paste_inject_tx),
                     portal_op_tx_opt.take(),
+                    render_wake.clone(),
                 )) {
                     Ok((handle, local_addr)) => {
                         network_handles.push(handle);
@@ -2250,6 +2422,7 @@ impl WindowedRuntime {
             let shared_for_exit = Arc::clone(&shared_state);
             let chrome_for_exit = Arc::clone(&chrome_state);
             let shutdown_for_exit = shutdown.clone();
+            let render_wake_for_exit = render_wake.clone();
             let mut rx = safe_mode_exit_rx;
             rt.rt.spawn(async move {
                 let mut shutdown_rx = shutdown_for_exit.subscribe();
@@ -2267,6 +2440,7 @@ impl WindowedRuntime {
                                         Arc::clone(&chrome_for_exit),
                                     );
                                     let result = ctrl.exit_safe_mode().await;
+                                    render_wake_for_exit.notify();
                                     tracing::info!(
                                         leases_resumed = result.leases_resumed,
                                         sessions_notified = result.sessions_notified,
@@ -2399,8 +2573,18 @@ impl WindowedRuntime {
                         // Wire the bridged-composer-input return path (hud-omfqi):
                         // the bridge requests the input capability + INPUT_EVENTS
                         // subscription and forwards inbound composer input here.
-                        let (input_tx, input_rx) = tokio::sync::mpsc::channel(64);
-                        resident_grpc_input_rx = Some(input_rx);
+                        let (input_tx, mut bridge_input_rx) = tokio::sync::mpsc::channel(64);
+                        let (main_input_tx, main_input_rx) = tokio::sync::mpsc::channel(64);
+                        resident_grpc_input_rx = Some(main_input_rx);
+                        let bridge_input_wake = render_wake.clone();
+                        network_handles.push(rt.rt.spawn(async move {
+                            while let Some(input) = bridge_input_rx.recv().await {
+                                if main_input_tx.send(input).await.is_err() {
+                                    break;
+                                }
+                                bridge_input_wake.notify();
+                            }
+                        }));
                         let handle = crate::resident_grpc_bridge::spawn_resident_grpc_bridge(
                             rt.rt.handle(),
                             bridge_cfg,
@@ -2425,6 +2609,8 @@ impl WindowedRuntime {
 
         let app_state = WindowedRuntimeState {
             config: cfg,
+            wake,
+            scheduled_main_deadline: None,
             compositor_handle: None,
             network_rt,
             network_handles,
@@ -2498,8 +2684,6 @@ impl WindowedRuntime {
 
         // Create winit event loop and run.
         // Per spec §Main Thread Responsibilities: winit event loop MUST run on main thread.
-        let event_loop = EventLoop::new()?;
-        event_loop.set_control_flow(ControlFlow::Poll);
         event_loop.run_app(&mut app)?;
 
         // ── Post-event-loop cleanup ───────────────────────────────────────────
@@ -2512,6 +2696,9 @@ impl WindowedRuntime {
                 .shutdown
                 .trigger(crate::threads::ShutdownReason::Clean);
         }
+        app.state
+            .wake
+            .notify_compositor(crate::idle_efficiency::RuntimeWakeupSource::Shutdown);
 
         // Abort all spawned network task handles (gRPC, MCP) so they do not
         // linger past process exit.  The shutdown token already signals tasks

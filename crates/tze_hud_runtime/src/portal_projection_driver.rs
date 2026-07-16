@@ -122,8 +122,8 @@ const PORTAL_Z_ORDER: u32 = 160;
 /// Hard upper bound on the number of portal updates processed in a single
 /// `drain_inner` call (per `about_to_wait` tick).
 ///
-/// The drain runs on the winit event-loop thread while holding the scene lock
-/// under `ControlFlow::Poll`, so an unbounded inner loop wedges the entire
+/// The drain runs on the winit event-loop thread while holding the scene lock,
+/// so an unbounded inner loop wedges the entire
 /// presentation pipeline (whole-HUD freeze, one core pegged ~98%). The loop is
 /// normally work-conserving and terminates when the coalescer is drained, but a
 /// divergence between the session map and the coalescer (e.g. an orphaned
@@ -658,6 +658,48 @@ impl InProcessPortalDriver {
     /// for end-to-end latency.
     pub fn drain_deferral_count(&self) -> u64 {
         self.drain_deferral_count
+    }
+
+    /// Earliest wall-clock instant at which an idle event loop must drive this
+    /// portal authority again: cadence release, activity-cue quiescence,
+    /// agent-liveness transition, or a projection lease's orphan-grace/TTL
+    /// boundary.
+    pub fn next_wake_deadline_wall_us(&self, scene: &SceneGraph) -> Option<u64> {
+        let now_us = now_wall_us();
+        let cadence = self.authority.next_pending_due_at_us(now_us);
+        let agent_liveness = self.authority.next_agent_liveness_deadline_wall_us();
+        let activity = self
+            .drive
+            .entries
+            .values()
+            .filter_map(|entry| entry.activity_cue_clear_due_us)
+            .min();
+        let lease = self
+            .drive
+            .entries
+            .values()
+            .filter_map(|entry| entry.scene_lease_id)
+            .filter_map(|lease_id| scene.leases.get(&lease_id))
+            .filter_map(|lease| {
+                let ttl = (lease.ttl_ms > 0).then(|| {
+                    lease
+                        .granted_at_ms
+                        .saturating_add(lease.ttl_ms)
+                        .saturating_mul(1_000)
+                });
+                let grace = lease.disconnected_at_ms.map(|at| {
+                    at.saturating_add(lease.grace_period_ms)
+                        .saturating_mul(1_000)
+                });
+                ttl.into_iter().chain(grace).min()
+            })
+            .min();
+        cadence
+            .into_iter()
+            .chain(activity)
+            .chain(agent_liveness)
+            .chain(lease)
+            .min()
     }
 
     /// Install (or clear) the resident gRPC portal bridge channel (hud-d7frs).
@@ -1677,7 +1719,7 @@ impl InProcessPortalDriver {
         let mut cycle_deferrals: u32 = 0;
         // Per-cycle iteration guard (hud-bsr7u). Bounds the number of loop
         // iterations so a session/coalescer divergence can never busy-spin the
-        // event loop (which runs this drain under the scene lock + ControlFlow::Poll).
+        // event loop (which runs this drain under the scene lock).
         let mut iterations: u32 = 0;
 
         loop {
@@ -2646,11 +2688,10 @@ impl InProcessPortalDriver {
     ///
     /// Runs at the END of every drain (after the render passes; the resume-side
     /// reconnect is handled up front by [`Self::reconnect_lease_grace_on_resume`]).
-    /// `about_to_wait` fires every event-loop iteration under `ControlFlow::Poll`,
-    /// so a dropped portal on an otherwise-idle screen still reaps after grace with
-    /// NO separate timer/wake source — the same idle-safety property the zone
-    /// content-TTL sweep relies on (hud-vfwb1). The steps are cheap map scans, both
-    /// no-ops on the common all-live path:
+    /// The windowed scheduler uses [`Self::next_wake_deadline_wall_us`] to wake
+    /// exactly at the next per-projection grace boundary, so an otherwise-idle
+    /// screen still reaps on time without periodic polling. The steps are cheap
+    /// map scans, both no-ops on the common all-live path:
     ///
     /// 1. ORPHAN — each disconnected or agent-stale projection orphans its own
     ///    Active lease. In-process tiles receive the scene disconnection badge;
@@ -5611,7 +5652,7 @@ mod tests {
     ///      `Err(ProjectionNotFound)` BEFORE it can consume the coalescer entry.
     ///   3. The `Err` arm previously did `detach + continue` without touching the
     ///      coalescer → `next_due_projection_id` returns the SAME id again →
-    ///      unbounded loop that wedges the event loop under `ControlFlow::Poll`.
+    ///      unbounded loop that wedges the event loop.
     ///
     /// The fix discards the coalescer entry in the `Err` arm. This test injects
     /// an orphaned coalescer entry (no session), runs a drain, and asserts the
@@ -8411,6 +8452,11 @@ mod tests {
         let mut processor = InputProcessor::new();
 
         driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_100);
+        assert_eq!(
+            driver.next_wake_deadline_wall_us(&scene),
+            Some(1_001_100),
+            "an idle runtime must schedule the first liveness sweep"
+        );
         let lease = driver
             .lease_id
             .expect("first drain grants the portal lease");
@@ -8430,6 +8476,20 @@ mod tests {
                 .connection_degraded
         );
         assert_eq!(scene.tile_count(), 1, "stale content remains during grace");
+        let scene_lease = scene
+            .leases
+            .get(&lease)
+            .expect("lease remains during grace");
+        let expected_grace_deadline_us = scene_lease
+            .disconnected_at_ms
+            .expect("degradation starts the grace clock")
+            .saturating_add(scene_lease.grace_period_ms)
+            .saturating_mul(1_000);
+        assert_eq!(
+            driver.next_wake_deadline_wall_us(&scene),
+            Some(expected_grace_deadline_us),
+            "after degradation the idle runtime must wake at the same governed grace boundary"
+        );
 
         clock.advance(SceneGraph::DEFAULT_GRACE_PERIOD_MS + 1);
         driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_300);

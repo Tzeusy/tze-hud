@@ -574,6 +574,27 @@ impl ProjectionAuthority {
         }
     }
 
+    /// Earliest time at which any pending coalesced portal can be serviced.
+    /// Immediately serviceable work returns `server_timestamp_wall_us`.
+    pub fn next_pending_due_at_us(&self, server_timestamp_wall_us: u64) -> Option<u64> {
+        self.cadence_coalescer
+            .pending_keys()
+            .filter_map(|projection_id| {
+                let session = self.sessions.get(projection_id)?;
+                let window_start = session.portal_rate_window_started_at_wall_us;
+                if window_start == 0 {
+                    Some(server_timestamp_wall_us)
+                } else {
+                    Some(
+                        window_start
+                            .saturating_add(PORTAL_UPDATE_RATE_WINDOW_WALL_US)
+                            .max(server_timestamp_wall_us),
+                    )
+                }
+            })
+            .min()
+    }
+
     /// Peek the submission timestamp (µs) of the pending coalescer entry for
     /// `projection_id`. Returns `None` if no pending entry exists.
     ///
@@ -654,6 +675,24 @@ impl ProjectionAuthority {
         }
         degraded.sort_unstable();
         degraded
+    }
+
+    /// Earliest wall-clock instant at which an attached session requires the
+    /// agent-liveness sweep, even when no producer submits more work.
+    pub fn next_agent_liveness_deadline_wall_us(&self) -> Option<u64> {
+        let threshold = self.bounds.agent_liveness_degraded_after_wall_us;
+        self.sessions
+            .values()
+            .filter(|session| {
+                session.agent_liveness_degraded_since_wall_us.is_none()
+                    && matches!(
+                        session.lifecycle_state,
+                        ProjectionLifecycleState::Attached | ProjectionLifecycleState::Active
+                    )
+            })
+            .filter_map(|session| session.reconnect.last_heartbeat_wall_us)
+            .map(|last_liveness_wall_us| last_liveness_wall_us.saturating_add(threshold))
+            .min()
     }
 
     /// Whether this projection's stale state was opened by the liveness sweep.

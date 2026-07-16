@@ -1728,6 +1728,9 @@ impl WinitApp {
             self.state
                 .shutdown
                 .trigger(crate::threads::ShutdownReason::Clean);
+            self.state
+                .wake
+                .notify_compositor(crate::idle_efficiency::RuntimeWakeupSource::Shutdown);
             let _ = handle.join();
         }
 
@@ -1810,7 +1813,9 @@ impl WinitApp {
                 // Present under the same mutex that guards pending swapchain
                 // ownership so acquire/present cannot interleave into a
                 // double-acquire validation error on some backends.
-                if !surface.present_pending_texture() {
+                if surface.present_pending_texture() {
+                    self.state.wake.counters().record_present();
+                } else {
                     // FrameReady signal fired but no texture is pending —
                     // this can happen if acquire_frame() failed on the
                     // compositor thread (error already logged there).

@@ -481,6 +481,35 @@ impl SceneGraph {
         expiries
     }
 
+    /// Earliest time-dependent lease transition in the scene clock domain.
+    /// Terminal leases and indefinite (`ttl_ms == 0`) leases contribute no TTL
+    /// deadline. Orphan grace and suspension safety bounds remain explicit.
+    pub fn next_lease_deadline_ms(&self, max_suspend_ms: u64) -> Option<u64> {
+        self.leases
+            .values()
+            .filter_map(|lease| match lease.state {
+                LeaseState::Active | LeaseState::Requested => {
+                    (lease.ttl_ms > 0).then(|| lease.granted_at_ms.saturating_add(lease.ttl_ms))
+                }
+                LeaseState::Orphaned => {
+                    let ttl = (lease.ttl_ms > 0)
+                        .then(|| lease.granted_at_ms.saturating_add(lease.ttl_ms));
+                    let grace = lease
+                        .disconnected_at_ms
+                        .map(|at| at.saturating_add(lease.grace_period_ms));
+                    ttl.into_iter().chain(grace).min()
+                }
+                LeaseState::Suspended => lease
+                    .suspended_at_ms
+                    .map(|at| at.saturating_add(max_suspend_ms)),
+                LeaseState::Denied
+                | LeaseState::Revoked
+                | LeaseState::Expired
+                | LeaseState::Released => None,
+            })
+            .min()
+    }
+
     /// Reap a **single** lease if — and only if — it is already past its TTL,
     /// grace period, or suspension timeout, returning the `LeaseExpiry` (with the
     /// removed tiles) or `None` if the lease is unknown or not yet due.

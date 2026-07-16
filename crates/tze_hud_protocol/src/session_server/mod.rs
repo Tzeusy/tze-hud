@@ -495,6 +495,7 @@ impl HudSession for HudSessionImpl {
         let budget_enforcer = self.budget_enforcer.clone();
         let fallback_unrestricted = self.fallback_unrestricted;
         let media_ingress_config = self.media_ingress_config.clone();
+        let render_wake = self.render_wake.clone();
         let degradation_notices = self.degradation_notices.clone();
         // Subscribe to the capability revocation broadcast channel.
         // Subscribing here ensures the session handler receives revocations issued
@@ -748,6 +749,7 @@ impl HudSession for HudSessionImpl {
                             &tx,
                             &upload_command_tx,
                             &media_ingress_config,
+                            &render_wake,
                         ).await {
                             LoopAction::Continue => continue,
                             LoopAction::Break => break,
@@ -890,6 +892,7 @@ async fn handle_client_message(
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     upload_command_tx: &tokio::sync::mpsc::Sender<UploadWorkerCommand>,
     media_ingress_config: &tze_hud_scene::config::MediaIngressConfig,
+    render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
     msg: ClientMessage,
 ) {
     let client_sequence = msg.sequence;
@@ -897,6 +900,7 @@ async fn handle_client_message(
         return;
     };
 
+    let creates_render_work = client_payload_creates_render_work(&payload);
     match payload {
         ClientPayload::MutationBatch(batch) => {
             handle_mutation_batch(state, session, tx, batch).await;
@@ -1037,6 +1041,27 @@ async fn handle_client_message(
         // outbound error flooding if an agent mistakenly sends them (RFC 0014 §2.4).
         ClientPayload::MediaIceCandidate(_) => {}
     }
+    if creates_render_work {
+        render_wake.notify();
+    }
+}
+
+fn client_payload_creates_render_work(payload: &ClientPayload) -> bool {
+    matches!(
+        payload,
+        ClientPayload::MutationBatch(_)
+            | ClientPayload::LeaseRequest(_)
+            | ClientPayload::LeaseRenew(_)
+            | ClientPayload::LeaseRelease(_)
+            | ClientPayload::ZonePublish(_)
+            | ClientPayload::InputCaptureRequest(_)
+            | ClientPayload::InputCaptureRelease(_)
+            | ClientPayload::SessionClose(_)
+            | ClientPayload::WidgetPublish(_)
+            | ClientPayload::WidgetAssetRegister(_)
+            | ClientPayload::MediaIngressOpen(_)
+            | ClientPayload::MediaIngressClose(_)
+    )
 }
 
 /// Send a `RuntimeError` server message.
@@ -1100,6 +1125,7 @@ impl StreamSession {
         tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, tonic::Status>>,
         upload_command_tx: &tokio::sync::mpsc::Sender<UploadWorkerCommand>,
         media_ingress_config: &tze_hud_scene::config::MediaIngressConfig,
+        render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
     ) -> LoopAction {
         match msg_result {
             Ok(Ok(Some(msg))) => {
@@ -1134,6 +1160,7 @@ impl StreamSession {
                         tx,
                         upload_command_tx,
                         media_ingress_config,
+                        render_wake,
                         msg,
                     )
                     .await;
@@ -1176,6 +1203,7 @@ impl StreamSession {
                     tx,
                     upload_command_tx,
                     media_ingress_config,
+                    render_wake,
                     msg,
                 )
                 .await;

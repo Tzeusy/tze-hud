@@ -86,6 +86,8 @@ impl WindowedRuntimeState {
         let (_paste_inject_tx, paste_inject_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
         WindowedRuntimeState {
+            wake: super::wake::WindowedWake::disconnected(),
+            scheduled_main_deadline: None,
             config: super::WindowedConfig::default(),
             compositor_handle: None,
             network_rt: None,

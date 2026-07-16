@@ -10402,3 +10402,22 @@ fn test_reset_geometry_override_carries_correct_previous_and_new() {
         other => panic!("expected Relative previous_geometry proto, got {other:?}"),
     }
 }
+
+#[test]
+fn render_wake_classification_covers_mutations_but_excludes_read_only_traffic() {
+    assert!(client_payload_creates_render_work(
+        &ClientPayload::MutationBatch(MutationBatch::default())
+    ));
+    assert!(client_payload_creates_render_work(
+        &ClientPayload::ZonePublish(ZonePublish::default())
+    ));
+    assert!(client_payload_creates_render_work(
+        &ClientPayload::InputCaptureRequest(InputCaptureRequest::default())
+    ));
+    assert!(!client_payload_creates_render_work(
+        &ClientPayload::Heartbeat(Heartbeat::default())
+    ));
+    assert!(!client_payload_creates_render_work(
+        &ClientPayload::ListElementsRequest(ListElementsRequest::default())
+    ));
+}

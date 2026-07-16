@@ -1977,6 +1977,8 @@ mod tests {
         };
 
         let state = WindowedRuntimeState {
+            wake: crate::windowed::wake::WindowedWake::disconnected(),
+            scheduled_main_deadline: None,
             config: cfg,
             compositor_handle: None,
             network_rt: None,

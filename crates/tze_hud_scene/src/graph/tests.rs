@@ -611,6 +611,11 @@ fn test_lease_expiry() {
         .unwrap();
 
     assert_eq!(scene.tile_count(), 1);
+    assert_eq!(
+        scene.next_lease_deadline_ms(SceneGraph::DEFAULT_MAX_SUSPENSION_MS),
+        Some(1_500),
+        "the idle scheduler must expose the lease TTL boundary"
+    );
 
     // Before expiry: clock still at t=1000, lease lives.
     let expired = scene.expire_leases();
@@ -1132,6 +1137,11 @@ fn test_notification_auto_dismiss_publisher_override() {
         record.expires_at_wall_us,
         Some(publisher_expires_at),
         "publisher-supplied expires_at must take precedence over urgency default"
+    );
+    assert_eq!(
+        scene.next_publication_expiry_wall_us(),
+        Some(publisher_expires_at),
+        "the idle scheduler must expose the same publication boundary"
     );
 }
 

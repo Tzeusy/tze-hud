@@ -39,6 +39,9 @@ use tze_hud_scene::types::{GeometryPolicy, ResourceBudget, SceneId};
 /// capabilities; unlisted agents are treated as guests (no capabilities).
 pub struct HudSessionImpl {
     pub state: Arc<Mutex<SharedState>>,
+    /// Runtime-owned callback that wakes the windowed event/compositor loops
+    /// after render-relevant session work is accepted or enqueued.
+    pub(super) render_wake: tze_hud_scene::render_wake::RenderWakeNotifier,
     pub(super) psk: String,
     /// Per-agent capability grants from `[agents.registered]` config.
     ///
@@ -144,6 +147,7 @@ impl HudSessionImpl {
                 input_capture_tx: None,
                 resolved_portal_tokens: std::collections::HashMap::new(),
             })),
+            render_wake: tze_hud_scene::render_wake::RenderWakeNotifier::default(),
             psk: psk.to_string(),
             agent_capabilities: Arc::new(HashMap::new()),
             agent_resource_budgets: Arc::new(HashMap::new()),
@@ -267,6 +271,7 @@ impl HudSessionImpl {
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
         Self {
             state,
+            render_wake: tze_hud_scene::render_wake::RenderWakeNotifier::default(),
             psk: psk.to_string(),
             agent_capabilities: Arc::new(agent_capabilities),
             agent_resource_budgets: Arc::new(agent_resource_budgets),
@@ -280,6 +285,16 @@ impl HudSessionImpl {
             frame_presented_tx,
             media_ingress_config: Arc::new(media_ingress_config),
         }
+    }
+
+    /// Bind the production render-work wake seam without exposing a platform
+    /// event-loop type to the protocol crate.
+    pub fn with_render_wake_notifier(
+        mut self,
+        notifier: tze_hud_scene::render_wake::RenderWakeNotifier,
+    ) -> Self {
+        self.render_wake = notifier;
+        self
     }
 
     /// Broadcast a `DegradationNotice` to all currently-active sessions.

@@ -130,7 +130,18 @@ pub(super) fn build_runtime_context(cfg: &WindowedConfig) -> (SharedRuntimeConte
 /// Returns `Err` if the `NetworkRuntime` Tokio runtime cannot be created, if
 /// the gRPC server address fails to parse, or if the gRPC listener fails to
 /// bind (e.g. the port is already in use).
+type NetworkServices = (
+    Option<NetworkRuntime>,
+    Vec<tokio::task::JoinHandle<()>>,
+    Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::ElementRepositionedEvent>>,
+    Option<tze_hud_protocol::session_server::InputEventSender>,
+    Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::FramePresented>>,
+    Option<tze_hud_protocol::session_server::DegradationNoticeSender>,
+    Option<std::net::SocketAddr>,
+);
+
 #[allow(clippy::type_complexity)] // return type is self-documenting in this internal helper
+#[cfg(test)]
 pub(super) fn start_network_services(
     grpc_port: u16,
     psk: &str,
@@ -138,18 +149,28 @@ pub(super) fn start_network_services(
     runtime_context: SharedRuntimeContext,
     fallback_unrestricted: bool,
     bind_all_interfaces: bool,
-) -> Result<
-    (
-        Option<NetworkRuntime>,
-        Vec<tokio::task::JoinHandle<()>>,
-        Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::ElementRepositionedEvent>>,
-        Option<tze_hud_protocol::session_server::InputEventSender>,
-        Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::FramePresented>>,
-        Option<tze_hud_protocol::session_server::DegradationNoticeSender>,
-        Option<std::net::SocketAddr>,
-    ),
-    Box<dyn std::error::Error>,
-> {
+) -> Result<NetworkServices, Box<dyn std::error::Error>> {
+    start_network_services_with_render_wake(
+        grpc_port,
+        psk,
+        shared_state,
+        runtime_context,
+        fallback_unrestricted,
+        bind_all_interfaces,
+        tze_hud_scene::render_wake::RenderWakeNotifier::default(),
+    )
+}
+
+#[allow(clippy::type_complexity)]
+pub(super) fn start_network_services_with_render_wake(
+    grpc_port: u16,
+    psk: &str,
+    shared_state: Arc<Mutex<SharedState>>,
+    runtime_context: SharedRuntimeContext,
+    fallback_unrestricted: bool,
+    bind_all_interfaces: bool,
+    render_wake: tze_hud_scene::render_wake::RenderWakeNotifier,
+) -> Result<NetworkServices, Box<dyn std::error::Error>> {
     if grpc_port == 0 {
         tracing::info!(
             "windowed runtime: gRPC server disabled (grpc_port = 0); running compositor-only"
@@ -194,7 +215,8 @@ pub(super) fn start_network_services(
                     .max_agent_leased_texture_bytes,
             ),
         )),
-    );
+    )
+    .with_render_wake_notifier(render_wake);
 
     // Clone the broadcast senders before moving the service into the gRPC task.
     // The windowed runtime holds these senders to:

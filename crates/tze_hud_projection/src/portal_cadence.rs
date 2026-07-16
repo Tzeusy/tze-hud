@@ -302,6 +302,10 @@ impl PortalCadenceCoalescer {
         self.pending.get(portal_key).map(|s| s.submitted_at_us)
     }
 
+    pub(crate) fn pending_keys(&self) -> impl Iterator<Item = &str> {
+        self.pending.keys().map(String::as_str)
+    }
+
     /// Returns `true` if the coalescer has any pending work.
     pub fn has_pending(&self) -> bool {
         !self.pending.is_empty()
