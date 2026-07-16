@@ -64,6 +64,7 @@ pub mod emit_scene_event;
 pub mod freeze_queue;
 pub mod handshake;
 pub mod input;
+pub mod input_event_bus;
 pub mod leases;
 pub mod lifecycle;
 pub mod media;
@@ -89,6 +90,7 @@ use input::{
 // scene_node_contains is used transitively in `mod tests { use super::* }`.
 #[allow(unused_imports)]
 use input::scene_node_contains;
+pub use input_event_bus::{InputEventReceiver, InputEventRecvError, InputEventSender};
 use leases::{handle_lease_release, handle_lease_renew, handle_lease_request};
 pub use lifecycle::SessionState;
 use media::{close_active_media_ingress, handle_media_ingress_close, handle_media_ingress_open};
@@ -1314,10 +1316,7 @@ impl StreamSession {
     /// forwarded; others are silently discarded. Delivery is gated on subscription.
     async fn on_input_event(
         &mut self,
-        input_event_result: Result<
-            (String, crate::proto::EventBatch),
-            tokio::sync::broadcast::error::RecvError,
-        >,
+        input_event_result: Result<(String, crate::proto::EventBatch), InputEventRecvError>,
         tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, tonic::Status>>,
     ) -> LoopAction {
         match input_event_result {
@@ -1340,14 +1339,11 @@ impl StreamSession {
                 }
                 LoopAction::Continue
             }
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                // Missed input events under backpressure. Transactional
-                // events (ClickEvent, CommandInputEvent) must not be
-                // dropped; in production this should emit a metric/alert.
-                // For v1 we continue silently — the session remains open.
+            Err(InputEventRecvError::Lagged(_)) => {
+                // Only ephemeral/state-stream input uses the bounded lane.
                 LoopAction::Continue
             }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+            Err(InputEventRecvError::Closed) => {
                 // Runtime shutting down — treat as ungraceful disconnect.
                 self.transition(SessionState::Closed);
                 LoopAction::Break

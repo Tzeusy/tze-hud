@@ -50,7 +50,7 @@ fn now_wall_us() -> u64 {
 async fn start_server() -> (
     HudSessionClient<tonic::transport::Channel>,
     tokio::task::JoinHandle<()>,
-    tokio::sync::broadcast::Sender<(String, EventBatch)>,
+    tze_hud_protocol::session_server::InputEventSender,
 ) {
     let scene = SceneGraph::new(1920.0, 1080.0);
     let service = HudSessionImpl::new(scene, "test-psk");

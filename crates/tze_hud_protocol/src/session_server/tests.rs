@@ -1,4 +1,40 @@
 use super::*;
+
+#[tokio::test]
+async fn transactional_command_input_does_not_lag_under_receiver_backpressure() {
+    let service = HudSessionImpl::new(SceneGraph::new(800.0, 600.0), "test-psk");
+    let mut receiver = service.input_event_tx.subscribe();
+
+    for interaction_id in 0..=BROADCAST_CHANNEL_CAPACITY as u64 {
+        let batch = crate::proto::EventBatch {
+            frame_number: 0,
+            batch_ts_us: interaction_id,
+            events: vec![crate::proto::InputEnvelope {
+                event: Some(crate::proto::input_envelope::Event::CommandInput(
+                    crate::proto::CommandInputEvent {
+                        interaction_id: interaction_id.to_string(),
+                        ..Default::default()
+                    },
+                )),
+            }],
+        };
+        service.inject_input_event("agent-a", batch);
+    }
+
+    let (_, first_batch) = receiver
+        .recv()
+        .await
+        .expect("transactional command input must never report receiver lag");
+    let first_command = first_batch.events[0]
+        .event
+        .as_ref()
+        .and_then(|event| match event {
+            crate::proto::input_envelope::Event::CommandInput(command) => Some(command),
+            _ => None,
+        })
+        .expect("first event must remain a command input event");
+    assert_eq!(first_command.interaction_id, "0");
+}
 use crate::proto::session::hud_session_client::HudSessionClient;
 use crate::proto::session::hud_session_server::HudSessionServer;
 use std::collections::HashMap;

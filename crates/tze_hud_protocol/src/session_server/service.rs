@@ -66,16 +66,16 @@ pub struct HudSessionImpl {
     /// mutation and delivering the `CapabilityNotice` + `LeaseStateChange` responses.
     pub capability_revocation_tx: tokio::sync::broadcast::Sender<CapabilityRevocationEvent>,
 
-    /// Broadcast sender for runtime-injected input event batches (hud-i6yd.6).
+    /// Traffic-class-aware sender for runtime-injected input event batches (hud-i6yd.6).
     ///
     /// Carries `(namespace, EventBatch)` tuples. Each session handler subscribes
     /// and delivers the batch only if `namespace` matches its own namespace AND the
     /// agent has at least one of `INPUT_EVENTS` / `FOCUS_EVENTS` active. The batch
     /// is filtered through `subscriptions::filter_event_batch` before delivery.
     ///
-    /// Used by `inject_input_event` to push runtime-assembled ClickEvent /
-    /// CommandInputEvent batches to the owning agent session.
-    pub input_event_tx: tokio::sync::broadcast::Sender<(String, crate::proto::EventBatch)>,
+    /// Transactional variants use a durable per-session lane; ephemeral and
+    /// state-stream variants use bounded broadcast delivery.
+    pub input_event_tx: super::InputEventSender,
 
     /// Broadcast sender for `ElementRepositionedEvent` notifications (hud-bs2q.6).
     ///
@@ -118,8 +118,7 @@ impl HudSessionImpl {
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
         let (capability_revocation_tx, _) =
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
-        let (input_event_tx, _) =
-            tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
+        let input_event_tx = super::InputEventSender::new(super::BROADCAST_CHANNEL_CAPACITY);
         let (element_repositioned_tx, _) =
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
         let (frame_presented_tx, _) =
@@ -190,8 +189,7 @@ impl HudSessionImpl {
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
         let (capability_revocation_tx, _) =
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
-        let (input_event_tx, _) =
-            tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
+        let input_event_tx = super::InputEventSender::new(super::BROADCAST_CHANNEL_CAPACITY);
         let (element_repositioned_tx, _) =
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
         let (frame_presented_tx, _) =
@@ -283,11 +281,11 @@ impl HudSessionImpl {
     /// Used by the runtime to push ClickEvent / CommandInputEvent batches produced by
     /// the compositor input pipeline (Stage 2) to the owning agent (hud-i6yd.6).
     ///
-    /// The batch is broadcast to all session handler tasks; each task delivers it only
+    /// The batch is fanned out to all session handler tasks; each task delivers it only
     /// if its namespace matches AND the event passes subscription filtering
     /// (`INPUT_EVENTS` / `FOCUS_EVENTS` gates).
     ///
-    /// Returns the number of session handlers that received the broadcast (0 if no
+    /// Returns the number of session handlers that received the batch (0 if no
     /// sessions are currently connected, regardless of namespace match).
     ///
     /// # Subscription gate
@@ -301,9 +299,7 @@ impl HudSessionImpl {
         namespace: impl Into<String>,
         batch: crate::proto::EventBatch,
     ) -> usize {
-        self.input_event_tx
-            .send((namespace.into(), batch))
-            .unwrap_or_default()
+        self.input_event_tx.send((namespace.into(), batch))
     }
 
     /// Broadcast an `ElementRepositionedEvent` to all active sessions subscribed

@@ -18,7 +18,7 @@ pub(super) fn normalize_mouse_wheel_delta(delta: &MouseScrollDelta) -> (f32, f32
 ///
 /// Looks up the owning namespace from the scene graph, constructs an
 /// `EventBatch` with a single `ScrollOffsetChangedEvent` envelope, and sends it
-/// on the `input_event_tx` broadcast channel.  The session handler delivers the
+/// through the traffic-class-aware input-event bus. The session handler delivers the
 /// batch only when the agent is subscribed to `INPUT_EVENTS` — the subscription
 /// gate is enforced in `subscriptions::filter_event_batch`, not here.
 ///
@@ -26,7 +26,7 @@ pub(super) fn normalize_mouse_wheel_delta(delta: &MouseScrollDelta) -> (f32, f32
 /// receiver is connected (gRPC disabled, no agent subscribed) the event is
 /// silently dropped, matching the ephemeral-realtime message class contract.
 pub(super) fn dispatch_scroll_offset_event(
-    tx: &Option<tokio::sync::broadcast::Sender<(String, EventBatch)>>,
+    tx: &Option<tze_hud_protocol::session_server::InputEventSender>,
     scene: &SceneGraph,
     ev: tze_hud_input::ScrollOffsetChangedEvent,
 ) {
@@ -59,9 +59,7 @@ pub(super) fn dispatch_scroll_offset_event(
         }],
     };
 
-    // Broadcast to all session handler tasks; each one delivers only if the
-    // namespace matches and INPUT_EVENTS is active. Errors (no receivers,
-    // channel full) are silently ignored — scroll events are ephemeral.
+    // Scroll is ephemeral, so the bus uses its bounded droppable lane.
     let _ = tx.send((namespace, batch));
 }
 
@@ -70,18 +68,15 @@ pub(super) fn dispatch_scroll_offset_event(
 ///
 /// Converts the `KeyboardDispatch` to the appropriate proto envelope
 /// (`KeyDownEvent`, `KeyUpEvent`, or `CharacterEvent`), wraps it in an
-/// `EventBatch`, and sends it on the broadcast channel.  The session handler
+/// `EventBatch`, and sends it through the input-event bus. The session handler
 /// delivers the batch only when the agent is subscribed to `INPUT_EVENTS` —
 /// the subscription gate is enforced in `subscriptions::filter_event_batch`.
 ///
-/// Keyboard events are transactional (never dropped by design), but the
-/// broadcast channel is best-effort from the runtime side: if no receiver is
-/// connected (gRPC disabled, no agent subscribed to INPUT_EVENTS), the send
-/// error is silently discarded.  This matches the existing scroll-event
-/// pattern and is consistent with the `FocusOwner::None` early-return in the
-/// dispatch helpers (no broadcast when no focused session).
+/// Keyboard events are transactional and therefore use the durable lane. If
+/// no receiver is connected (gRPC disabled or no live session), the event has
+/// no destination and the send result is ignored.
 pub(super) fn dispatch_keyboard_event(
-    tx: &Option<tokio::sync::broadcast::Sender<(String, EventBatch)>>,
+    tx: &Option<tze_hud_protocol::session_server::InputEventSender>,
     dispatch: tze_hud_input::KeyboardDispatch,
 ) {
     let Some(tx) = tx else { return };
@@ -152,9 +147,8 @@ pub(super) fn dispatch_keyboard_event(
         events: vec![InputEnvelope { event: Some(event) }],
     };
 
-    // Broadcast to all session handler tasks; each one delivers only if the
-    // namespace matches and INPUT_EVENTS is subscribed. Errors (no receivers,
-    // channel lagged) are silently ignored.
+    // Fan out to session handler tasks; the sender classifies keyboard input
+    // as transactional, so a slow receiver cannot make this event lag/drop.
     let _ = tx.send((dispatch.namespace, batch));
 }
 
@@ -164,7 +158,7 @@ pub(super) fn dispatch_keyboard_event(
 /// namespace-addressed `INPUT_EVENTS` channel as keyboard and pointer input;
 /// the session handler applies the capability/subscription filter.
 pub(super) fn dispatch_command_event(
-    tx: &Option<tokio::sync::broadcast::Sender<(String, EventBatch)>>,
+    tx: &Option<tze_hud_protocol::session_server::InputEventSender>,
     dispatch: tze_hud_input::CommandDispatch,
 ) {
     let Some(tx) = tx else { return };
@@ -233,7 +227,7 @@ pub(super) fn dispatch_command_event(
 }
 
 /// Deliver a [`tze_hud_input::DraftNotificationBatch`] to the owning adapter
-/// via the `INPUT_EVENTS` gRPC broadcast channel (hud-ygbcy).
+/// via the `INPUT_EVENTS` gRPC event channel (hud-ygbcy).
 ///
 /// # Proto mapping
 ///
@@ -260,16 +254,15 @@ pub(super) fn dispatch_command_event(
 ///
 /// # Delivery semantics
 ///
-/// Broadcast on the `INPUT_EVENTS` channel addressed to `namespace`.  The
+/// Fan out on the `INPUT_EVENTS` channel addressed to `namespace`. The
 /// session handler delivers each `EventBatch` only when the agent is
 /// subscribed to `INPUT_EVENTS` — the subscription gate is enforced in
-/// `subscriptions::filter_event_batch`, not here.  Errors (no receivers,
-/// channel lagged) are silently ignored, matching the keyboard-event
-/// broadcast pattern.
+/// `subscriptions::filter_event_batch`, not here. A batch containing submit or
+/// cancel is classified transactional; state-only batches remain droppable.
 ///
 /// # Parameters
 ///
-/// - `tx`: the shared broadcast sender; `None` when gRPC is disabled.
+/// - `tx`: the shared traffic-class-aware sender; `None` when gRPC is disabled.
 /// - `namespace`: the agent namespace that owns the composer node.
 /// - `node_id_bytes`: 16-byte UUIDv7 of the focused composer node.
 /// - `tile_id_bytes`: 16-byte UUIDv7 of the owning portal tile. Carried on the
@@ -278,7 +271,7 @@ pub(super) fn dispatch_command_event(
 ///   `resident_grpc_bridge::resolve_input_projection`.
 /// - `batch`: the coalesced draft batch to deliver.
 pub(super) fn deliver_composer_batch(
-    tx: &Option<tokio::sync::broadcast::Sender<(String, EventBatch)>>,
+    tx: &Option<tze_hud_protocol::session_server::InputEventSender>,
     namespace: String,
     node_id_bytes: &[u8],
     tile_id_bytes: &[u8],
@@ -377,9 +370,8 @@ pub(super) fn deliver_composer_batch(
         events,
     };
 
-    // Broadcast to all session handler tasks; each one delivers only if the
-    // namespace matches and INPUT_EVENTS is active. Errors (no receivers,
-    // channel lagged) are silently ignored.
+    // Fan out on the transactional lane; each session handler still applies
+    // namespace and subscription filtering.
     let _ = tx.send((namespace, event_batch));
 }
 
@@ -387,7 +379,7 @@ pub(super) fn deliver_composer_batch(
 /// via the `FOCUS_EVENTS` gRPC channel.
 ///
 /// Converts a [`tze_hud_input::FocusTransition`] into proto envelopes and sends
-/// each event as a single-event `EventBatch` on the broadcast channel.  The
+/// each event as a single-event `EventBatch` on the durable lane. The
 /// session handler delivers each batch only when the agent is subscribed to
 /// `FOCUS_EVENTS` — the subscription gate is enforced in
 /// `subscriptions::filter_event_batch`, not here.
@@ -396,10 +388,10 @@ pub(super) fn deliver_composer_batch(
 /// focus receives its event before the newly-focused agent receives its gained
 /// event, preserving the ordering guarantee in RFC 0004 §8.4.
 ///
-/// Delivery is best-effort (fire-and-forget): errors (no receivers, channel
-/// lagged) are silently ignored, matching the keyboard-event broadcast pattern.
+/// Focus events use the durable transactional lane. A send with no connected
+/// session has no destination and is ignored.
 pub(super) fn dispatch_focus_event(
-    tx: &Option<tokio::sync::broadcast::Sender<(String, EventBatch)>>,
+    tx: &Option<tze_hud_protocol::session_server::InputEventSender>,
     transition: tze_hud_input::FocusTransition,
 ) {
     let Some(tx) = tx else { return };
@@ -494,8 +486,8 @@ pub(super) fn dispatch_focus_event(
 ///
 /// Converts an [`tze_hud_input::AgentDispatch`] with `kind` in
 /// {`PointerDown`, `PointerMove`, `PointerUp`} to the corresponding proto
-/// envelope, wraps it in an `EventBatch`, and sends it on the broadcast
-/// channel.  The session handler delivers the batch only when the agent is
+/// envelope, wraps it in an `EventBatch`, and sends it through the input-event
+/// bus. The session handler delivers the batch only when the agent is
 /// subscribed to `INPUT_EVENTS` — the subscription gate is enforced in
 /// `subscriptions::filter_event_batch`, not here.
 ///
@@ -512,10 +504,10 @@ pub(super) fn dispatch_focus_event(
 /// `CaptureReleased` is routed to `dispatch_capture_released_event` by the
 /// caller (it belongs to `FOCUS_EVENTS`, not `INPUT_EVENTS`).
 ///
-/// Delivery is best-effort (fire-and-forget): errors (no receivers, channel
-/// lagged) are silently ignored, matching the scroll and keyboard patterns.
+/// Transactional pointer variants use the durable lane; move/hover variants
+/// retain bounded ephemeral delivery.
 pub(super) fn dispatch_pointer_event(
-    tx: &Option<tokio::sync::broadcast::Sender<(String, EventBatch)>>,
+    tx: &Option<tze_hud_protocol::session_server::InputEventSender>,
     dispatch: tze_hud_input::AgentDispatch,
 ) {
     let Some(tx) = tx else { return };
@@ -597,11 +589,8 @@ pub(super) fn dispatch_pointer_event(
         events: vec![InputEnvelope { event: Some(event) }],
     };
 
-    // Broadcast to all session handler tasks; each one delivers only if the
-    // namespace matches and INPUT_EVENTS is subscribed. Errors (no receivers,
-    // channel lagged) are silently ignored — PointerMove is ephemeral;
-    // PointerDown/Up are transactional but the broadcast channel is best-effort
-    // from the runtime side (consistent with keyboard and scroll patterns).
+    // The bus routes PointerDown/Up through the durable lane and PointerMove
+    // through the bounded ephemeral lane.
     let _ = tx.send((dispatch.namespace, batch));
 }
 
@@ -616,10 +605,9 @@ pub(super) fn dispatch_pointer_event(
 /// §`is_focus_variant`).  Agents that subscribe to `FOCUS_EVENTS` with the
 /// `access_input_events` capability will receive it.
 ///
-/// Delivery is best-effort (fire-and-forget): errors (no receivers, channel
-/// lagged) are silently ignored.
+/// Capture release uses the durable transactional lane.
 pub(super) fn dispatch_capture_released_event(
-    tx: &Option<tokio::sync::broadcast::Sender<(String, EventBatch)>>,
+    tx: &Option<tze_hud_protocol::session_server::InputEventSender>,
     dispatch: tze_hud_input::AgentDispatch,
 ) {
     let Some(tx) = tx else { return };
@@ -838,6 +826,15 @@ pub(super) fn winit_mods_to_keyboard_modifiers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_input_event_channel() -> (
+        tze_hud_protocol::session_server::InputEventSender,
+        tze_hud_protocol::session_server::InputEventReceiver,
+    ) {
+        let tx = tze_hud_protocol::session_server::InputEventSender::new(8);
+        let rx = tx.subscribe();
+        (tx, rx)
+    }
     use crate::channels::{INPUT_EVENT_CAPACITY, InputEventKind};
 
     #[test]
@@ -949,8 +946,7 @@ mod tests {
     fn dispatch_pointer_event_timestamp_mono_us_is_non_zero() {
         use tze_hud_input::AgentDispatchKind;
 
-        let (tx, mut rx) =
-            tokio::sync::broadcast::channel::<(String, tze_hud_protocol::proto::EventBatch)>(8);
+        let (tx, mut rx) = test_input_event_channel();
         let tx_opt = Some(tx);
 
         for kind in [
@@ -976,8 +972,7 @@ mod tests {
     fn dispatch_pointer_event_timestamp_mono_us_is_monotonic() {
         use tze_hud_input::AgentDispatchKind;
 
-        let (tx, mut rx) =
-            tokio::sync::broadcast::channel::<(String, tze_hud_protocol::proto::EventBatch)>(8);
+        let (tx, mut rx) = test_input_event_channel();
         let tx_opt = Some(tx);
 
         dispatch_pointer_event(&tx_opt, make_agent_dispatch(AgentDispatchKind::PointerDown));
@@ -1049,8 +1044,7 @@ mod tests {
     fn deliver_composer_batch_latest_emits_draft_state_event() {
         use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
 
-        let (tx, mut rx) =
-            tokio::sync::broadcast::channel::<(String, tze_hud_protocol::proto::EventBatch)>(8);
+        let (tx, mut rx) = test_input_event_channel();
         let tx_opt = Some(tx);
         let node_id_bytes = vec![0u8; 16];
         let tile_id_bytes = vec![9u8; 16];
@@ -1089,8 +1083,7 @@ mod tests {
     fn deliver_composer_batch_submit_emits_draft_submit_event() {
         use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
 
-        let (tx, mut rx) =
-            tokio::sync::broadcast::channel::<(String, tze_hud_protocol::proto::EventBatch)>(8);
+        let (tx, mut rx) = test_input_event_channel();
         let tx_opt = Some(tx);
         let node_id_bytes = vec![1u8; 16];
         let tile_id_bytes = vec![8u8; 16];
@@ -1123,8 +1116,7 @@ mod tests {
     fn deliver_composer_batch_cancel_emits_draft_cancel_event() {
         use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
 
-        let (tx, mut rx) =
-            tokio::sync::broadcast::channel::<(String, tze_hud_protocol::proto::EventBatch)>(8);
+        let (tx, mut rx) = test_input_event_channel();
         let tx_opt = Some(tx);
         let node_id_bytes = vec![2u8; 16];
         let tile_id_bytes = vec![7u8; 16];
@@ -1167,8 +1159,7 @@ mod tests {
     fn deliver_composer_batch_submit_cycle_correct_order_and_sequences() {
         use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
 
-        let (tx, mut rx) =
-            tokio::sync::broadcast::channel::<(String, tze_hud_protocol::proto::EventBatch)>(8);
+        let (tx, mut rx) = test_input_event_channel();
         let tx_opt = Some(tx);
         let node_id_bytes = vec![3u8; 16];
         let tile_id_bytes = vec![6u8; 16];
@@ -1270,11 +1261,10 @@ mod tests {
         );
     }
 
-    /// An empty batch produces no broadcast.
+    /// An empty batch produces no event.
     #[test]
     fn deliver_composer_batch_empty_batch_sends_nothing() {
-        let (tx, mut rx) =
-            tokio::sync::broadcast::channel::<(String, tze_hud_protocol::proto::EventBatch)>(8);
+        let (tx, mut rx) = test_input_event_channel();
         let tx_opt = Some(tx);
 
         deliver_composer_batch(
@@ -1287,7 +1277,7 @@ mod tests {
 
         assert!(
             rx.try_recv().is_err(),
-            "empty batch must not produce a broadcast"
+            "empty batch must not produce an event"
         );
     }
 
@@ -1298,8 +1288,7 @@ mod tests {
     fn deliver_composer_batch_post_submit_clear_sequence_exceeds_submission() {
         use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
 
-        let (tx, mut rx) =
-            tokio::sync::broadcast::channel::<(String, tze_hud_protocol::proto::EventBatch)>(8);
+        let (tx, mut rx) = test_input_event_channel();
         let tx_opt = Some(tx);
         let node_id_bytes = vec![0u8; 16];
 

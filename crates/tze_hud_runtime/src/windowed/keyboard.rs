@@ -179,12 +179,12 @@ fn keyboard_command(
             }
         }
         ("Enter" | "NumpadEnter", _) | (_, "Enter") => CommandAction::Activate,
-        ("Space", _) | (_, " ") | (_, "Space") => CommandAction::Activate,
+        ("Space", _) | (_, " ") | (_, "Space") if node_focused => CommandAction::Activate,
         ("Escape", _) | (_, "Escape") => CommandAction::Cancel,
         ("ContextMenu", _) | (_, "ContextMenu") => CommandAction::Context,
         ("F10", _) | (_, "F10") if raw.modifiers.shift => CommandAction::Context,
-        ("PageUp", _) | (_, "PageUp") => CommandAction::ScrollUp,
-        ("PageDown", _) | (_, "PageDown") => CommandAction::ScrollDown,
+        ("PageUp", _) | (_, "PageUp") if tile_focused => CommandAction::ScrollUp,
+        ("PageDown", _) | (_, "PageDown") if tile_focused => CommandAction::ScrollDown,
         ("ArrowUp", _) | (_, "ArrowUp") if node_focused => CommandAction::NavigatePrev,
         ("ArrowDown", _) | (_, "ArrowDown") if node_focused => CommandAction::NavigateNext,
         ("ArrowUp", _) | (_, "ArrowUp") if tile_focused => CommandAction::ScrollUp,
@@ -1971,12 +1971,6 @@ mod tests {
                 CommandAction::Activate,
             ),
             (
-                "Space",
-                " ",
-                KeyboardModifiers::NONE,
-                CommandAction::Activate,
-            ),
-            (
                 "Escape",
                 "Escape",
                 KeyboardModifiers::NONE,
@@ -1989,18 +1983,6 @@ mod tests {
                 CommandAction::Context,
             ),
             ("F10", "F10", shift, CommandAction::Context),
-            (
-                "PageUp",
-                "PageUp",
-                KeyboardModifiers::NONE,
-                CommandAction::ScrollUp,
-            ),
-            (
-                "PageDown",
-                "PageDown",
-                KeyboardModifiers::NONE,
-                CommandAction::ScrollDown,
-            ),
             (
                 "ArrowUp",
                 "ArrowUp",
@@ -2019,6 +2001,32 @@ mod tests {
                 command_binding(key_code, key, modifiers, &node_focus),
                 Some(expected),
                 "unexpected node-focused binding for {key_code}"
+            );
+        }
+
+        assert_eq!(
+            command_binding("Space", " ", KeyboardModifiers::NONE, &node_focus),
+            Some(CommandAction::Activate),
+            "Space activates only a focused node"
+        );
+        assert_eq!(
+            command_binding("Space", " ", KeyboardModifiers::NONE, &tile_focus),
+            None,
+            "Space must not activate tile-level focus"
+        );
+        for (key, action) in [
+            ("PageUp", CommandAction::ScrollUp),
+            ("PageDown", CommandAction::ScrollDown),
+        ] {
+            assert_eq!(
+                command_binding(key, key, KeyboardModifiers::NONE, &tile_focus),
+                Some(action),
+                "{key} scrolls tile-level focus"
+            );
+            assert_eq!(
+                command_binding(key, key, KeyboardModifiers::NONE, &node_focus),
+                None,
+                "{key} must not scroll while a node owns focus"
             );
         }
 

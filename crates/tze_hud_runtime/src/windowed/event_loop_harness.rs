@@ -376,7 +376,7 @@ mod tests {
     ) -> (
         SceneId,
         SceneId,
-        tokio::sync::broadcast::Receiver<(String, tze_hud_protocol::proto::EventBatch)>,
+        tze_hud_protocol::session_server::InputEventReceiver,
     ) {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
@@ -430,13 +430,14 @@ mod tests {
         }
         *harness.app.state.active_tab_mirror.lock().unwrap() = Some(tab_id);
 
-        let (tx, rx) = tokio::sync::broadcast::channel(16);
+        let tx = tze_hud_protocol::session_server::InputEventSender::new(16);
+        let rx = tx.subscribe();
         harness.app.state.input_event_tx = Some(tx);
         (tile_id, node_id, rx)
     }
 
     fn received_events(
-        rx: &mut tokio::sync::broadcast::Receiver<(String, tze_hud_protocol::proto::EventBatch)>,
+        rx: &mut tze_hud_protocol::session_server::InputEventReceiver,
     ) -> Vec<(String, ProtoInputEvent)> {
         let mut events = Vec::new();
         while let Ok((namespace, batch)) = rx.try_recv() {

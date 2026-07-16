@@ -205,7 +205,9 @@ commands move focus first; `CommandProcessor` then applies local feedback and
 constructs a transactional dispatch for the new/current focus owner.
 `input_dispatch::dispatch_command_event` serializes that dispatch as the
 existing protobuf `CommandInputEvent` on the owning namespace's `INPUT_EVENTS`
-subscription. A matching activation-key release clears the recorded node's
+subscription. The protocol fan-out routes transactional input through an
+ordered per-session durable lane; only ephemeral/state-stream input uses the
+bounded droppable lane. A matching activation-key release clears the recorded node's
 pressed state even if focus moved in the meantime. Future D-pad, voice,
 clicker, and rotary adapters enter at `RawCommandEvent` and reuse the same
 processor and protocol conversion.

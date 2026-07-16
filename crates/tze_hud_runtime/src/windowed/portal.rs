@@ -1948,14 +1948,15 @@ mod tests {
         input_processor: InputProcessor,
     ) -> (
         WinitApp,
-        tokio::sync::broadcast::Receiver<(String, tze_hud_protocol::proto::EventBatch)>,
+        tze_hud_protocol::session_server::InputEventReceiver,
     ) {
         let cfg = WindowedConfig::default();
         let shared_state = make_shared_state();
         let (input_capture_tx, input_capture_rx) = tokio::sync::mpsc::unbounded_channel();
         let (_paste_inject_tx, paste_inject_rx) = tokio::sync::mpsc::unbounded_channel();
         let (frame_ready_tx, frame_ready_rx) = frame_ready_channel();
-        let (input_event_tx, input_event_rx) = tokio::sync::broadcast::channel(8);
+        let input_event_tx = tze_hud_protocol::session_server::InputEventSender::new(8);
+        let input_event_rx = input_event_tx.subscribe();
         let safe_mode_atomic = {
             let state = shared_state
                 .try_lock()
