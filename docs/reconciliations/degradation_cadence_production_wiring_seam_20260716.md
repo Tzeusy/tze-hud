@@ -210,6 +210,33 @@ also coherent but requires a protocol amendment. Omitting current state until a
 later transition is rejected because a session joining during Level 4/5 would
 have no machine-readable indication of the policy already affecting its tiles.
 
+### Runtime-to-protocol mapping choices
+
+The current seven-value enum cannot truthfully represent all six v1 compositor
+rungs. `MEDIA_QUALITY_REDUCED` is not an exact name for static texture scaling,
+and `AUDIO_ONLY_FALLBACK` is false for Level 5, which still renders chrome plus
+one tile. The decision must select one of these protocol amendments:
+
+1. **Append exact enum values (recommended).** Preserve all existing numeric
+   values and append compositor-specific values for texture-quality reduction
+   and emergency rendering. Map Normal, Coalesce, DisableTransparency, and
+   ShedTiles to their existing exact semantic values; map Levels 2 and 5 to the
+   new appended values. This keeps one primary discriminant and makes the wire
+   transition lossless, at the cost of an enum/schema update.
+2. **Add an explicit runtime-level/action field.** Keep the legacy seven-value
+   enum as a compatibility summary and add an append-only numeric runtime level
+   plus typed action codes. This is more verbose and creates two fields that
+   receivers must reconcile, but preserves old enum behavior.
+
+Reusing `MEDIA_QUALITY_REDUCED` for Level 2 and
+`AUDIO_ONLY_FALLBACK`/`SHEDDING_TILES` for Level 5 without another exact field is
+rejected: it is either semantically false or collapses two observable rungs.
+Likewise, `affected_capabilities` must not be filled with invented action names
+such as `texture_quality` or `tile_visibility`; those are not capability grants.
+For the v1 render-only ladder the safe default is an empty capability list unless
+an actual granted capability is narrowed. The level/action field carries the
+render-policy effect, while the human-readable reason remains explanatory only.
+
 ## Required Decision
 
 Approve Option A or B.
@@ -230,6 +257,11 @@ Option A must provide:
 
 Option B must provide only the 60 Hz startup/configuration restriction plus
 items 4-6 and the 10/30-frame post-transition sample-reset/re-eligibility rule.
+
+For item 5, the default recommendation is the append-only exact enum option and
+an empty `affected_capabilities` list for render-only transitions. If neither
+protocol amendment is approved, the safe default is to leave production wiring
+blocked rather than publish a misleading degradation value.
 
 Default recommendation: **Option A**, with quiescent elapsed time eligible for
 recovery only after the runtime proves no animation, publication expiry,
