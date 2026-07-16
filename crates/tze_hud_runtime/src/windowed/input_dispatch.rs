@@ -30,13 +30,22 @@ pub(super) fn dispatch_scroll_offset_event(
     scene: &SceneGraph,
     ev: tze_hud_input::ScrollOffsetChangedEvent,
 ) {
-    let Some(tx) = tx else { return };
-
     // Look up the namespace that owns this tile so the session handler can
     // route the batch to the correct agent.
     let Some(namespace) = scene.tiles.get(&ev.tile_id).map(|t| t.namespace.clone()) else {
         return;
     };
+    dispatch_scroll_offset_event_to_namespace(tx, namespace, ev);
+}
+
+/// Dispatch a scroll-offset notification when the owning namespace was
+/// already resolved under the scene lock.
+pub(super) fn dispatch_scroll_offset_event_to_namespace(
+    tx: &Option<tze_hud_protocol::session_server::InputEventSender>,
+    namespace: String,
+    ev: tze_hud_input::ScrollOffsetChangedEvent,
+) {
+    let Some(tx) = tx else { return };
 
     let now_us = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

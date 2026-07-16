@@ -480,6 +480,74 @@ mod tests {
         events
     }
 
+    /// Install two scrollable tiles with keyboard focus on the first while the
+    /// cursor is over the second. This is the adversarial setup for keyboard
+    /// scroll ownership: focus and pointer location deliberately disagree.
+    fn install_conflicting_focus_and_pointer_scroll_tiles(
+        harness: &mut HeadlessEventLoopHarness,
+    ) -> (
+        SceneId,
+        SceneId,
+        tze_hud_protocol::session_server::InputEventReceiver,
+    ) {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "scroll-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let focused_tile = scene
+            .create_tile(
+                tab_id,
+                "scroll-agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 400.0, 300.0),
+                1,
+            )
+            .unwrap();
+        let pointer_tile = scene
+            .create_tile(
+                tab_id,
+                "scroll-agent",
+                lease_id,
+                Rect::new(500.0, 0.0, 400.0, 300.0),
+                1,
+            )
+            .unwrap();
+        scene
+            .register_tile_scroll_config(focused_tile, tze_hud_scene::TileScrollConfig::vertical())
+            .unwrap();
+        scene
+            .register_tile_scroll_config(pointer_tile, tze_hud_scene::TileScrollConfig::vertical())
+            .unwrap();
+
+        harness.app.state.focus_manager.add_tab(tab_id);
+        let transition =
+            harness
+                .app
+                .state
+                .focus_manager
+                .on_click(tab_id, focused_tile, None, &scene);
+        assert!(
+            transition.gained.is_some(),
+            "test setup must focus first tile"
+        );
+        harness.app.state.cursor_x = 550.0;
+        harness.app.state.cursor_y = 50.0;
+
+        {
+            let shared = harness.app.state.shared_state.blocking_lock();
+            *shared.scene.blocking_lock() = scene;
+        }
+        *harness.app.state.active_tab_mirror.lock().unwrap() = Some(tab_id);
+
+        let tx = tze_hud_protocol::session_server::InputEventSender::new(16);
+        let rx = tx.subscribe_all();
+        harness.app.state.input_event_tx = Some(tx);
+        (focused_tile, pointer_tile, rx)
+    }
+
     /// RFC 0007 §2.3 / system-shell "Tab Keyboard Shortcuts": the runtime
     /// consumes Ctrl+Tab before agent routing and changes the authoritative
     /// scene tab locally. Drive the real event-loop drain so this proves the
@@ -681,6 +749,181 @@ mod tests {
                 .get(&node_id)
                 .is_some_and(|state| !state.pressed),
             "matching activation KeyUp must clear local pressed feedback"
+        );
+    }
+
+    /// RFC 0004 §5.7/§10.3: PageDown is focus-routed command input, not a
+    /// pointer-position scroll. The focused tile must receive both local scroll
+    /// feedback and the command even when the cursor rests over another tile.
+    #[test]
+    fn page_down_scrolls_focused_tile_not_tile_under_pointer() {
+        let mut harness = HeadlessEventLoopHarness::new();
+        let (focused_tile, pointer_tile, mut rx) =
+            install_conflicting_focus_and_pointer_scroll_tiles(&mut harness);
+
+        harness.enqueue(key_down("PageDown", "PageDown", 1_000));
+        harness.drain();
+
+        let shared = harness.app.state.shared_state.blocking_lock();
+        let scene = shared.scene.blocking_lock();
+        let (_, focused_offset_y) = scene.tile_scroll_offset_local(focused_tile);
+        let (_, pointer_offset_y) = scene.tile_scroll_offset_local(pointer_tile);
+        assert_eq!(
+            focused_offset_y,
+            tze_hud_input::KEYBOARD_PAGE_SCROLL_PX,
+            "PageDown must apply local-first scroll to the focused tile"
+        );
+        assert_eq!(
+            pointer_offset_y, 0.0,
+            "PageDown must not scroll the different tile under the pointer"
+        );
+        drop(scene);
+        drop(shared);
+
+        let events = received_events(&mut rx);
+        assert_eq!(
+            events.len(),
+            2,
+            "PageDown must deliver one command then one resulting offset; got {events:?}"
+        );
+        let (command_namespace, ProtoInputEvent::CommandInput(command)) = &events[0] else {
+            panic!("PageDown must deliver CommandInputEvent first; got {events:?}")
+        };
+        assert_eq!(command_namespace, "scroll-agent");
+        assert_eq!(command.tile_id, focused_tile.as_uuid().as_bytes());
+        assert_eq!(command.action, CommandAction::ScrollDown as i32);
+        assert_eq!(command.source, CommandSource::Keyboard as i32);
+        let (scroll_namespace, ProtoInputEvent::ScrollOffsetChanged(scroll)) = &events[1] else {
+            panic!(
+                "PageDown must deliver resulting ScrollOffsetChangedEvent second; got {events:?}"
+            )
+        };
+        assert_eq!(scroll_namespace, "scroll-agent");
+        assert_eq!(scroll.tile_id, focused_tile.as_uuid().as_bytes());
+        assert_eq!(scroll.offset_y, tze_hud_input::KEYBOARD_PAGE_SCROLL_PX);
+    }
+
+    /// PageUp shares the focus-routed ownership contract with PageDown. Seed
+    /// both tiles away from origin so scrolling the wrong one is observable.
+    #[test]
+    fn page_up_scrolls_focused_tile_not_tile_under_pointer() {
+        let mut harness = HeadlessEventLoopHarness::new();
+        let (focused_tile, pointer_tile, mut rx) =
+            install_conflicting_focus_and_pointer_scroll_tiles(&mut harness);
+        let shared_state = Arc::clone(&harness.app.state.shared_state);
+        {
+            let shared = shared_state.blocking_lock();
+            let mut scene = shared.scene.blocking_lock();
+            harness.app.state.input_processor.process_keyboard_scroll(
+                focused_tile,
+                tze_hud_input::KEYBOARD_PAGE_SCROLL_PX,
+                &mut scene,
+            );
+            harness.app.state.input_processor.process_keyboard_scroll(
+                pointer_tile,
+                tze_hud_input::KEYBOARD_PAGE_SCROLL_PX,
+                &mut scene,
+            );
+        }
+        let _ = received_events(&mut rx);
+
+        harness.enqueue(key_down("PageUp", "PageUp", 1_000));
+        harness.drain();
+
+        let shared = shared_state.blocking_lock();
+        let scene = shared.scene.blocking_lock();
+        let (_, focused_offset_y) = scene.tile_scroll_offset_local(focused_tile);
+        let (_, pointer_offset_y) = scene.tile_scroll_offset_local(pointer_tile);
+        assert_eq!(
+            focused_offset_y, 0.0,
+            "PageUp must apply local-first scroll to the focused tile"
+        );
+        assert_eq!(
+            pointer_offset_y,
+            tze_hud_input::KEYBOARD_PAGE_SCROLL_PX,
+            "PageUp must leave the different tile under the pointer unchanged"
+        );
+        drop(scene);
+        drop(shared);
+
+        let events = received_events(&mut rx);
+        assert!(
+            events.iter().any(|(_, event)| matches!(
+                event,
+                ProtoInputEvent::CommandInput(command)
+                    if command.tile_id == focused_tile.as_uuid().as_bytes()
+                        && command.action == CommandAction::ScrollUp as i32
+            )),
+            "PageUp must retain focused SCROLL_UP command delivery; got {events:?}"
+        );
+    }
+
+    /// The keyboard correction must not alter wheel ownership: wheel input is
+    /// still pointer-routed even when keyboard focus belongs to another tile.
+    #[test]
+    fn wheel_scroll_still_targets_tile_under_pointer_not_focused_tile() {
+        let mut harness = HeadlessEventLoopHarness::new();
+        let (focused_tile, pointer_tile, _rx) =
+            install_conflicting_focus_and_pointer_scroll_tiles(&mut harness);
+
+        harness.app.enqueue_scroll_event(0.0, 40.0);
+
+        let shared = harness.app.state.shared_state.blocking_lock();
+        let scene = shared.scene.blocking_lock();
+        let (_, focused_offset_y) = scene.tile_scroll_offset_local(focused_tile);
+        let (_, pointer_offset_y) = scene.tile_scroll_offset_local(pointer_tile);
+        assert_eq!(
+            focused_offset_y, 0.0,
+            "wheel scroll must not be redirected from the pointer tile to focus"
+        );
+        assert_eq!(
+            pointer_offset_y, 40.0,
+            "wheel scroll must retain its pointer-hit-test ownership"
+        );
+    }
+
+    /// ArrowDown remains an abstract command binding at tile focus, but this
+    /// PageUp/PageDown correction must not invent a page-sized local side
+    /// effect for that distinct key.
+    #[test]
+    fn arrow_down_command_does_not_apply_page_scroll_side_effect() {
+        let mut harness = HeadlessEventLoopHarness::new();
+        let (focused_tile, pointer_tile, mut rx) =
+            install_conflicting_focus_and_pointer_scroll_tiles(&mut harness);
+
+        harness.enqueue(key_down("ArrowDown", "ArrowDown", 1_000));
+        harness.drain();
+
+        let shared = harness.app.state.shared_state.blocking_lock();
+        let scene = shared.scene.blocking_lock();
+        assert_eq!(
+            scene.tile_scroll_offset_local(focused_tile).1,
+            0.0,
+            "ArrowDown must not reuse the page-scroll side effect"
+        );
+        assert_eq!(
+            scene.tile_scroll_offset_local(pointer_tile).1,
+            0.0,
+            "ArrowDown must not scroll the pointer tile either"
+        );
+        drop(scene);
+        drop(shared);
+
+        let events = received_events(&mut rx);
+        assert!(
+            events.iter().any(|(_, event)| matches!(
+                event,
+                ProtoInputEvent::CommandInput(command)
+                    if command.tile_id == focused_tile.as_uuid().as_bytes()
+                        && command.action == CommandAction::ScrollDown as i32
+            )),
+            "ArrowDown must retain its focused SCROLL_DOWN command; got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|(_, event)| !matches!(event, ProtoInputEvent::ScrollOffsetChanged(_))),
+            "ArrowDown must not emit a page-scroll offset event; got {events:?}"
         );
     }
 

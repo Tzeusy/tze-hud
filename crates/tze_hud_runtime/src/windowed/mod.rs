@@ -1628,32 +1628,6 @@ impl ApplicationHandler for WinitApp {
                     }
                 }
 
-                // ── PgUp / PgDn: keyboard scroll through OS input path (hud-6bbe) ──
-                //
-                // PageUp and PageDown scroll the portal tile under the cursor by
-                // one page step (KEYBOARD_PAGE_SCROLL_PX).  This is the keyboard
-                // analogue of wheel scroll: same hit-test path, same coalescing,
-                // same clamp — only the input device class differs.
-                //
-                // We handle both Press *and* Repeat (held key = continuous scroll)
-                // so the experience matches normal page-scroll behaviour.
-                if event.state == ElementState::Pressed {
-                    use winit::keyboard::{KeyCode, PhysicalKey};
-                    let delta_y = match event.physical_key {
-                        PhysicalKey::Code(KeyCode::PageUp) => {
-                            // Scroll up: negative delta_y (same sign convention as wheel)
-                            -tze_hud_input::KEYBOARD_PAGE_SCROLL_PX
-                        }
-                        PhysicalKey::Code(KeyCode::PageDown) => {
-                            tze_hud_input::KEYBOARD_PAGE_SCROLL_PX
-                        }
-                        _ => 0.0,
-                    };
-                    if delta_y != 0.0 {
-                        self.enqueue_keyboard_scroll_event(delta_y);
-                    }
-                }
-
                 // Extract a u32 key code from the physical key for the channel type.
                 let key_u32 = physical_key_to_u32(&event.physical_key);
                 let input_event = InputEvent {
