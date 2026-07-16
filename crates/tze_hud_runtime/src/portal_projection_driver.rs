@@ -5077,10 +5077,46 @@ mod tests {
             hud_target: None,
             reply: re_tx,
         });
-        re_rx
+        let replay_token = re_rx
             .try_recv()
             .expect("reply must be sent synchronously")
             .expect("idempotent re-attach must be accepted");
+        assert_ne!(
+            replay_token, owner_token,
+            "idempotent re-attach must rotate the owner token"
+        );
+
+        let (stale_tx, mut stale_rx) =
+            tokio::sync::oneshot::channel::<Result<String, PortalOpRejection>>();
+        driver.dispatch_portal_op(PortalOp::PublishStatus {
+            projection_id: "reattach-proj".to_string(),
+            owner_token,
+            lifecycle_state: "active".to_string(),
+            status_text: Some("stale token".to_string()),
+            reply: stale_tx,
+        });
+        let stale_rejection = stale_rx
+            .try_recv()
+            .expect("stale-token reply must be sent synchronously")
+            .expect_err("pre-replay token must be invalidated");
+        assert_eq!(
+            stale_rejection.error_code,
+            ProjectionErrorCode::ProjectionUnauthorized
+        );
+
+        let (current_tx, mut current_rx) =
+            tokio::sync::oneshot::channel::<Result<String, PortalOpRejection>>();
+        driver.dispatch_portal_op(PortalOp::PublishStatus {
+            projection_id: "reattach-proj".to_string(),
+            owner_token: replay_token,
+            lifecycle_state: "active".to_string(),
+            status_text: Some("current token".to_string()),
+            reply: current_tx,
+        });
+        current_rx
+            .try_recv()
+            .expect("current-token reply must be sent synchronously")
+            .expect("replay token must authorize owner operations");
 
         // The drive entry must still point at the SAME tile — not reset to None.
         let tile_after_reattach = driver

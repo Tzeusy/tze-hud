@@ -2204,7 +2204,9 @@ pub struct PortalProjectionAttachParams {
     pub projection_id: String,
     /// Human-readable label (max 128 bytes).
     pub display_name: String,
-    /// Optional key for replay-safe re-attach after an interruption.
+    /// Optional key for replay-safe re-attach after an interruption. A matching
+    /// authenticated replay returns a fresh owner token and invalidates the old
+    /// token without extending the original expiry deadline.
     #[serde(default)]
     pub idempotency_key: Option<String>,
     /// Optional provider: `codex`|`claude`|`opencode`|`other` (default `other`).
