@@ -393,6 +393,9 @@ struct DriveEntry {
     /// re-deriving that from authority state every publish (which would inflate
     /// the reconnect bookkeeping on normal, non-recovery publishes).
     hud_disconnected: bool,
+    /// Agent-op staleness latch, distinct from HUD transport disconnection.
+    /// Both use the same stale treatment and scene lease grace path.
+    agent_liveness_degraded: bool,
     /// One-shot flag requesting a forced degraded repaint on the next drain
     /// (hud-h3mvo).
     ///
@@ -501,6 +504,7 @@ impl InProcessPortalDriveState {
                 tile_scene_id: None,
                 prev_content_height_px: 0.0,
                 hud_disconnected: false,
+                agent_liveness_degraded: false,
                 needs_degraded_repaint: false,
                 activity_cue_clear_due_us: None,
                 activity_cue_carried_unread: 0,
@@ -1614,6 +1618,32 @@ impl InProcessPortalDriver {
     ) {
         self.drain_pending_tile_removals(scene);
 
+        // Agent-side liveness sweep (hud-ccj2o). Authentication recency lives
+        // in the projection authority; presentation and removal stay runtime-
+        // owned. Synchronize degradation and recovery before lease handling so
+        // a recovered owner can reactivate an orphaned lease before rendering.
+        self.authority
+            .sweep_agent_liveness_degradation(now_us.max(1));
+        let liveness_states: Vec<(String, bool)> = self
+            .drive
+            .entries
+            .keys()
+            .map(|id| (id.clone(), self.authority.is_agent_liveness_degraded(id)))
+            .collect();
+        for (projection_id, degraded) in liveness_states {
+            let Some(entry) = self.drive.entries.get_mut(&projection_id) else {
+                continue;
+            };
+            if entry.agent_liveness_degraded == degraded {
+                continue;
+            }
+            entry.agent_liveness_degraded = degraded;
+            entry.needs_degraded_repaint = true;
+            if degraded {
+                entry.activity_cue_clear_due_us = None;
+            }
+        }
+
         // Resume-side of the lease-grace lifecycle (hud-i429x): if an owner
         // returned within grace, reconnect the orphaned driver lease BEFORE the
         // render due-loop below, so a resumed publish paints under an Active lease
@@ -2538,7 +2568,11 @@ impl InProcessPortalDriver {
         let Some(lease_id) = self.lease_id else {
             return;
         };
-        let any_live = self.drive.entries.values().any(|e| !e.hud_disconnected);
+        let any_live = self
+            .drive
+            .entries
+            .values()
+            .any(|e| !e.hud_disconnected && !e.agent_liveness_degraded);
         if any_live && scene.lease_is_orphaned(&lease_id) {
             match scene.reconnect_lease(&lease_id, scene.now_millis()) {
                 Ok(()) => tracing::info!(
@@ -2597,7 +2631,11 @@ impl InProcessPortalDriver {
 
         // 1. ORPHAN: every live projection dropped → start grace on the lease.
         let all_disconnected = !self.drive.entries.is_empty()
-            && self.drive.entries.values().all(|e| e.hud_disconnected);
+            && self
+                .drive
+                .entries
+                .values()
+                .all(|e| e.hud_disconnected || e.agent_liveness_degraded);
         if all_disconnected && scene.lease_is_active(&lease_id) {
             match scene.disconnect_lease(&lease_id, now_ms) {
                 Ok(()) => tracing::info!(
@@ -8262,6 +8300,81 @@ mod tests {
             scene.tile_count(),
             0,
             "draining after reap does not revive the surface"
+        );
+    }
+
+    /// hud-ccj2o: agent-side silence uses the same governed orphan/grace window
+    /// as an explicit upstream drop. The liveness threshold opens Degraded; it
+    /// does not create a second independent surface-expiry timer.
+    #[test]
+    fn agent_liveness_degradation_is_bounded_by_existing_lease_grace() {
+        use std::sync::Arc;
+        use tze_hud_scene::TestClock;
+
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                agent_liveness_degraded_after_wall_us: 1_000_000,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
+            drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
+        };
+
+        let projection_id = "proj-agent-liveness-grace";
+        let token = attach_and_get_token(&mut driver, projection_id);
+        driver.attach_projection(projection_id, Vec::new());
+        publish(
+            &mut driver,
+            projection_id,
+            &token,
+            "last live output",
+            1_100,
+        );
+
+        let clock = TestClock::new(1_000);
+        let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, Arc::new(clock.clone()));
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_100);
+        let lease = driver
+            .lease_id
+            .expect("first drain grants the portal lease");
+        assert_eq!(scene.tile_count(), 1);
+        assert!(scene.lease_is_active(&lease));
+
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_001_100);
+        assert!(
+            scene.lease_is_orphaned(&lease),
+            "the authority liveness transition must open the existing scene lease grace"
+        );
+        assert!(
+            driver
+                .authority_mut()
+                .projected_portal_state(projection_id, &ProjectedPortalPolicy::permit_all())
+                .expect("stale portal is retained during grace")
+                .connection_degraded
+        );
+        assert_eq!(scene.tile_count(), 1, "stale content remains during grace");
+
+        clock.advance(SceneGraph::DEFAULT_GRACE_PERIOD_MS + 1);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_300);
+        assert_eq!(
+            scene.tile_count(),
+            0,
+            "lease grace expiry removes stale content"
+        );
+        assert!(
+            driver
+                .authority_mut()
+                .projected_portal_state(projection_id, &ProjectedPortalPolicy::permit_all())
+                .is_none(),
+            "the grace-reaped projection cannot rematerialize stale state"
         );
     }
 

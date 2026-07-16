@@ -57,6 +57,12 @@ pub const DEFAULT_MAX_AUDIT_RECORDS: usize = 4_096;
 pub const OWNER_TOKEN_ENTROPY_BITS: usize = 256;
 /// Default owner-token lifetime in wall-clock microseconds.
 pub const DEFAULT_OWNER_TOKEN_TTL_WALL_US: u64 = 24 * 60 * 60 * 1_000_000;
+/// Default authenticated-operation gap before an attached projection is stale.
+pub const DEFAULT_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US: u64 = 30 * 1_000_000;
+/// Smallest accepted agent-liveness degradation threshold (one second).
+pub const MIN_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US: u64 = 1_000_000;
+/// Largest accepted agent-liveness degradation threshold (one hour).
+pub const MAX_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US: u64 = 60 * 60 * 1_000_000;
 /// One wall-clock second in microseconds, used for portal update-rate windows.
 pub const PORTAL_UPDATE_RATE_WINDOW_WALL_US: u64 = 1_000_000;
 

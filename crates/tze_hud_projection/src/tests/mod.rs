@@ -2598,6 +2598,228 @@ fn heartbeat_requires_live_connection_and_is_monotonic() {
 }
 
 #[test]
+fn agent_liveness_gap_degrades_portal_without_escalating_attention() {
+    let mut authority = ProjectionAuthority::new(ProjectionBounds {
+        agent_liveness_degraded_after_wall_us: 1_000_000,
+        ..ProjectionBounds::default()
+    })
+    .unwrap();
+    attach(&mut authority, "projection-a");
+
+    assert!(
+        authority
+            .sweep_agent_liveness_degradation(1_000_009)
+            .is_empty(),
+        "the configured threshold is a lower bound, not an early warning"
+    );
+    assert_eq!(
+        authority.sweep_agent_liveness_degradation(1_000_010),
+        vec!["projection-a".to_string()],
+        "an idle attached projection must enter Degraded at the threshold"
+    );
+
+    let summary = authority.state_summary("projection-a").unwrap();
+    assert_eq!(summary.lifecycle_state, ProjectionLifecycleState::Degraded);
+    assert_eq!(summary.reconnect.last_heartbeat_wall_us, Some(10));
+    let state = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .unwrap();
+    assert!(
+        state.connection_degraded,
+        "agent-side liveness loss must reuse the token-styled stale treatment"
+    );
+    assert_eq!(
+        state.attention,
+        ProjectedPortalAttention::Ambient,
+        "going stale is ambient state, never an attention escalation"
+    );
+    assert!(
+        authority
+            .sweep_agent_liveness_degradation(2_000_000)
+            .is_empty(),
+        "the transition is one-shot while the same session stays degraded"
+    );
+}
+
+#[test]
+fn agent_liveness_authenticated_projection_operations_refresh_and_recover() {
+    let mut authority = ProjectionAuthority::new(ProjectionBounds {
+        agent_liveness_degraded_after_wall_us: 1_000_000,
+        ..ProjectionBounds::default()
+    })
+    .unwrap();
+    let owner_token = attach(&mut authority, "projection-a");
+    authority
+        .enqueue_input(
+            "projection-a",
+            "input-1",
+            "operator input".to_string(),
+            20,
+            10_000_000,
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(
+        authority.sweep_agent_liveness_degradation(1_000_010),
+        vec!["projection-a".to_string()]
+    );
+
+    let denied = authority.handle_publish_output(
+        output_request("projection-a", "wrong-owner-token", "req-denied"),
+        "caller-a",
+        1_000_019,
+    );
+    assert!(!denied.accepted);
+    assert_eq!(
+        authority
+            .state_summary("projection-a")
+            .unwrap()
+            .reconnect
+            .last_heartbeat_wall_us,
+        Some(10),
+        "a failed token check must not refresh liveness"
+    );
+
+    let poll = authority.handle_get_pending_input(
+        GetPendingInputRequest {
+            envelope: envelope(
+                ProjectionOperation::GetPendingInput,
+                "projection-a",
+                "req-poll-recover",
+            ),
+            owner_token: owner_token.clone(),
+            max_items: Some(1),
+            max_bytes: None,
+        },
+        "caller-a",
+        1_000_020,
+    );
+    assert!(poll.accepted);
+    assert_eq!(
+        authority
+            .state_summary("projection-a")
+            .unwrap()
+            .lifecycle_state,
+        ProjectionLifecycleState::Active,
+        "an authenticated poll recovers a liveness-degraded session"
+    );
+    assert_eq!(
+        authority
+            .state_summary("projection-a")
+            .unwrap()
+            .reconnect
+            .last_heartbeat_wall_us,
+        Some(1_000_020)
+    );
+
+    assert_eq!(
+        authority.sweep_agent_liveness_degradation(2_000_020),
+        vec!["projection-a".to_string()]
+    );
+    let ack = authority.handle_acknowledge_input(
+        AcknowledgeInputRequest {
+            envelope: envelope(
+                ProjectionOperation::AcknowledgeInput,
+                "projection-a",
+                "req-ack-recover",
+            ),
+            owner_token: owner_token.clone(),
+            input_id: "input-1".to_string(),
+            ack_state: InputAckState::Handled,
+            ack_message: None,
+            not_before_wall_us: None,
+        },
+        "caller-a",
+        2_000_030,
+    );
+    assert!(ack.accepted);
+    assert_eq!(
+        authority
+            .state_summary("projection-a")
+            .unwrap()
+            .reconnect
+            .last_heartbeat_wall_us,
+        Some(2_000_030),
+        "an authenticated acknowledgement counts as liveness"
+    );
+
+    assert_eq!(
+        authority.sweep_agent_liveness_degradation(3_000_030),
+        vec!["projection-a".to_string()]
+    );
+    let status = authority.handle_publish_status(
+        status_request("projection-a", &owner_token, "req-status-recover"),
+        "caller-a",
+        3_000_040,
+    );
+    assert!(status.accepted);
+    assert_eq!(
+        authority
+            .state_summary("projection-a")
+            .unwrap()
+            .reconnect
+            .last_heartbeat_wall_us,
+        Some(3_000_040),
+        "an authenticated status update counts as liveness"
+    );
+
+    assert_eq!(
+        authority.sweep_agent_liveness_degradation(4_000_040),
+        vec!["projection-a".to_string()]
+    );
+    let publish = authority.handle_publish_output(
+        output_request("projection-a", &owner_token, "req-publish-recover"),
+        "caller-a",
+        4_000_050,
+    );
+    assert!(publish.accepted);
+    let recovered = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .unwrap();
+    assert_eq!(
+        recovered.lifecycle_state,
+        Some(ProjectionLifecycleState::Active)
+    );
+    assert!(!recovered.connection_degraded);
+    assert_eq!(
+        authority
+            .state_summary("projection-a")
+            .unwrap()
+            .reconnect
+            .last_heartbeat_wall_us,
+        Some(4_000_050),
+        "an authenticated output publish counts as liveness"
+    );
+}
+
+#[test]
+fn agent_liveness_threshold_is_bounded_and_has_a_safe_default() {
+    let defaults = ProjectionBounds::default();
+    assert!(
+        defaults.agent_liveness_degraded_after_wall_us >= MIN_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US
+    );
+    assert!(
+        defaults.agent_liveness_degraded_after_wall_us <= MAX_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US
+    );
+    assert!(
+        ProjectionAuthority::new(ProjectionBounds {
+            agent_liveness_degraded_after_wall_us: 0,
+            ..defaults.clone()
+        })
+        .is_err()
+    );
+    assert!(
+        ProjectionAuthority::new(ProjectionBounds {
+            agent_liveness_degraded_after_wall_us: MAX_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US
+                .saturating_add(1),
+            ..defaults
+        })
+        .is_err()
+    );
+}
+
+#[test]
 fn reconnect_preserves_transcript_inbox_ack_state_and_requires_new_lease() {
     let mut authority = ProjectionAuthority::default();
     let owner_token = attach(&mut authority, "projection-a");
