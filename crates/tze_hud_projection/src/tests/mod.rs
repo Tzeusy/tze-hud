@@ -292,6 +292,50 @@ fn external_authority_route_plans_redact_credentials_and_expose_no_capture_autho
 }
 
 #[test]
+fn external_authority_duplicate_manage_preserves_active_owner_token() {
+    let mut authority = ExternalAgentProjectionAuthority::default();
+    authority
+        .register_windows_target(windows_target())
+        .expect("target is valid");
+
+    let first = authority
+        .manage_session(managed_zone_session("agent-status"), "manager", 10)
+        .expect("initial managed session is accepted");
+    let verifier_before = authority
+        .projection_authority()
+        .owner_token_verifier_for_test("agent-status")
+        .expect("managed session stores an owner-token verifier")
+        .to_string();
+
+    assert_eq!(
+        authority.manage_session(managed_zone_session("agent-status"), "manager", 11),
+        Err(ProjectionErrorCode::ProjectionAlreadyAttached),
+        "duplicate management must not rotate ownership away from the active provider"
+    );
+    assert_eq!(
+        authority
+            .projection_authority()
+            .owner_token_verifier_for_test("agent-status"),
+        Some(verifier_before.as_str())
+    );
+    assert!(
+        authority
+            .projection_authority_mut()
+            .handle_publish_status(
+                status_request(
+                    "agent-status",
+                    &first.owner_token,
+                    "req-original-managed-owner",
+                ),
+                "manager",
+                12,
+            )
+            .accepted,
+        "the provider's original owner token must remain current"
+    );
+}
+
+#[test]
 fn external_authority_resolves_runtime_auth_material_without_serializing_secret() {
     let mut authority = ExternalAgentProjectionAuthority::default();
     authority
@@ -968,6 +1012,54 @@ fn idempotent_attach_replay_preserves_original_token_expiry() {
         Some(ProjectionErrorCode::ProjectionTokenExpired)
     );
     assert!(!authority.has_projection("projection-a"));
+}
+
+#[test]
+fn attach_at_expiry_starts_fresh_session_with_fresh_ttl() {
+    let mut authority = ProjectionAuthority::new(ProjectionBounds {
+        owner_token_ttl_wall_us: 20,
+        ..ProjectionBounds::default()
+    })
+    .unwrap();
+    let first = authority.handle_attach(attach_request("projection-a", "req-a"), "caller-a", 10);
+    let first_token = first.owner_token.expect("initial attach returns a token");
+    assert!(
+        authority
+            .handle_publish_output(
+                output_request("projection-a", &first_token, "req-old-output"),
+                "caller-a",
+                20,
+            )
+            .accepted
+    );
+
+    let fresh = authority.handle_attach(
+        attach_request("projection-a", "req-after-expiry"),
+        "caller-a",
+        30,
+    );
+    assert!(fresh.accepted);
+    let fresh_token = fresh
+        .owner_token
+        .expect("attach at the old deadline starts a fresh session");
+    assert_ne!(fresh_token, first_token);
+    assert!(
+        authority
+            .visible_transcript_window("projection-a")
+            .expect("fresh session exists")
+            .is_empty(),
+        "expired session state must not survive a fresh attach"
+    );
+    assert!(
+        authority
+            .handle_publish_status(
+                status_request("projection-a", &fresh_token, "req-fresh-current"),
+                "caller-a",
+                49,
+            )
+            .accepted,
+        "fresh attach receives a full TTL from its own attach timestamp"
+    );
 }
 
 #[test]

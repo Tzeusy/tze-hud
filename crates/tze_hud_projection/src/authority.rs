@@ -709,6 +709,16 @@ impl ProjectionAuthority {
             );
         }
 
+        if self
+            .sessions
+            .get(&request.envelope.projection_id)
+            .is_some_and(|existing| {
+                server_timestamp_wall_us >= existing.owner_token_expires_at_wall_us
+            })
+        {
+            self.expire_projection(&request.envelope.projection_id);
+        }
+
         if let Some(idempotent_replay) =
             self.sessions
                 .get(&request.envelope.projection_id)
