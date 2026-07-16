@@ -48,6 +48,8 @@ class ConstrainedEnvelopeCheckerTests(unittest.TestCase):
                 "device_type": "Cpu",
                 "driver": "llvmpipe",
                 "driver_info": "Mesa 24.2",
+                "vendor_id": 0x10005,
+                "device_id": 0,
                 "verified_software": True,
             },
             "viewport": {"width": 1920, "height": 1080},
@@ -56,12 +58,14 @@ class ConstrainedEnvelopeCheckerTests(unittest.TestCase):
 
     @classmethod
     def _valid_artifact(cls) -> dict:
-        bucket = {"samples": [1]}
+        frame_bucket = {"samples": [1] * 180}
+        latency_bucket = {"samples": [1]}
         base_summary = {
-            "frame_time": bucket,
-            "input_to_local_ack": bucket,
-            "input_to_scene_commit": bucket,
-            "input_to_next_present": bucket,
+            "total_frames": 180,
+            "frame_time": frame_bucket,
+            "input_to_local_ack": latency_bucket,
+            "input_to_scene_commit": latency_bucket,
+            "input_to_next_present": latency_bucket,
             "lease_violations": 0,
             "budget_overruns": 0,
             "sync_drift_violations": 0,
@@ -79,7 +83,10 @@ class ConstrainedEnvelopeCheckerTests(unittest.TestCase):
                 {"name": name, "summary": dict(base_summary)}
                 for name in ("steady_state_render", "high_mutation")
             ]
-            + [{"name": "scene_lock_paced_contention", "summary": paced_summary}],
+            + [
+                {"name": "scene_lock_contention", "summary": dict(base_summary)},
+                {"name": "scene_lock_paced_contention", "summary": paced_summary},
+            ],
         }
 
     def test_valid_proxy_reuses_reference_normalized_ceilings(self) -> None:
@@ -203,6 +210,21 @@ class ConstrainedEnvelopeCheckerTests(unittest.TestCase):
             report["failures"],
         )
 
+    def test_memory_limit_requires_the_observed_cgroup_v2_mechanism(self) -> None:
+        artifact = self._valid_artifact()
+        artifact["constrained_profile"]["memory"] = {
+            "limit_bytes": 1_073_741_824,
+            "enforcement_mechanism": "unverified soft limit",
+        }
+
+        report = check_constrained_envelope.build_report(artifact, "benchmark.json")
+
+        self.assertEqual("fail", report["verdict"])
+        self.assertTrue(
+            any("cgroup v2 memory.max" in failure for failure in report["failures"]),
+            report["failures"],
+        )
+
     def test_viewport_must_match_the_canonical_benchmark_corpus(self) -> None:
         artifact = self._valid_artifact()
         artifact["constrained_profile"]["viewport"] = {
@@ -248,6 +270,49 @@ class ConstrainedEnvelopeCheckerTests(unittest.TestCase):
         )
         self.assertTrue(
             any("renderer.driver_info" in failure for failure in report["failures"]),
+            report["failures"],
+        )
+
+    def test_renderer_numeric_identity_fields_are_required(self) -> None:
+        artifact = self._valid_artifact()
+        renderer = artifact["constrained_profile"]["renderer"]
+        del renderer["vendor_id"]
+        renderer["device_id"] = "unknown"
+
+        report = check_constrained_envelope.build_report(artifact, "benchmark.json")
+
+        self.assertEqual("fail", report["verdict"])
+        self.assertTrue(
+            any("renderer.vendor_id" in failure for failure in report["failures"]),
+            report["failures"],
+        )
+        self.assertTrue(
+            any("renderer.device_id" in failure for failure in report["failures"]),
+            report["failures"],
+        )
+
+    def test_truncated_benchmark_corpus_fails_closed(self) -> None:
+        artifact = self._valid_artifact()
+        for session in artifact["sessions"]:
+            session["summary"]["total_frames"] = 1
+
+        report = check_constrained_envelope.build_report(artifact, "benchmark.json")
+
+        self.assertEqual("fail", report["verdict"])
+        self.assertTrue(
+            any("180 frames" in failure for failure in report["failures"]),
+            report["failures"],
+        )
+
+    def test_incomplete_frame_sample_corpus_fails_closed(self) -> None:
+        artifact = self._valid_artifact()
+        artifact["sessions"][0]["summary"]["frame_time"]["samples"] = [1]
+
+        report = check_constrained_envelope.build_report(artifact, "benchmark.json")
+
+        self.assertEqual("fail", report["verdict"])
+        self.assertTrue(
+            any("frame-time samples" in failure for failure in report["failures"]),
             report["failures"],
         )
 

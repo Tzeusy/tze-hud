@@ -17,12 +17,17 @@ performance gate:
 scripts/ci/run_constrained_envelope.sh
 ```
 
-For a local smoke run, the frame count may be reduced without changing any
-budget:
+For a faster local runner-path smoke, the frame count may be reduced without
+changing any budget:
 
 ```bash
 CONSTRAINED_ENVELOPE_FRAMES=30 scripts/ci/run_constrained_envelope.sh
 ```
+
+That reduced run is intentionally non-gating: the checker rejects any corpus
+other than the canonical 180 frames per scenario, so the command exits nonzero
+after still producing diagnostic artifacts. A passing constrained-envelope
+result always requires the full corpus.
 
 The runner chooses the first two CPUs from the invoking process's current
 `Cpus_allowed_list`; it does not assume CPUs `0-1` are available. The benchmark
@@ -41,6 +46,7 @@ Linux lane label and enforcement identity to agree with that observed
 - requested software-renderer state and the actual wgpu backend, adapter name,
   device type, driver identity/details, vendor, and device identifiers;
 - 1920x1080 viewport and calibration vector version;
+- the canonical four-scenario, 180-frame-per-scenario corpus and frame samples;
 - raw CPU/GPU/upload calibration factors and raw benchmark samples.
 
 `scripts/ci/check_constrained_envelope.py` emits `budget-gate.json` with the raw
@@ -61,10 +67,11 @@ The gate fails closed when execution identity is missing, affinity is not
 exactly two logical CPUs, software rendering was not requested and verified,
 the selected adapter is not Vulkan llvmpipe/softpipe (or Windows DX12 WARP), or
 any calibration factor is missing, non-finite, zero, or negative. It also
-rejects a non-canonical viewport, contradictory memory-limit metadata, or an
+rejects a truncated benchmark corpus, a non-canonical viewport, incomplete
+adapter identity, contradictory or unverified memory-limit metadata, or an
 OS/lane/enforcement identity mismatch. The checker is allowed to emit its
-diagnostic artifact after the benchmark reports a definitive validation
-failure, but the runner preserves that non-zero benchmark status.
+diagnostic artifact after the benchmark reports a definitive validation failure,
+but the runner preserves that non-zero benchmark status.
 
 ## Rollback and waivers
 

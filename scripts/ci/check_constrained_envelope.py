@@ -23,6 +23,10 @@ WINDOWS_SPEC.loader.exec_module(windows_budgets)
 
 CALIBRATION_VECTOR_VERSION = "tze_hud.cpu-gpu-upload.v1"
 CANONICAL_VIEWPORT = (1920, 1080)
+EXPECTED_BENCHMARK_FRAMES = 180
+EXPECTED_SCENARIOS = windows_budgets.REQUIRED_COUNTER_SESSIONS + (
+    "scene_lock_contention",
+)
 
 
 def _is_text(value: Any) -> bool:
@@ -108,6 +112,13 @@ def _profile_failures(artifact: dict[str, Any]) -> tuple[dict[str, Any], list[st
         failures.append(
             "constrained_profile.memory limit and enforcement mechanism disagree"
         )
+    elif (
+        memory_limit is not None
+        and memory["enforcement_mechanism"] != "cgroup v2 memory.max"
+    ):
+        failures.append(
+            "constrained profile memory limit must identify cgroup v2 memory.max"
+        )
 
     renderer = profile.get("renderer")
     if not isinstance(renderer, dict):
@@ -120,6 +131,12 @@ def _profile_failures(artifact: dict[str, Any]) -> tuple[dict[str, Any], list[st
     for field in ("backend", "adapter_identity", "device_type", "driver", "driver_info"):
         if not _is_text(renderer.get(field)):
             failures.append(f"constrained_profile.renderer.{field} is required")
+    for field in ("vendor_id", "device_id"):
+        value = renderer.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            failures.append(
+                f"constrained_profile.renderer.{field} must be a non-negative integer"
+            )
 
     family = str(operating_system.get("family", "")).lower()
     lane = str(profile.get("lane", ""))
@@ -174,6 +191,43 @@ def _profile_failures(artifact: dict[str, Any]) -> tuple[dict[str, Any], list[st
     return profile, failures
 
 
+def _corpus_failures(artifact: dict[str, Any]) -> list[str]:
+    sessions = artifact.get("sessions")
+    if not isinstance(sessions, list):
+        return ["benchmark artifact sessions must be a list"]
+
+    by_name = {
+        session.get("name"): session
+        for session in sessions
+        if isinstance(session, dict) and isinstance(session.get("name"), str)
+    }
+    failures: list[str] = []
+    for name in EXPECTED_SCENARIOS:
+        session = by_name.get(name)
+        if not isinstance(session, dict):
+            failures.append(f"constrained benchmark corpus is missing session {name}")
+            continue
+        summary = session.get("summary")
+        total_frames = summary.get("total_frames") if isinstance(summary, dict) else None
+        if total_frames != EXPECTED_BENCHMARK_FRAMES or isinstance(total_frames, bool):
+            failures.append(
+                f"{name}: constrained benchmark corpus must run exactly "
+                f"{EXPECTED_BENCHMARK_FRAMES} frames, observed {total_frames!r}"
+            )
+        frame_time = summary.get("frame_time") if isinstance(summary, dict) else None
+        frame_samples = (
+            frame_time.get("samples") if isinstance(frame_time, dict) else None
+        )
+        if not isinstance(frame_samples, list) or len(frame_samples) != EXPECTED_BENCHMARK_FRAMES:
+            observed_count = len(frame_samples) if isinstance(frame_samples, list) else None
+            failures.append(
+                f"{name}: constrained benchmark corpus must contain exactly "
+                f"{EXPECTED_BENCHMARK_FRAMES} frame-time samples, observed "
+                f"{observed_count!r}"
+            )
+    return failures
+
+
 def _normalized_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for result in results:
@@ -191,6 +245,7 @@ def _normalized_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def build_report(artifact: dict[str, Any], source_artifact: str) -> dict[str, Any]:
     profile, failures = _profile_failures(artifact)
+    failures.extend(_corpus_failures(artifact))
     results: list[dict[str, Any]] = []
     factors: dict[str, float] | None = None
     try:
