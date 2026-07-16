@@ -548,13 +548,17 @@ mod defaults {
     pub const HEADER_TEXT_COLOR: &str = "#F5F8FF";
     pub const HEADER_FONT_SIZE: &str = "16";
 
-    pub const COMPOSER_BACKGROUND: &str = "#0F1418";
+    /// Reviewed native two-pane INPUT fill: black at 95% opacity. Keeping this
+    /// in the canonical portal profile makes resident projections and the
+    /// exemplar resolve the same pane treatment without adapter-authored style.
+    pub const COMPOSER_BACKGROUND: &str = "#000000F2";
     pub const COMPOSER_TEXT_COLOR: &str = "#E0E8F4";
     pub const COMPOSER_FONT_SIZE: &str = "16";
     /// Muted amber — conveys "limit reached" without alarming the user.
     pub const COMPOSER_AT_CAPACITY_COLOR: &str = "#B87333";
 
-    pub const TRANSCRIPT_BACKGROUND: &str = "#0A0D11";
+    /// Reviewed native two-pane OUTPUT fill: black at 95% opacity.
+    pub const TRANSCRIPT_BACKGROUND: &str = "#000000F2";
     pub const TRANSCRIPT_TEXT_COLOR: &str = "#E6EFFA";
     pub const TRANSCRIPT_FONT_SIZE: &str = "16";
     /// Per-turn role attribution for non-assistant agent-side turns (tool /

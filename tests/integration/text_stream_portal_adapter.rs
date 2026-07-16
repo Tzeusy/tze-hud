@@ -361,6 +361,33 @@ struct TileVerification {
     input_mode: tze_hud_scene::types::InputMode,
 }
 
+/// Collect visible text from either the collapsed single-node card or the
+/// expanded native frame subtree in painters-model order.
+fn portal_tree_text(scene: &tze_hud_scene::SceneGraph, node_id: tze_hud_scene::SceneId) -> String {
+    fn collect(
+        scene: &tze_hud_scene::SceneGraph,
+        node_id: tze_hud_scene::SceneId,
+        output: &mut String,
+    ) {
+        let Some(node) = scene.nodes.get(&node_id) else {
+            return;
+        };
+        if let NodeData::TextMarkdown(text) = &node.data {
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(&text.content);
+        }
+        for child in &node.children {
+            collect(scene, *child, output);
+        }
+    }
+
+    let mut output = String::new();
+    collect(scene, node_id, &mut output);
+    output
+}
+
 async fn verify_scene_for_namespace(
     runtime: &HeadlessRuntime,
     namespace: &str,
@@ -378,12 +405,9 @@ async fn verify_scene_for_namespace(
         }
         count += 1;
         if let Some(root_id) = tile.root_node {
-            if let Some(node) = scene.nodes.get(&root_id) {
-                if let NodeData::TextMarkdown(text) = &node.data {
-                    has_incremental |= text.content.contains(incremental_needle);
-                    has_identity |= text.content.contains(identity_needle);
-                }
-            }
+            let text = portal_tree_text(&scene, root_id);
+            has_incremental |= text.contains(incremental_needle);
+            has_identity |= text.contains(identity_needle);
         }
     }
     SessionSceneVerification {
@@ -406,14 +430,11 @@ async fn verify_single_tile(
         .tiles
         .get(&scene_id)
         .ok_or("expected resident portal tile to exist")?;
-    let root_text = tile
-        .root_node
-        .and_then(|root_id| scene.nodes.get(&root_id))
-        .and_then(|node| match &node.data {
-            NodeData::TextMarkdown(text) => Some(text.content.clone()),
-            _ => None,
-        })
-        .ok_or("expected resident portal root TextMarkdown node")?;
+    let root_id = tile.root_node.ok_or("expected resident portal root node")?;
+    let root_text = portal_tree_text(&scene, root_id);
+    if root_text.is_empty() {
+        return Err("expected resident portal subtree text".into());
+    }
     Ok(TileVerification {
         tile_count: scene.tiles.len(),
         root_text,

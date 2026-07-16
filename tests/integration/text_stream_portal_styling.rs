@@ -290,18 +290,17 @@ fn portal_node_proto_uses_injected_visual_tokens() {
         })
         .expect("MutationBatch must contain a PublishToTile mutation");
 
-    // Extract the NodeProto and its TextMarkdown data
+    // Extract the native subtree and its OUTPUT transcript node.
     let node = publish.node.expect("PublishToTile must have a node");
-    let text_md = match node.data.expect("NodeProto must have data") {
-        proto::node_proto::Data::TextMarkdown(tm) => tm,
-        other => panic!("NodeProto must be TextMarkdown in the portal pilot, got {other:?}"),
-    };
+    let text_md = find_transcript_node(&node)
+        .expect("expanded native portal subtree must contain an OUTPUT transcript node");
 
     // ── Core assertion (§6.4d): NodeProto color must be the injected token value ──
 
     // Expanded state uses transcript_text_color: injected to cyan (#00FFFF)
     let color = text_md
         .color
+        .as_ref()
         .expect("TextMarkdownNodeProto must have a color");
     assert!(
         color.r.abs() < 1e-2,
@@ -1153,32 +1152,43 @@ fn default_profile_renders_no_timestamps() {
 fn extract_text_markdown_content(
     cmd: tze_hud_projection::resident_grpc::ResidentGrpcPortalCommand,
 ) -> String {
-    use tze_hud_protocol::proto;
-    use tze_hud_protocol::proto::session as session_proto;
-
-    let batch = match cmd.message.payload.expect("render must produce payload") {
-        session_proto::client_message::Payload::MutationBatch(b) => b,
-        other => panic!("expected MutationBatch payload, got {other:?}"),
-    };
-    let publish = batch
-        .mutations
-        .into_iter()
-        .find_map(|m| match m.mutation {
-            Some(proto::mutation_proto::Mutation::PublishToTile(p)) => Some(p),
-            _ => None,
-        })
-        .expect("MutationBatch must contain a PublishToTile mutation");
-    let node = publish.node.expect("PublishToTile must have a node");
-    match node.data.expect("NodeProto must have data") {
-        proto::node_proto::Data::TextMarkdown(tm) => tm.content,
-        other => panic!("NodeProto must be TextMarkdown, got {other:?}"),
+    fn collect(node: &tze_hud_protocol::proto::NodeProto, output: &mut String) {
+        if let Some(tze_hud_protocol::proto::node_proto::Data::TextMarkdown(text)) =
+            node.data.as_ref()
+        {
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(&text.content);
+        }
+        for child in &node.children {
+            collect(child, output);
+        }
     }
+
+    let root = published_portal_root(cmd);
+    let mut output = String::new();
+    collect(&root, &mut output);
+    assert!(
+        !output.is_empty(),
+        "published portal subtree must contain visible text"
+    );
+    output
 }
 
 /// Extract both the content string and color_runs from a published NodeProto.
 fn extract_text_markdown_with_runs(
     cmd: tze_hud_projection::resident_grpc::ResidentGrpcPortalCommand,
 ) -> (String, Vec<tze_hud_protocol::proto::TextColorRunProto>) {
+    let root = published_portal_root(cmd);
+    let transcript = find_transcript_node(&root)
+        .expect("published portal subtree must contain an OUTPUT transcript node");
+    (transcript.content.clone(), transcript.color_runs.clone())
+}
+
+fn published_portal_root(
+    cmd: tze_hud_projection::resident_grpc::ResidentGrpcPortalCommand,
+) -> tze_hud_protocol::proto::NodeProto {
     use tze_hud_protocol::proto;
     use tze_hud_protocol::proto::session as session_proto;
 
@@ -1194,9 +1204,16 @@ fn extract_text_markdown_with_runs(
             _ => None,
         })
         .expect("MutationBatch must contain a PublishToTile mutation");
-    let node = publish.node.expect("PublishToTile must have a node");
-    match node.data.expect("NodeProto must have data") {
-        proto::node_proto::Data::TextMarkdown(tm) => (tm.content, tm.color_runs),
-        other => panic!("NodeProto must be TextMarkdown, got {other:?}"),
+    publish.node.expect("PublishToTile must have a node")
+}
+
+fn find_transcript_node(
+    node: &tze_hud_protocol::proto::NodeProto,
+) -> Option<&tze_hud_protocol::proto::TextMarkdownNodeProto> {
+    if let Some(tze_hud_protocol::proto::node_proto::Data::TextMarkdown(text)) = node.data.as_ref()
+        && text.overflow == tze_hud_protocol::proto::TextOverflowProto::Ellipsis as i32
+    {
+        return Some(text);
     }
+    node.children.iter().find_map(find_transcript_node)
 }
