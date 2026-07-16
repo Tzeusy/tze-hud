@@ -1,0 +1,10 @@
+[
+  {
+    "title": "Make the windowed benchmark advance through the idle-render gate",
+    "type": "bug",
+    "priority": 1,
+    "depends_on": "hud-i0jdz",
+    "rationale": "The live TzeHouse fullscreen pass rendered exactly one warmup frame, then the production idle-render gate skipped the unchanged composite_tiles_v1 scene until the 30-second watchdog aborted. Because WindowedBenchmarkRunState::record is called only after a presented frame, the harness cannot produce fullscreen/overlay p99 values or evaluate the locked 500 us composite-delta budget.",
+    "unblock_condition": "A focused fix, with a red-green regression test, makes benchmark mode deterministically present all requested warmup and measured frames without disabling the production idle gate for normal runtime sessions; then rerun the canonical TzeHouse harness and commit windowed_fullscreen_vs_overlay_report.json with composite_delta.p99_us <= 500 or a measured over-budget diagnosis."
+  }
+]
