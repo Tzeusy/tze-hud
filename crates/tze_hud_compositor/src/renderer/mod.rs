@@ -83,9 +83,46 @@ pub use viewer_echo::{
     ViewerEchoStore,
 };
 
+/// Stable, dependency-free identity for the adapter selected by wgpu.
+///
+/// Benchmark and validation crates use this instead of depending directly on
+/// wgpu merely to prove which renderer executed a constrained lane.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompositorAdapterInfo {
+    /// Adapter name reported by wgpu (for example, `llvmpipe`).
+    pub name: String,
+    /// Debug-stable wgpu backend name (for example, `Vulkan`).
+    pub backend: String,
+    /// Debug-stable wgpu device type (for example, `Cpu`).
+    pub device_type: String,
+    /// Adapter driver name reported by wgpu.
+    pub driver: String,
+    /// Adapter driver version/details reported by wgpu.
+    pub driver_info: String,
+    /// PCI vendor identifier reported by the adapter when available.
+    pub vendor: u32,
+    /// PCI device identifier reported by the adapter when available.
+    pub device: u32,
+}
+
+impl From<wgpu::AdapterInfo> for CompositorAdapterInfo {
+    fn from(info: wgpu::AdapterInfo) -> Self {
+        Self {
+            name: info.name,
+            backend: format!("{:?}", info.backend),
+            device_type: format!("{:?}", info.device_type),
+            driver: info.driver,
+            driver_info: info.driver_info,
+            vendor: info.vendor,
+            device: info.device,
+        }
+    }
+}
+
 pub struct Compositor {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    adapter_info: CompositorAdapterInfo,
     pipeline: wgpu::RenderPipeline,
     /// Pipeline with no blending — writes RGBA directly. Used to clear
     /// the framebuffer to transparent in overlay mode (LoadOp::Clear
@@ -641,6 +678,7 @@ impl Compositor {
             })
             .await
             .ok_or(CompositorError::NoAdapter)?;
+        let adapter_info = CompositorAdapterInfo::from(adapter.get_info());
 
         let (device, queue) = adapter
             .request_device(
@@ -683,6 +721,7 @@ impl Compositor {
         Ok(Self {
             device,
             queue,
+            adapter_info,
             pipeline,
             clear_pipeline,
             texture_rect_pipeline,
@@ -978,6 +1017,7 @@ impl Compositor {
         let compositor = Self {
             device,
             queue,
+            adapter_info: CompositorAdapterInfo::from(adapter_info),
             pipeline,
             clear_pipeline,
             texture_rect_pipeline,
@@ -1043,6 +1083,11 @@ impl Compositor {
 
         let window_surface = WindowSurface::new(surface, config);
         Ok((compositor, window_surface))
+    }
+
+    /// Identity of the adapter selected when this compositor was created.
+    pub fn adapter_info(&self) -> &CompositorAdapterInfo {
+        &self.adapter_info
     }
 
     /// Create a render pipeline targeting a specific texture format.

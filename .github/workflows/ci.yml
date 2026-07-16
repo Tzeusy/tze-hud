@@ -12,6 +12,7 @@
 #   test-v1-thesis — cargo test -p integration --test v1_thesis
 #   production-boot — cargo test -p vertical_slice --test production_boot
 #   windows-performance-budget — headless Windows benchmark + locked budget gate
+#   constrained-envelope-budget — llvmpipe proxy, exactly two logical CPUs, same normalized ceilings
 #   release-artifact-provenance-smoke — cross-build tze_hud.exe and verify uploaded checksum round-trip
 #   vocabulary-lint — scripts/check_canonical_vocabulary.sh
 #   user-test-python-suite — pytest over .claude/skills/user-test/{tests,scripts}/
@@ -395,6 +396,35 @@ jobs:
         with:
           name: windows-performance-budget
           path: test_results/windows-performance-budget/
+          if-no-files-found: error
+
+  constrained-envelope-budget:
+    name: Constrained-envelope budget (llvmpipe / 2 CPUs)
+    runs-on: ubuntu-latest
+    needs: [check]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+      - uses: Swatinem/rust-cache@v2.9.1
+        timeout-minutes: 10
+      - name: Install benchmark dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            mesa-vulkan-drivers \
+            protobuf-compiler \
+            util-linux
+      - name: Run constrained-envelope benchmark and unchanged normalized budget gate
+        run: scripts/ci/run_constrained_envelope.sh
+      - name: Upload constrained-envelope artifact
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: constrained-envelope-budget
+          path: test_results/constrained-envelope-budget/
           if-no-files-found: error
 
   # ── Integration: trace regression ──────────────────────────────────────────

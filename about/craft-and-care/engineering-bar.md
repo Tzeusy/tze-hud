@@ -52,6 +52,8 @@ Any future Windows performance number quoted in docs, PRs, or release notes must
 
 The PR gate runs the existing `examples/benchmark` headless harness on `windows-latest`, emits the normal benchmark JSON artifact, and validates it with `scripts/ci/check_windows_perf_budgets.py`. The checker scales these TzeHouse raw budgets by `current_factor / TzeHouse_factor`; missing calibration is a gate failure. This avoids a live TzeHouse dependency in PR CI while still failing regressions in the benchmark/artifact path.
 
+The companion `constrained-envelope-budget` job runs the same versioned calibration vector and 180-frame corpus in release mode on Ubuntu llvmpipe with the benchmark process restricted to exactly two logical CPUs. It is a low-power regression proxy only, never device or non-Windows product qualification. `scripts/ci/check_constrained_envelope.py` imports this gate's reference factors, metric definitions, correctness counters, and ceilings directly; it reports `raw * reference_factor / current_factor` and compares that normalized observation to the unchanged locked ceiling. Missing runner identity, an unenforced CPU limit, renderer fallback, or invalid calibration fails closed. See `docs/operations/constrained-envelope-benchmark.md` for the reproducible command and artifact contract.
+
 | Metric | Locked TzeHouse budget | Normalization | Scope |
 |--------|------------------------|---------------|-------|
 | `steady_state_render.frame_time` p99 | ≤ 8.3 ms | GPU factor | Headless Windows benchmark |
