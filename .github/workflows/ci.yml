@@ -2,6 +2,7 @@
 #
 # Job map:
 #   check          — cargo check: fast compilation gate (no codegen)
+#                    + fail-closed idle-efficiency checker contract tests
 #   fmt            — cargo fmt --check: formatting gate
 #   clippy         — cargo clippy --all-targets -D warnings: lint gate (incl. tests/examples/benches)
 #   clippy-windows-gnu — cargo clippy --target x86_64-pc-windows-gnu -D warnings: lints the four
@@ -96,6 +97,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends protobuf-compiler
       - name: cargo check (workspace)
         run: cargo check --workspace
+      - name: Test idle-efficiency artifact gate
+        run: python3 scripts/ci/test_check_idle_efficiency.py
 
   fmt:
     name: cargo fmt
