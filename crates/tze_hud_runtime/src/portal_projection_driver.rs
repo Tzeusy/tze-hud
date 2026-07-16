@@ -2695,7 +2695,7 @@ mod tests {
         PortalInputFeedbackState, ProjectionBounds, ProjectionOperation, ProviderKind,
         PublishOutputRequest,
     };
-    use tze_hud_scene::SceneGraph;
+    use tze_hud_scene::{NodeData, SceneGraph};
 
     /// The header marker line the resident adapter paints while the agent is
     /// actively appending (mirrors `resident_grpc::PORTAL_ACTIVITY_MARKER_LINE`,
@@ -4090,7 +4090,6 @@ mod tests {
     #[test]
     fn drain_paints_published_transcript_onto_tile() {
         use tze_hud_projection::{AdapterGeometrySnapshot, AdapterPortalRect, ProjectionBounds};
-        use tze_hud_scene::NodeData;
 
         let mut driver = InProcessPortalDriver {
             authority: ProjectionAuthority::new(ProjectionBounds {
@@ -4173,7 +4172,7 @@ mod tests {
             .expect("drain must create a portal tile in the scene");
 
         let assert_content_present = |scene: &SceneGraph, ctx: &str| {
-            let root_id = scene
+            scene
                 .tiles
                 .get(&tile_id)
                 .expect("portal tile must exist in scene")
@@ -4184,21 +4183,12 @@ mod tests {
                          (the cooperative grey-tile bug)"
                     )
                 });
-            let root = scene
-                .nodes
-                .get(&root_id)
-                .expect("tile root_node id must resolve to a node");
-            match &root.data {
-                NodeData::TextMarkdown(tm) => {
-                    assert!(
-                        tm.content.contains(PUBLISHED),
-                        "{ctx}: tile root TextMarkdown must contain the published text \
-                         {PUBLISHED:?}; got content: {:?}",
-                        tm.content
-                    );
-                }
-                other => panic!("{ctx}: expected TextMarkdown tile root, got {other:?}"),
-            }
+            let content = tile_markdown(scene, tile_id);
+            assert!(
+                content.contains(PUBLISHED),
+                "{ctx}: portal subtree must contain the published text \
+                 {PUBLISHED:?}; got content: {content:?}"
+            );
         };
 
         // First-publish (create-arm) content must be painted.
@@ -4223,23 +4213,18 @@ mod tests {
 
         // The retained transcript window keeps prior lines, so both markers must
         // be present after the second (RenderPortal) drain.
-        let root_id = scene
+        scene
             .tiles
             .get(&tile_id)
             .unwrap()
             .root_node
             .expect("after render drain: portal tile must still have a painted root node");
-        match &scene.nodes.get(&root_id).unwrap().data {
-            NodeData::TextMarkdown(tm) => {
-                assert!(
-                    tm.content.contains(PUBLISHED_2),
-                    "after render drain: tile root TextMarkdown must contain the second \
-                     published text {PUBLISHED_2:?}; got content: {:?}",
-                    tm.content
-                );
-            }
-            other => panic!("after render drain: expected TextMarkdown tile root, got {other:?}"),
-        }
+        let content = tile_markdown(&scene, tile_id);
+        assert!(
+            content.contains(PUBLISHED_2),
+            "after render drain: portal subtree must contain the second \
+             published text {PUBLISHED_2:?}; got content: {content:?}"
+        );
     }
 
     /// Migration guard (hud-rpm9s): the in-process cooperative driver declares
@@ -4340,6 +4325,17 @@ mod tests {
                 .any(|p| p.kind == tze_hud_scene::types::PortalPartKind::Frame),
             "declared surface must carry the Frame part"
         );
+        for expected in [
+            tze_hud_scene::types::PortalPartKind::Header,
+            tze_hud_scene::types::PortalPartKind::Composer,
+            tze_hud_scene::types::PortalPartKind::Transcript,
+            tze_hud_scene::types::PortalPartKind::Divider,
+        ] {
+            assert!(
+                surface.parts.iter().any(|part| part.kind == expected),
+                "native expanded surface must declare {expected:?}"
+            );
+        }
         assert_eq!(
             surface.display_state,
             tze_hud_scene::types::PortalDisplayState::Expanded,
@@ -4355,6 +4351,32 @@ mod tests {
                 .root_node
                 .is_some(),
             "raw-tile content root must still be painted alongside the surface"
+        );
+        let root_id = scene.tiles.get(&tile_id).unwrap().root_node.unwrap();
+        let root = scene.nodes.get(&root_id).expect("root node resolves");
+        assert!(
+            matches!(root.data, NodeData::SolidColor(_)),
+            "production drain must materialize the native frame root"
+        );
+        let child_text: Vec<&str> = root
+            .children
+            .iter()
+            .filter_map(|id| match &scene.nodes.get(id)?.data {
+                NodeData::TextMarkdown(text) => Some(text.content.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            child_text.contains(&"INPUT"),
+            "INPUT label must materialize"
+        );
+        assert!(
+            child_text.contains(&"OUTPUT"),
+            "OUTPUT label must materialize"
+        );
+        assert!(
+            child_text.iter().any(|text| text.contains("hello surface")),
+            "OUTPUT transcript must materialize in the native subtree"
         );
     }
 
@@ -4395,7 +4417,6 @@ mod tests {
         use tze_hud_projection::{
             AdapterGeometrySnapshot, AdapterPortalRect, ProjectedPortalPolicy, ProjectionBounds,
         };
-        use tze_hud_scene::NodeData;
 
         let mut driver = InProcessPortalDriver {
             authority: ProjectionAuthority::new(ProjectionBounds {
@@ -4493,23 +4514,12 @@ mod tests {
             .expect("drive entry must still exist after drain")
             .tile_scene_id
             .expect("drain must create a portal tile in the scene");
-        let root_id = scene
-            .tiles
-            .get(&tile_id)
-            .expect("portal tile must exist in scene")
-            .root_node
-            .expect("portal tile must have a painted root node");
-        match &scene.nodes.get(&root_id).unwrap().data {
-            NodeData::TextMarkdown(tm) => {
-                assert!(
-                    tm.content.contains("3 unread"),
-                    "the ambient unread indicator must survive drain-then-render for a \
-                     nonzero count; expected a `3 unread` line, got content: {:?}",
-                    tm.content
-                );
-            }
-            other => panic!("expected TextMarkdown tile root, got {other:?}"),
-        }
+        let content = tile_markdown(&scene, tile_id);
+        assert!(
+            content.contains("3 unread"),
+            "the ambient unread indicator must survive drain-then-render for a \
+             nonzero count; expected a `3 unread` line, got content: {content:?}"
+        );
     }
 
     /// Regression (hud-n95zc): the in-transcript unread divider reads
@@ -4526,7 +4536,6 @@ mod tests {
     #[test]
     fn drain_then_render_surfaces_unread_divider() {
         use tze_hud_projection::{AdapterGeometrySnapshot, AdapterPortalRect, ProjectionBounds};
-        use tze_hud_scene::NodeData;
 
         let mut driver = InProcessPortalDriver {
             authority: ProjectionAuthority::new(ProjectionBounds {
@@ -4612,27 +4621,15 @@ mod tests {
             .expect("drive entry must still exist after drain")
             .tile_scene_id
             .expect("drain must create a portal tile in the scene");
-        let root_id = scene
-            .tiles
-            .get(&tile_id)
-            .expect("portal tile must exist in scene")
-            .root_node
-            .expect("portal tile must have a painted root node");
-        match &scene.nodes.get(&root_id).unwrap().data {
-            NodeData::TextMarkdown(tm) => {
-                // Literal marker text mirrors resident_grpc.rs's private
-                // `PORTAL_UNREAD_DIVIDER_LINE` const, which is not reachable from
-                // this crate.
-                assert!(
-                    tm.content.contains("─── unread ───"),
-                    "the in-transcript unread divider must survive drain-then-render \
-                     for a nonzero visible unread count; expected a \
-                     `─── unread ───` marker, got content: {:?}",
-                    tm.content
-                );
-            }
-            other => panic!("expected TextMarkdown tile root, got {other:?}"),
-        }
+        let content = tile_markdown(&scene, tile_id);
+        // Literal marker text mirrors resident_grpc.rs's private
+        // `PORTAL_UNREAD_DIVIDER_LINE` const, which is not reachable from this crate.
+        assert!(
+            content.contains("─── unread ───"),
+            "the in-transcript unread divider must survive drain-then-render \
+             for a nonzero visible unread count; expected a \
+             `─── unread ───` marker, got content: {content:?}"
+        );
     }
 
     /// Regression guard (hud-lylbz): the ambient unread-output-count indicator
@@ -4655,7 +4652,6 @@ mod tests {
     #[test]
     fn drain_then_degraded_repaint_same_cycle_preserves_ambient_unread_count() {
         use tze_hud_projection::{AdapterGeometrySnapshot, AdapterPortalRect, ProjectionBounds};
-        use tze_hud_scene::NodeData;
 
         let mut driver = InProcessPortalDriver {
             authority: ProjectionAuthority::new(ProjectionBounds {
@@ -4781,23 +4777,12 @@ mod tests {
             .expect("drive entry must still exist after drain")
             .tile_scene_id
             .expect("drain must create a portal tile in the scene");
-        let root_id = scene
-            .tiles
-            .get(&tile_id)
-            .expect("portal tile must exist in scene")
-            .root_node
-            .expect("portal tile must have a painted root node");
-        match &scene.nodes.get(&root_id).unwrap().data {
-            NodeData::TextMarkdown(tm) => {
-                assert!(
-                    tm.content.contains("3 unread"),
-                    "the ambient unread indicator must survive a same-cycle \
-                     degraded repaint; expected a `3 unread` line, got content: {:?}",
-                    tm.content
-                );
-            }
-            other => panic!("expected TextMarkdown tile root, got {other:?}"),
-        }
+        let content = tile_markdown(&scene, tile_id);
+        assert!(
+            content.contains("3 unread"),
+            "the ambient unread indicator must survive a same-cycle \
+             degraded repaint; expected a `3 unread` line, got content: {content:?}"
+        );
     }
 
     /// Regression guard (hud-obw3q): a cooperative portal must render even when
@@ -4810,7 +4795,6 @@ mod tests {
     #[test]
     fn drain_with_no_active_tab_activates_tab_and_paints() {
         use tze_hud_projection::{AdapterGeometrySnapshot, AdapterPortalRect, ProjectionBounds};
-        use tze_hud_scene::NodeData;
 
         // Build a driver with one attached projection that has published `text`
         // and a geometry snapshot, ready to drain.
@@ -4885,20 +4869,11 @@ mod tests {
                     .expect("drive entry")
                     .tile_scene_id
                     .expect("drain must create a portal tile even with no active tab");
-                let root_id = scene
-                    .tiles
-                    .get(&tile_id)
-                    .expect("tile in scene")
-                    .root_node
-                    .expect("tile must have a painted root node (content not dropped)");
-                match &scene.nodes.get(&root_id).unwrap().data {
-                    NodeData::TextMarkdown(tm) => assert!(
-                        tm.content.contains(marker),
-                        "content {marker:?} not painted; got {:?}",
-                        tm.content
-                    ),
-                    other => panic!("expected TextMarkdown tile root, got {other:?}"),
-                }
+                let content = tile_markdown(scene, tile_id);
+                assert!(
+                    content.contains(marker),
+                    "content {marker:?} not painted; got {content:?}"
+                );
             };
 
         // Case 1: a tab exists (the config's default "Main") but is NOT active —
@@ -6914,24 +6889,33 @@ mod tests {
             .expect("record_hud_connection must succeed for an attached projection");
     }
 
-    /// The tile root's painted markdown content (panics if the tile has no
-    /// painted `TextMarkdown` root — that would itself be a paint regression).
+    /// All painted text in the portal subtree. Expanded native projections use
+    /// a `SolidColor` frame root with token-styled text children; collapsed
+    /// projections retain the single `TextMarkdown` card root.
     fn tile_markdown(scene: &SceneGraph, tile_id: SceneId) -> String {
+        fn collect(scene: &SceneGraph, node_id: SceneId, output: &mut String) {
+            let node = scene.nodes.get(&node_id).expect("node id must resolve");
+            if let tze_hud_scene::NodeData::TextMarkdown(text) = &node.data {
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str(&text.content);
+            }
+            for child in &node.children {
+                collect(scene, *child, output);
+            }
+        }
+
         let root_id = scene
             .tiles
             .get(&tile_id)
             .expect("portal tile must exist in scene")
             .root_node
             .expect("portal tile must have a painted root node");
-        match &scene
-            .nodes
-            .get(&root_id)
-            .expect("root node must resolve")
-            .data
-        {
-            tze_hud_scene::NodeData::TextMarkdown(tm) => tm.content.clone(),
-            other => panic!("expected TextMarkdown tile root, got {other:?}"),
-        }
+        let mut output = String::new();
+        collect(scene, root_id, &mut output);
+        assert!(!output.is_empty(), "portal subtree must paint text content");
+        output
     }
 
     /// A fully-idle in-process portal must quiesce its activity cue on its own:
@@ -7960,7 +7944,7 @@ mod tests {
     fn disconnect_then_reconnect_within_grace_resumes_same_surface_without_duplication() {
         use std::sync::Arc;
         use tze_hud_projection::HudConnectionMetadata;
-        use tze_hud_scene::{Clock, NodeData, TestClock};
+        use tze_hud_scene::{Clock, TestClock};
 
         const FIRST: &str = "ALPHA-committed-before-drop";
         const SECOND: &str = "BETA-continued-after-resume";
@@ -8095,22 +8079,14 @@ mod tests {
 
         // Both committed units are present, each exactly once — coherent resume,
         // no duplication or reset of the retained transcript.
-        let root_id = scene
-            .tiles
-            .get(&tile)
-            .expect("tile present")
-            .root_node
-            .expect("resumed tile has a painted root node");
-        let NodeData::TextMarkdown(tm) = &scene.nodes.get(&root_id).unwrap().data else {
-            panic!("expected TextMarkdown tile root after resume");
-        };
+        let content = tile_markdown(&scene, tile);
         assert_eq!(
-            tm.content.matches(FIRST).count(),
+            content.matches(FIRST).count(),
             1,
             "the pre-disconnect committed unit is retained exactly once (no duplication)"
         );
         assert_eq!(
-            tm.content.matches(SECOND).count(),
+            content.matches(SECOND).count(),
             1,
             "the post-reconnect append appears exactly once"
         );
@@ -8261,7 +8237,7 @@ mod tests {
     fn production_reattach_within_grace_resumes_same_surface_via_drain_sweep() {
         use std::sync::Arc;
         use tze_hud_projection::HudConnectionMetadata;
-        use tze_hud_scene::{NodeData, TestClock};
+        use tze_hud_scene::TestClock;
 
         const FIRST: &str = "ALPHA-before-drop";
 
@@ -8422,19 +8398,10 @@ mod tests {
         // reconnected to Active BEFORE the due-loop rendered it. Reconnecting only
         // after rendering (end-of-drain) would make `set_tile_root_checked` reject
         // this batch under the still-Orphaned lease and the content would be lost.
-        let root_id = scene
-            .tiles
-            .get(&resumed_tile)
-            .expect("resumed tile present")
-            .root_node
-            .expect("resumed tile has a painted root node");
-        let NodeData::TextMarkdown(tm) = &scene.nodes.get(&root_id).unwrap().data else {
-            panic!("expected TextMarkdown tile root after resume");
-        };
+        let content = tile_markdown(&scene, resumed_tile);
         assert!(
-            tm.content.contains("BETA-after-resume"),
-            "the resumed publish paints under the reconnected Active lease (P1): got {:?}",
-            tm.content
+            content.contains("BETA-after-resume"),
+            "the resumed publish paints under the reconnected Active lease (P1): got {content:?}"
         );
     }
 }

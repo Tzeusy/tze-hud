@@ -1,7 +1,9 @@
 //! Resident gRPC adapter for cooperative projection portal materialization.
 //!
 //! This module is daemon-side glue: it turns bounded projection authority state
-//! into `HudSession` messages for the existing raw-tile text-stream portal path.
+//! into `HudSession` messages for the native text-stream portal path. Expanded
+//! portals publish server-owned two-pane chrome; collapsed portals retain the
+//! compact text card.
 //! It deliberately does not expose an LLM-facing CLI, MCP surface, provider RPC,
 //! PTY, terminal byte stream, or process lifecycle authority.
 
@@ -302,13 +304,17 @@ const DEFAULT_COMPACT_W: f32 = 420.0;
 const DEFAULT_COMPACT_H: f32 = 96.0;
 const DEFAULT_Z_ORDER: u32 = 160;
 const MAX_PORTAL_MARKDOWN_BYTES: usize = 16_384;
+/// Server-owned two-pane frame radius. This is layout chrome, not model input;
+/// it mirrors the reviewed exemplar geometry profile without exposing geometry
+/// through projection text or provider-authored tokens.
+const EXPANDED_PORTAL_CORNER_RADIUS_PX: f32 = 14.0;
 
 // ── PortalVisualTokens ────────────────────────────────────────────────────────
 
-/// Resolved visual values for the portal surface parts consumed by the
-/// raw-tile pilot, sourced from the runtime's resolved design token set.
+/// Resolved visual values for the portal surface parts, sourced from the
+/// runtime's resolved design token set.
 ///
-/// **Pre-promotion rule (§6.1):** the exemplar adapter MUST source every
+/// **Token rule (§6.1):** the resident adapter MUST source every
 /// published visual value from this struct. No literal colors or font sizes
 /// are permitted in the adapter publish path. A profile/token change must
 /// reskin the portal end-to-end with zero adapter logic changes.
@@ -319,18 +325,10 @@ const MAX_PORTAL_MARKDOWN_BYTES: usize = 16_384;
 /// `tze_hud_runtime::portal_tokens::portal_visual_tokens_from_part_tokens`.
 /// Pass the result to `ResidentGrpcPortalAdapter::with_tokens`.
 ///
-/// ## Phase-1 scope limitation
-///
-/// The Phase-1 raw-tile pilot publishes a **single** `TextMarkdownNodeProto`,
-/// which carries only `color`, `background`, and `font_size_px`. This struct
-/// therefore contains only the fields that `portal_node` actually consumes
-/// (transcript, collapsed, and composer parts). The full part inventory defined in
-/// `PortalPartTokens` (frame, header, divider, transitions) requires
-/// a structured multi-node layout (one node per surface part) that is deferred
-/// to promotion-era work (see spec §7.5 and RFC 0013 §7.2 promotion gate).
-///
-/// If you need the full part inventory for promotion-era work, consume
-/// `PortalPartTokens` directly from `tze_hud_config::resolve_portal_tokens`.
+/// Expanded projections materialize a bounded absolute subtree for the frame,
+/// header, INPUT pane, OUTPUT pane, and divider. Collapsed projections remain a
+/// single text node. Geometry is resolved server-side from the portal bounds and
+/// spacing tokens; projection text never supplies layout coordinates.
 ///
 /// ## Redaction safety (§6.3)
 ///
@@ -340,17 +338,14 @@ const MAX_PORTAL_MARKDOWN_BYTES: usize = 16_384;
 /// animation position. A restricted viewer therefore sees `redacted = true` in
 /// every frame — expanded, collapsed, and any intermediate transition state.
 ///
-/// ## Part inventory (Phase-1 pilot — single TextMarkdownNodeProto)
+/// ## Part inventory
 ///
 /// | Part | Fields |
 /// |------|--------|
-/// | transcript body | `transcript_background`, `transcript_text_color`, `transcript_font_size_px` |
+/// | frame/header/divider | `frame_*`, `header_*`, `divider_*`, spacing fields |
+/// | OUTPUT transcript | `transcript_background`, `transcript_text_color`, `transcript_font_size_px` |
 /// | collapsed card | `collapsed_background`, `collapsed_text_color`, `collapsed_font_size_px` |
-/// | composer region | `composer_background`, `composer_text_color`, `composer_font_size_px` |
-///
-/// Frame, header, divider, and transition fields are omitted because
-/// `TextMarkdownNodeProto` has no slots for them. They are wired in
-/// `PortalPartTokens` (in `tze_hud_config`) for promotion-era structured layout.
+/// | INPUT region | `composer_background`, `composer_text_color`, `composer_font_size_px` |
 ///
 /// ## Composer rendering (§4.1 / §4.8 — local feedback first)
 ///
@@ -364,6 +359,14 @@ const MAX_PORTAL_MARKDOWN_BYTES: usize = 16_384;
 /// display state without any remote roundtrip.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PortalVisualTokens {
+    // Promoted native frame/header chrome (hud-z5uem).
+    pub frame_background: proto::Rgba,
+    pub frame_opacity: f32,
+    pub header_text_color: proto::Rgba,
+    pub header_font_size_px: f32,
+    pub divider_color: proto::Rgba,
+    pub divider_grip_color: proto::Rgba,
+    pub content_inset_px: f32,
     // Transcript body (expanded presentation)
     pub transcript_background: proto::Rgba,
     pub transcript_text_color: proto::Rgba,
@@ -744,6 +747,24 @@ pub struct ComposerDisplayState {
     pub sequence: u64,
 }
 
+/// Runtime-owned geometry for the promoted native two-pane projection profile.
+///
+/// The LLM-facing projection operations never carry these values. Geometry is
+/// resolved once per publish from the tile bounds plus the active portal token
+/// profile, then reused by the scene subtree, composer hit region, and governed
+/// `PortalSurface` descriptor. No frame-loop layout work is introduced.
+#[derive(Clone, Copy, Debug)]
+struct ExpandedPortalGeometry {
+    full: proto::Rect,
+    header: proto::Rect,
+    input_pane: proto::Rect,
+    input_content: proto::Rect,
+    output_pane: proto::Rect,
+    output_content: proto::Rect,
+    divider: proto::Rect,
+    divider_grip: proto::Rect,
+}
+
 impl ResidentGrpcPortalAdapter {
     /// Create a new adapter with default visual tokens.
     ///
@@ -770,7 +791,7 @@ impl ResidentGrpcPortalAdapter {
     /// `tze_hud_config::resolve_portal_tokens` first to get `PortalPartTokens`,
     /// then converting with
     /// `tze_hud_runtime::portal_tokens::portal_visual_tokens_from_part_tokens`
-    /// to obtain the Phase-1 pilot `PortalVisualTokens`.
+    /// to obtain `PortalVisualTokens`.
     pub fn with_tokens(config: ResidentGrpcPortalConfig, tokens: PortalVisualTokens) -> Self {
         Self {
             config,
@@ -928,7 +949,7 @@ impl ResidentGrpcPortalAdapter {
         // Drive the promoted portal through the first-class surface API: the
         // first render prepends the one-time `SetPortalSurface` declaration, and
         // every render carries the coalescible `UpdatePortalSurfaceState` patch
-        // (hud-rpm9s). The raw-tile assembly still paints the pixels.
+        // (hud-rpm9s). PublishToTile atomically materializes the native subtree.
         let batch = self.render_batch_with_surface(state, timestamp_wall_us)?;
         Ok(self.command(
             ResidentGrpcPortalCommandKind::RenderPortal,
@@ -1246,7 +1267,12 @@ impl ResidentGrpcPortalAdapter {
         // redaction-gated accent clear.
         let composer = if state.interaction_enabled {
             Some(proto::HitRegionNodeProto {
-                bounds: Some(self.local_bounds_for_state(state)),
+                bounds: Some(match state.presentation {
+                    ProjectedPortalPresentation::Expanded => {
+                        self.expanded_portal_geometry(state).input_pane
+                    }
+                    ProjectedPortalPresentation::Collapsed => self.local_bounds_for_state(state),
+                }),
                 interaction_id: format!("{}-composer", state.portal_id),
                 accepts_focus: true,
                 // accepts_pointer MUST be true for click-to-focus (hud-v4k1h).
@@ -1306,12 +1332,13 @@ impl ResidentGrpcPortalAdapter {
         });
 
         // NOTE: `render_batch` deliberately emits NO first-class portal-surface
-        // mutation — it stays a pure raw-tile content render (plus the coalescible
-        // lifecycle-accent and unread-count overlay updates above), the retained
-        // escape hatch. The one-time structural `SetPortalSurface` declaration and
+        // mutation — it stays a direct PublishToTile content render (plus the
+        // coalescible lifecycle-accent and unread-count overlay updates above),
+        // the retained compatibility path. The one-time structural
+        // `SetPortalSurface` declaration and
         // the per-render coalescible `UpdatePortalSurfaceState` patch are added by
         // `render_batch_with_surface`. Keeping them out of `render_batch` is
-        // load-bearing: any direct raw-tile caller must never send an
+        // load-bearing: any direct PublishToTile caller must never send an
         // `UpdatePortalSurfaceState` before the surface is declared — the wire
         // session server rejects such a batch
         // ATOMICALLY (the whole batch), unlike the in-process warn-and-skip path.
@@ -1344,9 +1371,9 @@ impl ResidentGrpcPortalAdapter {
     ///   mirroring the `SetTileLifecycleAccent` treatment; a redacted lifecycle
     ///   (`lifecycle_state == None`) encodes UNSPECIFIED = "leave unchanged" so
     ///   the patch goes silent under redaction rather than asserting a value;
-    /// - every render still emits the raw-tile assembly (`PublishToTile` + …) as
-    ///   the retained escape hatch — the surface descriptor governs, the raw
-    ///   tiles paint.
+    /// - every render emits one `PublishToTile` carrying the native subtree. The
+    ///   surface descriptor governs; inline children paint without per-node
+    ///   mutation fan-out.
     ///
     /// Re-declaration is bounded to genuine topology transitions (profile-swap /
     /// collapse-expand / interaction toggle), which are infrequent, so the
@@ -1427,22 +1454,19 @@ impl ResidentGrpcPortalAdapter {
     ///
     /// The descriptor GROUPS the portal's named parts, identity, and
     /// lifecycle/display state; it does not paint pixels. Each declared part
-    /// carries surface-local geometry and leaves `node` empty — "derived / not
-    /// materialized": the raw-tile `PublishToTile` render (the retained escape
-    /// hatch) still paints the content, and the compositor renderer promotion
-    /// (hud-s4lrw) is the eventual per-part node consumer. The parts mirror this
-    /// adapter's single-markdown-pane layout: `Frame` spans the surface, an
-    /// Expanded portal splits into `Header` + `Transcript` (+ `Composer` when
-    /// interaction is enabled), and a Collapsed portal declares a `CollapsedCard`.
+    /// carries surface-local geometry and leaves `node` empty because the
+    /// per-render inline subtree receives fresh node IDs. `Frame` spans the
+    /// surface, an Expanded portal splits into `Header`, INPUT `Composer`, OUTPUT
+    /// `Transcript`, and `Divider`, and a Collapsed portal declares a
+    /// `CollapsedCard`.
     fn portal_surface_proto(&self, state: &ProjectedPortalState) -> proto::PortalSurfaceProto {
         let full = self.local_bounds_for_state(state);
         let part = |kind: proto::PortalPartKindProto, bounds: proto::Rect| proto::PortalPartProto {
             kind: kind as i32,
             bounds: Some(bounds),
-            // Empty = no materialized backing node (derived); the raw-tile
-            // assembly paints the pixels. The scene's `SetTileRoot` republish
-            // path prunes stale part-node refs, so declaring `None` here is the
-            // stable choice for a per-render-republished single-pane portal.
+            // Empty = no stable backing node reference. PublishToTile replaces
+            // the inline subtree on each state change, so retaining a child ID in
+            // the descriptor would immediately become stale.
             node: Vec::new(),
         };
         let mut parts = vec![part(proto::PortalPartKindProto::PortalPartKindFrame, full)];
@@ -1454,47 +1478,23 @@ impl ResidentGrpcPortalAdapter {
                 ));
             }
             ProjectedPortalPresentation::Expanded => {
-                // Header strip height + inter-section gap are resolved from the
-                // `portal.spacing.*` design tokens (hud-zn6yw), never hardcoded.
-                // The header occupies [0, header_h]; a `section_gap` band follows;
-                // the transcript takes the remaining height below it. Both are
-                // clamped so a short surface degrades gracefully (header, then gap,
-                // then whatever transcript height remains — never negative).
-                let header_h = self
-                    .visual_tokens
-                    .header_height_px
-                    .max(0.0)
-                    .min(full.height);
-                let section_gap = self
-                    .visual_tokens
-                    .section_gap_px
-                    .max(0.0)
-                    .min((full.height - header_h).max(0.0));
-                let transcript_y = header_h + section_gap;
+                let geometry = self.expanded_portal_geometry(state);
                 parts.push(part(
                     proto::PortalPartKindProto::PortalPartKindHeader,
-                    proto::Rect {
-                        x: 0.0,
-                        y: 0.0,
-                        width: full.width,
-                        height: header_h,
-                    },
+                    geometry.header,
                 ));
                 parts.push(part(
                     proto::PortalPartKindProto::PortalPartKindTranscript,
-                    proto::Rect {
-                        x: 0.0,
-                        y: transcript_y,
-                        width: full.width,
-                        height: (full.height - transcript_y).max(0.0),
-                    },
+                    geometry.output_pane,
+                ));
+                parts.push(part(
+                    proto::PortalPartKindProto::PortalPartKindDivider,
+                    geometry.divider,
                 ));
                 if state.interaction_enabled {
-                    // The composer hit region spans the full local bounds (see
-                    // render_batch), so the declared Composer part mirrors it.
                     parts.push(part(
                         proto::PortalPartKindProto::PortalPartKindComposer,
-                        full,
+                        geometry.input_pane,
                     ));
                 }
             }
@@ -1514,7 +1514,255 @@ impl ResidentGrpcPortalAdapter {
         }
     }
 
+    fn expanded_portal_geometry(&self, state: &ProjectedPortalState) -> ExpandedPortalGeometry {
+        let full = self.local_bounds_for_state(state);
+        let header_h = self
+            .visual_tokens
+            .header_height_px
+            .max(0.0)
+            .min(full.height);
+        let divider_w = self.visual_tokens.section_gap_px.max(1.0).min(full.width);
+        let pane_width = ((full.width - divider_w).max(0.0) * 0.5).max(0.0);
+        let body_y = header_h;
+        let body_h = (full.height - body_y).max(0.0);
+        let input_pane = proto::Rect {
+            x: 0.0,
+            y: body_y,
+            width: pane_width,
+            height: body_h,
+        };
+        let divider = proto::Rect {
+            x: pane_width,
+            y: body_y,
+            width: divider_w,
+            height: body_h,
+        };
+        let output_pane = proto::Rect {
+            x: divider.x + divider.width,
+            y: body_y,
+            width: (full.width - divider.x - divider.width).max(0.0),
+            height: body_h,
+        };
+        let inset = self.visual_tokens.content_inset_px.max(0.0);
+        let label_band_h = (self.visual_tokens.header_font_size_px + inset).min(body_h);
+        let output_content_y = output_pane.y + label_band_h;
+        let input_content_y = input_pane.y + label_band_h;
+        let input_content = proto::Rect {
+            x: input_pane.x + inset,
+            y: input_content_y,
+            width: (input_pane.width - inset * 2.0).max(0.0),
+            height: (input_pane.y + input_pane.height - input_content_y - inset).max(0.0),
+        };
+        let output_content = proto::Rect {
+            x: output_pane.x + inset,
+            y: output_content_y,
+            width: (output_pane.width - inset * 2.0).max(0.0),
+            height: (output_pane.y + output_pane.height - output_content_y - inset).max(0.0),
+        };
+        let grip_w = (divider_w / 3.0).max(1.0).min(divider_w);
+        let grip_h = (header_h * 0.85).max(grip_w).min(body_h);
+        let divider_grip = proto::Rect {
+            x: divider.x + (divider.width - grip_w) / 2.0,
+            y: divider.y + (divider.height - grip_h) / 2.0,
+            width: grip_w,
+            height: grip_h,
+        };
+
+        ExpandedPortalGeometry {
+            full,
+            header: proto::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: full.width,
+                height: header_h,
+            },
+            input_pane,
+            input_content,
+            output_pane,
+            output_content,
+            divider,
+            divider_grip,
+        }
+    }
+
+    fn solid_node(
+        id: Vec<u8>,
+        color: proto::Rgba,
+        bounds: proto::Rect,
+        radius: f32,
+    ) -> proto::NodeProto {
+        proto::NodeProto {
+            id,
+            data: Some(proto::node_proto::Data::SolidColor(
+                proto::SolidColorNodeProto {
+                    color: Some(color),
+                    bounds: Some(bounds),
+                    radius,
+                },
+            )),
+            children: vec![],
+            layout: proto::NodeLayoutProto::Absolute as i32,
+        }
+    }
+
+    fn chrome_text_node(
+        content: String,
+        bounds: proto::Rect,
+        color: proto::Rgba,
+        font_size_px: f32,
+    ) -> proto::NodeProto {
+        proto::NodeProto {
+            id: new_node_id_le(),
+            data: Some(proto::node_proto::Data::TextMarkdown(
+                proto::TextMarkdownNodeProto {
+                    content,
+                    bounds: Some(bounds),
+                    font_size_px,
+                    color: Some(color),
+                    // Explicit transparency keeps text from repainting square
+                    // backdrops over the token-styled rounded solid layers.
+                    background: Some(proto::Rgba {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 0.0,
+                    }),
+                    color_runs: vec![],
+                    overflow: proto::TextOverflowProto::Clip as i32,
+                },
+            )),
+            children: vec![],
+            layout: proto::NodeLayoutProto::Absolute as i32,
+        }
+    }
+
     fn portal_node(
+        &self,
+        state: &ProjectedPortalState,
+        root_id_le: Vec<u8>,
+        now_wall_us: u64,
+    ) -> proto::NodeProto {
+        if state.presentation == ProjectedPortalPresentation::Collapsed {
+            return self.portal_text_node(state, root_id_le, now_wall_us);
+        }
+
+        let geometry = self.expanded_portal_geometry(state);
+        let mut transcript = self.portal_text_node(state, new_node_id_le(), now_wall_us);
+        if let Some(proto::node_proto::Data::TextMarkdown(text)) = transcript.data.as_mut() {
+            text.bounds = Some(geometry.output_content);
+        }
+
+        let mut frame_color = self.visual_tokens.frame_background;
+        frame_color.a *= self.visual_tokens.frame_opacity.clamp(0.0, 1.0);
+        let header_background = if is_connection_degraded(state) {
+            self.visual_tokens.transcript_dim_background
+        } else {
+            frame_color
+        };
+        let input_label_bounds = proto::Rect {
+            x: geometry.input_pane.x + self.visual_tokens.content_inset_px,
+            y: geometry.input_pane.y,
+            width: (geometry.input_pane.width - self.visual_tokens.content_inset_px * 2.0).max(0.0),
+            height: self.visual_tokens.header_font_size_px + self.visual_tokens.content_inset_px,
+        };
+        let output_label_bounds = proto::Rect {
+            x: geometry.output_pane.x + self.visual_tokens.content_inset_px,
+            y: geometry.output_pane.y,
+            width: (geometry.output_pane.width - self.visual_tokens.content_inset_px * 2.0)
+                .max(0.0),
+            height: self.visual_tokens.header_font_size_px + self.visual_tokens.content_inset_px,
+        };
+        let title = state.display_name.as_deref().unwrap_or("Projected session");
+        let mut header_title = match state.lifecycle_state {
+            Some(lifecycle) => format!("{title} · {lifecycle:?}"),
+            None => title.to_string(),
+        };
+        if let Some(unread) = unread_indicator_line(state.unread_output_count) {
+            header_title.push_str(" · ");
+            header_title.push_str(&unread);
+        }
+        if awaiting_reply(state) {
+            header_title.push_str(" · awaiting reply");
+        } else if agent_activity_active(state, now_wall_us) {
+            header_title.push_str(" · ");
+            header_title.push_str(PORTAL_ACTIVITY_MARKER_LINE);
+        }
+        if is_connection_degraded(state) {
+            header_title.push_str(" · ");
+            header_title.push_str(PORTAL_DISCONNECT_MARKER_LINE);
+        }
+
+        let mut root = Self::solid_node(
+            root_id_le,
+            frame_color,
+            geometry.full,
+            EXPANDED_PORTAL_CORNER_RADIUS_PX,
+        );
+        root.children = vec![
+            Self::solid_node(
+                new_node_id_le(),
+                header_background,
+                geometry.header,
+                EXPANDED_PORTAL_CORNER_RADIUS_PX,
+            ),
+            Self::chrome_text_node(
+                header_title,
+                geometry.header,
+                self.visual_tokens.header_text_color,
+                self.visual_tokens.header_font_size_px,
+            ),
+            Self::solid_node(
+                new_node_id_le(),
+                self.visual_tokens.composer_background,
+                geometry.input_pane,
+                0.0,
+            ),
+            Self::chrome_text_node(
+                "INPUT".to_string(),
+                input_label_bounds,
+                self.visual_tokens.header_text_color,
+                self.visual_tokens.header_font_size_px,
+            ),
+            Self::chrome_text_node(
+                portal_input_markdown(
+                    state,
+                    self.composer_display.as_ref(),
+                    self.visual_tokens.timestamp_granularity,
+                ),
+                geometry.input_content,
+                self.visual_tokens.composer_text_color,
+                self.visual_tokens.composer_font_size_px,
+            ),
+            Self::solid_node(
+                new_node_id_le(),
+                self.visual_tokens.transcript_background,
+                geometry.output_pane,
+                0.0,
+            ),
+            Self::chrome_text_node(
+                "OUTPUT".to_string(),
+                output_label_bounds,
+                self.visual_tokens.header_text_color,
+                self.visual_tokens.header_font_size_px,
+            ),
+            transcript,
+            Self::solid_node(
+                new_node_id_le(),
+                self.visual_tokens.divider_color,
+                geometry.divider,
+                0.0,
+            ),
+            Self::solid_node(
+                new_node_id_le(),
+                self.visual_tokens.divider_grip_color,
+                geometry.divider_grip,
+                0.0,
+            ),
+        ];
+        root
+    }
+
+    fn portal_text_node(
         &self,
         state: &ProjectedPortalState,
         root_id_le: Vec<u8>,
@@ -1546,12 +1794,19 @@ impl ResidentGrpcPortalAdapter {
             text_color = self.visual_tokens.transcript_dim_text_color;
             background_color = self.visual_tokens.transcript_dim_background;
         }
-        let (content, turn_spans) = portal_markdown_with_spans(
-            state,
-            self.composer_display.as_ref(),
-            now_wall_us,
-            self.visual_tokens.timestamp_granularity,
-        );
+        let (content, turn_spans) = match state.presentation {
+            ProjectedPortalPresentation::Expanded => portal_output_markdown_with_spans(
+                state,
+                now_wall_us,
+                self.visual_tokens.timestamp_granularity,
+            ),
+            ProjectedPortalPresentation::Collapsed => portal_markdown_with_spans(
+                state,
+                self.composer_display.as_ref(),
+                now_wall_us,
+                self.visual_tokens.timestamp_granularity,
+            ),
+        };
         // Byte length of the assembled content: the streaming-cursor tail marker
         // is pinned here (`[content_len..content_len]`) so the compositor can
         // distinguish it from the byte-0 sentinels and recolor the trailing
@@ -1783,7 +2038,7 @@ impl ResidentGrpcPortalAdapter {
 ///
 /// Thin default-carrying shim over [`portal_markdown_with`], used only by the unit
 /// tests that predate timestamps and assert the no-stamp rendering. The production
-/// render path ([`ResidentGrpcPortalAdapter::text_node`] /
+/// render path ([`ResidentGrpcPortalAdapter::portal_text_node`] /
 /// [`ResidentGrpcPortalAdapter::render_portal_markdown`]) always passes the
 /// adapter's profile-resolved [`TimestampGranularity`]; hence `#[cfg(test)]`.
 #[cfg(test)]
@@ -1814,6 +2069,41 @@ fn portal_markdown_with(
     timestamps: TimestampGranularity,
 ) -> String {
     portal_markdown_with_spans(state, composer_display, now_wall_us, timestamps).0
+}
+
+/// Render only the agent-authored OUTPUT history for the promoted native split
+/// surface. Identity/status chrome is materialized by the header subtree and
+/// viewer turns are materialized independently in the INPUT pane, so neither is
+/// allowed to enter this byte stream.
+fn portal_output_markdown_with_spans(
+    state: &ProjectedPortalState,
+    now_wall_us: u64,
+    timestamps: TimestampGranularity,
+) -> (String, Vec<TranscriptTurnSpan>) {
+    if state.visible_transcript.is_empty() {
+        return (empty_portal_markdown(state).to_string(), Vec::new());
+    }
+
+    let (mut content, mut spans) = visible_transcript_markdown_spans(
+        &state.visible_transcript,
+        unread_divider_boundary(state),
+        timestamps,
+    );
+    if agent_activity_active(state, now_wall_us) {
+        content.push_str(PORTAL_STREAMING_CURSOR_GLYPH);
+    }
+    if content.len() <= MAX_PORTAL_MARKDOWN_BYTES {
+        return (content, spans);
+    }
+
+    let cut = clamp_utf8(&content, MAX_PORTAL_MARKDOWN_BYTES).len();
+    content.truncate(cut);
+    for span in &mut spans {
+        span.start = span.start.min(cut);
+        span.end = span.end.min(cut);
+    }
+    spans.retain(|span| span.start < span.end);
+    (content, spans)
 }
 
 /// Render the portal body markdown and, for the expanded OUTPUT transcript,
@@ -2218,9 +2508,8 @@ fn composer_feedback_line(feedback: &PortalInputFeedback) -> String {
 ///   (`composer_draft_base_color`, hud-9gyao), not carried as a color run on
 ///   this markdown node.
 ///
-/// The promotion-era structured composer node (a dedicated footer input box with
-/// its own bounds) will let the echo, chrome, and status share one geometry and
-/// retire this interim dedup.
+/// The native INPUT pane keeps this status and viewer history in its own bounds;
+/// the compositor overlay remains the single source of truth for draft glyphs.
 fn composer_line(
     composer_display: Option<&ComposerDisplayState>,
     interaction_enabled: bool,
@@ -2976,6 +3265,24 @@ fn input_history_markdown(units: &[TranscriptUnit], timestamps: TimestampGranula
     visible_transcript_markdown_with(units, None, timestamps)
 }
 
+/// Render the native INPUT pane without duplicating draft glyphs. Viewer history
+/// stays left of the divider and the final status line preserves the established
+/// composer availability contract for both pixels and headless verification.
+fn portal_input_markdown(
+    state: &ProjectedPortalState,
+    composer_display: Option<&ComposerDisplayState>,
+    timestamps: TimestampGranularity,
+) -> String {
+    let status = composer_line(composer_display, state.interaction_enabled);
+    // Reserve the final line before bounding history so the status affordance
+    // cannot be truncated away by a full retained viewer-echo window.
+    let max_history_bytes = MAX_PORTAL_MARKDOWN_BYTES.saturating_sub(status.len() + 1);
+    let history = input_history_markdown(&state.input_history, timestamps);
+    let mut result = clamp_utf8(&history, max_history_bytes).to_string();
+    push_line(&mut result, &status);
+    result
+}
+
 fn clamp_one_line(text: &str, max_bytes: usize) -> String {
     clamp_utf8(text.lines().next().unwrap_or_default(), max_bytes).to_string()
 }
@@ -3009,10 +3316,14 @@ fn new_scene_id_bytes() -> Vec<u8> {
     uuid::Uuid::now_v7().as_bytes().to_vec()
 }
 
+fn new_node_id_le() -> Vec<u8> {
+    uuid::Uuid::now_v7().to_bytes_le().to_vec()
+}
+
 // ── Token bridge (tze_hud_config feature) ─────────────────────────────────────
 
 /// Convert a fully-resolved `PortalPartTokens` (from `tze_hud_config`) into
-/// the Phase-1 pilot's `PortalVisualTokens`.
+/// `PortalVisualTokens`.
 ///
 /// This is the **canonical production-path conversion**. Any code that constructs
 /// a `ResidentGrpcPortalAdapter` MUST use this function instead of
@@ -3021,9 +3332,9 @@ fn new_scene_id_bytes() -> Vec<u8> {
 /// `DesignTokenMap` to get `PortalPartTokens`, pass the result here, and forward
 /// the `PortalVisualTokens` to `adapter.set_visual_tokens(...)`.
 ///
-/// Maps transcript, collapsed, and composer parts. The remaining parts of
-/// `PortalPartTokens` (frame, header, divider, transitions) require a structured
-/// multi-node layout deferred to promotion-era work.
+/// Maps every visual part consumed by the native expanded subtree and collapsed
+/// card. Transition values remain runtime-owned and are not part of this render
+/// payload.
 ///
 /// ## Usage
 ///
@@ -3047,6 +3358,33 @@ pub fn portal_visual_tokens_from_part_tokens(
     part: &tze_hud_config::PortalPartTokens,
 ) -> PortalVisualTokens {
     PortalVisualTokens {
+        frame_background: proto::Rgba {
+            r: part.frame_background.r,
+            g: part.frame_background.g,
+            b: part.frame_background.b,
+            a: part.frame_background.a,
+        },
+        frame_opacity: part.frame_opacity,
+        header_text_color: proto::Rgba {
+            r: part.header_text_color.r,
+            g: part.header_text_color.g,
+            b: part.header_text_color.b,
+            a: part.header_text_color.a,
+        },
+        header_font_size_px: part.header_font_size_px,
+        divider_color: proto::Rgba {
+            r: part.divider_color.r,
+            g: part.divider_color.g,
+            b: part.divider_color.b,
+            a: part.divider_color.a,
+        },
+        divider_grip_color: proto::Rgba {
+            r: part.resize_grip_color.r,
+            g: part.resize_grip_color.g,
+            b: part.resize_grip_color.b,
+            a: part.resize_grip_color.a,
+        },
+        content_inset_px: part.content_inset_px,
         transcript_background: proto::Rgba {
             r: part.transcript_background.r,
             g: part.transcript_background.g,
@@ -3407,11 +3745,11 @@ mod tests {
         );
     }
 
-    /// The declared surface maps the adapter's expanded single-pane layout onto
-    /// the first-class parts (Frame + Header + Transcript + Composer), carries the
-    /// identity (session id, display name, ResidentLlm peer class), and reflects
-    /// the lifecycle/display state. The whole descriptor passes the scene-side
-    /// structural validation.
+    /// The declared surface maps the adapter's expanded two-pane layout onto the
+    /// first-class parts (Frame + Header + Composer + Transcript + Divider),
+    /// carries the identity (session id, display name, ResidentLlm peer class),
+    /// and reflects the lifecycle/display state. The whole descriptor passes the
+    /// scene-side structural validation.
     #[test]
     fn portal_surface_declaration_maps_expanded_parts_and_identity() {
         use tze_hud_protocol::convert::proto_portal_surface_to_scene;
@@ -3436,6 +3774,7 @@ mod tests {
             proto::PortalPartKindProto::PortalPartKindHeader,
             proto::PortalPartKindProto::PortalPartKindTranscript,
             proto::PortalPartKindProto::PortalPartKindComposer,
+            proto::PortalPartKindProto::PortalPartKindDivider,
         ] {
             assert!(
                 kinds.contains(&(expected as i32)),
@@ -3464,13 +3803,14 @@ mod tests {
     }
 
     /// hud-zn6yw: the declared `Header` part height and the Header→Transcript
-    /// section gap are resolved from the `portal.spacing.*` tokens carried on
+    /// middle-divider width are resolved from the `portal.spacing.*` tokens carried on
     /// `PortalVisualTokens`, not from a hardcoded constant. At the canonical
     /// default tokens (`header_height_px` = 52, `section_gap_px` = 8) the header
     /// strip is 52px — matching the former hardcoded `PORTAL_SURFACE_HEADER_BAND_PX`
     /// and `PORTAL_HEADER_DRAG_BAND_PX_DEFAULT`, so the draggable header band
     /// (derived from this part by `portal_header_band_anchors`) is unchanged — the
-    /// transcript starts at 52 + 8 = 60, and takes the remaining surface height.
+    /// OUTPUT pane starts below the 52px header and to the right of the token-sized
+    /// 8px middle divider.
     #[test]
     fn portal_surface_header_and_gap_honor_default_spacing_tokens() {
         let config = ResidentGrpcPortalConfig::new(vec![3u8; 16]);
@@ -3493,17 +3833,20 @@ mod tests {
             &surface,
             proto::PortalPartKindProto::PortalPartKindTranscript,
         );
+        let divider = part_of(&surface, proto::PortalPartKindProto::PortalPartKindDivider);
         assert_eq!(header.height, 52.0, "header height honors header_height_px");
         assert_eq!(header.y, 0.0);
         assert_eq!(
-            transcript.y, 60.0,
-            "transcript starts below the header + section gap (52 + 8)"
+            transcript.y, 52.0,
+            "OUTPUT pane starts directly below the draggable header"
         );
         assert_eq!(
             transcript.height,
-            full_h - 60.0,
-            "transcript takes the remaining surface height"
+            full_h - 52.0,
+            "OUTPUT pane takes the remaining surface height"
         );
+        assert_eq!(divider.width, 8.0, "divider width honors section_gap_px");
+        assert!(transcript.x > divider.x, "OUTPUT pane follows the divider");
     }
 
     /// hud-zn6yw: overriding the spacing tokens moves the declared part bounds in
@@ -3538,12 +3881,142 @@ mod tests {
             &surface,
             proto::PortalPartKindProto::PortalPartKindTranscript,
         );
+        let divider = part_of(&surface, proto::PortalPartKindProto::PortalPartKindDivider);
         assert_eq!(header.height, 40.0, "header height tracks the override");
         assert_eq!(
-            transcript.y, 52.0,
-            "transcript starts below header(40) + gap(12)"
+            transcript.y, 40.0,
+            "OUTPUT pane starts below the overridden header"
         );
-        assert_eq!(transcript.height, full_h - 52.0);
+        assert_eq!(transcript.height, full_h - 40.0);
+        assert_eq!(divider.width, 12.0, "divider width tracks section gap");
+    }
+
+    /// hud-z5uem: cooperative projections must paint the reviewed two-pane
+    /// portal chrome in the resident adapter itself. The LLM-facing projection
+    /// contract carries semantic text only; INPUT/OUTPUT geometry and chrome are
+    /// a native subtree rooted in the one governed portal tile.
+    #[test]
+    fn expanded_portal_node_materializes_native_two_pane_chrome() {
+        let config = ResidentGrpcPortalConfig::new(vec![3u8; 16]);
+        let adapter = ResidentGrpcPortalAdapter::new(config);
+        let mut state = make_expanded_interaction_state("portal-native-two-pane");
+        state.visible_transcript = vec![transcript_unit_text(
+            1,
+            OutputKind::Assistant,
+            "hello from agent",
+        )];
+        state.input_history = vec![transcript_unit_text(
+            2,
+            OutputKind::Viewer,
+            "hello from viewer",
+        )];
+
+        let root = adapter.portal_node(&state, vec![0u8; 16], 0);
+        assert!(
+            matches!(root.data, Some(proto::node_proto::Data::SolidColor(_))),
+            "expanded portal root must be the token-styled native frame"
+        );
+
+        let text_children: Vec<&proto::TextMarkdownNodeProto> = root
+            .children
+            .iter()
+            .filter_map(|child| match child.data.as_ref() {
+                Some(proto::node_proto::Data::TextMarkdown(text)) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            text_children.iter().any(|text| text.content == "INPUT"),
+            "native chrome must label the left input pane"
+        );
+        assert!(
+            text_children.iter().any(|text| text.content == "OUTPUT"),
+            "native chrome must label the right output pane"
+        );
+        assert!(
+            text_children
+                .iter()
+                .filter(|text| text.overflow == proto::TextOverflowProto::Clip as i32)
+                .all(|text| text
+                    .background
+                    .is_some_and(|background| background.a == 0.0)),
+            "chrome labels and INPUT copy must stay transparent over the rounded solid layers"
+        );
+
+        let output = text_children
+            .iter()
+            .find(|text| text.content.contains("hello from agent"))
+            .expect("the OUTPUT pane must own the projected transcript");
+        let output_bounds = output.bounds.expect("OUTPUT transcript bounds");
+        assert!(
+            output_bounds.x > 0.0 && output_bounds.width < DEFAULT_EXPANDED_W,
+            "OUTPUT transcript must occupy only the right pane: {output_bounds:?}"
+        );
+        assert!(
+            !output.content.contains("hello from viewer"),
+            "viewer replies must never leak into the OUTPUT pane"
+        );
+        assert!(
+            text_children
+                .iter()
+                .any(|text| text.content.contains("hello from viewer")),
+            "retained viewer replies must render in the INPUT pane"
+        );
+
+        let solid_children: Vec<&proto::SolidColorNodeProto> = root
+            .children
+            .iter()
+            .filter_map(|child| match child.data.as_ref() {
+                Some(proto::node_proto::Data::SolidColor(solid)) => Some(solid),
+                _ => None,
+            })
+            .collect();
+        let pane_fills: Vec<proto::Rgba> = solid_children
+            .iter()
+            .filter_map(|solid| {
+                let bounds = solid.bounds?;
+                (bounds.width > DEFAULT_EXPANDED_W / 3.0
+                    && bounds.height > DEFAULT_EXPANDED_H / 2.0)
+                    .then_some(solid.color?)
+            })
+            .collect();
+        assert_eq!(pane_fills.len(), 2, "native profile must paint two panes");
+        assert!(
+            pane_fills.iter().all(|color| {
+                color.r == 0.0
+                    && color.g == 0.0
+                    && color.b == 0.0
+                    && (color.a - (242.0 / 255.0)).abs() < f32::EPSILON
+            }),
+            "INPUT and OUTPUT panes must use the reviewed 95%-black token profile: {pane_fills:?}"
+        );
+        assert!(
+            solid_children.iter().any(|solid| {
+                let bounds = solid.bounds.expect("solid child bounds");
+                bounds.width > 0.0
+                    && bounds.width <= adapter.visual_tokens().section_gap_px
+                    && bounds.height > adapter.visual_tokens().header_height_px / 2.0
+            }),
+            "native chrome must paint a fat middle divider with a visible grip"
+        );
+    }
+
+    #[test]
+    fn native_input_pane_preserves_composer_status_at_history_bound() {
+        let mut state = make_expanded_interaction_state("portal-input-bound");
+        state.input_history = (0..6)
+            .map(|sequence| transcript_unit_text(sequence, OutputKind::Viewer, &"x".repeat(4_096)))
+            .collect();
+
+        let input = portal_input_markdown(&state, None, TimestampGranularity::Off);
+        assert!(
+            input.len() <= MAX_PORTAL_MARKDOWN_BYTES,
+            "native INPUT materialization must stay bounded"
+        );
+        assert!(
+            input.ends_with("composer: ready"),
+            "composer availability must survive bounded history truncation"
+        );
     }
 
     /// hud-zn6yw: the `portal.spacing.header_height_px` / `section_gap_px` design
@@ -3768,10 +4241,8 @@ mod tests {
         fn markdown_of(batch: &session_proto::MutationBatch) -> proto::TextMarkdownNodeProto {
             for m in &batch.mutations {
                 if let Some(proto::mutation_proto::Mutation::PublishToTile(p)) = &m.mutation {
-                    if let Some(proto::node_proto::Data::TextMarkdown(tm)) =
-                        p.node.as_ref().and_then(|n| n.data.as_ref())
-                    {
-                        return tm.clone();
+                    if let Some(node) = p.node.as_ref() {
+                        return text_markdown_node(node).clone();
                     }
                 }
             }
@@ -4215,8 +4686,9 @@ mod tests {
             other => panic!("First mutation must be PublishToTile, got {other:?}"),
         }
 
-        // The composer hit region (4th mutation) must cover the grown height —
-        // proving the body bounds followed the resize, not the config size.
+        // The INPUT-pane composer hit region (4th mutation) must cover the grown
+        // body below the token-sized header — proving the native two-pane body
+        // followed the resize, not the config size.
         let composer_mutation = &batch.mutations[3];
         match &composer_mutation.mutation {
             Some(
@@ -4227,9 +4699,10 @@ mod tests {
                     .as_ref()
                     .expect("composer spec must be present");
                 let bounds = hr.bounds.as_ref().expect("composer must carry bounds");
+                let expected_body_h = grown_h - adapter.visual_tokens().header_height_px;
                 assert_eq!(
-                    bounds.height, grown_h,
-                    "composer/body must size to the resized height {grown_h}, got {}",
+                    bounds.height, expected_body_h,
+                    "composer/body must size below the header to {expected_body_h}, got {}",
                     bounds.height
                 );
             }
@@ -4255,8 +4728,8 @@ mod tests {
                 .expect("composer spec must be present");
             assert_eq!(
                 hr.bounds.as_ref().unwrap().height,
-                DEFAULT_EXPANDED_H,
-                "without resized_bounds the body must keep the config height"
+                DEFAULT_EXPANDED_H - adapter.visual_tokens().header_height_px,
+                "without resized_bounds the body must keep the config height below the header"
             );
         } else {
             panic!("expected SetTileComposerInteraction composer mutation");
@@ -4401,12 +4874,19 @@ mod tests {
 
     // ── §2/§3 disconnect + stale-content treatment ───────────────────────────
 
-    /// Extract the single `TextMarkdownNodeProto` produced by `portal_node`.
+    /// Extract the transcript `TextMarkdownNodeProto` from either the collapsed
+    /// single-node card or the expanded native two-pane subtree.
     fn text_markdown_node(node: &proto::NodeProto) -> &proto::TextMarkdownNodeProto {
-        match node.data.as_ref().expect("node must carry data") {
-            proto::node_proto::Data::TextMarkdown(tm) => tm,
-            other => panic!("portal_node must produce TextMarkdown, got {other:?}"),
+        fn find(node: &proto::NodeProto) -> Option<&proto::TextMarkdownNodeProto> {
+            if let Some(proto::node_proto::Data::TextMarkdown(tm)) = node.data.as_ref()
+                && tm.overflow == proto::TextOverflowProto::Ellipsis as i32
+            {
+                return Some(tm);
+            }
+            node.children.iter().find_map(find)
         }
+        find(node)
+            .unwrap_or_else(|| panic!("portal subtree must contain a transcript TextMarkdown node"))
     }
 
     /// §2: when the portal is connection-degraded, the expanded transcript
@@ -4700,10 +5180,6 @@ mod tests {
         ];
 
         let node = adapter.portal_node(&state, vec![0u8; 16], 0);
-        assert!(
-            node.children.is_empty(),
-            "attribution must not split into child nodes"
-        );
         let tm = text_markdown_node(&node);
         assert_eq!(
             tm.color,
@@ -5840,10 +6316,7 @@ mod tests {
         }];
 
         let node = adapter.portal_node(&state, vec![0u8; 16], now_fresh);
-        let tm = match node.data.expect("node data") {
-            proto::node_proto::Data::TextMarkdown(tm) => tm,
-            other => panic!("expected TextMarkdown node, got {other:?}"),
-        };
+        let tm = text_markdown_node(&node);
 
         // The cursor glyph is at the exact tail of the latest turn's text.
         let expected_tail = format!("{tail_text}{PORTAL_STREAMING_CURSOR_GLYPH}");
@@ -6125,6 +6598,20 @@ mod tests {
         detached.lifecycle_state = Some(ProjectionLifecycleState::Detached);
         let detached_node = adapter.portal_node(&detached, vec![0u8; 16], 0);
         let detached_tm = text_markdown_node(&detached_node);
+        let header = |node: &proto::NodeProto| {
+            node.children
+                .iter()
+                .filter_map(|child| match child.data.as_ref() {
+                    Some(proto::node_proto::Data::TextMarkdown(text)) => Some(text),
+                    _ => None,
+                })
+                .find(|text| text.content.starts_with("Test Session"))
+                .expect("expanded native portal must carry a text-visible header")
+                .content
+                .clone()
+        };
+        let active_header = header(&active_node);
+        let detached_header = header(&detached_node);
 
         // The render path reflects each state distinctly.
         assert_ne!(
@@ -6132,12 +6619,12 @@ mod tests {
             "lifecycle transition must change the node's color runs (render path reflects state)"
         );
         assert_ne!(
-            active_tm.content, detached_tm.content,
-            "lifecycle transition must change the text-visible status line"
+            active_header, detached_header,
+            "lifecycle transition must change the text-visible native header"
         );
         assert!(
-            active_tm.content.contains("status:"),
-            "permitted viewer must see the lifecycle status line"
+            active_header.contains("Active"),
+            "permitted viewer must see the lifecycle state in the native header"
         );
     }
 
@@ -6272,10 +6759,7 @@ mod tests {
     #[test]
     fn composer_at_capacity_adds_no_color_run_to_markdown_node() {
         fn markdown_color_runs(node: &proto::NodeProto) -> Vec<proto::TextColorRunProto> {
-            match node.data.as_ref().expect("node must carry data") {
-                proto::node_proto::Data::TextMarkdown(tm) => tm.color_runs.clone(),
-                other => panic!("expected a TextMarkdown node, got {other:?}"),
-            }
+            text_markdown_node(node).color_runs.clone()
         }
 
         let state = make_expanded_interaction_state("portal-composer-cap-run");
