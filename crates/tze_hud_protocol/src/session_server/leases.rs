@@ -187,14 +187,18 @@ pub(super) async fn handle_lease_request(
     // conversion to u8 is always lossless.
     let priority_u8 = granted_priority as u8;
     let st = state.lock().await;
-    let lease_result = st.scene.lock().await.try_grant_lease_for_session_with_budget(
-        &session.namespace,
-        session.scene_session_id,
-        ttl,
-        priority_u8,
-        capabilities,
-        session.resource_budget.clone(),
-    );
+    let lease_result = st
+        .scene
+        .lock()
+        .await
+        .try_grant_lease_for_session_with_budget(
+            &session.namespace,
+            session.scene_session_id,
+            ttl,
+            priority_u8,
+            capabilities,
+            session.resource_budget.clone(),
+        );
     let lease_id = match lease_result {
         Ok(lease_id) => lease_id,
         Err(error) => {

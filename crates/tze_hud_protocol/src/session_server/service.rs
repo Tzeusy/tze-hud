@@ -9,8 +9,8 @@
 //! `session_server/mod.rs` as a separate `impl HudSession for HudSessionImpl`
 //! block, which is valid Rust (split impl across files in the same module).
 
-use super::stream_session::CapabilityRevocationEvent;
 use super::SharedMutationBudgetEnforcer;
+use super::stream_session::CapabilityRevocationEvent;
 use crate::convert;
 use crate::proto::session::DegradationNotice;
 use crate::session::SharedState;

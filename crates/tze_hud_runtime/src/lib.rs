@@ -176,7 +176,6 @@ pub use channels::{
     frame_ready_channel,
 };
 pub use degradation::{DegradationConfig, DegradationController, DegradationLevel, TileDescriptor};
-pub use mutation_budget_bridge::RuntimeMutationBudgetEnforcer;
 pub use event_bus::{
     AGGREGATE_RATE_CAP, AggregateRateLimiter, ClassifiedEvent, EventBus, InterruptionClass,
     SubscriberQueue,
@@ -194,6 +193,7 @@ pub use media_admission::{
     REMEMBER_TTL_US, SessionCapabilityCache, SessionCapabilityGrant, SignalingRateLimiter,
     now_us as media_now_us, now_us_monotonic as media_now_us_monotonic, runtime_level_to_e25_step,
 };
+pub use mutation_budget_bridge::RuntimeMutationBudgetEnforcer;
 pub use quiet_hours::{
     GateDecision, QuietHoursConfig, QuietHoursGate, ZoneContentionPolicy, ZoneQueue,
 };

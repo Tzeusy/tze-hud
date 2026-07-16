@@ -59,8 +59,8 @@ use tze_hud_widget::{RuntimeWidgetAssetError, register_runtime_widget_svg_asset}
 
 // ─── Submodules (SS-1..SS-7h) ────────────────────────────────────────────────
 
-pub mod config;
 pub mod budget_gate;
+pub mod config;
 pub mod degradation_notice_bus;
 pub mod emit_scene_event;
 pub mod freeze_queue;
@@ -79,10 +79,10 @@ pub mod upload;
 pub mod widgets;
 pub mod zone_publish;
 
-pub use config::SessionConfig;
 pub use budget_gate::{
     MutationBudgetDecision, MutationBudgetEnforcer, SharedMutationBudgetEnforcer,
 };
+pub use config::SessionConfig;
 pub use degradation_notice_bus::{DegradationNoticeReceiver, DegradationNoticeSender};
 // FreezeEnqueueResult, FREEZE_QUEUE_CAPACITY, and SessionFreezeQueue are used
 // transitively in `mod tests { use super::* }`.
