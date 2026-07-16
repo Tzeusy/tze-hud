@@ -452,6 +452,10 @@ struct WindowedRuntimeState {
     /// key-down inserts the chord here, the matching key-up removes it instead of
     /// resizing again.
     consumed_portal_resize_keydowns: std::collections::HashSet<String>,
+    /// Shell-reserved chord identities whose `KeyDown` was handled locally.
+    /// Their matching `KeyUp` is consumed before focused-agent routing so an
+    /// agent never observes half of a chrome-owned key sequence.
+    consumed_shell_shortcut_keydowns: std::collections::HashSet<String>,
     /// Focused nodes holding local pressed feedback from a keyboard ACTIVATE,
     /// keyed by physical key identity until the matching key release.
     keyboard_activation_nodes: std::collections::HashMap<String, tze_hud_scene::SceneId>,
@@ -1600,14 +1604,23 @@ impl ApplicationHandler for WinitApp {
                                          network runtime — exit signal not available"
                                     );
                                 }
+                                self.state
+                                    .consumed_shell_shortcut_keydowns
+                                    .insert("Escape".to_string());
                                 return;
                             }
                             PhysicalKey::Code(KeyCode::F9) => {
                                 self.cycle_monitor(event_loop, 1);
+                                self.state
+                                    .consumed_shell_shortcut_keydowns
+                                    .insert("F9".to_string());
                                 return;
                             }
                             PhysicalKey::Code(KeyCode::F8) => {
                                 self.cycle_monitor(event_loop, -1);
+                                self.state
+                                    .consumed_shell_shortcut_keydowns
+                                    .insert("F8".to_string());
                                 return;
                             }
                             _ => {}
@@ -2339,6 +2352,7 @@ impl WindowedRuntime {
             composer_pointer_drag_anchor: None,
             portal_resize_states: std::collections::HashMap::new(),
             consumed_portal_resize_keydowns: std::collections::HashSet::new(),
+            consumed_shell_shortcut_keydowns: std::collections::HashSet::new(),
             keyboard_activation_nodes: std::collections::HashMap::new(),
             consumed_command_keydowns: std::collections::HashSet::new(),
             // Placeholder; replaced in resumed() with the Arc cloned from the

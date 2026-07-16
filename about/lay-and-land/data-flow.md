@@ -198,9 +198,19 @@ OS / winit           tze_hud_runtime::windowed      tze_hud_input              C
 Rollback: only on explicit agent rejection (100ms reverse). Silence/latency
 does not trigger rollback.
 
-Pointer-free command input shares this production path. After safe-mode,
-shell-reserved, portal-control, and composer precedence, the windowed keyboard
-drain translates RFC 0004 default bindings into `RawCommandEvent`. Focus-cycle
+Pointer-free command input shares this production path. At the shell-reserved
+precedence seam, `ShellReservedShortcut` classifies `Ctrl+Tab`, numbered tab
+jumps, the v1 mute noop, safe-mode, and monitor-cycle chords before any portal,
+composer, or focused-agent route. The runtime executes tab actions locally via
+the system-shell state machine, switches the authoritative `SceneGraph` tab,
+refreshes `active_tab_mirror`, and records the physical key identity so both the
+press and matching release remain agent-inaccessible. This is the production
+trace for RFC 0007 §2.3 and `system-shell` Requirement: Tab Keyboard
+Shortcuts; release-only F8/F9 events are also consumed because their press is
+handled one stage earlier in the winit OS path.
+
+After that shell precedence, the windowed keyboard drain translates RFC 0004
+default bindings into `RawCommandEvent`. Focus-cycle
 commands move focus first; `CommandProcessor` then applies local feedback and
 constructs a transactional dispatch for the new/current focus owner.
 `input_dispatch::dispatch_command_event` serializes that dispatch as the
