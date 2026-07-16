@@ -630,6 +630,26 @@ pub(super) struct WindowedBenchmarkRunState {
     last_frame_at: Instant,
 }
 
+/// Decide whether the windowed compositor must build and present this frame.
+///
+/// An explicitly configured benchmark is fixed-cadence active work: every
+/// requested sample must reach [`WindowedBenchmarkRunState::record`], even when
+/// its deterministic scene is otherwise unchanged. Normal runtime sessions
+/// remain gated on presentation-relevant changes.
+pub(super) fn windowed_frame_needs_render(
+    scene_changed: bool,
+    geometry_changed: bool,
+    animation_inflight: bool,
+    composer_needs_render: bool,
+    benchmark_active: bool,
+) -> bool {
+    benchmark_active
+        || scene_changed
+        || geometry_changed
+        || animation_inflight
+        || composer_needs_render
+}
+
 impl WindowedBenchmarkRunState {
     pub(super) fn new(
         config: WindowedBenchmarkConfig,
@@ -2033,6 +2053,42 @@ mod tests {
             1080,
             60,
         )
+    }
+
+    #[test]
+    fn unchanged_windowed_benchmark_scene_presents_every_requested_sample() {
+        let warmup_frames = 2;
+        let measured_frames = 3;
+        let requested_samples = warmup_frames + measured_frames;
+        let mut state = make_benchmark_state(warmup_frames, measured_frames);
+        let mut completed = false;
+
+        for frame_number in 1..=requested_samples {
+            assert!(
+                windowed_frame_needs_render(false, false, false, false, true),
+                "explicit benchmark mode must bypass the unchanged-scene idle gate for sample {frame_number}"
+            );
+            let mut telemetry = tze_hud_telemetry::FrameTelemetry::new(frame_number);
+            telemetry.frame_time_us = 8_000;
+            completed = state.record(&telemetry);
+            assert_eq!(
+                completed,
+                frame_number == requested_samples,
+                "benchmark completion must occur on exactly the final requested sample"
+            );
+        }
+
+        assert!(
+            completed,
+            "the final requested benchmark sample must complete the run"
+        );
+        assert_eq!(state.warmup_seen, warmup_frames);
+        assert_eq!(state.measured_seen, measured_frames);
+        assert_eq!(state.summary.total_frames, measured_frames);
+        assert!(
+            !windowed_frame_needs_render(false, false, false, false, false),
+            "normal unchanged runtime sessions must remain behind the idle render gate"
+        );
     }
 
     #[test]

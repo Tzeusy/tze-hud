@@ -206,6 +206,7 @@ use self::lifecycle::{
     BENCHMARK_NO_PROGRESS_TIMEOUT, PendingInputLatencySamples, WindowedBenchmarkRunState,
     begin_os_mouse_capture, detect_monitor_size, drain_pending_input_latency, end_os_mouse_capture,
     focus_window_for_text_input, read_windows_clipboard_text, seed_windowed_benchmark_scene,
+    windowed_frame_needs_render,
 };
 pub use self::network::render_attach_info;
 use self::network::{build_runtime_context, render_startup_banner, start_network_services};
@@ -1173,11 +1174,17 @@ impl ApplicationHandler for WinitApp {
                         // tick, prune, cache primes) ALWAYS run, so a fade-out
                         // start or expiry still bumps scene.version and re-arms the
                         // gate; an in-flight eased transition / TTL fade / reveal /
-                        // smooth-scroll forces a render so it never freezes.
-                        let dirty = scene.version != last_rendered_scene_version
-                            || scene.geometry_epoch != last_rendered_geometry_epoch
-                            || compositor.has_inflight_animation(&scene)
-                            || composer_needs_render;
+                        // smooth-scroll forces a render so it never freezes. An
+                        // explicitly configured benchmark is active fixed-cadence
+                        // work and presents every requested sample without changing
+                        // the normal runtime idle contract.
+                        let needs_render = windowed_frame_needs_render(
+                            scene.version != last_rendered_scene_version,
+                            scene.geometry_epoch != last_rendered_geometry_epoch,
+                            compositor.has_inflight_animation(&scene),
+                            composer_needs_render,
+                            benchmark_state.is_some(),
+                        );
 
                         // A successful try_lock means we are NOT lock-starved,
                         // whether or not we present this frame — reset the
@@ -1191,7 +1198,7 @@ impl ApplicationHandler for WinitApp {
                         consecutive_misses = 0;
                         watchdog_logged = false;
 
-                        if !dirty {
+                        if !needs_render {
                             // Idle: scene unchanged and nothing animating. Release
                             // the lock without building vertices, encoding, or
                             // signalling the main thread to present.
