@@ -41,6 +41,7 @@
 //! Tests that don't exercise the session layer use this to skip server startup.
 
 use crate::component_startup::{register_profile_widgets, run_component_startup};
+use crate::degradation::{DegradationController, DegradationEnvelope, TileDescriptor};
 use crate::element_store::bootstrap_scene_element_store;
 use crate::pipeline::{FramePipeline, HitTestSnapshot};
 use crate::reload_triggers::{RuntimeServiceImpl, spawn_sighup_listener};
@@ -56,7 +57,7 @@ use tze_hud_protocol::proto::FramePresented;
 use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
 use tze_hud_protocol::proto::session::runtime_service_server::RuntimeServiceServer;
 use tze_hud_protocol::session::SharedState;
-use tze_hud_protocol::session_server::HudSessionImpl;
+use tze_hud_protocol::session_server::{DegradationNoticeSender, HudSessionImpl};
 use tze_hud_resource::{
     ResourceStore, ResourceStoreConfig, RuntimeWidgetStore, RuntimeWidgetStoreConfig,
 };
@@ -248,6 +249,9 @@ pub struct HeadlessRuntime {
     /// Wire this to `HudSessionImpl::frame_presented_tx` (via
     /// [`HeadlessRuntime::set_frame_presented_tx`]) to deliver to gRPC subscribers.
     frame_presented_tx: Option<tokio::sync::broadcast::Sender<FramePresented>>,
+    degradation_controller: DegradationController,
+    degradation_notices: DegradationNoticeSender,
+    degradation_clock_start: Instant,
 }
 
 impl HeadlessRuntime {
@@ -382,6 +386,7 @@ impl HeadlessRuntime {
             resolved_portal_tokens: std::collections::HashMap::new(),
         }));
 
+        let degradation_notices = DegradationNoticeSender::default();
         Ok(Self {
             compositor,
             surface,
@@ -394,6 +399,12 @@ impl HeadlessRuntime {
             fallback_unrestricted,
             _runtime_widget_store: runtime_widget_store,
             frame_presented_tx: None,
+            degradation_controller: DegradationController::with_envelope(
+                crate::degradation::DegradationConfig::default(),
+                DegradationEnvelope::from_effective_fps(60).expect("60 Hz is valid"),
+            ),
+            degradation_notices,
+            degradation_clock_start: Instant::now(),
         })
     }
 
@@ -423,6 +434,10 @@ impl HeadlessRuntime {
     /// that `read_pixels()` returns actual rendered pixel data after this call.
     pub async fn render_frame(&mut self) -> FrameTelemetry {
         let frame_start = Instant::now();
+        // Include all active scene/compositor work performed for this frame;
+        // this boundary precedes expiry, animation, and Stage 3 work and ends
+        // only after Stage 7 completes.
+        let degradation_work_start = Instant::now();
         let state = self.state.lock().await;
         // Clone the Arc so we can release the SharedState lock before rendering.
         let scene_arc = state.scene.clone();
@@ -493,6 +508,26 @@ impl HeadlessRuntime {
         // Gated internally on scene.version; no-op when unchanged.
         self.compositor.prime_truncation_cache(&scene_guard);
 
+        let degradation_tiles: Vec<TileDescriptor> = scene_guard
+            .visible_tiles()
+            .into_iter()
+            .filter_map(|tile| {
+                scene_guard
+                    .leases
+                    .get(&tile.lease_id)
+                    .map(|lease| TileDescriptor {
+                        tile_id: tile.id,
+                        lease_priority: u32::from(lease.priority),
+                        z_order: tile.z_order,
+                    })
+            })
+            .collect();
+        let applied_degradation_level = self.degradation_controller.level();
+        self.compositor.set_degradation_policy(
+            self.degradation_controller
+                .compositor_policy(&degradation_tiles),
+        );
+
         let stage4_us = s4_start.elapsed().as_micros() as u64;
         // input_to_scene_commit: wall time from frame_start to end of Stage 4.
         // Measured as elapsed since frame_start (not a sum of stage durations)
@@ -501,7 +536,6 @@ impl HeadlessRuntime {
 
         // Stage 5: Layout Resolve
         let s5_start = Instant::now();
-        let tiles_visible = scene_guard.visible_tiles().len() as u32;
         let stage5_us = s5_start.elapsed().as_micros() as u64;
 
         // Stages 6 + 7: Render Encode + GPU Submit (handled by Compositor::render_frame_headless)
@@ -519,6 +553,7 @@ impl HeadlessRuntime {
 
         // Total frame time: stage 1 start → stage 7 end
         let frame_time_us = frame_start.elapsed().as_micros() as u64;
+        let degradation_work_time_us = degradation_work_start.elapsed().as_micros() as u64;
         // input_to_next_present: time from frame start (proxy for input event
         // arrival) to Stage 7 completion (GPU present). Equals total frame time
         // since the frame pipeline starts at the input drain boundary.
@@ -552,6 +587,7 @@ impl HeadlessRuntime {
             // error condition for a droppable state-stream present ack.
             let _ = tx.send(event);
         }
+        drop(scene_guard);
 
         // Build the per-stage telemetry record (outside the Stage 8 timed region)
         let mut telemetry = FrameTelemetry::new(compositor_telemetry.frame_number);
@@ -563,6 +599,8 @@ impl HeadlessRuntime {
         telemetry.stage6_render_encode_us = stage6_us;
         telemetry.stage7_gpu_submit_us = stage7_us;
         telemetry.frame_time_us = frame_time_us;
+        telemetry.degradation_work_time_us = degradation_work_time_us;
+        telemetry.degradation_level = applied_degradation_level.as_u8();
         // ── Split input latency fields ─────────────────────────────────────
         // input_to_local_ack_us is populated externally by the input processor
         // (via input_processor.process() → InputProcessResult::local_ack_us) and
@@ -584,7 +622,7 @@ impl HeadlessRuntime {
         } else {
             0
         };
-        telemetry.tile_count = tiles_visible;
+        telemetry.tile_count = compositor_telemetry.tile_count;
         telemetry.node_count = compositor_telemetry.node_count;
         telemetry.active_leases = compositor_telemetry.active_leases;
         telemetry.mutations_applied = compositor_telemetry.mutations_applied;
@@ -594,6 +632,35 @@ impl HeadlessRuntime {
         // Non-zero only when scene.version changed this frame (new/changed content
         // required a parse pass); zero on steady-state frames (cache hit, no work).
         telemetry.markdown_prime_us = markdown_prime_us;
+
+        let completed_at_us = self.degradation_clock_start.elapsed().as_micros() as u64;
+        if let Some(event) = self
+            .degradation_controller
+            .record_frame_at(degradation_work_time_us, completed_at_us)
+        {
+            tracing::warn!(
+                previous_level = event.previous_level,
+                new_level = event.new_level,
+                direction = ?event.direction,
+                p95_us = event.frame_time_p95_us,
+                sample_count = event.sample_count,
+                window_duration_us = event.window_duration_us,
+                effective_cadence_hz = event.effective_cadence_hz,
+                entry_threshold_us = event.entry_threshold_us,
+                recovery_threshold_us = event.recovery_threshold_us,
+                recovery_source = ?event.recovery_source,
+                "runtime degradation transition"
+            );
+            let (runtime_level, _) = self.degradation_controller.protocol_level();
+            self.state.lock().await.degradation_level = runtime_level;
+            let notice = self.degradation_controller.protocol_notice(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_micros() as u64)
+                    .unwrap_or(0),
+            );
+            self.degradation_notices.publish(notice).await;
+        }
 
         // Stage 8: Telemetry Emit — non-blocking record into collector.
         // Timer wraps the actual emit so the measurement reflects its cost.
@@ -729,13 +796,15 @@ impl HeadlessRuntime {
         // guest policy (no capabilities) unless fallback_unrestricted is true (dev mode).
         let agent_caps = self.runtime_context.snapshot_agent_capabilities();
 
-        let service = HudSessionImpl::from_shared_state_with_config_and_media_ingress(
-            self.state.clone(),
-            &self.config.psk,
-            agent_caps,
-            self.fallback_unrestricted,
-            self.runtime_context.media_ingress.clone(),
-        );
+        let service =
+            HudSessionImpl::from_shared_state_with_config_media_ingress_and_degradation_notices(
+                self.state.clone(),
+                &self.config.psk,
+                agent_caps,
+                self.fallback_unrestricted,
+                self.runtime_context.media_ingress.clone(),
+                self.degradation_notices.clone(),
+            );
 
         let handle = tokio::spawn(async move {
             let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);

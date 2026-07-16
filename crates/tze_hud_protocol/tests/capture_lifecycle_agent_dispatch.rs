@@ -112,8 +112,8 @@ async fn perform_handshake_with_focus(
 
     let mut stream = client.session(inbound).await.unwrap().into_inner();
 
-    // Drain SessionEstablished + SceneSnapshot.
-    for _ in 0..2 {
+    // Drain SessionEstablished + SceneSnapshot + current DegradationNotice.
+    for _ in 0..3 {
         let _ = stream.next().await;
     }
 
@@ -152,8 +152,8 @@ async fn perform_handshake_no_focus(
 
     let mut stream = client.session(inbound).await.unwrap().into_inner();
 
-    // Drain SessionEstablished + SceneSnapshot.
-    for _ in 0..2 {
+    // Drain SessionEstablished + SceneSnapshot + current DegradationNotice.
+    for _ in 0..3 {
         let _ = stream.next().await;
     }
 

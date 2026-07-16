@@ -35,6 +35,27 @@ pub struct ImageTextureEntry {
     pub height: u32,
 }
 
+fn downsample_rgba_nearest(
+    source: &[u8],
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+) -> Vec<u8> {
+    let mut target = vec![0; target_width as usize * target_height as usize * 4];
+    for y in 0..target_height {
+        let source_y = y.saturating_mul(source_height) / target_height;
+        for x in 0..target_width {
+            let source_x = x.saturating_mul(source_width) / target_width;
+            let source_offset = (source_y as usize * source_width as usize + source_x as usize) * 4;
+            let target_offset = (y as usize * target_width as usize + x as usize) * 4;
+            target[target_offset..target_offset + 4]
+                .copy_from_slice(&source[source_offset..source_offset + 4]);
+        }
+    }
+    target
+}
+
 /// GPU state and render pipeline.
 /// Runtime-side local composer echo state.
 ///
@@ -534,12 +555,37 @@ impl super::Compositor {
             return false;
         }
 
+        let reduce_quality = self.degradation_policy.level
+            >= tze_hud_scene::DegradationLevel::Moderate
+            && (img_width > self.degradation_policy.texture_quality_threshold_px
+                || img_height > self.degradation_policy.texture_quality_threshold_px);
+        let (texture_width, texture_height) = if reduce_quality {
+            (
+                ((img_width as f32 * self.degradation_policy.texture_scale_factor).round() as u32)
+                    .max(1),
+                ((img_height as f32 * self.degradation_policy.texture_scale_factor).round() as u32)
+                    .max(1),
+            )
+        } else {
+            (img_width, img_height)
+        };
+        let scaled_rgba = reduce_quality.then(|| {
+            downsample_rgba_nearest(
+                &rgba_data,
+                img_width,
+                img_height,
+                texture_width,
+                texture_height,
+            )
+        });
+        let upload_rgba = scaled_rgba.as_deref().unwrap_or(&rgba_data);
+
         // Create GPU texture.
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some(&format!("img_tex_{resource_id}")),
             size: wgpu::Extent3d {
-                width: img_width,
-                height: img_height,
+                width: texture_width,
+                height: texture_height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -558,15 +604,15 @@ impl super::Compositor {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &rgba_data,
+            upload_rgba,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(img_width * 4),
-                rows_per_image: Some(img_height),
+                bytes_per_row: Some(texture_width * 4),
+                rows_per_image: Some(texture_height),
             },
             wgpu::Extent3d {
-                width: img_width,
-                height: img_height,
+                width: texture_width,
+                height: texture_height,
                 depth_or_array_layers: 1,
             },
         );
@@ -593,8 +639,8 @@ impl super::Compositor {
             ImageTextureEntry {
                 _texture: texture,
                 bind_group,
-                width: img_width,
-                height: img_height,
+                width: texture_width,
+                height: texture_height,
             },
         );
 
@@ -782,5 +828,19 @@ impl super::Compositor {
         // Also evict bytes and dims for resources no longer referenced.
         self.image_bytes.retain(|id, _| referenced_ids.contains(id));
         self.image_dims.retain(|id, _| referenced_ids.contains(id));
+    }
+}
+
+#[cfg(test)]
+mod degradation_texture_tests {
+    use super::downsample_rgba_nearest;
+
+    #[test]
+    fn nearest_downsample_is_deterministic_and_preserves_rgba_pixels() {
+        let source = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        assert_eq!(
+            downsample_rgba_nearest(&source, 2, 2, 1, 1),
+            vec![1, 2, 3, 4]
+        );
     }
 }

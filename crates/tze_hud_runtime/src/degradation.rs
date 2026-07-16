@@ -21,6 +21,11 @@
 
 use std::collections::VecDeque;
 
+use tze_hud_compositor::CompositorDegradationPolicy;
+use tze_hud_protocol::proto::session::{
+    DegradationLevel as ProtocolDegradationLevel, DegradationNotice,
+};
+use tze_hud_protocol::session::RuntimeDegradationLevel;
 use tze_hud_scene::types::SceneId;
 use tze_hud_telemetry::{DegradationDirection, DegradationEvent};
 
@@ -37,6 +42,62 @@ const TRIGGER_THRESHOLD_US: u64 = 14_000; // 14ms
 
 /// Recovery threshold: frame_time_p95 must be below this to recover a level (µs).
 const RECOVERY_THRESHOLD_US: u64 = 12_000; // 12ms
+
+/// Immutable cadence-derived thresholds and elapsed windows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DegradationEnvelope {
+    pub effective_fps: u32,
+    pub period_us: u64,
+    pub entry_threshold_us: u64,
+    pub recovery_threshold_us: u64,
+    pub entry_duration_us: u64,
+    pub recovery_duration_us: u64,
+    pub entry_min_samples: usize,
+    pub recovery_min_samples: usize,
+}
+
+impl DegradationEnvelope {
+    /// Derive the frozen runtime envelope from the validated effective cadence.
+    pub fn from_effective_fps(effective_fps: u32) -> Option<Self> {
+        if effective_fps == 0 {
+            return None;
+        }
+        let period_us = 1_000_000_u64 / u64::from(effective_fps);
+        if period_us == 0 {
+            return None;
+        }
+        let ceil_ratio = |numerator: u64, denominator: u64| {
+            period_us
+                .checked_mul(numerator)
+                .map(|value| value.div_ceil(denominator))
+        };
+        Some(Self {
+            effective_fps,
+            period_us,
+            entry_threshold_us: ceil_ratio(21, 25)?.min(TRIGGER_THRESHOLD_US),
+            recovery_threshold_us: ceil_ratio(18, 25)?.min(RECOVERY_THRESHOLD_US),
+            entry_duration_us: period_us.checked_mul(TRIGGER_WINDOW as u64)?,
+            recovery_duration_us: period_us.checked_mul(RECOVERY_WINDOW as u64)?,
+            entry_min_samples: TRIGGER_WINDOW,
+            recovery_min_samples: RECOVERY_WINDOW,
+        })
+    }
+}
+
+/// Resolve the immutable startup cadence from the configured target and a
+/// monitor refresh reported in millihertz. Unknown refresh leaves the target
+/// unchanged; a known refresh caps it. Millihertz is rounded to the nearest
+/// whole presentation cadence because the runtime envelope is integer-Hz.
+pub(crate) fn effective_degradation_fps(
+    target_fps: u32,
+    monitor_refresh_millihz: Option<u32>,
+) -> u32 {
+    let target_fps = target_fps.max(1);
+    monitor_refresh_millihz.map_or(target_fps, |refresh_millihz| {
+        let refresh_fps = refresh_millihz.saturating_add(500) / 1_000;
+        target_fps.min(refresh_fps.max(1))
+    })
+}
 
 // ─── Degradation Level ────────────────────────────────────────────────────────
 
@@ -184,7 +245,7 @@ pub struct DegradationController {
     ///
     /// We keep the longer window (30 frames) because it subsumes the shorter
     /// (10 frames). The p95 over the last N entries gives the rolling window.
-    frame_times: VecDeque<u64>,
+    frame_times: VecDeque<(u64, u64)>,
 
     /// Number of consecutive 30-frame rolling windows where p95 < 12ms.
     /// Used for the full-recovery path from Level 5.
@@ -195,17 +256,37 @@ pub struct DegradationController {
 
     /// Monotonically increasing frame counter for telemetry.
     frame_number: u64,
+
+    /// Frozen startup thresholds and elapsed windows.
+    envelope: DegradationEnvelope,
+
+    /// Deterministic clock used by the compatibility `record_frame` API.
+    virtual_now_us: u64,
+
+    /// First instant at which the scheduler proved there was no render deadline.
+    quiescent_since_us: Option<u64>,
 }
 
 impl DegradationController {
     /// Create a new controller starting at Normal.
     pub fn new(config: DegradationConfig) -> Self {
+        Self::with_envelope(
+            config,
+            DegradationEnvelope::from_effective_fps(60).expect("60 Hz envelope is valid"),
+        )
+    }
+
+    /// Create a controller with a cadence envelope frozen by startup resolution.
+    pub fn with_envelope(config: DegradationConfig, envelope: DegradationEnvelope) -> Self {
         Self {
             level: DegradationLevel::Normal,
             frame_times: VecDeque::with_capacity(RECOVERY_WINDOW),
             clean_recovery_windows: 0,
             config,
             frame_number: 0,
+            envelope,
+            virtual_now_us: 0,
+            quiescent_since_us: None,
         }
     }
 
@@ -222,6 +303,10 @@ impl DegradationController {
     /// The current configuration.
     pub fn config(&self) -> &DegradationConfig {
         &self.config
+    }
+
+    pub fn envelope(&self) -> DegradationEnvelope {
+        self.envelope
     }
 
     /// Record a completed frame's time (in microseconds) and evaluate
@@ -248,16 +333,25 @@ impl DegradationController {
     /// rolling 30-frame window: checked every frame once at least 30 samples
     /// exist, matching the spec ("30-frame rolling window").
     pub fn record_frame(&mut self, frame_time_us: u64) -> Option<DegradationEvent> {
-        self.frame_number += 1;
+        self.virtual_now_us = self.virtual_now_us.saturating_add(self.envelope.period_us);
+        self.record_frame_at(frame_time_us, self.virtual_now_us)
+    }
 
-        // ── Maintain ring buffer ──────────────────────────────────────────────
-        //
-        // We store up to RECOVERY_WINDOW (30) samples. When the buffer is full,
-        // the oldest sample is evicted (the VecDeque acts as a ring buffer).
-        if self.frame_times.len() >= RECOVERY_WINDOW {
+    /// Record a successful active frame at an injected monotonic completion time.
+    pub fn record_frame_at(
+        &mut self,
+        frame_time_us: u64,
+        completed_at_us: u64,
+    ) -> Option<DegradationEvent> {
+        self.frame_number += 1;
+        self.virtual_now_us = self.virtual_now_us.max(completed_at_us);
+        self.quiescent_since_us = None;
+
+        self.frame_times.push_back((completed_at_us, frame_time_us));
+        let oldest = completed_at_us.saturating_sub(self.envelope.recovery_duration_us);
+        while self.frame_times.front().is_some_and(|(at, _)| *at < oldest) {
             self.frame_times.pop_front();
         }
-        self.frame_times.push_back(frame_time_us);
 
         let old_level = self.level;
 
@@ -265,9 +359,22 @@ impl DegradationController {
         //
         // Spec: trigger fires when p95 > 14ms over the rolling 10-frame window.
         // Evaluated on every frame once at least TRIGGER_WINDOW samples exist.
-        if self.level < DegradationLevel::Emergency && self.frame_times.len() >= TRIGGER_WINDOW {
-            let p95_trigger = p95_of_last_n(&self.frame_times, TRIGGER_WINDOW);
-            if p95_trigger > TRIGGER_THRESHOLD_US {
+        let entry_samples = samples_for_window(
+            &self.frame_times,
+            completed_at_us,
+            self.envelope.entry_duration_us,
+        );
+        if self.level < DegradationLevel::Emergency
+            && entry_samples.len() >= self.envelope.entry_min_samples
+            && window_coverage_us(
+                &self.frame_times,
+                completed_at_us,
+                self.envelope.entry_duration_us,
+                self.envelope.period_us,
+            ) >= self.envelope.entry_duration_us
+        {
+            let p95_trigger = p95(&entry_samples);
+            if p95_trigger > self.envelope.entry_threshold_us {
                 self.level = self.level.advance();
                 // Clear the ring buffer after a level change.
                 // New observations start from scratch, preventing the same
@@ -281,6 +388,12 @@ impl DegradationController {
                     new_level: self.level.as_u8(),
                     frame_time_p95_us: p95_trigger,
                     direction: DegradationDirection::Advance,
+                    sample_count: entry_samples.len() as u32,
+                    window_duration_us: self.envelope.entry_duration_us,
+                    effective_cadence_hz: self.envelope.effective_fps,
+                    entry_threshold_us: self.envelope.entry_threshold_us,
+                    recovery_threshold_us: self.envelope.recovery_threshold_us,
+                    recovery_source: tze_hud_telemetry::DegradationRecoverySource::ActiveFrames,
                 });
             }
         }
@@ -291,11 +404,23 @@ impl DegradationController {
         // window (spec line 256). Evaluated on every frame once at least
         // RECOVERY_WINDOW samples exist. For Level 5, full recovery to Normal
         // requires 5 such successive clean windows (~2.5 seconds at 60fps).
-        if self.level > DegradationLevel::Normal && self.frame_times.len() >= RECOVERY_WINDOW {
-            // A full 30-frame rolling window is available — evaluate it.
-            let p95_recovery = p95_of_last_n(&self.frame_times, RECOVERY_WINDOW);
+        let recovery_samples = samples_for_window(
+            &self.frame_times,
+            completed_at_us,
+            self.envelope.recovery_duration_us,
+        );
+        if self.level > DegradationLevel::Normal
+            && recovery_samples.len() >= self.envelope.recovery_min_samples
+            && window_coverage_us(
+                &self.frame_times,
+                completed_at_us,
+                self.envelope.recovery_duration_us,
+                self.envelope.period_us,
+            ) >= self.envelope.recovery_duration_us
+        {
+            let p95_recovery = p95(&recovery_samples);
 
-            if p95_recovery < RECOVERY_THRESHOLD_US {
+            if p95_recovery < self.envelope.recovery_threshold_us {
                 self.clean_recovery_windows += 1;
                 // Always recover one level per clean window.
                 self.level = self.level.recover();
@@ -308,6 +433,12 @@ impl DegradationController {
                     new_level: self.level.as_u8(),
                     frame_time_p95_us: p95_recovery,
                     direction: DegradationDirection::Recover,
+                    sample_count: recovery_samples.len() as u32,
+                    window_duration_us: self.envelope.recovery_duration_us,
+                    effective_cadence_hz: self.envelope.effective_fps,
+                    entry_threshold_us: self.envelope.entry_threshold_us,
+                    recovery_threshold_us: self.envelope.recovery_threshold_us,
+                    recovery_source: tze_hud_telemetry::DegradationRecoverySource::ActiveFrames,
                 });
             } else {
                 // Dirty window — reset clean window counter.
@@ -317,6 +448,36 @@ impl DegradationController {
         }
 
         None
+    }
+
+    /// Report a scheduler tick whose canonical predicate proved true quiescence.
+    pub fn record_quiescent_at(&mut self, now_us: u64) -> Option<DegradationEvent> {
+        self.virtual_now_us = self.virtual_now_us.max(now_us);
+        if self.level == DegradationLevel::Normal {
+            self.quiescent_since_us = Some(now_us);
+            return None;
+        }
+        let since = *self.quiescent_since_us.get_or_insert(now_us);
+        if now_us.saturating_sub(since) < self.envelope.recovery_duration_us {
+            return None;
+        }
+        let old_level = self.level;
+        self.level = self.level.recover();
+        self.quiescent_since_us = Some(now_us);
+        self.frame_times.clear();
+        Some(DegradationEvent {
+            frame_number: self.frame_number,
+            previous_level: old_level.as_u8(),
+            new_level: self.level.as_u8(),
+            frame_time_p95_us: 0,
+            direction: DegradationDirection::Recover,
+            sample_count: 0,
+            window_duration_us: self.envelope.recovery_duration_us,
+            effective_cadence_hz: self.envelope.effective_fps,
+            entry_threshold_us: self.envelope.entry_threshold_us,
+            recovery_threshold_us: self.envelope.recovery_threshold_us,
+            recovery_source: tze_hud_telemetry::DegradationRecoverySource::Quiescent,
+        })
     }
 
     /// Determine which tiles to suppress in the render pass at Level 4+ shedding.
@@ -448,6 +609,77 @@ impl DegradationController {
     pub fn clean_recovery_windows(&self) -> u32 {
         self.clean_recovery_windows
     }
+
+    /// Build the complete compositor policy from inputs snapshotted under the
+    /// scene lock for the frame being built.
+    pub fn compositor_policy(&self, tiles: &[TileDescriptor]) -> CompositorDegradationPolicy {
+        let level = match self.level {
+            DegradationLevel::Normal => tze_hud_scene::DegradationLevel::Nominal,
+            DegradationLevel::Coalesce => tze_hud_scene::DegradationLevel::Minor,
+            DegradationLevel::ReduceTextureQuality => tze_hud_scene::DegradationLevel::Moderate,
+            DegradationLevel::DisableTransparency => tze_hud_scene::DegradationLevel::Significant,
+            DegradationLevel::ShedTiles => tze_hud_scene::DegradationLevel::ShedTiles,
+            DegradationLevel::Emergency => tze_hud_scene::DegradationLevel::Emergency,
+        };
+        CompositorDegradationPolicy {
+            level,
+            suppressed_tiles: self
+                .shed_tiles(tiles)
+                .into_iter()
+                .map(|tile| tile.tile_id)
+                .collect(),
+            texture_quality_threshold_px: self.config.texture_quality_threshold_px,
+            texture_scale_factor: self.config.texture_scale_factor,
+        }
+    }
+
+    /// Exhaustive append-only runtime-to-wire mapping.
+    pub fn protocol_level(&self) -> (RuntimeDegradationLevel, ProtocolDegradationLevel) {
+        match self.level {
+            DegradationLevel::Normal => (
+                RuntimeDegradationLevel::Normal,
+                ProtocolDegradationLevel::Normal,
+            ),
+            DegradationLevel::Coalesce => (
+                RuntimeDegradationLevel::CoalescingMore,
+                ProtocolDegradationLevel::CoalescingMore,
+            ),
+            DegradationLevel::ReduceTextureQuality => (
+                RuntimeDegradationLevel::TextureQualityReduced,
+                ProtocolDegradationLevel::TextureQualityReduced,
+            ),
+            DegradationLevel::DisableTransparency => (
+                RuntimeDegradationLevel::RenderingSimplified,
+                ProtocolDegradationLevel::RenderingSimplified,
+            ),
+            DegradationLevel::ShedTiles => (
+                RuntimeDegradationLevel::SheddingTiles,
+                ProtocolDegradationLevel::SheddingTiles,
+            ),
+            DegradationLevel::Emergency => (
+                RuntimeDegradationLevel::EmergencyRendering,
+                ProtocolDegradationLevel::EmergencyRendering,
+            ),
+        }
+    }
+
+    pub fn protocol_notice(&self, timestamp_wall_us: u64) -> DegradationNotice {
+        let (_, level) = self.protocol_level();
+        let affected_capabilities = match self.level {
+            DegradationLevel::Coalesce => vec!["state_stream".to_string()],
+            DegradationLevel::Normal
+            | DegradationLevel::ReduceTextureQuality
+            | DegradationLevel::DisableTransparency
+            | DegradationLevel::ShedTiles
+            | DegradationLevel::Emergency => Vec::new(),
+        };
+        DegradationNotice {
+            level: level as i32,
+            reason: format!("runtime degradation level changed to {}", self.level),
+            affected_capabilities,
+            timestamp_wall_us,
+        }
+    }
 }
 
 // ─── p95 helper ───────────────────────────────────────────────────────────────
@@ -457,11 +689,47 @@ impl DegradationController {
 /// Panics if `n > deque.len()` — callers must guard with `len() >= n`.
 ///
 /// Uses the nearest-rank method (consistent with [`LatencyBucket::percentile`]).
-fn p95_of_last_n(deque: &VecDeque<u64>, n: usize) -> u64 {
+#[cfg(test)]
+fn p95_of_last_n(deque: &VecDeque<(u64, u64)>, n: usize) -> u64 {
     debug_assert!(deque.len() >= n, "caller must ensure len() >= n");
-    let mut samples: Vec<u64> = deque.iter().rev().take(n).copied().collect();
+    let samples: Vec<u64> = deque
+        .iter()
+        .rev()
+        .take(n)
+        .map(|(_, value)| *value)
+        .collect();
+    p95(&samples)
+}
+
+fn samples_for_window(deque: &VecDeque<(u64, u64)>, now_us: u64, duration_us: u64) -> Vec<u64> {
+    let oldest = now_us.saturating_sub(duration_us);
+    deque
+        .iter()
+        .filter(|(at, _)| *at >= oldest && *at <= now_us)
+        .map(|(_, value)| *value)
+        .collect()
+}
+
+fn window_coverage_us(
+    deque: &VecDeque<(u64, u64)>,
+    now_us: u64,
+    duration_us: u64,
+    period_us: u64,
+) -> u64 {
+    let oldest = now_us.saturating_sub(duration_us);
+    deque
+        .iter()
+        .find(|(at, _)| *at >= oldest && *at <= now_us)
+        .map_or(0, |(first_at, _)| {
+            now_us.saturating_sub(*first_at).saturating_add(period_us)
+        })
+}
+
+fn p95(samples: &[u64]) -> u64 {
+    debug_assert!(!samples.is_empty());
+    let mut samples = samples.to_vec();
     samples.sort_unstable();
-    let rank = ((95.0_f64 / 100.0) * samples.len() as f64).ceil() as usize;
+    let rank = (95 * samples.len()).div_ceil(100);
     let idx = rank.saturating_sub(1).min(samples.len() - 1);
     samples[idx]
 }
@@ -475,6 +743,91 @@ mod tests {
 
     fn controller() -> DegradationController {
         DegradationController::with_defaults()
+    }
+
+    #[test]
+    fn cadence_envelope_preserves_60hz_calibration_and_tightens_faster_periods() {
+        let sixty = DegradationEnvelope::from_effective_fps(60).expect("valid cadence");
+        assert_eq!(sixty.entry_threshold_us, 14_000);
+        assert_eq!(sixty.recovery_threshold_us, 12_000);
+        assert_eq!(sixty.entry_min_samples, 10);
+        assert_eq!(sixty.recovery_min_samples, 30);
+
+        let faster = DegradationEnvelope::from_effective_fps(75).expect("valid cadence");
+        assert!(faster.entry_threshold_us < sixty.entry_threshold_us);
+        assert!(faster.recovery_threshold_us < sixty.recovery_threshold_us);
+    }
+
+    #[test]
+    fn effective_cadence_is_capped_only_when_monitor_refresh_is_known() {
+        assert_eq!(effective_degradation_fps(120, None), 120);
+        assert_eq!(effective_degradation_fps(120, Some(60_000)), 60);
+        assert_eq!(effective_degradation_fps(120, Some(59_940)), 60);
+        assert_eq!(effective_degradation_fps(30, Some(60_000)), 30);
+    }
+
+    #[test]
+    fn elapsed_window_blocks_burst_samples_and_quiescence_recovers_without_frames() {
+        let envelope = DegradationEnvelope::from_effective_fps(60).expect("valid cadence");
+        let mut ctrl = DegradationController::with_envelope(DegradationConfig::default(), envelope);
+        for i in 0..10 {
+            assert!(ctrl.record_frame_at(20_000, 1_000 + i).is_none());
+        }
+        assert_eq!(ctrl.level(), DegradationLevel::Normal);
+
+        let mut now = 0;
+        for _ in 0..10 {
+            now += envelope.period_us;
+            let _ = ctrl.record_frame_at(20_000, now);
+        }
+        assert_eq!(ctrl.level(), DegradationLevel::Coalesce);
+        assert!(ctrl.record_quiescent_at(now).is_none());
+        assert!(
+            ctrl.record_quiescent_at(now + envelope.recovery_duration_us - 1)
+                .is_none()
+        );
+        let recovered = ctrl
+            .record_quiescent_at(now + envelope.recovery_duration_us)
+            .expect("one quiescent recovery step");
+        assert_eq!(recovered.new_level, DegradationLevel::Normal.as_u8());
+    }
+
+    #[test]
+    fn production_degradation_sustained_payload_emits_machine_readable_deadline_evidence() {
+        let started = std::time::Instant::now();
+        let envelope = DegradationEnvelope::from_effective_fps(60).expect("valid cadence");
+        let mut ctrl = DegradationController::with_envelope(DegradationConfig::default(), envelope);
+        let mut selected_at_us = 0;
+        let mut transition = None;
+
+        for sample_index in 1..=envelope.entry_min_samples {
+            selected_at_us = sample_index as u64 * envelope.period_us;
+            transition = ctrl.record_frame_at(envelope.entry_threshold_us + 1, selected_at_us);
+        }
+
+        let transition = transition.expect("sustained over-budget load must select Level 1");
+        assert!(
+            selected_at_us <= envelope.entry_duration_us,
+            "transition must be selected within the cadence-derived deadline"
+        );
+        assert_eq!(transition.previous_level, DegradationLevel::Normal.as_u8());
+        assert_eq!(transition.new_level, DegradationLevel::Coalesce.as_u8());
+
+        println!(
+            "{}",
+            serde_json::json!({
+                "artifact": "production_degradation_sustained_payload",
+                "status": "pass",
+                "effective_cadence_hz": envelope.effective_fps,
+                "entry_threshold_us": envelope.entry_threshold_us,
+                "entry_deadline_us": envelope.entry_duration_us,
+                "selected_at_us": selected_at_us,
+                "sample_count": transition.sample_count,
+                "from_level": transition.previous_level,
+                "to_level": transition.new_level,
+                "validation_wall_time_us": started.elapsed().as_micros() as u64,
+            })
+        );
     }
 
     /// Push `n` frames of `frame_time_us` through the controller without
@@ -969,6 +1322,76 @@ mod tests {
         assert!(ctrl.should_disable_transparency());
     }
 
+    #[test]
+    fn production_policy_mapping_is_exhaustive_and_suppression_uses_scene_ids() {
+        let mut ctrl = controller();
+        let tiles = vec![
+            TileDescriptor {
+                tile_id: SceneId::new(),
+                lease_priority: 3,
+                z_order: 1,
+            },
+            TileDescriptor {
+                tile_id: SceneId::new(),
+                lease_priority: 1,
+                z_order: 9,
+            },
+            TileDescriptor {
+                tile_id: SceneId::new(),
+                lease_priority: 2,
+                z_order: 4,
+            },
+            TileDescriptor {
+                tile_id: SceneId::new(),
+                lease_priority: 2,
+                z_order: 8,
+            },
+        ];
+
+        ctrl.level = DegradationLevel::ShedTiles;
+        let policy = ctrl.compositor_policy(&tiles);
+        assert_eq!(policy.level, tze_hud_scene::DegradationLevel::ShedTiles);
+        assert_eq!(policy.suppressed_tiles.len(), 1);
+        assert!(policy.suppressed_tiles.contains(&tiles[0].tile_id));
+
+        ctrl.level = DegradationLevel::Emergency;
+        let policy = ctrl.compositor_policy(&tiles);
+        assert_eq!(policy.suppressed_tiles.len(), 3);
+        assert!(!policy.suppressed_tiles.contains(&tiles[1].tile_id));
+    }
+
+    #[test]
+    fn runtime_levels_have_exact_append_only_protocol_mapping() {
+        let mut ctrl = controller();
+        let expected = [
+            (DegradationLevel::Normal, ProtocolDegradationLevel::Normal),
+            (
+                DegradationLevel::Coalesce,
+                ProtocolDegradationLevel::CoalescingMore,
+            ),
+            (
+                DegradationLevel::ReduceTextureQuality,
+                ProtocolDegradationLevel::TextureQualityReduced,
+            ),
+            (
+                DegradationLevel::DisableTransparency,
+                ProtocolDegradationLevel::RenderingSimplified,
+            ),
+            (
+                DegradationLevel::ShedTiles,
+                ProtocolDegradationLevel::SheddingTiles,
+            ),
+            (
+                DegradationLevel::Emergency,
+                ProtocolDegradationLevel::EmergencyRendering,
+            ),
+        ];
+        for (runtime, protocol) in expected {
+            ctrl.level = runtime;
+            assert_eq!(ctrl.protocol_level().1, protocol);
+        }
+    }
+
     // ── Telemetry events ──────────────────────────────────────────────────────
 
     #[test]
@@ -981,6 +1404,29 @@ mod tests {
         assert!(
             ev.frame_time_p95_us > TRIGGER_THRESHOLD_US,
             "p95 should exceed trigger threshold"
+        );
+    }
+
+    #[test]
+    fn render_only_protocol_notices_do_not_claim_capability_reduction() {
+        let mut ctrl = controller();
+        for level in [
+            DegradationLevel::ReduceTextureQuality,
+            DegradationLevel::DisableTransparency,
+            DegradationLevel::ShedTiles,
+            DegradationLevel::Emergency,
+        ] {
+            ctrl.level = level;
+            assert!(
+                ctrl.protocol_notice(1).affected_capabilities.is_empty(),
+                "{level} changes rendering only"
+            );
+        }
+
+        ctrl.level = DegradationLevel::Coalesce;
+        assert_eq!(
+            ctrl.protocol_notice(1).affected_capabilities,
+            vec!["state_stream"]
         );
     }
 
@@ -1002,9 +1448,9 @@ mod tests {
 
     #[test]
     fn test_p95_helper_correctness() {
-        let mut deque: VecDeque<u64> = VecDeque::new();
+        let mut deque: VecDeque<(u64, u64)> = VecDeque::new();
         for i in 1..=10u64 {
-            deque.push_back(i * 1000);
+            deque.push_back((i, i * 1000));
         }
         // Values: [1000, 2000, ..., 10000]
         // p95 nearest-rank: ceil(0.95*10) = 10 → index 9 → 10000

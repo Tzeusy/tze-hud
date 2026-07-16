@@ -411,6 +411,20 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         }
     }
 
+    // Read the current degradation policy before transactional responses. The
+    // server sends this baseline for every new session and resume.
+    let msg = response_stream.next().await.unwrap()?;
+    match &msg.payload {
+        Some(session_proto::server_message::Payload::DegradationNotice(notice)) => {
+            println!("  Degradation baseline: level={}", notice.level);
+        }
+        other => {
+            return Err(
+                format!("Expected DegradationNotice after SceneSnapshot, got: {other:?}").into(),
+            );
+        }
+    }
+
     // Request lease with priority.
     //
     // `lease_priority` controls arbitration when the runtime must shed leases under
@@ -1466,6 +1480,13 @@ capabilities = ["create_tiles"]
         assert!(matches!(
             msg.payload,
             Some(session_proto::server_message::Payload::SceneSnapshot(_))
+        ));
+
+        // Current degradation baseline
+        let msg = response.next().await.unwrap().unwrap();
+        assert!(matches!(
+            msg.payload,
+            Some(session_proto::server_message::Payload::DegradationNotice(_))
         ));
 
         let elapsed = start.elapsed();

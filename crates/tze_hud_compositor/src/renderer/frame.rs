@@ -99,7 +99,7 @@ impl Compositor {
         telemetry: &mut FrameTelemetry,
     ) -> (Vec<RectVertex>, Vec<TexturedDrawCmd>, usize) {
         // Collect visible tiles, re-sorted with drag-z-order boost applied.
-        let tiles = Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene);
+        let tiles = Self::sort_tiles_with_drag_boost(self.policy_visible_tiles(scene), scene);
         telemetry.tile_count = tiles.len() as u32;
         telemetry.node_count = scene.node_count() as u32;
         telemetry.active_leases = scene.leases.len() as u32;
@@ -221,9 +221,7 @@ impl Compositor {
             if let Some(accent) = scene.tile_lifecycle_accent(tile.id) {
                 // Fold the tile's effective + portal-transition opacity so the
                 // accent fades with the tile (matches the tile background).
-                let opacity = (Self::effective_tile_opacity(tile, scene)
-                    * self.portal_tile_anim_opacity(tile.id))
-                .clamp(0.0, 1.0);
+                let opacity = self.tile_effective_opacity(tile, scene);
                 if let Some((bar_w, color)) =
                     Self::lifecycle_accent_bar_geom(tile.bounds, accent, opacity)
                 {
@@ -1063,7 +1061,11 @@ impl Compositor {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            content_pass.set_pipeline(&self.pipeline);
+            if self.use_opaque_rect_pipeline() {
+                content_pass.set_pipeline(&self.clear_pipeline);
+            } else {
+                content_pass.set_pipeline(&self.pipeline);
+            }
             if let Some(ref buf) = content_buffer {
                 let bg_end = bg_vertex_count.min(content_vertices.len());
                 if bg_end > 0 {
@@ -1098,7 +1100,11 @@ impl Compositor {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            content_pass.set_pipeline(&self.pipeline);
+            if self.use_opaque_rect_pipeline() {
+                content_pass.set_pipeline(&self.clear_pipeline);
+            } else {
+                content_pass.set_pipeline(&self.pipeline);
+            }
             if let Some(ref buf) = content_buffer {
                 let bg_end = bg_vertex_count.min(content_vertices.len());
                 let rest_count = content_vertices.len().saturating_sub(bg_end);
@@ -1175,6 +1181,7 @@ impl Compositor {
                 vec![]
             };
         // Phase C: render passes (re-takes tr mutable borrow).
+        let use_opaque_rect_pipeline = self.use_opaque_rect_pipeline();
         if let Some(ref mut tr) = self.text_rasterizer {
             if let Some(ref result) = chrome_prepare_result {
                 match result {
@@ -1206,7 +1213,11 @@ impl Compositor {
                                     timestamp_writes: None,
                                     occlusion_query_set: None,
                                 });
-                            inline_pass.set_pipeline(&self.pipeline);
+                            if use_opaque_rect_pipeline {
+                                inline_pass.set_pipeline(&self.clear_pipeline);
+                            } else {
+                                inline_pass.set_pipeline(&self.pipeline);
+                            }
                             inline_pass.set_vertex_buffer(0, inline_buf.slice(..));
                             inline_pass.draw(0..chrome_inline_verts.len() as u32, 0..1);
                         }
@@ -1271,7 +1282,11 @@ impl Compositor {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            chrome_pass.set_pipeline(&self.pipeline);
+            if self.use_opaque_rect_pipeline() {
+                chrome_pass.set_pipeline(&self.clear_pipeline);
+            } else {
+                chrome_pass.set_pipeline(&self.pipeline);
+            }
             if let Some(ref buf) = chrome_buffer {
                 chrome_pass.set_vertex_buffer(0, buf.slice(..));
                 chrome_pass.draw(0..chrome_vertices.len() as u32, 0..1);

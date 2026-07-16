@@ -39,6 +39,30 @@ use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::*;
 use tze_hud_telemetry::FrameTelemetry;
 
+/// Runtime-selected render policy for one frame.
+///
+/// The suppression set is computed under the same scene lock as the frame
+/// build and uses stable tile identities. The compositor never derives or
+/// advances degradation state independently.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompositorDegradationPolicy {
+    pub level: DegradationLevel,
+    pub suppressed_tiles: HashSet<SceneId>,
+    pub texture_quality_threshold_px: u32,
+    pub texture_scale_factor: f32,
+}
+
+impl Default for CompositorDegradationPolicy {
+    fn default() -> Self {
+        Self {
+            level: DegradationLevel::Nominal,
+            suppressed_tiles: HashSet::new(),
+            texture_quality_threshold_px: 512,
+            texture_scale_factor: 0.5,
+        }
+    }
+}
+
 pub mod animation;
 pub mod draw_cmds;
 pub mod easing;
@@ -165,6 +189,7 @@ pub struct Compositor {
     /// interpolation is skipped and final parameter values are applied
     /// immediately to reduce re-rasterization under load.
     pub degradation_level: DegradationLevel,
+    degradation_policy: CompositorDegradationPolicy,
     /// Optional text rasterizer (glyphon). Absent until `init_text_renderer`
     /// is called. When `None`, TextMarkdownNode and zone StreamText content
     /// renders as solid-color rectangles only (no glyph output).
@@ -735,6 +760,7 @@ impl Compositor {
             overlay_mode: false,
             debug_zone_tints: std::env::var("TZE_HUD_DEBUG_ZONES").is_ok_and(|v| v == "1"),
             degradation_level: DegradationLevel::Nominal,
+            degradation_policy: CompositorDegradationPolicy::default(),
             text_rasterizer: None,
             widget_renderer: None,
             zone_animation_states: HashMap::new(),
@@ -1031,6 +1057,7 @@ impl Compositor {
             overlay_mode: false,
             debug_zone_tints: std::env::var("TZE_HUD_DEBUG_ZONES").is_ok_and(|v| v == "1"),
             degradation_level: DegradationLevel::Nominal,
+            degradation_policy: CompositorDegradationPolicy::default(),
             text_rasterizer: None,
             widget_renderer: None,
             zone_animation_states: HashMap::new(),
@@ -1732,6 +1759,8 @@ impl Compositor {
         // gets shaped. Gated per-tile to portal surfaces below.
         let transcript_max_measure_px = resolve_transcript_max_measure_px(&self.token_map);
 
+        let policy_visible_tiles = self.policy_visible_tiles(scene);
+
         // Safe: checked is_none() above and returned; rasterizer stays Some
         // (this method holds &mut self exclusively).
         let rasterizer = self
@@ -1744,7 +1773,7 @@ impl Compositor {
         // mid-read (hud-33qo7).
         let markdown_cache = self.markdown_primer.load();
         let mut live_items: Vec<crate::text::TextItem> = Vec::new();
-        for tile in scene.visible_tiles() {
+        for tile in policy_visible_tiles {
             let tile_x = tile.bounds.x;
             let tile_y = tile.bounds.y;
             // Determine whether this tile is currently following its tail.
@@ -2124,7 +2153,7 @@ impl Compositor {
                 occlusion_query_set: None,
             });
 
-            if use_overlay_pipeline {
+            if use_overlay_pipeline || self.use_opaque_rect_pipeline() {
                 render_pass.set_pipeline(&self.clear_pipeline);
             } else {
                 render_pass.set_pipeline(&self.pipeline);
@@ -2164,7 +2193,7 @@ impl Compositor {
                 occlusion_query_set: None,
             });
 
-            if use_overlay_pipeline {
+            if use_overlay_pipeline || self.use_opaque_rect_pipeline() {
                 render_pass.set_pipeline(&self.clear_pipeline);
             } else {
                 render_pass.set_pipeline(&self.pipeline);
@@ -2190,6 +2219,7 @@ impl Compositor {
         // `collect_encode_inputs` (Phase A/B). Here we only replay the prepared
         // TextAreas (Phase C) and always trim the atlas — no scene access.
         let inline_verts = &inputs.inline_verts;
+        let use_opaque_rect_pipeline = self.use_opaque_rect_pipeline();
         if let Some(ref mut tr) = self.text_rasterizer {
             if inputs.render_text {
                 // ── Inline backdrop pass (Phase 2, hud-9ieev) ────────────────
@@ -2218,7 +2248,7 @@ impl Compositor {
                         timestamp_writes: None,
                         occlusion_query_set: None,
                     });
-                    if use_overlay_pipeline {
+                    if use_overlay_pipeline || use_opaque_rect_pipeline {
                         inline_pass.set_pipeline(&self.clear_pipeline);
                     } else {
                         inline_pass.set_pipeline(&self.pipeline);

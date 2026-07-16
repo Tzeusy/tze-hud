@@ -31,6 +31,15 @@ pub struct FrameTelemetry {
     /// Total frame time in microseconds (Stage 1 start → Stage 7 end).
     pub frame_time_us: u64,
 
+    /// Authoritative degradation trigger workload: active runtime/compositor
+    /// work before Stage 3 through successful Stage 7 completion.
+    #[serde(default)]
+    pub degradation_work_time_us: u64,
+
+    /// Runtime degradation policy actually applied while rendering this frame.
+    #[serde(default)]
+    pub degradation_level: u8,
+
     // ── Per-stage timings ────────────────────────────────────────────────────
     /// Stage 1 — Input Drain (main thread). p99 budget: 500us.
     /// Drain OS input events, attach hardware timestamps, enqueue InputEvent records.
@@ -189,6 +198,8 @@ impl FrameTelemetry {
             frame_number,
             timestamp_us: 0,
             frame_time_us: 0,
+            degradation_work_time_us: 0,
+            degradation_level: 0,
             stage1_input_drain_us: 0,
             stage2_local_feedback_us: 0,
             stage3_mutation_intake_us: 0,
@@ -488,6 +499,25 @@ pub struct DegradationEvent {
     pub frame_time_p95_us: u64,
     /// Direction of the transition.
     pub direction: DegradationDirection,
+    #[serde(default)]
+    pub sample_count: u32,
+    #[serde(default)]
+    pub window_duration_us: u64,
+    #[serde(default)]
+    pub effective_cadence_hz: u32,
+    #[serde(default)]
+    pub entry_threshold_us: u64,
+    #[serde(default)]
+    pub recovery_threshold_us: u64,
+    #[serde(default)]
+    pub recovery_source: DegradationRecoverySource,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DegradationRecoverySource {
+    #[default]
+    ActiveFrames,
+    Quiescent,
 }
 
 /// Direction of a degradation level transition.
@@ -1014,6 +1044,32 @@ mod tests {
         let json = serde_json::to_string(&frame).unwrap();
         assert!(json.contains("\"invariant_violations_this_frame\":0"));
         assert!(json.contains("\"layer0_checks_failed_this_frame\":0"));
+    }
+
+    #[test]
+    fn degradation_workload_and_applied_level_are_machine_readable() {
+        let mut frame = FrameTelemetry::new(42);
+        assert_eq!(frame.degradation_work_time_us, 0);
+        assert_eq!(frame.degradation_level, 0);
+        frame.degradation_work_time_us = 8_750;
+        frame.degradation_level = 3;
+
+        let encoded = serde_json::to_string(&frame).unwrap();
+        let decoded: FrameTelemetry = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.degradation_work_time_us, 8_750);
+        assert_eq!(decoded.degradation_level, 3);
+    }
+
+    #[test]
+    fn degradation_fields_default_when_reading_legacy_frame_json() {
+        let mut legacy = serde_json::to_value(FrameTelemetry::new(42)).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        object.remove("degradation_work_time_us");
+        object.remove("degradation_level");
+
+        let decoded: FrameTelemetry = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.degradation_work_time_us, 0);
+        assert_eq!(decoded.degradation_level, 0);
     }
 
     // ── hud-gpqde: markdown_prime_us telemetry field ─────────────────────────

@@ -383,7 +383,8 @@ async fn connect_test_client_with_retry(port: u16) -> HudSessionClient<tonic::tr
 }
 
 /// Helper: create a bidirectional stream and perform handshake.
-/// Returns (sender, first few server messages including SessionEstablished + SceneSnapshot).
+/// Returns the sender and the three ordered handshake messages:
+/// SessionEstablished, SceneSnapshot, and current DegradationNotice.
 async fn handshake(
     client: &mut HudSessionClient<tonic::transport::Channel>,
     agent_id: &str,
@@ -423,10 +424,9 @@ async fn handshake(
 
     let mut response_stream = client.session(stream).await.unwrap().into_inner();
 
-    // Collect SessionEstablished and SceneSnapshot
+    // Collect SessionEstablished, SceneSnapshot, and current degradation state.
     let mut messages = Vec::new();
-    // We expect exactly 2 messages: SessionEstablished and SceneSnapshot
-    for _ in 0..2 {
+    for _ in 0..3 {
         if let Some(msg) = response_stream.next().await {
             messages.push(msg.unwrap());
         }
@@ -470,7 +470,7 @@ async fn handshake_with_requested_capabilities(
 
     let mut response_stream = client.session(stream).await.unwrap().into_inner();
     let mut messages = Vec::new();
-    for _ in 0..2 {
+    for _ in 0..3 {
         if let Some(msg) = response_stream.next().await {
             messages.push(msg.unwrap());
         }
@@ -483,7 +483,7 @@ async fn test_handshake_init_established_and_snapshot() {
     let (mut client, _server) = setup_test().await;
     let (_tx, messages, _stream) = handshake(&mut client, "test-agent", "test-key").await;
 
-    assert_eq!(messages.len(), 2);
+    assert_eq!(messages.len(), 3);
 
     // First message: SessionEstablished
     match &messages[0].payload {
@@ -545,6 +545,13 @@ async fn test_handshake_init_established_and_snapshot() {
             assert!(!snapshot.snapshot_json.is_empty());
         }
         other => panic!("Expected SceneSnapshot, got: {other:?}"),
+    }
+
+    match &messages[2].payload {
+        Some(ServerPayload::DegradationNotice(notice)) => {
+            assert_eq!(notice.level, DegradationLevel::Normal as i32);
+        }
+        other => panic!("Expected current DegradationNotice, got: {other:?}"),
     }
 }
 
@@ -2544,7 +2551,8 @@ async fn test_resume_with_token() {
 
     let mut response_stream = client.session(resume_stream).await.unwrap().into_inner();
 
-    // Should get SessionResumeResult + SceneSnapshot (not SessionEstablished)
+    // Resume ordering is result, coherent snapshot, then current degradation
+    // state before any live transition.
     let msg1 = response_stream.next().await.unwrap().unwrap();
     match &msg1.payload {
         Some(ServerPayload::SessionResumeResult(result)) => {
@@ -2563,6 +2571,14 @@ async fn test_resume_with_token() {
     match &msg2.payload {
         Some(ServerPayload::SceneSnapshot(_)) => {}
         other => panic!("Expected SceneSnapshot on resume, got: {other:?}"),
+    }
+
+    let msg3 = response_stream.next().await.unwrap().unwrap();
+    match &msg3.payload {
+        Some(ServerPayload::DegradationNotice(notice)) => {
+            assert_eq!(notice.level, DegradationLevel::Normal as i32);
+        }
+        other => panic!("Expected current DegradationNotice on resume, got: {other:?}"),
     }
 }
 
@@ -2651,8 +2667,8 @@ async fn test_subscription_change_result() {
 
     let mut response_stream = client.session(stream).await.unwrap().into_inner();
 
-    // Collect SessionEstablished and SceneSnapshot
-    for _ in 0..2 {
+    // Collect SessionEstablished, SceneSnapshot, and current degradation state.
+    for _ in 0..3 {
         let _ = response_stream.next().await;
     }
 
@@ -2744,8 +2760,8 @@ async fn test_subscription_change_with_filter_prefix() {
 
     let mut response_stream = client.session(stream).await.unwrap().into_inner();
 
-    // Collect SessionEstablished and SceneSnapshot
-    for _ in 0..2 {
+    // Collect SessionEstablished, SceneSnapshot, and current degradation state.
+    for _ in 0..3 {
         let _ = response_stream.next().await;
     }
 
@@ -3724,11 +3740,11 @@ async fn test_state_machine_successful_establishment() {
     let (mut client, _server) = setup_test().await;
     let (_tx, messages, _stream) = handshake(&mut client, "state-test-agent", "test-key").await;
 
-    // If handshake succeeded, we must have SessionEstablished followed by SceneSnapshot
+    // The complete initial baseline is establishment, snapshot, then current policy.
     assert_eq!(
         messages.len(),
-        2,
-        "Expected SessionEstablished + SceneSnapshot"
+        3,
+        "Expected SessionEstablished + SceneSnapshot + DegradationNotice"
     );
     assert!(
         matches!(
@@ -3740,6 +3756,13 @@ async fn test_state_machine_successful_establishment() {
     assert!(
         matches!(messages[1].payload, Some(ServerPayload::SceneSnapshot(_))),
         "Second message must be SceneSnapshot"
+    );
+    assert!(
+        matches!(
+            messages[2].payload,
+            Some(ServerPayload::DegradationNotice(_))
+        ),
+        "Third message must be current DegradationNotice"
     );
 }
 
@@ -5186,6 +5209,13 @@ async fn test_capability_request_after_resume_uses_policy_scope() {
         Some(ServerPayload::SceneSnapshot(_)) => {}
         other => panic!("Expected SceneSnapshot after resume, got: {other:?}"),
     }
+    let current_degradation = resumed.next().await.unwrap().unwrap();
+    match current_degradation.payload {
+        Some(ServerPayload::DegradationNotice(notice)) => {
+            assert_eq!(notice.level, DegradationLevel::Normal as i32);
+        }
+        other => panic!("Expected current degradation after snapshot, got: {other:?}"),
+    }
 
     // Authorized post-resume escalation must succeed.
     resume_tx
@@ -5679,13 +5709,55 @@ fn test_degradation_notice_is_transactional() {
     );
 }
 
+#[tokio::test]
+async fn new_session_receives_existing_degradation_after_snapshot() {
+    let scene = SceneGraph::new(800.0, 600.0);
+    let service = HudSessionImpl::new(scene, "test-key");
+    service
+        .degradation_notices
+        .publish(DegradationNotice {
+            level: DegradationLevel::SheddingTiles as i32,
+            reason: "existing load".to_string(),
+            affected_capabilities: Vec::new(),
+            timestamp_wall_us: now_wall_us(),
+        })
+        .await;
+
+    let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _server = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(HudSessionServer::new(service))
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+            .await
+            .unwrap();
+    });
+    let mut client = connect_test_client_with_retry(addr.port()).await;
+    let (_tx, messages, _stream) = handshake(&mut client, "degraded-new-agent", "test-key").await;
+
+    assert!(matches!(
+        messages[0].payload,
+        Some(ServerPayload::SessionEstablished(_))
+    ));
+    assert!(matches!(
+        messages[1].payload,
+        Some(ServerPayload::SceneSnapshot(_))
+    ));
+    match &messages[2].payload {
+        Some(ServerPayload::DegradationNotice(notice)) => {
+            assert_eq!(notice.level, DegradationLevel::SheddingTiles as i32);
+        }
+        other => panic!("expected current degradation third, got {other:?}"),
+    }
+}
+
 /// Scenario: WHEN runtime enters COALESCING_MORE degradation level,
 /// THEN all active sessions receive DegradationNotice unconditionally.
 #[tokio::test]
 async fn test_degradation_notice_broadcast_to_active_session() {
     let scene = SceneGraph::new(800.0, 600.0);
     let service = HudSessionImpl::new(scene, "test-key");
-    let degradation_tx = service.degradation_tx.clone();
+    let degradation_notices = service.degradation_notices.clone();
     let state_ref = service.state.clone();
 
     let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
@@ -5716,7 +5788,7 @@ async fn test_degradation_notice_broadcast_to_active_session() {
         affected_capabilities: vec!["state_stream".to_string()],
         timestamp_wall_us: now_wall_us(),
     };
-    let _ = degradation_tx.send(notice.clone());
+    assert_eq!(degradation_notices.publish(notice.clone()).await, 1);
 
     // Update shared state level (mirrors what broadcast_degradation() does).
     {
@@ -6434,8 +6506,8 @@ async fn test_input_capture_release_delivers_event() {
 
     let mut response_stream = client.session(stream_rx).await.unwrap().into_inner();
 
-    // Drain SessionEstablished and SceneSnapshot
-    for _ in 0..2 {
+    // Drain SessionEstablished, SceneSnapshot, and current degradation state.
+    for _ in 0..3 {
         let _ = response_stream.next().await;
     }
 
@@ -7186,9 +7258,10 @@ async fn handshake_with_publish_zone_lease(
 
     let mut response_stream = client.session(stream).await.unwrap().into_inner();
 
-    // Drain SessionEstablished + SceneSnapshot
+    // Drain SessionEstablished + SceneSnapshot + current degradation state.
     let _established = response_stream.next().await.unwrap().unwrap();
     let _snapshot = response_stream.next().await.unwrap().unwrap();
+    let _degradation = response_stream.next().await.unwrap().unwrap();
 
     // Request a lease with publish_zone:subtitle + create_tiles
     tx.send(ClientMessage {
@@ -9809,10 +9882,9 @@ async fn handshake_with_capabilities(
 
     let mut streaming = client.session(stream).await.unwrap().into_inner();
 
-    // Collect exactly 2 handshake messages: SessionEstablished + SceneSnapshot.
-    // This mirrors the existing `handshake` helper to avoid stream state issues.
+    // Collect the full ordered handshake baseline.
     let mut init_messages = Vec::new();
-    for _ in 0..2 {
+    for _ in 0..3 {
         if let Some(msg) = streaming.next().await {
             init_messages.push(msg.unwrap());
         }
@@ -10066,7 +10138,8 @@ async fn test_element_repositioned_not_delivered_without_scene_topology_subscrip
     .await
     .unwrap();
     let mut response_stream = client.session(stream).await.unwrap().into_inner();
-    // Drain handshake (SessionEstablished + SceneSnapshot).
+    // Drain handshake baseline.
+    response_stream.next().await;
     response_stream.next().await;
     response_stream.next().await;
 
@@ -10137,7 +10210,7 @@ async fn setup_test_with_frame_presented_tx() -> (
 
 /// Handshake requesting `read_telemetry` and subscribing to `TELEMETRY_FRAMES`.
 /// Returns the client-send half and the server->client stream after draining the
-/// SessionEstablished + SceneSnapshot handshake messages.
+/// SessionEstablished + SceneSnapshot + current DegradationNotice messages.
 async fn handshake_telemetry(
     client: &mut HudSessionClient<tonic::transport::Channel>,
     agent_id: &str,
@@ -10175,7 +10248,8 @@ async fn handshake_telemetry(
     .unwrap();
 
     let mut response_stream = client.session(stream).await.unwrap().into_inner();
-    // Drain SessionEstablished + SceneSnapshot.
+    // Drain the three-message handshake baseline.
+    response_stream.next().await;
     response_stream.next().await;
     response_stream.next().await;
     (tx, response_stream)

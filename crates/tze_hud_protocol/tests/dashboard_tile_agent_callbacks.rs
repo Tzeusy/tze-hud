@@ -133,8 +133,8 @@ async fn perform_handshake(
 
     let mut stream = client.session(inbound).await.unwrap().into_inner();
 
-    // Drain SessionEstablished + SceneSnapshot.
-    for _ in 0..2 {
+    // Drain SessionEstablished + SceneSnapshot + current DegradationNotice.
+    for _ in 0..3 {
         let _ = stream.next().await;
     }
 
@@ -793,8 +793,8 @@ async fn event_batch_not_delivered_without_input_events_subscription() {
 
     let mut stream = client.session(inbound).await.unwrap().into_inner();
 
-    // Drain SessionEstablished + SceneSnapshot.
-    for _ in 0..2 {
+    // Drain SessionEstablished + SceneSnapshot + current DegradationNotice.
+    for _ in 0..3 {
         let _ = stream.next().await;
     }
 

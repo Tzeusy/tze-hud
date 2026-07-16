@@ -268,6 +268,20 @@ async fn connect_soak_agent(
 
     // Read SceneSnapshot
     let _snapshot_msg = response_stream.next().await.ok_or("no scene snapshot")??;
+    let degradation_msg = response_stream
+        .next()
+        .await
+        .ok_or("no degradation notice")??;
+    if !matches!(
+        &degradation_msg.payload,
+        Some(session_proto::server_message::Payload::DegradationNotice(_))
+    ) {
+        return Err(format!(
+            "soak agent {agent_id}: Expected DegradationNotice after SceneSnapshot, got: {:?}",
+            degradation_msg.payload
+        )
+        .into());
+    }
 
     // Request lease
     tx.send(session_proto::ClientMessage {
@@ -1227,6 +1241,20 @@ async fn connect_soak_agent_to(
     };
 
     let _snapshot_msg = response_stream.next().await.ok_or("no scene snapshot")??;
+    let degradation_msg = response_stream
+        .next()
+        .await
+        .ok_or("no degradation notice")??;
+    if !matches!(
+        &degradation_msg.payload,
+        Some(session_proto::server_message::Payload::DegradationNotice(_))
+    ) {
+        return Err(format!(
+            "soak agent {agent_id}: Expected DegradationNotice after SceneSnapshot, got: {:?}",
+            degradation_msg.payload
+        )
+        .into());
+    }
 
     tx.send(session_proto::ClientMessage {
         sequence: 2,

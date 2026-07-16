@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use tze_hud_scene::DegradationLevel;
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::*;
 
@@ -342,7 +343,7 @@ impl super::Compositor {
         let transcript_max_measure_px = resolve_transcript_max_measure_px(&self.token_map);
 
         // ── TextMarkdownNode tiles ────────────────────────────────────────────
-        for tile in &Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene) {
+        for tile in &Self::sort_tiles_with_drag_boost(self.policy_visible_tiles(scene), scene) {
             if let Some(root_id) = tile.root_node {
                 // Whole-tile opacity, split into its two components:
                 //
@@ -361,7 +362,7 @@ impl super::Compositor {
                 // re-shaping when it crosses the visibility threshold (hud-991cj).
                 // Gating the skip on the *combined* value would defer that shape
                 // into the middle of the animation — a per-frame re-shape hitch.
-                let base_opacity = Self::effective_tile_opacity(tile, scene);
+                let base_opacity = self.rendered_tile_opacity(tile, scene);
                 if base_opacity <= TILE_TEXT_OPACITY_EPSILON {
                     // Durably invisible (minimized / dragged to zero): collect,
                     // shape, truncate, and draw nothing — no floating glyphs
@@ -372,8 +373,7 @@ impl super::Compositor {
                 // The value the quad/backdrop path applies via
                 // `tile_effective_opacity` (== base × portal anim). Text fades in
                 // lockstep with the tile's solid-color backdrop.
-                let tile_opacity =
-                    (base_opacity * self.portal_tile_anim_opacity(tile.id)).clamp(0.0, 1.0);
+                let tile_opacity = self.tile_effective_opacity(tile, scene);
 
                 // Compute scroll offset once per tile and pass it down so text
                 // glyph positions track the scrolled content (Bounded Transcript
@@ -451,11 +451,14 @@ impl super::Compositor {
             let policy = &zone_def.rendering_policy;
 
             // Current animation opacity for this zone.
-            let anim_opacity = self
-                .zone_animation_states
-                .get(zone_name)
-                .map(|s| s.current_opacity())
-                .unwrap_or(1.0);
+            let anim_opacity = if self.degradation_policy.level >= DegradationLevel::Significant {
+                1.0
+            } else {
+                self.zone_animation_states
+                    .get(zone_name)
+                    .map(|s| s.current_opacity())
+                    .unwrap_or(1.0)
+            };
 
             // Emit TextItems based on contention policy.
             //
@@ -1055,7 +1058,7 @@ impl super::Compositor {
         // render_composer_overlay / render_frame tile loop.
         if self.local_composer.is_some() {
             let composer_tokens = resolve_composer_overlay_tokens(&self.token_map);
-            for tile in &Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene) {
+            for tile in &Self::sort_tiles_with_drag_boost(self.policy_visible_tiles(scene), scene) {
                 if let Some(mut text_item) =
                     self.collect_composer_text_item(tile, scene, sw, sh, &composer_tokens)
                 {
@@ -1064,7 +1067,7 @@ impl super::Compositor {
                     // rather than floating over a minimized tile (hud-dat3x).
                     // Skip only on DURABLE invisibility (scene tile.opacity); a
                     // transient portal fade still shapes and blends.
-                    if Self::effective_tile_opacity(tile, scene) > TILE_TEXT_OPACITY_EPSILON {
+                    if self.rendered_tile_opacity(tile, scene) > TILE_TEXT_OPACITY_EPSILON {
                         text_item.opacity *= self.tile_effective_opacity(tile, scene);
                         items.push(text_item);
                     }
@@ -1086,7 +1089,7 @@ impl super::Compositor {
         // scrollable tile with unread content and clears with the pill at the tail.
         let jump_to_latest_tokens = resolve_jump_to_latest_tokens(&self.token_map);
         let scroll_indicator_tokens = resolve_scroll_indicator_tokens(&self.token_map);
-        for tile in scene.visible_tiles() {
+        for tile in self.policy_visible_tiles(scene) {
             if let Some(mut badge) = self.collect_jump_to_latest_badge_item(
                 tile,
                 scene,
@@ -1094,7 +1097,7 @@ impl super::Compositor {
                 &scroll_indicator_tokens,
             ) {
                 // Fade the badge with the tile (matches the pill / composer echo).
-                if Self::effective_tile_opacity(tile, scene) > TILE_TEXT_OPACITY_EPSILON {
+                if self.rendered_tile_opacity(tile, scene) > TILE_TEXT_OPACITY_EPSILON {
                     badge.opacity *= self.tile_effective_opacity(tile, scene);
                     items.push(badge);
                 }
@@ -1108,13 +1111,13 @@ impl super::Compositor {
         // every visible tile is checked. No-op when the store is empty.
         if !self.viewer_echoes.is_empty() {
             let viewer_tokens = resolve_viewer_echo_tokens(&self.token_map);
-            for tile in &Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene) {
+            for tile in &Self::sort_tiles_with_drag_boost(self.policy_visible_tiles(scene), scene) {
                 // Skip minimized tiles entirely and blend the rest, so viewer
                 // echo history fades with the tile backdrop instead of floating
                 // over a hidden tile (hud-dat3x). Gate the skip on DURABLE
                 // invisibility (scene tile.opacity) — a transient portal fade
                 // still shapes and blends.
-                if Self::effective_tile_opacity(tile, scene) <= TILE_TEXT_OPACITY_EPSILON {
+                if self.rendered_tile_opacity(tile, scene) <= TILE_TEXT_OPACITY_EPSILON {
                     continue;
                 }
                 let tile_opacity = self.tile_effective_opacity(tile, scene);

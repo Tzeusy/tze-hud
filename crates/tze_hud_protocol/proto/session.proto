@@ -1032,6 +1032,8 @@ enum DegradationLevel {
   RENDERING_SIMPLIFIED              = 5;  // Compositor drops non-critical render passes
   SHEDDING_TILES                    = 6;  // Low-priority tiles actively shed
   AUDIO_ONLY_FALLBACK               = 7;  // Video disabled; audio-only mode
+  TEXTURE_QUALITY_REDUCED           = 8;  // Static texture resolution reduced
+  EMERGENCY_RENDERING               = 9;  // Chrome plus one highest-priority tile
 }
 
 // Runtime notifies all active sessions of a change in degradation level.

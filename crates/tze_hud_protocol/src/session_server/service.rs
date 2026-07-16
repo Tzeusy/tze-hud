@@ -29,10 +29,8 @@ use tze_hud_scene::types::{GeometryPolicy, SceneId};
 /// Holds shared state (scene graph + session registry) and implements the
 /// `HudSession` trait generated from `session.proto`.
 ///
-/// `degradation_tx` is a broadcast channel used to deliver `DegradationNotice`
-/// messages to all active sessions unconditionally (RFC 0005 §3.4, §7.1).
-/// Each session handler task subscribes to this channel and forwards any
-/// received notices to the agent stream at Transactional traffic class.
+/// `degradation_notices` is a bounded per-session transactional hub. It applies
+/// producer backpressure instead of allowing lag/drop semantics.
 ///
 /// `agent_capabilities` drives per-agent capability gating at handshake time
 /// (configuration/spec.md §Requirement: Agent Registration, lines 136-147).
@@ -55,9 +53,8 @@ pub struct HudSessionImpl {
     ///
     /// Production deployments MUST set this to `false`.
     pub(super) fallback_unrestricted: bool,
-    /// Broadcast sender for transactional server-push notices (DegradationNotice).
-    /// Cloned into each session handler task.
-    pub degradation_tx: tokio::sync::broadcast::Sender<DegradationNotice>,
+    /// Bounded never-drop sender for transactional degradation notices.
+    pub degradation_notices: super::DegradationNoticeSender,
     /// Broadcast sender for live capability revocation commands (RFC 0001 §3.3, GAP-G3-4).
     ///
     /// When the runtime calls `revoke_capability_on_lease`, it broadcasts a
@@ -114,8 +111,7 @@ impl HudSessionImpl {
     /// for backwards compatibility. Prefer `new_with_config` for production.
     #[cfg(any(test, feature = "dev-mode"))]
     pub fn new(scene: SceneGraph, psk: &str) -> Self {
-        let (degradation_tx, _) =
-            tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
+        let degradation_notices = super::DegradationNoticeSender::default();
         let (capability_revocation_tx, _) =
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
         let input_event_tx = super::InputEventSender::new(super::BROADCAST_CHANNEL_CAPACITY);
@@ -144,7 +140,7 @@ impl HudSessionImpl {
             psk: psk.to_string(),
             agent_capabilities: Arc::new(HashMap::new()),
             fallback_unrestricted: true,
-            degradation_tx,
+            degradation_notices,
             capability_revocation_tx,
             input_event_tx,
             element_repositioned_tx,
@@ -185,8 +181,24 @@ impl HudSessionImpl {
         fallback_unrestricted: bool,
         media_ingress_config: tze_hud_scene::config::MediaIngressConfig,
     ) -> Self {
-        let (degradation_tx, _) =
-            tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
+        Self::from_shared_state_with_config_media_ingress_and_degradation_notices(
+            state,
+            psk,
+            agent_capabilities,
+            fallback_unrestricted,
+            media_ingress_config,
+            super::DegradationNoticeSender::default(),
+        )
+    }
+
+    pub fn from_shared_state_with_config_media_ingress_and_degradation_notices(
+        state: Arc<Mutex<SharedState>>,
+        psk: &str,
+        agent_capabilities: HashMap<String, Vec<String>>,
+        fallback_unrestricted: bool,
+        media_ingress_config: tze_hud_scene::config::MediaIngressConfig,
+        degradation_notices: super::DegradationNoticeSender,
+    ) -> Self {
         let (capability_revocation_tx, _) =
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
         let input_event_tx = super::InputEventSender::new(super::BROADCAST_CHANNEL_CAPACITY);
@@ -199,7 +211,7 @@ impl HudSessionImpl {
             psk: psk.to_string(),
             agent_capabilities: Arc::new(agent_capabilities),
             fallback_unrestricted,
-            degradation_tx,
+            degradation_notices,
             capability_revocation_tx,
             input_event_tx,
             element_repositioned_tx,
@@ -237,7 +249,7 @@ impl HudSessionImpl {
 
         // Broadcast returns an error only when there are no active subscribers
         // (no sessions connected). That is not an error condition.
-        self.degradation_tx.send(notice).unwrap_or_default()
+        self.degradation_notices.publish(notice).await
     }
 
     /// Revoke a named capability from an active lease at runtime (RFC 0001 §3.3, GAP-G3-4).

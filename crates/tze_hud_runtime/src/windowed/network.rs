@@ -145,6 +145,7 @@ pub(super) fn start_network_services(
         Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::ElementRepositionedEvent>>,
         Option<tze_hud_protocol::session_server::InputEventSender>,
         Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::FramePresented>>,
+        Option<tze_hud_protocol::session_server::DegradationNoticeSender>,
         Option<std::net::SocketAddr>,
     ),
     Box<dyn std::error::Error>,
@@ -156,7 +157,7 @@ pub(super) fn start_network_services(
         // Compositor-only mode: no session, so no present-ack subscriber. The
         // compositor thread still drains the present-ack queue (bounded memory)
         // but has no sender to broadcast on (hud-4va6q).
-        return Ok((None, Vec::new(), None, None, None, None));
+        return Ok((None, Vec::new(), None, None, None, None, None));
     }
 
     // Build the multi-thread Tokio runtime for network tasks.
@@ -196,6 +197,7 @@ pub(super) fn start_network_services(
     // headless runtime's producer. Cloned before the service moves into the
     // gRPC task; subscribers attach via HudSession::subscribe_frame_presented.
     let frame_presented_tx = service.frame_presented_tx.clone();
+    let degradation_notices = service.degradation_notices.clone();
 
     // Wire RuntimeService (ReloadConfig RPC) alongside HudSession.
     let runtime_svc = RuntimeServiceImpl::new(Arc::clone(&runtime_context));
@@ -246,6 +248,7 @@ pub(super) fn start_network_services(
         Some(element_repositioned_tx),
         Some(input_event_tx),
         Some(frame_presented_tx),
+        Some(degradation_notices),
         Some(grpc_bound_addr),
     ))
 }
@@ -569,7 +572,7 @@ mod tests {
     fn start_network_services_grpc_port_zero_returns_no_runtime() {
         let shared_state = make_shared_state();
         let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
-        let (rt, handles, _tx, _scroll_tx, present_tx, grpc_addr) =
+        let (rt, handles, _tx, _scroll_tx, present_tx, _degradation_notices, grpc_addr) =
             start_network_services(0, "test-psk", shared_state, ctx, true, false)
                 .expect("start_network_services should not fail for port 0");
         assert!(
@@ -603,7 +606,7 @@ mod tests {
             .and_then(|l| l.local_addr())
             .map(|a| a.port())
             .expect("failed to allocate ephemeral port");
-        let (rt, handles, _tx, _scroll_tx, present_tx, grpc_addr) =
+        let (rt, handles, _tx, _scroll_tx, present_tx, _degradation_notices, grpc_addr) =
             start_network_services(port, "test-psk", shared_state, ctx, true, true)
                 .expect("start_network_services should not error for a valid port");
         assert!(
@@ -637,7 +640,7 @@ mod tests {
         for _ in 0..2 {
             let shared_state = make_shared_state();
             let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
-            let (rt, handles, _tx, _scroll_tx, _present_tx, _grpc_addr) =
+            let (rt, handles, _tx, _scroll_tx, _present_tx, _degradation_notices, _grpc_addr) =
                 start_network_services(0, "psk", shared_state, ctx, false, false)
                     .expect("port-0 must not error");
             assert!(rt.is_none());
@@ -665,7 +668,7 @@ mod tests {
             .expect("failed to allocate ephemeral port for loopback bind test");
         let shared_state = make_shared_state();
         let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
-        let (rt, handles, _, _, _, _) =
+        let (rt, handles, _, _, _, _, _) =
             start_network_services(port, "psk", shared_state, ctx, false, false)
                 .expect("loopback bind must succeed on a freshly allocated ephemeral port");
         assert!(rt.is_some(), "loopback bind must create a NetworkRuntime");
@@ -685,7 +688,7 @@ mod tests {
             .expect("failed to allocate ephemeral port for all-interfaces bind test");
         let shared_state = make_shared_state();
         let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
-        let (rt, handles, _, _, _, _) =
+        let (rt, handles, _, _, _, _, _) =
             start_network_services(port, "psk", shared_state, ctx, false, true)
                 .expect("all-interfaces bind must succeed on a freshly allocated ephemeral port");
         assert!(

@@ -54,12 +54,48 @@ pub enum RuntimeDegradationLevel {
     RenderingSimplified = 5,
     SheddingTiles = 6,
     AudioOnlyFallback = 7,
+    TextureQualityReduced = 8,
+    EmergencyRendering = 9,
 }
 
 impl RuntimeDegradationLevel {
     /// Convert to the proto enum integer value.
     pub fn to_proto_i32(self) -> i32 {
         self as i32
+    }
+
+    /// Decode only assigned append-only values. Unspecified and future values
+    /// fail closed instead of being interpreted as Normal.
+    pub fn from_proto_i32(value: i32) -> Option<Self> {
+        match value {
+            1 => Some(Self::Normal),
+            2 => Some(Self::CoalescingMore),
+            3 => Some(Self::MediaQualityReduced),
+            4 => Some(Self::StreamsReduced),
+            5 => Some(Self::RenderingSimplified),
+            6 => Some(Self::SheddingTiles),
+            7 => Some(Self::AudioOnlyFallback),
+            8 => Some(Self::TextureQualityReduced),
+            9 => Some(Self::EmergencyRendering),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod degradation_level_tests {
+    use super::RuntimeDegradationLevel;
+
+    #[test]
+    fn append_only_mapping_rejects_unspecified_and_future_values() {
+        for value in 1..=9 {
+            let level = RuntimeDegradationLevel::from_proto_i32(value)
+                .expect("assigned degradation value must decode");
+            assert_eq!(level.to_proto_i32(), value);
+        }
+        assert_eq!(RuntimeDegradationLevel::from_proto_i32(0), None);
+        assert_eq!(RuntimeDegradationLevel::from_proto_i32(10), None);
+        assert_eq!(RuntimeDegradationLevel::from_proto_i32(-1), None);
     }
 }
 

@@ -488,6 +488,17 @@ async fn connect_agent(
     };
 
     let _snapshot = rx.next().await.ok_or("missing SceneSnapshot")??;
+    let degradation = rx.next().await.ok_or("missing DegradationNotice")??;
+    if !matches!(
+        &degradation.payload,
+        Some(session_proto::server_message::Payload::DegradationNotice(_))
+    ) {
+        return Err(format!(
+            "expected DegradationNotice after SceneSnapshot, got: {:?}",
+            degradation.payload
+        )
+        .into());
+    }
 
     tx.send(session_proto::ClientMessage {
         sequence: 2,

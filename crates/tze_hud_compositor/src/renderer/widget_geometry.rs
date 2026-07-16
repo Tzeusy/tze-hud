@@ -102,7 +102,7 @@ impl Compositor {
             .into_iter()
             .collect();
 
-        for tile in scene.visible_tiles() {
+        for tile in self.policy_visible_tiles(scene) {
             let interaction_id = format!("drag-handle:{}", Self::scene_id_hex(tile.id));
             if let Some(band_rect) = band_rects.get(&tile.id) {
                 // Header-band handle: clamp the frame-relative band rect to the
