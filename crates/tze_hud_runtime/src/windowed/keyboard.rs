@@ -11,7 +11,7 @@ use tze_hud_input::{
 use super::WinitApp;
 use super::input_dispatch::{
     dispatch_command_event, dispatch_focus_event, dispatch_keyboard_event, dispatch_pointer_event,
-    dispatch_scroll_offset_event,
+    dispatch_scroll_offset_event_to_namespace,
 };
 use super::lifecycle::{INTERACTION_LOCK_BUDGET, spin_acquire, write_windows_clipboard_text};
 use crate::shell::{ChromeShortcut, ChromeTab, handle_shortcut};
@@ -219,6 +219,17 @@ fn keyboard_command(
         device_id: "keyboard".to_string(),
         timestamp_mono_us: raw.timestamp_mono_us,
     })
+}
+
+/// Return the local page-scroll step for the two page-key bindings only.
+/// ArrowUp/ArrowDown share the abstract scroll command at tile focus, but they
+/// are not page keys and must not inherit this page-sized local side effect.
+fn keyboard_page_scroll_delta(raw: &RawKeyDownEvent) -> Option<f32> {
+    match (raw.key_code.as_str(), raw.key.as_str()) {
+        ("PageUp", _) | (_, "PageUp") => Some(-tze_hud_input::KEYBOARD_PAGE_SCROLL_PX),
+        ("PageDown", _) | (_, "PageDown") => Some(tze_hud_input::KEYBOARD_PAGE_SCROLL_PX),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -928,8 +939,12 @@ impl WinitApp {
                 }
                 return;
             }
-            if self.dispatch_focused_command(tab_id, &command, &key_identity)
-                == CommandDispatchOutcome::Busy
+            if self.dispatch_focused_command(
+                tab_id,
+                &command,
+                keyboard_page_scroll_delta(raw),
+                &key_identity,
+            ) == CommandDispatchOutcome::Busy
             {
                 self.state
                     .pending_keyboard_events
@@ -1091,9 +1106,10 @@ impl WinitApp {
         &mut self,
         tab_id: tze_hud_scene::SceneId,
         command: &RawCommandEvent,
+        page_scroll_delta_y: Option<f32>,
         key_identity: &str,
     ) -> CommandDispatchOutcome {
-        let dispatch = {
+        let (dispatch, scroll_event) = {
             let Some(state) = spin_acquire(&self.state.shared_state, INTERACTION_LOCK_BUDGET)
             else {
                 return CommandDispatchOutcome::Busy;
@@ -1111,26 +1127,20 @@ impl WinitApp {
                     Some(namespace.clone())
                 })
             });
-            if let Some(dispatch) = &dispatch {
-                let delta_y = match dispatch.event.action {
-                    CommandAction::ScrollUp => -tze_hud_input::KEYBOARD_PAGE_SCROLL_PX,
-                    CommandAction::ScrollDown => tze_hud_input::KEYBOARD_PAGE_SCROLL_PX,
-                    _ => 0.0,
-                };
-                if delta_y != 0.0
-                    && let Some(event) = self.state.input_processor.process_keyboard_scroll(
+            let scroll_event = dispatch.as_ref().and_then(|dispatch| {
+                page_scroll_delta_y.and_then(|delta_y| {
+                    self.state.input_processor.process_keyboard_scroll(
                         dispatch.event.tile_id,
                         delta_y,
                         &mut scene,
                     )
-                {
-                    dispatch_scroll_offset_event(&self.state.input_event_tx, &scene, event);
-                }
-            }
-            dispatch
+                })
+            });
+            (dispatch, scroll_event)
         };
 
         if let Some(dispatch) = dispatch {
+            let namespace = dispatch.namespace.clone();
             if dispatch.event.action == CommandAction::Activate
                 && let Some(node_id) = dispatch.event.node_id
             {
@@ -1148,6 +1158,16 @@ impl WinitApp {
                 "command input dispatched to focused agent"
             );
             dispatch_command_event(&self.state.input_event_tx, dispatch);
+            if let Some(event) = scroll_event {
+                // Enqueue the command first, then its resulting droppable state
+                // notification. InputEventReceiver prioritizes transactional
+                // input when both lanes are ready, preserving this sequence.
+                dispatch_scroll_offset_event_to_namespace(
+                    &self.state.input_event_tx,
+                    namespace,
+                    event,
+                );
+            }
         }
         CommandDispatchOutcome::Done
     }
