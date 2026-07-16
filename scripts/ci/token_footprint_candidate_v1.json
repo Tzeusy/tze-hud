@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "runtime_build": "0.1.0",
+  "tokenizer": {
+    "name": "o200k_base",
+    "implementation": "tiktoken-rs",
+    "version": "0.12.0",
+    "vocab_fingerprint": "sha256:446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d",
+    "counting_policy": "each canonical JSON-RPC body independently; UTF-8 bytes; encode_with_special_tokens; operation and flow totals are integer sums"
+  },
+  "fixture_fingerprint": "blake3:2eb5b26b70f47913fc494dd716d93b62d1263aa82882372c4228687e2ed81f81",
+  "flows": {
+    "portal_projection": {
+      "flow_fingerprint": "blake3:2bba2d14ffefce463c82b4abaad682ceacbabe48c3f7c5587814438066e8c946",
+      "operations": {
+        "portal_projection_acknowledge_input": {
+          "request": {"bytes": 385, "tokens": 105},
+          "response": {"bytes": 89, "tokens": 25},
+          "total": {"bytes": 474, "tokens": 130}
+        },
+        "portal_projection_attach": {
+          "request": {"bytes": 512, "tokens": 142},
+          "response": {"bytes": 120, "tokens": 33},
+          "total": {"bytes": 632, "tokens": 175}
+        },
+        "portal_projection_get_pending_input": {
+          "request": {"bytes": 334, "tokens": 99},
+          "response": {"bytes": 416, "tokens": 103},
+          "total": {"bytes": 750, "tokens": 202}
+        },
+        "portal_projection_publish": {
+          "request": {"bytes": 458, "tokens": 118},
+          "response": {"bytes": 105, "tokens": 28},
+          "total": {"bytes": 563, "tokens": 146}
+        }
+      },
+      "total": {"bytes": 2419, "tokens": 653}
+    },
+    "publish_to_widget": {
+      "flow_fingerprint": "blake3:34d8d5dce48b7552b3c43e3bf3723d33bdb549960bfaaf12d884afdc425f9092",
+      "operations": {
+        "publish_to_widget": {
+          "request": {"bytes": 320, "tokens": 100},
+          "response": {"bytes": 117, "tokens": 36},
+          "total": {"bytes": 437, "tokens": 136}
+        }
+      },
+      "total": {"bytes": 437, "tokens": 136}
+    },
+    "publish_to_zone": {
+      "flow_fingerprint": "blake3:9a4759392799d9def4aa0193a5b4e4b4675b28628800e10532420e3cd53ba490",
+      "operations": {
+        "publish_to_zone": {
+          "request": {"bytes": 440, "tokens": 129},
+          "response": {"bytes": 127, "tokens": 39},
+          "total": {"bytes": 567, "tokens": 168}
+        }
+      },
+      "total": {"bytes": 567, "tokens": 168}
+    }
+  },
+  "approval": {
+    "status": "candidate_unapproved",
+    "basis": "deterministic initial measurement candidate; not comparison authority until every value receives explicit owner approval"
+  }
+}
