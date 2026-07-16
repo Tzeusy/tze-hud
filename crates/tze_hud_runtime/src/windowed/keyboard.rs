@@ -488,10 +488,15 @@ impl WinitApp {
             }
         };
         if chrome.tabs.len() != ordered_tabs.len() {
+            let mut existing_tabs = std::mem::take(&mut chrome.tabs).into_iter();
             chrome.tabs = ordered_tabs
                 .iter()
                 .enumerate()
                 .map(|(index, (scene_id, ..))| {
+                    if let Some(mut tab) = existing_tabs.next() {
+                        tab.active = index == active_index;
+                        return tab;
+                    }
                     let bytes = scene_id.as_uuid().as_bytes();
                     ChromeTab {
                         id: u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),

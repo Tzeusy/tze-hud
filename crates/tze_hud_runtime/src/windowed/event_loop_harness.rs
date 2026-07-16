@@ -531,6 +531,36 @@ mod tests {
         );
     }
 
+    /// Runtime tab topology can grow after chrome labels are configured. The
+    /// shell reconciliation must retain labels for existing chrome slots and
+    /// synthesize a neutral label only for the newly-discovered slot.
+    #[test]
+    fn ctrl_tab_preserves_configured_chrome_label_when_scene_adds_tab() {
+        let mut harness = HeadlessEventLoopHarness::new();
+        let (_tile_id, _node_id, mut rx) = install_button(&mut harness, true);
+        let second_tab = {
+            let shared = harness.app.state.shared_state.blocking_lock();
+            let mut scene = shared.scene.blocking_lock();
+            scene.create_tab("Second", 1).unwrap()
+        };
+        harness.app.state.focus_manager.add_tab(second_tab);
+        {
+            let mut chrome = harness.app.state.chrome_state.write().unwrap();
+            chrome.add_tab(10, "Configured One".to_string());
+        }
+
+        harness.enqueue(ctrl_key_down("Tab", "Tab", false, 1_000));
+        harness.drain();
+
+        let chrome = harness.app.state.chrome_state.read().unwrap();
+        assert_eq!(chrome.tabs[0].name, "Configured One");
+        assert_eq!(chrome.tabs[1].name, "Tab 2");
+        assert!(
+            received_events(&mut rx).is_empty(),
+            "the shell-owned tab shortcut must remain agent-inaccessible"
+        );
+    }
+
     /// A shell-owned KeyDown consumes its physical sequence. Its matching
     /// release must not surface as an impossible agent-visible KeyUp after the
     /// shell already intercepted the press.
@@ -543,7 +573,14 @@ mod tests {
         harness.drain();
         let _ = received_events(&mut rx);
 
-        harness.enqueue(ctrl_key_up("Tab", "Tab", false, 1_100));
+        harness.enqueue(PendingKeyboardEvent::KeyUp(RawKeyUpEvent {
+            key_code: "Tab".to_string(),
+            key: "Tab".to_string(),
+            // The user may release Ctrl before Tab. The physical identity from
+            // KeyDown, not release-time modifiers, must still own this KeyUp.
+            modifiers: KeyboardModifiers::NONE,
+            timestamp_mono_us: MonoUs(1_100),
+        }));
         harness.drain();
 
         assert!(
