@@ -230,8 +230,17 @@ def bound_records(
 def retain_record(state, record):
     """Return state with an authored record appended or coalesced in place."""
     records = [dict(item) for item in state.get("records", [])]
-    coalesce_key = record.get("coalesce_key")
-    if coalesce_key:
+    logical_unit_id = record["logical_unit_id"]
+    if any(item["logical_unit_id"] == logical_unit_id for item in records):
+        # The authority treats a repeated logical-unit identity as an accepted
+        # no-op, even if the retry's payload differs. Mirror that behavior in
+        # the durable tail by preserving the first authoritative record once.
+        return {
+            "version": CONTINUITY_VERSION,
+            "idempotency_key": state.get("idempotency_key"),
+            "records": bound_records(records),
+        }
+    if coalesce_key := record.get("coalesce_key"):
         matching = [
             index
             for index, item in enumerate(records)
@@ -554,11 +563,16 @@ def cmd_publish(a):
     save_continuity(a.projection_id, prepared)
     try:
         result = result_or_die(call_tool("portal_projection_publish", args))
-    except SystemExit:
-        if previous_exists:
-            save_continuity(a.projection_id, previous)
-        else:
-            clear_continuity(a.projection_id)
+    except SystemExit as error:
+        # Exit 2 is a definitive tool rejection, so the prepared record did not
+        # become authoritative and must be rolled back. Exit 1 is a transport or
+        # response failure: the server may already have accepted the publish, so
+        # retain the stable logical_unit_id for an idempotent replay.
+        if error.code == 2:
+            if previous_exists:
+                save_continuity(a.projection_id, previous)
+            else:
+                clear_continuity(a.projection_id)
         raise
     emit(result)
 

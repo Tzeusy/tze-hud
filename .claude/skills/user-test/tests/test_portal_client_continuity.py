@@ -150,6 +150,22 @@ def test_same_coalesce_key_replaces_local_tail_entry_in_place() -> None:
     ]
 
 
+def test_repeated_logical_unit_id_preserves_original_record_once() -> None:
+    original = record("turn-1", "first payload")
+    state = {
+        "version": 1,
+        "idempotency_key": "stable-attach-key",
+        "records": [original],
+    }
+
+    updated = portal_client.retain_record(
+        state,
+        record("turn-1", "retry payload must remain an authority no-op"),
+    )
+
+    assert updated["records"] == [original]
+
+
 def test_corrupt_state_is_quarantined_without_replaying_untrusted_content(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -308,6 +324,32 @@ def test_rejected_publish_rolls_back_prepared_local_record() -> None:
 
     assert exc.value.code == 2
     assert portal_client.load_continuity("continuity-session") == initial
+
+
+def test_ambiguous_transport_failure_retains_record_for_idempotent_replay() -> None:
+    initial = {
+        "version": 1,
+        "idempotency_key": "original-key",
+        "records": [record("turn-1", "committed")],
+    }
+    portal_client.save_continuity("continuity-session", initial)
+    portal_client.save_token("continuity-session", "owner-token")
+
+    with (
+        mock.patch.object(portal_client, "call_tool", side_effect=SystemExit(1)),
+        mock.patch.object(portal_client, "new_logical_unit_id", return_value="turn-2"),
+        pytest.raises(SystemExit) as exc,
+    ):
+        portal_client.cmd_publish(publish_args("acceptance-unknown"))
+
+    assert exc.value.code == 1
+    assert portal_client.load_continuity("continuity-session") == {
+        **initial,
+        "records": [
+            record("turn-1", "committed"),
+            record("turn-2", "acceptance-unknown"),
+        ],
+    }
 
 
 def test_failed_atomic_replace_preserves_previous_state() -> None:

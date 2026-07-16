@@ -48,15 +48,19 @@ Repeating attach/replay against a live authority is idempotent because every
 record uses the same `logical_unit_id`. Against a fresh authority, the same
 records reconstruct the bounded tail. If replay fails partway, local state is
 not advanced or discarded; another attach can retry, and already accepted
-records deduplicate. A rejected live publish restores the previous local tail,
-while an atomic-write failure occurs before network publication and preserves
-the prior file.
+records deduplicate. A repeated live publish with an already-retained
+`logical_unit_id` preserves the original local record once, matching the
+authority's accepted no-op. A definitively rejected live publish restores the
+previous local tail; an ambiguous transport or response failure retains the
+prepared record so the stable identity can be replayed safely. An atomic-write
+failure occurs before network publication and preserves the prior file.
 
 ## Verification
 
-Tests cover deterministic item and byte bounds, coalesce replacement, private
-permissions and atomic writes, corrupt-state quarantine, owner-token and input
-exclusion, stable double replay, fresh-runtime reconstruction, rejection and
+Tests cover deterministic item and byte bounds, coalesce and logical-identity
+deduplication, private permissions and atomic writes, corrupt-state quarantine,
+owner-token and input exclusion, stable double replay, fresh-runtime
+reconstruction, definitive-rejection rollback, ambiguous-outcome retention,
 storage rollback, and explicit cleanup. Existing token-rotation and MCP-dialect
 tests remain part of the focused suite. The final gate includes the full
 user-test Python suite, skill-package audit, Ruff formatting/lint, Python
