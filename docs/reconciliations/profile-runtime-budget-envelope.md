@@ -2,6 +2,8 @@
 
 Issue: `hud-k3lfx`
 
+Authority follow-up: `hud-1utwb`
+
 OpenSpec change: `profile-runtime-budget-envelope`
 
 Scope: configuration, runtime admission, scene resources, resource store, and compositor caches. Cadence/quiescence and device-specific implementation are excluded.
@@ -32,9 +34,20 @@ The selected display profile is a frozen configuration object, not yet one opera
 | Font residency/cache | [`ResourceStoreConfig::max_font_cache_bytes`](../../crates/tze_hud_resource/src/types.rs) and renderer/font internals | No production read of `max_font_cache_bytes` found; font bytes and renderer glyph/font state are retained independently | The configured 64 MiB value is declarative only, not an enforced production ceiling | Profile-owned font-residency class with enforced, ledger-visible usage |
 | Image/GPU texture cache | [`renderer::image_cache`](../../crates/tze_hud_compositor/src/renderer/image_cache.rs) plus scene references | Windowed/headless render paths | Evicts unused scene images, but has no profile-visible accounted-byte ledger | Charge each owned CPU/GPU allocation identity once while retaining logical per-agent charges |
 | Frame cadence/degradation thresholds | CLI/env `opts.fps`; independent runtime constants | Windowed loop / degradation module | Outside this issue | `hud-le1e0` / `hud-0jfqd`; deliberately untouched |
-| Headless `max_agent_update_hz` value | RFC 0006 §3.4 and `DisplayProfile::headless()` say 60; canonical configuration OpenSpec says 30 | Config validation today; future envelope admission after approval | Pre-existing contract/code drift, distinct from compositor cadence | Reconcile the authoritative value before operational-envelope implementation |
+| Headless `max_agent_update_hz` value | RFC 0006 §3.4 and `DisplayProfile::headless()` define 60; canonical configuration OpenSpec is corrected from 30 to 60 | Config validation today; future envelope admission after approval | Per-agent state-stream admission ceiling, distinct from compositor cadence | Preserve 60 as the profile authority and keep cadence/quiescence separate |
 
 Repository-wide absence checks found no production caller of `AdmissionController::{new,with_limits,admit}` outside its own tests, no production consumer of the selected profile's `max_agents`, `max_tiles`, `max_texture_mb`, or `max_agent_update_hz` beyond configuration validation, no production read of `ResourceStoreConfig::max_font_cache_bytes`, and no production bridge from the MCP widget registry to durable/runtime widget registration. These are reachability gaps, not missing unit tests.
+
+## Headless Update-Rate Authority
+
+The authoritative headless `max_agent_update_hz` is **60 Hz**. This is a contract correction, not a new performance-budget choice:
+
+- RFC 0006 §3.4 has defined 60 Hz for the headless profile since the profile contract was introduced. Its separate mobile profile defines 30 Hz for aggressive coalescing.
+- `DisplayProfile::headless()` gained the field as 60 Hz in `edd5fee1`; that commit explicitly records full-display=60, headless=60, mobile=30 "per RFC 0006."
+- The canonical configuration spec originally omitted this field. Commit `1cb0e39b` later filled omitted profile fields and inserted headless=30 without a rationale or corresponding implementation change. The value conflicts with its cited RFC source and matches the distinct mobile value.
+- Headless is the CI/test parity profile. A 30 Hz admission ceiling would prevent headless validation of the 60 Hz state-stream ceiling accepted by the production full-display profile without evidence of a separate CI constraint.
+
+The exact production consumer is configuration validation: `profile_ceiling_for_validation()` selects `DisplayProfile::headless()`, and `validate_agent_profile_ceilings()` rejects a registered agent only when `max_update_hz` exceeds that ceiling. `ConfigLoader::freeze()` retains the resolved value in `ResolvedConfig` / `RuntimeContext`, but no headless or windowed scheduling path reads `max_agent_update_hz`. Fixtures and application configs do not override the built-in value. Consequently, 60 Hz does not require or authorize a 60 fps idle loop; compositor cadence/quiescence remains outside this change.
 
 ## Ownership Boundary
 

@@ -734,6 +734,7 @@ name = "T"
     assert_eq!(resolved.profile.max_tiles, 256);
     assert_eq!(resolved.profile.max_texture_mb, 512);
     assert_eq!(resolved.profile.max_agents, 8);
+    assert_eq!(resolved.profile.max_agent_update_hz, 60);
     assert_eq!(resolved.profile.target_fps, 60);
     assert_eq!(resolved.profile.min_fps, 1);
     assert_eq!(resolved.profile.name, "headless");
@@ -1859,11 +1860,9 @@ max_update_hz = 60
     );
 }
 
-/// WHEN agent max_update_hz exceeds headless profile ceiling THEN rejected.
+/// WHEN agent max_update_hz equals the headless profile ceiling THEN accepted.
 #[test]
-fn spec_agent_max_update_hz_exceeds_headless_ceiling_rejected() {
-    // headless has max_agent_update_hz = 60; same as full-display in our defaults.
-    // Use a custom profile with lower ceiling to test headless-derived scenario.
+fn spec_agent_max_update_hz_equal_to_headless_ceiling_accepted() {
     let toml = r#"
 [runtime]
 profile = "headless"
@@ -1872,7 +1871,36 @@ profile = "headless"
 name = "Main"
 
 [agents.registered.ci_agent]
-max_update_hz = 120
+max_update_hz = 60
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    let has_budget_error = errors.iter().any(|e| {
+        matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile)
+            && e.field_path.contains("max_update_hz")
+    });
+    assert!(
+        !has_budget_error,
+        "max_update_hz=60 equal to headless ceiling should be accepted, got: {:?}",
+        errors
+            .iter()
+            .map(|e| (&e.code, &e.field_path))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// WHEN agent max_update_hz exceeds headless profile ceiling THEN rejected.
+#[test]
+fn spec_agent_max_update_hz_exceeds_headless_ceiling_rejected() {
+    let toml = r#"
+[runtime]
+profile = "headless"
+
+[[tabs]]
+name = "Main"
+
+[agents.registered.ci_agent]
+max_update_hz = 61
 "#;
     let loader = parse_ok(toml);
     let errors = loader.validate();
@@ -1882,7 +1910,7 @@ max_update_hz = 120
     });
     assert!(
         has_budget_error,
-        "max_update_hz=120 exceeding headless ceiling of 60 should produce \
+        "max_update_hz=61 exceeding headless ceiling of 60 should produce \
          CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE"
     );
 }
