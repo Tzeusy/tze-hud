@@ -73,14 +73,15 @@ now supplies enough evidence for the behavior change.
    | `scene_lock_contention` | 180 | 180 | saturation reference |
    | `scene_lock_paced_contention` | 180 | 18 | healthy (`1..=20`) |
 
-   The overall benchmark verdict was `pass`. The paced session reports zeroed
-   frame-latency samples for its lock probe, so it does not establish a latency
-   regression caused by the misses.
+   The overall benchmark verdict was `pass`. The paced session's frame-time
+   bucket measures only the `try_lock` probe (0–1 us in this run), not
+   missed-frame, staleness, or end-to-end input/present latency caused by a
+   miss, so it does not establish a latency regression.
 
 8. The production seam remains broad. The canonical graph is still shared as
-   `Arc<tokio::sync::Mutex<SceneGraph>>`; the current source contains 62 direct
-   `lock` / `try_lock` sites matching that handle across runtime, protocol, and
-   MCP code (including inline test support). The windowed compositor's Stage 4
+   `Arc<tokio::sync::Mutex<SceneGraph>>`; the current source contains dozens of
+   direct `lock` / `try_lock` sites against scene handles across runtime,
+   protocol, and MCP code. The windowed compositor's Stage 4
    path takes the same mutex, performs expiry and animation maintenance, builds
    a self-contained `WindowedFrameBuild`, refreshes hit regions, drains present
    acknowledgements, then releases the mutex before GPU submission/present.
@@ -137,8 +138,8 @@ The obvious implementation variants also fail the current doctrine/spec gate:
 
 The existing path already releases the scene mutex before GPU
 submit/present. Given a passing bounded gate and no measured 10x budget breach,
-all three variants have more demonstrated risk than the current one-frame stale
-fallback.
+all three variants have more demonstrated risk than the current skip-and-retry
+fallback for a transient miss.
 
 ## Recommendation
 
@@ -176,7 +177,7 @@ bd show hud-3qpgv.2 --json
 bd show hud-iky7b --json
 bd show hud-pio04 --json
 git rebase origin/main
-target/release/benchmark --frames 180 --emit /tmp/hud-ibzl4-current-180.json
+cargo run --release -p benchmark --features headless -- --frames 180 --emit /tmp/hud-ibzl4-current-180.json
 jq '.sessions[] | {name, total_frames: .summary.total_frames, scene_lock_misses: .summary.scene_lock_misses}' /tmp/hud-ibzl4-current-180.json
 gh pr view 781 --json number,title,state,url,body,comments,reviews,commits,mergeCommit,headRefName,baseRefName --repo Tzeusy/tze-hud
 gh pr view 935 --json number,title,state,url,body,comments,reviews,commits,mergeCommit,headRefName,baseRefName --repo Tzeusy/tze-hud
