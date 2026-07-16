@@ -35,3 +35,21 @@ def test_manual_tab_bootstrap_is_only_a_warp_vm_fallback() -> None:
     assert "until runtime bug" not in skill
     assert "Known runtime bug (hud-d5rcd)" not in quickstart
     assert "not needed on a normal gpu desktop" in quickstart.lower()
+
+
+def test_projection_guidance_assigns_durable_continuity_to_the_client() -> None:
+    skill = read(SKILL_DIR / "SKILL.md")
+    facade = read(SKILL_DIR / "references" / "mcp-facade.md")
+    examples = read(SKILL_DIR / "references" / "operation-examples.md")
+
+    for contents in (skill, facade, examples):
+        assert "portal-continuity" in contents
+        assert "logical_unit_id" in contents
+        assert "coalesce_key" in contents
+    assert "64 records" in skill
+    assert "64 KiB" in skill
+    assert "continuity-clear" in skill
+    assert "viewer-authored" in skill
+    assert "runtime restart" in skill.lower()
+    assert "durable transcript" in facade.lower()
+    assert "owner token" in examples.lower()

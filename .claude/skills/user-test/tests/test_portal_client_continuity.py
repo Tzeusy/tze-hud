@@ -94,7 +94,9 @@ def test_continuity_state_is_private_and_atomically_replaced() -> None:
 def test_rolling_tail_enforces_item_and_canonical_utf8_byte_bounds() -> None:
     records = [record(f"turn-{index}", "é" * index) for index in range(1, 5)]
 
-    item_bounded = portal_client.bound_records(records, max_items=3, max_bytes=1_000_000)
+    item_bounded = portal_client.bound_records(
+        records, max_items=3, max_bytes=1_000_000
+    )
     assert [item["logical_unit_id"] for item in item_bounded] == [
         "turn-2",
         "turn-3",
@@ -109,7 +111,21 @@ def test_rolling_tail_enforces_item_and_canonical_utf8_byte_bounds() -> None:
         "turn-3",
         "turn-4",
     ]
-    assert sum(portal_client.record_size(item) for item in byte_bounded) <= last_two_bytes
+    assert (
+        sum(portal_client.record_size(item) for item in byte_bounded) <= last_two_bytes
+    )
+
+
+def test_generated_identity_keys_respect_the_128_byte_wire_contract() -> None:
+    projection_id = "p" * 128
+
+    logical_unit_id = portal_client.new_logical_unit_id(projection_id)
+    idempotency_key = portal_client._idempotency_key_for_attach(
+        projection_id, None, portal_client.empty_continuity()
+    )
+
+    assert len(logical_unit_id.encode("utf-8")) <= 128
+    assert len(idempotency_key.encode("utf-8")) <= 128
 
 
 def test_same_coalesce_key_replaces_local_tail_entry_in_place() -> None:
@@ -156,9 +172,13 @@ def test_published_record_preserves_semantics_without_persisting_owner_token() -
     portal_client.save_token("continuity-session", "owner-token-must-not-leak")
     response = {"result": {"accepted": True, "status_summary": "published"}}
 
-    with mock.patch.object(portal_client, "call_tool", return_value=response), mock.patch.object(
-        portal_client, "emit"
-    ), mock.patch.object(portal_client, "new_logical_unit_id", return_value="stable-unit"):
+    with (
+        mock.patch.object(portal_client, "call_tool", return_value=response),
+        mock.patch.object(portal_client, "emit"),
+        mock.patch.object(
+            portal_client, "new_logical_unit_id", return_value="stable-unit"
+        ),
+    ):
         portal_client.cmd_publish(
             publish_args(
                 "authored text",
@@ -203,8 +223,9 @@ def test_attach_reuses_original_key_and_double_replay_is_idempotent() -> None:
             return {"result": {"accepted": True}}
         raise AssertionError(tool)
 
-    with mock.patch.object(portal_client, "call_tool", side_effect=fake_call), mock.patch.object(
-        portal_client, "emit"
+    with (
+        mock.patch.object(portal_client, "call_tool", side_effect=fake_call),
+        mock.patch.object(portal_client, "emit"),
     ):
         portal_client.cmd_attach(attach_args())
         portal_client.cmd_attach(attach_args())
@@ -240,8 +261,9 @@ def test_fresh_runtime_attach_replays_authored_tail_with_original_semantics() ->
             return {"result": {"accepted": True}}
         raise AssertionError(tool)
 
-    with mock.patch.object(portal_client, "call_tool", side_effect=fake_call), mock.patch.object(
-        portal_client, "emit"
+    with (
+        mock.patch.object(portal_client, "call_tool", side_effect=fake_call),
+        mock.patch.object(portal_client, "emit"),
     ):
         portal_client.cmd_attach(attach_args())
 
@@ -273,13 +295,15 @@ def test_rejected_publish_rolls_back_prepared_local_record() -> None:
     portal_client.save_continuity("continuity-session", initial)
     portal_client.save_token("continuity-session", "owner-token")
 
-    with mock.patch.object(
-        portal_client,
-        "call_tool",
-        return_value={"error": {"code": -32105, "message": "too large"}},
-    ), mock.patch.object(portal_client, "new_logical_unit_id", return_value="turn-2"), pytest.raises(
-        SystemExit
-    ) as exc:
+    with (
+        mock.patch.object(
+            portal_client,
+            "call_tool",
+            return_value={"error": {"code": -32105, "message": "too large"}},
+        ),
+        mock.patch.object(portal_client, "new_logical_unit_id", return_value="turn-2"),
+        pytest.raises(SystemExit) as exc,
+    ):
         portal_client.cmd_publish(publish_args("rejected"))
 
     assert exc.value.code == 2
@@ -294,8 +318,9 @@ def test_failed_atomic_replace_preserves_previous_state() -> None:
     }
     portal_client.save_continuity("continuity-session", initial)
 
-    with mock.patch.object(os, "replace", side_effect=OSError("disk unavailable")), pytest.raises(
-        OSError, match="disk unavailable"
+    with (
+        mock.patch.object(os, "replace", side_effect=OSError("disk unavailable")),
+        pytest.raises(OSError, match="disk unavailable"),
     ):
         portal_client.save_continuity(
             "continuity-session",

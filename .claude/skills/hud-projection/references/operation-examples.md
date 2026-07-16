@@ -85,6 +85,14 @@ opencode:
 
 Successful attach responses include `owner_token`, `request_id`, `projection_id`, `accepted`, `error_code`, `server_timestamp_wall_us`, bounded `status_summary`, and lifecycle state. The `owner_token` is returned only by successful `attach`; later operation responses must not return it. Repeating attach for a live projection through the authenticated Resident MCP surface with the same non-empty `idempotency_key` rotates and returns a fresh token, invalidates the prior token, and preserves the original expiry deadline. Missing or unrelated keys do not rotate ownership.
 
+The preferred `portal_client.py` persists that original idempotency key and a
+bounded client-authored tail at
+`~/.local/state/tze_hud/portal-continuity/<projection_id>.json`. The private
+state file is not a runtime snapshot: it contains no owner token, pending
+input, acknowledgement, or viewer-authored turn. After successful attach, the
+client stores the new owner token separately and replays the tail before
+returning.
+
 ## Publish Output
 
 Accepted `output_kind` values: `assistant` *(default)*, `tool`, `status`, `error`, `other`.
@@ -105,6 +113,27 @@ Any other value is rejected. Omit `output_kind` to get the `assistant` default.
   "coalesce_key": "latest-summary"
 }
 ```
+
+For continuity-safe publishing, every client-authored record has a stable
+`logical_unit_id`. A replay sends that same ID, so an authority that already
+saw it accepts the operation idempotently without duplicating the unit. A
+streaming/progress replacement uses a new logical unit ID with the same
+`coalesce_key`; the local `portal-continuity` tail replaces its earlier record
+under that key, and a fresh runtime reconstructs only the latest value. The
+tail preserves each record's `output_kind` and `content_classification`.
+
+The replay ceremony is:
+
+1. authenticated `attach` with the original `idempotency_key`;
+2. atomically replace the separate 0600 owner-token file;
+3. replay bounded `portal-continuity` records in retained order with their
+   original `logical_unit_id` and optional `coalesce_key`;
+4. resume live publishing.
+
+Running the ceremony twice is safe. On a live authority, logical-unit
+idempotency prevents duplicates; after a runtime restart or grace expiry, the
+fresh portal receives the bounded authored tail. Viewer-authored HUD input is
+never part of this replay.
 
 ## Publish Status
 

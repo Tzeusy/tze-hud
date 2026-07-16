@@ -26,7 +26,7 @@ Use this skill to opt an already-running LLM session into a governed tze_hud tex
 Hard boundaries:
 - This is cooperative opt-in. The current session intentionally calls projection operations.
 - This is not PTY, tmux, shell, stdin/stdout, or terminal byte-stream capture.
-- The `ProjectionAuthority` runs **in-process** inside the tze_hud runtime (not as an external daemon). It owns projection state outside the LLM token context: HUD connection metadata, advisory portal lease identity, bounded transcript/window state, pending HUD input, acknowledgement state, lifecycle state, unread state, privacy classification, and reconnect bookkeeping.
+- The `ProjectionAuthority` runs **in-process** inside the tze_hud runtime (not as an external daemon). It owns only ephemeral runtime state: HUD connection metadata, advisory portal lease identity, the bounded visible transcript window, pending HUD input, acknowledgement state, lifecycle state, unread state, privacy classification, and grace-period reconnect bookkeeping. It does not own durable transcript history; the adapter/client does.
 - The `portal_projection_*` tools are a projection facade into that in-process authority — distinct from the runtime's zone/widget publishing tools (`th-hud-publish`). They are Resident tools; reach them as the resident principal (see [MCP facade](references/mcp-facade.md) for the auth wiring and code paths).
 
 ## Choosing A Target Runtime
@@ -80,6 +80,16 @@ projection id and the same non-empty idempotency key is safe: it rotates the
 owner token, atomically invalidates the prior token, and replaces the token
 file without extending the projection's original expiry deadline.
 
+Client-authored continuity is separately retained at
+`~/.local/state/tze_hud/portal-continuity/<id>.json` (0700 parent directory,
+0600 file, atomic replacement; override with `PORTAL_CONTINUITY_DIR`). The tail
+is bounded to the newest 64 records and 64 KiB of canonical UTF-8 record data.
+It contains only output text, kind, classification, `logical_unit_id`, and an
+optional `coalesce_key`, plus the original attach idempotency key. It never
+contains owner tokens, pending input, acknowledgements, or viewer-authored HUD
+turns. Use `continuity-path` to inspect its location and `continuity-clear` for
+explicit local deletion; detach and remote cleanup do not silently erase it.
+
 For a one-command connectivity trial (attach + greeting + poll), use
 `.claude/skills/user-test/scripts/portal_trial.sh`.
 
@@ -127,7 +137,7 @@ Read [operation examples](references/operation-examples.md) for compact JSON exa
 ## Workflow
 
 1. **Attach once.** Choose a stable `projection_id`, set `provider_kind` to `codex`, `claude`, `opencode`, or `other`, and include a human-readable `display_name`. Default missing or uncertain classification to `private`.
-2. **Store the owner token securely and immediately.** Every successful attach returns `owner_token`; no non-attach operation response will ever return it. Store it in a tool-call result or session variable, never in transcript text, assistant-visible output, or log lines. If it is lost before detach, repeat attach through the authenticated Resident MCP surface with the same non-empty idempotency key used by the original attach. That replay returns a fresh token, invalidates the lost token, and preserves the original expiry deadline. A missing or unrelated key is rejected and does not rotate ownership.
+2. **Store the owner token securely and immediately.** Every successful attach returns `owner_token`; no non-attach operation response will ever return it. Store it in a tool-call result or session variable, never in transcript text, assistant-visible output, or log lines. The deterministic client persists the original idempotency key, reuses it for authenticated attach, stores the rotated token, then replays its bounded authored tail before attach returns. Before grace expiry this is idempotent against the authority's retained window; after a runtime restart or grace expiry it reconstructs a fresh portal without pretending the dead runtime state survived. A missing or unrelated key is rejected and does not rotate live ownership.
 3. **Publish intentionally.** Call `publish_output` for assistant-visible transcript/status fragments and `publish_status` for lifecycle updates such as `active`, `degraded`, or `detached`.
 
    **Accepted `lifecycle_state` values** (snake_case strings; any other value is rejected):
@@ -152,7 +162,7 @@ Read [operation examples](references/operation-examples.md) for compact JSON exa
 7. **Cleanup stale state when appropriate.** Use owner cleanup with `owner_token`; operator cleanup uses a separate daemon authority and must not expose private projection content.
 
 **Token-efficient use** (this is meant to be viable as a primary session interface):
-- `publish_output` **appends** — send only the new fragment each turn, never the whole transcript. The authority retains transcript history outside your token context.
+- `publish_output` **appends** — send only the new fragment each turn, never the whole transcript. The client retains only its bounded authored continuity tail; the authority retains only the bounded in-memory visible window while that runtime lives.
 - Use `coalesce_key` for streaming/progress lines so repeated publishes collapse in place instead of piling up.
 - To await a reply, prefer one `get_pending_input` with `wait_ms` (long-poll) over a busy-poll loop; keep `max_items`/`max_bytes` small.
 
@@ -185,4 +195,4 @@ References:
 - **Owner-token loss requires authenticated rotation, never retrieval.** Re-attach through the Resident MCP surface with the same non-empty idempotency key to receive a fresh token. This immediately invalidates every previously issued token and does not extend the original expiry deadline. Without the matching key, the authority rejects the attach with `PROJECTION_ALREADY_ATTACHED`; after expiry, attach creates a new session under the normal authorization path.
 - **Do not embed `owner_token` in `publish_output` text, `status_text`, `ack_message`, or `reason` fields.** These fields are readable by audit records and portal rendering; tokens in them constitute a credential leak.
 - Treat `PROJECTION_UNAUTHORIZED`, `PROJECTION_TOKEN_EXPIRED`, and `PROJECTION_STATE_CONFLICT` as hard stops unless the user explicitly authorizes reattach or operator cleanup.
-- If the runtime restarts, prior transcript text, pending input text, owner tokens, and cached lease identity are gone. Attach again and receive a fresh owner token — the old token is permanently invalid after a restart.
+- If the runtime restarts, its prior transcript window, pending input text, owner tokens, and cached lease identity are gone. Run `attach` again: the client reuses the original idempotency key, receives and stores a fresh owner token, then replays only its bounded client-authored `portal-continuity` tail with the original `logical_unit_id` and `coalesce_key` values. Pending/viewer-authored input is never replayed. A second replay is safe because logical-unit identity remains idempotent.
