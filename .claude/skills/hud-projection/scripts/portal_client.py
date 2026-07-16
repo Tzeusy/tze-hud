@@ -52,6 +52,7 @@ Exit codes: 0 success · 1 transport/config error · 2 operation rejected ·
 """
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -61,6 +62,11 @@ import sys
 import time
 import urllib.error
 import urllib.request
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 STATE_ROOT = os.path.join(
     os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
@@ -77,6 +83,7 @@ CONTINUITY_DIR = os.environ.get("PORTAL_CONTINUITY_DIR") or os.path.join(
 CONTINUITY_VERSION = 1
 CONTINUITY_MAX_ITEMS = 64
 CONTINUITY_MAX_BYTES = 64 * 1024
+CONTINUITY_MAX_QUARANTINES = 4
 CONTINUITY_RECORD_KEYS = frozenset(
     {
         "output_text",
@@ -103,9 +110,17 @@ OUTPUT_KINDS = frozenset({"assistant", "tool", "status", "error", "other"})
 PROJECTION_ID_SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
-def die(msg, code=1):
+class PortalClientExit(SystemExit):
+    """CLI exit carrying whether the attempted operation was definitely rejected."""
+
+    def __init__(self, code, *, definitive_rejection=False):
+        super().__init__(code)
+        self.definitive_rejection = definitive_rejection
+
+
+def die(msg, code=1, *, definitive_rejection=False):
     print(f"portal_client: ERROR — {msg}", file=sys.stderr)
-    sys.exit(code)
+    raise PortalClientExit(code, definitive_rejection=definitive_rejection)
 
 
 def mcp_url():
@@ -135,6 +150,10 @@ def token_path(projection_id):
 
 def continuity_path(projection_id):
     return os.path.join(CONTINUITY_DIR, f"{projection_id}.json")
+
+
+def continuity_lock_path(projection_id):
+    return os.path.join(CONTINUITY_DIR, f"{projection_id}.lock")
 
 
 def _ensure_private_dir(path):
@@ -176,6 +195,35 @@ def _atomic_write_private(path, text):
         except FileNotFoundError:
             pass
         raise
+
+
+@contextlib.contextmanager
+def continuity_lock(projection_id):
+    """Serialize one projection's continuity transaction across CLI processes."""
+    _ensure_private_dir(CONTINUITY_DIR)
+    path = continuity_lock_path(projection_id)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    os.chmod(path, 0o600)
+    locked = False
+    try:
+        if os.name == "nt":
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"\0")
+                os.fsync(fd)
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        locked = True
+        yield
+    finally:
+        if locked:
+            if os.name == "nt":
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def save_token(projection_id, token):
@@ -295,16 +343,66 @@ def _valid_continuity(state):
     )
 
 
-def _quarantine_corrupt_continuity(path):
+def _quarantine_candidates(path):
+    directory = os.path.dirname(path)
+    prefix = os.path.basename(path) + ".corrupt"
+    try:
+        names = [
+            name
+            for name in os.listdir(directory)
+            if name == prefix or name.startswith(prefix + ".")
+        ]
+    except FileNotFoundError:
+        return []
+    return [os.path.join(directory, name) for name in names]
+
+
+def _quarantine_corrupt_continuity(path, reason):
+    """Replace corrupt state with bounded metadata, never its private payload."""
+    digest = hashlib.sha256()
+    byte_length = 0
+    try:
+        with open(path, "rb") as stream:
+            while chunk := stream.read(64 * 1024):
+                digest.update(chunk)
+                byte_length += len(chunk)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        print(
+            f"portal_client: WARNING — discarded unreadable continuity state at {path}: {error}",
+            file=sys.stderr,
+        )
+        return
+
     candidate = f"{path}.corrupt"
     suffix = 0
     while os.path.exists(candidate):
         suffix += 1
         candidate = f"{path}.corrupt.{suffix}"
-    os.replace(path, candidate)
-    os.chmod(candidate, 0o600)
+    os.remove(path)
+    metadata = {
+        "byte_length": byte_length,
+        "reason": reason,
+        "sha256": digest.hexdigest(),
+        "version": 1,
+    }
+    _atomic_write_private(
+        candidate,
+        json.dumps(metadata, separators=(",", ":"), sort_keys=True) + "\n",
+    )
+    quarantines = sorted(
+        _quarantine_candidates(path),
+        key=lambda item: (os.stat(item).st_mtime_ns, item),
+    )
+    for expired in quarantines[:-CONTINUITY_MAX_QUARANTINES]:
+        os.remove(expired)
     print(
-        f"portal_client: WARNING — quarantined corrupt continuity state at {candidate}",
+        f"portal_client: WARNING — quarantined sanitized continuity metadata at {candidate}",
         file=sys.stderr,
     )
 
@@ -317,12 +415,12 @@ def load_continuity(projection_id):
     except FileNotFoundError:
         return empty_continuity()
     except (json.JSONDecodeError, UnicodeDecodeError):
-        _quarantine_corrupt_continuity(path)
+        _quarantine_corrupt_continuity(path, "invalid_json")
         return empty_continuity()
     except OSError as error:
         die(f"cannot read continuity state at {path}: {error}")
     if not _valid_continuity(state):
-        _quarantine_corrupt_continuity(path)
+        _quarantine_corrupt_continuity(path, "invalid_schema")
         return empty_continuity()
     bounded = bound_records(state["records"])
     if bounded != state["records"]:
@@ -406,8 +504,10 @@ def rpc(method, params):
             raw = resp.read().decode("utf-8", errors="replace")
             ctype = resp.headers.get("Content-Type", "")
     except urllib.error.HTTPError as e:
+        definitive_rejection = 400 <= e.code < 500 and e.code not in {408, 425}
         die(
-            f"HTTP {e.code} from {mcp_url()}: {e.read().decode('utf-8', errors='replace')[:400]}"
+            f"HTTP {e.code} from {mcp_url()}: {e.read().decode('utf-8', errors='replace')[:400]}",
+            definitive_rejection=definitive_rejection,
         )
     except urllib.error.URLError as e:
         die(f"cannot reach {mcp_url()}: {e.reason}")
@@ -446,11 +546,11 @@ def call_tool(tool, args):
 def result_or_die(resp):
     if resp.get("error") is not None:
         print(json.dumps(redact(resp), indent=2))
-        sys.exit(2)
+        raise PortalClientExit(2, definitive_rejection=True)
     result = resp.get("result") or {}
     if result.get("accepted") is False:
         print(json.dumps(redact(result), indent=2))
-        sys.exit(2)
+        raise PortalClientExit(2, definitive_rejection=True)
     return result
 
 
@@ -492,6 +592,11 @@ def replay_continuity(projection_id, owner_token, continuity):
 
 
 def cmd_attach(a):
+    with continuity_lock(a.projection_id):
+        _cmd_attach_locked(a)
+
+
+def _cmd_attach_locked(a):
     continuity = load_continuity(a.projection_id)
     idempotency_key = _idempotency_key_for_attach(
         a.projection_id, a.idempotency_key, continuity
@@ -533,6 +638,11 @@ def cmd_attach(a):
 
 
 def cmd_publish(a):
+    with continuity_lock(a.projection_id):
+        _cmd_publish_locked(a)
+
+
+def _cmd_publish_locked(a):
     if a.text is not None:
         text = a.text
     elif a.text_file == "-":
@@ -564,15 +674,18 @@ def cmd_publish(a):
     try:
         result = result_or_die(call_tool("portal_projection_publish", args))
     except SystemExit as error:
-        # Exit 2 is a definitive tool rejection, so the prepared record did not
-        # become authoritative and must be rolled back. Exit 1 is a transport or
-        # response failure: the server may already have accepted the publish, so
-        # retain the stable logical_unit_id for an idempotent replay.
-        if error.code == 2:
+        definitive_rejection = getattr(error, "definitive_rejection", error.code == 2)
+        if definitive_rejection:
             if previous_exists:
                 save_continuity(a.projection_id, previous)
             else:
                 clear_continuity(a.projection_id)
+        else:
+            print(
+                "portal_client: continuity retained after an ambiguous outcome; "
+                f"run attach to replay logical_unit_id={logical_unit_id!r} safely",
+                file=sys.stderr,
+            )
         raise
     emit(result)
 
@@ -640,8 +753,9 @@ def cmd_ack(a):
 
 
 def cmd_continuity_clear(a):
-    path = continuity_path(a.projection_id)
-    emit({"continuity_file": path, "removed": clear_continuity(a.projection_id)})
+    with continuity_lock(a.projection_id):
+        path = continuity_path(a.projection_id)
+        emit({"continuity_file": path, "removed": clear_continuity(a.projection_id)})
 
 
 def _terminal(a, op, tool, extra=None):

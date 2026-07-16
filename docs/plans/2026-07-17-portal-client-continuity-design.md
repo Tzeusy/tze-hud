@@ -31,10 +31,17 @@ data are never stored.
 The rolling tail keeps at most 64 records and 64 KiB of canonical UTF-8 record
 data. Oldest records are evicted first. A newer record with the same
 `coalesce_key` replaces the earlier local record in place, matching the
-authority's visible-window semantics. Corrupt or schema-invalid state is moved
-to a private `.corrupt` file and excluded from replay. Local state deletion is
-an explicit `continuity-clear` operation; detach and remote cleanup do not
-silently destroy it.
+authority's visible-window semantics. Corrupt or schema-invalid content is
+deleted and replaced by private, bounded `.corrupt` metadata containing only a
+reason, byte count, and SHA-256 digest; at most four metadata files are kept, so
+forbidden owner-token or viewer-input content never survives quarantine. Local
+state deletion is an explicit `continuity-clear` operation; detach and remote
+cleanup do not silently destroy it.
+
+A private per-projection lock serializes attach/replay, live publish including
+its network outcome and rollback, and explicit continuity clear across CLI
+processes. This makes the read-modify-write sequence transactional: one
+writer's rejection rollback cannot erase another writer's accepted record.
 
 ## Attach and replay
 
@@ -53,7 +60,12 @@ records deduplicate. A repeated live publish with an already-retained
 authority's accepted no-op. A definitively rejected live publish restores the
 previous local tail; an ambiguous transport or response failure retains the
 prepared record so the stable identity can be replayed safely. An atomic-write
-failure occurs before network publication and preserves the prior file.
+failure occurs before network publication and preserves the prior file. HTTP
+4xx responses other than timeout/early-data cases are definitive rejection;
+connection loss, timeout, malformed response, and server/proxy failure remain
+ambiguous. On an ambiguous result, the client prints the retained
+`logical_unit_id` and directs the caller to run attach/replay instead of issuing
+a new auto-identified publish.
 
 ## Verification
 
@@ -61,8 +73,9 @@ Tests cover deterministic item and byte bounds, coalesce and logical-identity
 deduplication, private permissions and atomic writes, corrupt-state quarantine,
 owner-token and input exclusion, stable double replay, fresh-runtime
 reconstruction, definitive-rejection rollback, ambiguous-outcome retention,
-storage rollback, and explicit cleanup. Existing token-rotation and MCP-dialect
-tests remain part of the focused suite. The final gate includes the full
+HTTP outcome classification, multiprocess accepted/rejected/attach/clear
+interleavings, storage rollback, and explicit cleanup. Existing token-rotation
+and MCP-dialect tests remain part of the focused suite. The final gate includes the full
 user-test Python suite, skill-package audit, Ruff formatting/lint, Python
 compilation/help smoke tests, documentation links, and repository workspace
 guards that do not require a live Windows or GPU target.

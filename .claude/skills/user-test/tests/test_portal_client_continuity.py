@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import io
 import json
+import multiprocessing
 import os
 import stat
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -70,6 +74,87 @@ def record(unit: str, text: str, *, coalesce_key: str | None = None) -> dict:
     if coalesce_key is not None:
         item["coalesce_key"] = coalesce_key
     return item
+
+
+def _publish_worker(
+    text: str,
+    logical_unit_id: str,
+    entered: multiprocessing.synchronize.Event | None = None,
+    release: multiprocessing.synchronize.Event | None = None,
+    rejected: bool = False,
+) -> None:
+    def fake_call(_tool: str, _args: dict) -> dict:
+        if entered is not None:
+            entered.set()
+        if release is not None and not release.wait(timeout=10):
+            raise TimeoutError("publish worker release timed out")
+        if rejected:
+            return {"error": {"code": -32109, "message": "state conflict"}}
+        return {"result": {"accepted": True}}
+
+    with (
+        mock.patch.object(portal_client, "call_tool", side_effect=fake_call),
+        mock.patch.object(
+            portal_client, "new_logical_unit_id", return_value=logical_unit_id
+        ),
+        mock.patch.object(portal_client, "emit"),
+    ):
+        try:
+            portal_client.cmd_publish(publish_args(text))
+        except SystemExit:
+            if not rejected:
+                raise
+
+
+def _attach_worker(
+    entered: multiprocessing.synchronize.Event,
+    release: multiprocessing.synchronize.Event,
+) -> None:
+    def fake_call(tool: str, _args: dict) -> dict:
+        if tool == "portal_projection_attach":
+            return {"result": {"accepted": True, "owner_token": "rotated-token"}}
+        if tool == "portal_projection_publish":
+            entered.set()
+            if not release.wait(timeout=10):
+                raise TimeoutError("attach replay release timed out")
+            return {"result": {"accepted": True}}
+        raise AssertionError(tool)
+
+    with (
+        mock.patch.object(portal_client, "call_tool", side_effect=fake_call),
+        mock.patch.object(portal_client, "emit"),
+    ):
+        portal_client.cmd_attach(attach_args())
+
+
+def _clear_worker(
+    entered: multiprocessing.synchronize.Event,
+    release: multiprocessing.synchronize.Event,
+) -> None:
+    original_clear = portal_client.clear_continuity
+
+    def blocking_clear(projection_id: str) -> bool:
+        entered.set()
+        if not release.wait(timeout=10):
+            raise TimeoutError("clear release timed out")
+        return original_clear(projection_id)
+
+    with (
+        mock.patch.object(
+            portal_client, "clear_continuity", side_effect=blocking_clear
+        ),
+        mock.patch.object(portal_client, "emit"),
+    ):
+        portal_client.cmd_continuity_clear(
+            SimpleNamespace(projection_id="continuity-session")
+        )
+
+
+def _join_workers(*workers: multiprocessing.Process) -> None:
+    for worker in workers:
+        worker.join(timeout=10)
+        assert not worker.is_alive(), "continuity worker did not exit"
+        assert worker.exitcode == 0
 
 
 def test_continuity_state_is_private_and_atomically_replaced() -> None:
@@ -171,7 +256,8 @@ def test_corrupt_state_is_quarantined_without_replaying_untrusted_content(
 ) -> None:
     path = Path(portal_client.continuity_path("continuity-session"))
     path.parent.mkdir(mode=0o700, parents=True)
-    path.write_text('{"records":[', encoding="utf-8")
+    corrupt = '{"records":['
+    path.write_text(corrupt, encoding="utf-8")
     path.chmod(0o600)
 
     loaded = portal_client.load_continuity("continuity-session")
@@ -179,9 +265,29 @@ def test_corrupt_state_is_quarantined_without_replaying_untrusted_content(
     assert loaded == portal_client.empty_continuity()
     assert not path.exists()
     quarantined = path.with_suffix(path.suffix + ".corrupt")
-    assert quarantined.read_text(encoding="utf-8") == '{"records":['
+    metadata = json.loads(quarantined.read_text(encoding="utf-8"))
+    assert metadata == {
+        "byte_length": len(corrupt.encode("utf-8")),
+        "reason": "invalid_json",
+        "sha256": hashlib.sha256(corrupt.encode("utf-8")).hexdigest(),
+        "version": 1,
+    }
     assert stat.S_IMODE(quarantined.stat().st_mode) == 0o600
-    assert "quarantined corrupt continuity state" in capsys.readouterr().err
+    assert "quarantined sanitized continuity metadata" in capsys.readouterr().err
+
+
+def test_corrupt_quarantine_count_is_bounded() -> None:
+    path = Path(portal_client.continuity_path("continuity-session"))
+    path.parent.mkdir(mode=0o700, parents=True)
+
+    for index in range(portal_client.CONTINUITY_MAX_QUARANTINES + 3):
+        path.write_text(f'{{"invalid":{index},"records":[', encoding="utf-8")
+        portal_client.load_continuity("continuity-session")
+        time.sleep(0.001)
+
+    quarantines = list(path.parent.glob(path.name + ".corrupt*"))
+    assert len(quarantines) == portal_client.CONTINUITY_MAX_QUARANTINES
+    assert all(item.stat().st_size < 512 for item in quarantines)
 
 
 def test_published_record_preserves_semantics_without_persisting_owner_token() -> None:
@@ -326,7 +432,9 @@ def test_rejected_publish_rolls_back_prepared_local_record() -> None:
     assert portal_client.load_continuity("continuity-session") == initial
 
 
-def test_ambiguous_transport_failure_retains_record_for_idempotent_replay() -> None:
+def test_ambiguous_transport_failure_retains_record_for_idempotent_replay(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     initial = {
         "version": 1,
         "idempotency_key": "original-key",
@@ -350,6 +458,56 @@ def test_ambiguous_transport_failure_retains_record_for_idempotent_replay() -> N
             record("turn-2", "acceptance-unknown"),
         ],
     }
+    assert (
+        "run attach to replay logical_unit_id='turn-2' safely"
+        in capsys.readouterr().err
+    )
+
+
+def test_http_client_rejection_is_classified_as_definitive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HUD_MCP_URL", "http://127.0.0.1:9090/mcp")
+    monkeypatch.setenv("HUD_PSK", "test-psk")
+    rejection = portal_client.urllib.error.HTTPError(
+        "http://127.0.0.1:9090/mcp",
+        401,
+        "Unauthorized",
+        {},
+        io.BytesIO(b"denied"),
+    )
+
+    with (
+        mock.patch.object(
+            portal_client.urllib.request, "urlopen", side_effect=rejection
+        ),
+        pytest.raises(portal_client.PortalClientExit) as exc,
+    ):
+        portal_client.rpc("tools/call", {})
+
+    assert exc.value.code == 1
+    assert exc.value.definitive_rejection is True
+
+
+def test_definitive_http_rejection_rolls_back_prepared_record() -> None:
+    initial = {
+        "version": 1,
+        "idempotency_key": "original-key",
+        "records": [record("turn-1", "committed")],
+    }
+    portal_client.save_continuity("continuity-session", initial)
+    portal_client.save_token("continuity-session", "owner-token")
+    rejection = portal_client.PortalClientExit(1, definitive_rejection=True)
+
+    with (
+        mock.patch.object(portal_client, "call_tool", side_effect=rejection),
+        mock.patch.object(portal_client, "new_logical_unit_id", return_value="turn-2"),
+        pytest.raises(SystemExit) as exc,
+    ):
+        portal_client.cmd_publish(publish_args("rejected-before-acceptance"))
+
+    assert exc.value.code == 1
+    assert portal_client.load_continuity("continuity-session") == initial
 
 
 def test_failed_atomic_replace_preserves_previous_state() -> None:
@@ -388,6 +546,164 @@ def test_local_continuity_cleanup_is_explicit_and_idempotent() -> None:
     assert not Path(portal_client.continuity_path("continuity-session")).exists()
 
 
+@pytest.mark.skipif(
+    os.name == "nt", reason="fork barrier exercises POSIX process locks"
+)
+def test_concurrent_accepted_publishes_preserve_both_records() -> None:
+    portal_client.save_token("continuity-session", "owner-token")
+    portal_client.save_continuity(
+        "continuity-session",
+        {
+            "version": 1,
+            "idempotency_key": "original-key",
+            "records": [record("turn-0", "initial")],
+        },
+    )
+    context = multiprocessing.get_context("fork")
+    first_entered, first_release, second_entered = (
+        context.Event(),
+        context.Event(),
+        context.Event(),
+    )
+    first = context.Process(
+        target=_publish_worker,
+        args=("first", "turn-a", first_entered, first_release, False),
+    )
+    second = context.Process(
+        target=_publish_worker,
+        args=("second", "turn-b", second_entered, None, False),
+    )
+
+    first.start()
+    assert first_entered.wait(timeout=5)
+    second.start()
+    assert not second_entered.wait(timeout=0.25)
+    first_release.set()
+    _join_workers(first, second)
+
+    assert [
+        item["logical_unit_id"]
+        for item in portal_client.load_continuity("continuity-session")["records"]
+    ] == ["turn-0", "turn-a", "turn-b"]
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="fork barrier exercises POSIX process locks"
+)
+def test_rejected_writer_rollback_cannot_erase_concurrent_accepted_publish() -> None:
+    portal_client.save_token("continuity-session", "owner-token")
+    portal_client.save_continuity(
+        "continuity-session",
+        {
+            "version": 1,
+            "idempotency_key": "original-key",
+            "records": [record("turn-0", "initial")],
+        },
+    )
+    context = multiprocessing.get_context("fork")
+    first_entered, first_release, second_entered = (
+        context.Event(),
+        context.Event(),
+        context.Event(),
+    )
+    rejected = context.Process(
+        target=_publish_worker,
+        args=("rejected", "turn-a", first_entered, first_release, True),
+    )
+    accepted = context.Process(
+        target=_publish_worker,
+        args=("accepted", "turn-b", second_entered, None, False),
+    )
+
+    rejected.start()
+    assert first_entered.wait(timeout=5)
+    accepted.start()
+    assert not second_entered.wait(timeout=0.25)
+    first_release.set()
+    _join_workers(rejected, accepted)
+
+    assert [
+        item["logical_unit_id"]
+        for item in portal_client.load_continuity("continuity-session")["records"]
+    ] == ["turn-0", "turn-b"]
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="fork barrier exercises POSIX process locks"
+)
+def test_attach_replay_serializes_with_concurrent_publish() -> None:
+    portal_client.save_continuity(
+        "continuity-session",
+        {
+            "version": 1,
+            "idempotency_key": "original-key",
+            "records": [record("turn-0", "initial")],
+        },
+    )
+    context = multiprocessing.get_context("fork")
+    replay_entered, replay_release, publish_entered = (
+        context.Event(),
+        context.Event(),
+        context.Event(),
+    )
+    attach = context.Process(
+        target=_attach_worker, args=(replay_entered, replay_release)
+    )
+    publish = context.Process(
+        target=_publish_worker,
+        args=("after attach", "turn-b", publish_entered, None, False),
+    )
+
+    attach.start()
+    assert replay_entered.wait(timeout=5)
+    publish.start()
+    assert not publish_entered.wait(timeout=0.25)
+    replay_release.set()
+    _join_workers(attach, publish)
+
+    assert [
+        item["logical_unit_id"]
+        for item in portal_client.load_continuity("continuity-session")["records"]
+    ] == ["turn-0", "turn-b"]
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="fork barrier exercises POSIX process locks"
+)
+def test_clear_serializes_before_concurrent_publish() -> None:
+    portal_client.save_token("continuity-session", "owner-token")
+    portal_client.save_continuity(
+        "continuity-session",
+        {
+            "version": 1,
+            "idempotency_key": "original-key",
+            "records": [record("turn-0", "initial")],
+        },
+    )
+    context = multiprocessing.get_context("fork")
+    clear_entered, clear_release, publish_entered = (
+        context.Event(),
+        context.Event(),
+        context.Event(),
+    )
+    clear = context.Process(target=_clear_worker, args=(clear_entered, clear_release))
+    publish = context.Process(
+        target=_publish_worker,
+        args=("after clear", "turn-b", publish_entered, None, False),
+    )
+
+    clear.start()
+    assert clear_entered.wait(timeout=5)
+    publish.start()
+    assert not publish_entered.wait(timeout=0.25)
+    clear_release.set()
+    _join_workers(clear, publish)
+
+    state = portal_client.load_continuity("continuity-session")
+    assert state["idempotency_key"] is None
+    assert [item["logical_unit_id"] for item in state["records"]] == ["turn-b"]
+
+
 def test_continuity_json_never_accepts_unknown_or_token_fields() -> None:
     path = Path(portal_client.continuity_path("continuity-session"))
     path.parent.mkdir(mode=0o700, parents=True)
@@ -414,3 +730,11 @@ def test_continuity_json_never_accepts_unknown_or_token_fields() -> None:
 
     assert loaded == portal_client.empty_continuity()
     assert not path.exists()
+    artifacts = list(path.parent.glob(path.name + ".corrupt*"))
+    assert artifacts
+    for artifact in artifacts:
+        serialized = artifact.read_text(encoding="utf-8")
+        assert "forbidden" not in serialized
+        assert "viewer-private" not in serialized
+        assert "owner_token" not in serialized
+        assert "input_items" not in serialized

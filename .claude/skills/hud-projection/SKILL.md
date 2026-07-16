@@ -89,6 +89,9 @@ optional `coalesce_key`, plus the original attach idempotency key. It never
 contains owner tokens, pending input, acknowledgements, or viewer-authored HUD
 turns. Use `continuity-path` to inspect its location and `continuity-clear` for
 explicit local deletion; detach and remote cleanup do not silently erase it.
+Schema-invalid files are reduced to bounded hash/size/reason metadata rather
+than preserving their raw private payload, and per-projection process locking
+serializes attach, publish outcome/rollback, and clear transactions.
 
 For a one-command connectivity trial (attach + greeting + poll), use
 `.claude/skills/user-test/scripts/portal_trial.sh`.
