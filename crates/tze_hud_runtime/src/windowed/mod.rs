@@ -226,6 +226,8 @@ fn publish_degradation_transition(
         sample_count = event.sample_count,
         window_duration_us = event.window_duration_us,
         effective_cadence_hz = event.effective_cadence_hz,
+        entry_threshold_us = event.entry_threshold_us,
+        recovery_threshold_us = event.recovery_threshold_us,
         recovery_source = ?event.recovery_source,
         "runtime degradation transition"
     );
@@ -819,6 +821,17 @@ impl ApplicationHandler for WinitApp {
         self.refresh_widget_hover_tracking();
 
         let cfg = self.state.config.clone();
+        let monitor_refresh_millihz = window
+            .current_monitor()
+            .and_then(|monitor| monitor.refresh_rate_millihertz());
+        let degradation_effective_fps =
+            crate::degradation::effective_degradation_fps(cfg.target_fps, monitor_refresh_millihz);
+        tracing::info!(
+            target_fps = cfg.target_fps,
+            ?monitor_refresh_millihz,
+            degradation_effective_fps,
+            "windowed: froze startup degradation cadence"
+        );
         let window_clone = window.clone();
 
         // ── Resolve actual surface dimensions ─────────────────────────────
@@ -1039,7 +1052,7 @@ impl ApplicationHandler for WinitApp {
                 let degradation_clock_start = Instant::now();
                 let degradation_envelope =
                     crate::degradation::DegradationEnvelope::from_effective_fps(
-                        cfg.target_fps.max(1),
+                        degradation_effective_fps,
                     )
                     .expect("validated target cadence must produce a degradation envelope");
                 let mut degradation_controller =
@@ -1149,6 +1162,10 @@ impl ApplicationHandler for WinitApp {
                     }
 
                     let frame_start = Instant::now();
+                    // Authoritative degradation workload boundary: all active
+                    // compositor work, including resize handling, before Stage 3
+                    // through successful Stage 7 completion.
+                    let degradation_work_start = Instant::now();
 
                     // ── Resize check ───────────────────────────────────────
                     // The main thread writes pending_resize_width/height on
@@ -1184,10 +1201,6 @@ impl ApplicationHandler for WinitApp {
                         compositor.height = pending_h;
                     }
 
-                    // Authoritative degradation workload boundary: active
-                    // compositor work from before Stage 3 through Stage 7.
-                    let degradation_work_start = Instant::now();
-
                     // ── Stage 3: Mutation Intake ───────────────────────────
                     // (placeholder — real mutations come via gRPC session)
 
@@ -1213,17 +1226,19 @@ impl ApplicationHandler for WinitApp {
 
                         // Snapshot identity, priority, z-order, and selected
                         // policy atomically under this frame's scene lock.
-                        // Priority-zero chrome tiles are never suppression
-                        // candidates.
+                        // Chrome is a separate compositor layer; every agent or
+                        // runtime tile, including priority zero, participates in
+                        // the one-tile Emergency selection.
                         let degradation_tiles: Vec<crate::degradation::TileDescriptor> = scene
                             .visible_tiles()
                             .into_iter()
                             .filter_map(|tile| {
-                                let priority = scene.leases.get(&tile.lease_id)?.priority;
-                                (priority != 0).then_some(crate::degradation::TileDescriptor {
-                                    tile_id: tile.id,
-                                    lease_priority: u32::from(priority),
-                                    z_order: tile.z_order,
+                                scene.leases.get(&tile.lease_id).map(|lease| {
+                                    crate::degradation::TileDescriptor {
+                                        tile_id: tile.id,
+                                        lease_priority: u32::from(lease.priority),
+                                        z_order: tile.z_order,
+                                    }
                                 })
                             })
                             .collect();

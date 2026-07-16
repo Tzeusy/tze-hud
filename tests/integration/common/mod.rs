@@ -177,8 +177,22 @@ pub async fn connect_agent(
         }
     };
 
-    // Read SceneSnapshot
+    // Read SceneSnapshot followed by the mandatory current degradation state.
     let _msg = response_stream.next().await.ok_or("no scene snapshot")??;
+    let msg = response_stream
+        .next()
+        .await
+        .ok_or("no current degradation notice")??;
+    if !matches!(
+        &msg.payload,
+        Some(session_proto::server_message::Payload::DegradationNotice(_))
+    ) {
+        return Err(format!(
+            "agent {agent_id}: Expected DegradationNotice after SceneSnapshot, got: {:?}",
+            msg.payload
+        )
+        .into());
+    }
 
     // Request lease
     tx.send(session_proto::ClientMessage {

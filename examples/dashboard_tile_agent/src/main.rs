@@ -411,8 +411,8 @@ async fn do_content_update_with_host(
     })
     .await?;
 
-    // Drain SessionEstablished + SceneSnapshot.
-    for _ in 0..2 {
+    // Drain SessionEstablished + SceneSnapshot + current DegradationNotice.
+    for _ in 0..3 {
         response_stream
             .next()
             .await
@@ -1039,6 +1039,21 @@ async fn establish_session_with_host(
         }
     }
 
+    let degradation_msg = response_stream
+        .next()
+        .await
+        .ok_or("stream closed before DegradationNotice")??;
+    match degradation_msg.payload {
+        Some(session_proto::server_message::Payload::DegradationNotice(ref notice)) => {
+            println!("  DegradationNotice received: level={}", notice.level);
+        }
+        other => {
+            return Err(
+                format!("Expected DegradationNotice after SceneSnapshot, got: {other:?}").into(),
+            );
+        }
+    }
+
     // ── 7. Return SessionState ─────────────────────────────────────────────
     Ok(SessionState {
         session_id: established.session_id.clone(),
@@ -1176,6 +1191,20 @@ async fn request_lease_with_host(
         other => {
             return Err(
                 format!("Expected SceneSnapshot after SessionEstablished, got: {other:?}").into(),
+            );
+        }
+    }
+
+    // Drain the current degradation baseline.
+    let third = response_stream
+        .next()
+        .await
+        .ok_or("stream closed before DegradationNotice")??;
+    match third.payload {
+        Some(session_proto::server_message::Payload::DegradationNotice(_)) => {}
+        other => {
+            return Err(
+                format!("Expected DegradationNotice after SceneSnapshot, got: {other:?}").into(),
             );
         }
     }
@@ -1456,8 +1485,8 @@ async fn create_tile_batch_with_host(
     })
     .await?;
 
-    // Drain SessionEstablished + SceneSnapshot.
-    for _ in 0..2 {
+    // Drain SessionEstablished + SceneSnapshot + current DegradationNotice.
+    for _ in 0..3 {
         response_stream
             .next()
             .await
@@ -2186,8 +2215,8 @@ mod tests {
         .await
         .unwrap();
 
-        // Drain SessionEstablished + SceneSnapshot.
-        for _ in 0..2 {
+        // Drain SessionEstablished + SceneSnapshot + current DegradationNotice.
+        for _ in 0..3 {
             resp_stream
                 .next()
                 .await
@@ -2580,8 +2609,8 @@ mod tests {
         .await
         .unwrap();
 
-        // Drain SessionEstablished + SceneSnapshot.
-        for _ in 0..2 {
+        // Drain SessionEstablished + SceneSnapshot + current DegradationNotice.
+        for _ in 0..3 {
             response_stream
                 .next()
                 .await
@@ -2840,7 +2869,7 @@ mod tests {
         .await
         .unwrap();
 
-        for _ in 0..2 {
+        for _ in 0..3 {
             response_stream
                 .next()
                 .await
@@ -3284,7 +3313,7 @@ mod tests {
         .await
         .unwrap();
 
-        for _ in 0..2 {
+        for _ in 0..3 {
             response_stream
                 .next()
                 .await
@@ -3964,8 +3993,8 @@ mod tests {
 
         let mut stream = client.session(stream).await.unwrap().into_inner();
 
-        // Drain SessionEstablished + SceneSnapshot.
-        for _ in 0..2 {
+        // Drain SessionEstablished + SceneSnapshot + current DegradationNotice.
+        for _ in 0..3 {
             stream.next().await.expect("stream open").expect("no error");
         }
 

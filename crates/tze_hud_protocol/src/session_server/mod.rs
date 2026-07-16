@@ -564,8 +564,6 @@ impl HudSession for HudSessionImpl {
                 }
             };
 
-            let is_resume = matches!(&first_msg.payload, Some(ClientPayload::SessionResume(_)));
-
             // Process handshake
             let mut session = match first_msg.payload {
                 Some(ClientPayload::SessionInit(init)) => {
@@ -653,25 +651,23 @@ impl HudSession for HudSessionImpl {
                     .await;
             }
 
-            // Atomically subscribe after the coherent scene snapshot. A
-            // reconnect additionally receives current policy before any later
-            // transition/incremental event; a new session preserves the v1
-            // two-message handshake and receives subsequent transitions.
+            // Atomically subscribe after the coherent scene snapshot, then send
+            // the captured current policy before any later transition or
+            // incremental event. RFC 0005 requires this for both new sessions
+            // and resumes, including when the current level is Normal.
             let (mut degradation_rx, current_degradation) =
                 degradation_notices.subscribe_with_current();
-            if is_resume {
-                let seq = session.next_server_seq();
-                if tx
-                    .send(Ok(ServerMessage {
-                        sequence: seq,
-                        timestamp_wall_us: now_wall_us(),
-                        payload: Some(ServerPayload::DegradationNotice(current_degradation)),
-                    }))
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
+            let seq = session.next_server_seq();
+            if tx
+                .send(Ok(ServerMessage {
+                    sequence: seq,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::DegradationNotice(current_degradation)),
+                }))
+                .await
+                .is_err()
+            {
+                return;
             }
 
             let upload_rate_limit_bytes_per_sec =

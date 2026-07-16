@@ -63,6 +63,9 @@ impl DegradationEnvelope {
             return None;
         }
         let period_us = 1_000_000_u64 / u64::from(effective_fps);
+        if period_us == 0 {
+            return None;
+        }
         let ceil_ratio = |numerator: u64, denominator: u64| {
             period_us
                 .checked_mul(numerator)
@@ -79,6 +82,21 @@ impl DegradationEnvelope {
             recovery_min_samples: RECOVERY_WINDOW,
         })
     }
+}
+
+/// Resolve the immutable startup cadence from the configured target and a
+/// monitor refresh reported in millihertz. Unknown refresh leaves the target
+/// unchanged; a known refresh caps it. Millihertz is rounded to the nearest
+/// whole presentation cadence because the runtime envelope is integer-Hz.
+pub(crate) fn effective_degradation_fps(
+    target_fps: u32,
+    monitor_refresh_millihz: Option<u32>,
+) -> u32 {
+    let target_fps = target_fps.max(1);
+    monitor_refresh_millihz.map_or(target_fps, |refresh_millihz| {
+        let refresh_fps = refresh_millihz.saturating_add(500) / 1_000;
+        target_fps.min(refresh_fps.max(1))
+    })
 }
 
 // ─── Degradation Level ────────────────────────────────────────────────────────
@@ -648,13 +666,12 @@ impl DegradationController {
     pub fn protocol_notice(&self, timestamp_wall_us: u64) -> DegradationNotice {
         let (_, level) = self.protocol_level();
         let affected_capabilities = match self.level {
-            DegradationLevel::Normal => Vec::new(),
             DegradationLevel::Coalesce => vec!["state_stream".to_string()],
-            DegradationLevel::ReduceTextureQuality => vec!["texture_quality".to_string()],
-            DegradationLevel::DisableTransparency => vec!["transparency".to_string()],
-            DegradationLevel::ShedTiles | DegradationLevel::Emergency => {
-                vec!["tile_visibility".to_string()]
-            }
+            DegradationLevel::Normal
+            | DegradationLevel::ReduceTextureQuality
+            | DegradationLevel::DisableTransparency
+            | DegradationLevel::ShedTiles
+            | DegradationLevel::Emergency => Vec::new(),
         };
         DegradationNotice {
             level: level as i32,
@@ -712,7 +729,7 @@ fn p95(samples: &[u64]) -> u64 {
     debug_assert!(!samples.is_empty());
     let mut samples = samples.to_vec();
     samples.sort_unstable();
-    let rank = ((95.0_f64 / 100.0) * samples.len() as f64).ceil() as usize;
+    let rank = (95 * samples.len()).div_ceil(100);
     let idx = rank.saturating_sub(1).min(samples.len() - 1);
     samples[idx]
 }
@@ -742,6 +759,14 @@ mod tests {
     }
 
     #[test]
+    fn effective_cadence_is_capped_only_when_monitor_refresh_is_known() {
+        assert_eq!(effective_degradation_fps(120, None), 120);
+        assert_eq!(effective_degradation_fps(120, Some(60_000)), 60);
+        assert_eq!(effective_degradation_fps(120, Some(59_940)), 60);
+        assert_eq!(effective_degradation_fps(30, Some(60_000)), 30);
+    }
+
+    #[test]
     fn elapsed_window_blocks_burst_samples_and_quiescence_recovers_without_frames() {
         let envelope = DegradationEnvelope::from_effective_fps(60).expect("valid cadence");
         let mut ctrl = DegradationController::with_envelope(DegradationConfig::default(), envelope);
@@ -765,6 +790,44 @@ mod tests {
             .record_quiescent_at(now + envelope.recovery_duration_us)
             .expect("one quiescent recovery step");
         assert_eq!(recovered.new_level, DegradationLevel::Normal.as_u8());
+    }
+
+    #[test]
+    fn production_degradation_sustained_payload_emits_machine_readable_deadline_evidence() {
+        let started = std::time::Instant::now();
+        let envelope = DegradationEnvelope::from_effective_fps(60).expect("valid cadence");
+        let mut ctrl = DegradationController::with_envelope(DegradationConfig::default(), envelope);
+        let mut selected_at_us = 0;
+        let mut transition = None;
+
+        for sample_index in 1..=envelope.entry_min_samples {
+            selected_at_us = sample_index as u64 * envelope.period_us;
+            transition = ctrl.record_frame_at(envelope.entry_threshold_us + 1, selected_at_us);
+        }
+
+        let transition = transition.expect("sustained over-budget load must select Level 1");
+        assert!(
+            selected_at_us <= envelope.entry_duration_us,
+            "transition must be selected within the cadence-derived deadline"
+        );
+        assert_eq!(transition.previous_level, DegradationLevel::Normal.as_u8());
+        assert_eq!(transition.new_level, DegradationLevel::Coalesce.as_u8());
+
+        println!(
+            "{}",
+            serde_json::json!({
+                "artifact": "production_degradation_sustained_payload",
+                "status": "pass",
+                "effective_cadence_hz": envelope.effective_fps,
+                "entry_threshold_us": envelope.entry_threshold_us,
+                "entry_deadline_us": envelope.entry_duration_us,
+                "selected_at_us": selected_at_us,
+                "sample_count": transition.sample_count,
+                "from_level": transition.previous_level,
+                "to_level": transition.new_level,
+                "validation_wall_time_us": started.elapsed().as_micros() as u64,
+            })
+        );
     }
 
     /// Push `n` frames of `frame_time_us` through the controller without
@@ -1341,6 +1404,29 @@ mod tests {
         assert!(
             ev.frame_time_p95_us > TRIGGER_THRESHOLD_US,
             "p95 should exceed trigger threshold"
+        );
+    }
+
+    #[test]
+    fn render_only_protocol_notices_do_not_claim_capability_reduction() {
+        let mut ctrl = controller();
+        for level in [
+            DegradationLevel::ReduceTextureQuality,
+            DegradationLevel::DisableTransparency,
+            DegradationLevel::ShedTiles,
+            DegradationLevel::Emergency,
+        ] {
+            ctrl.level = level;
+            assert!(
+                ctrl.protocol_notice(1).affected_capabilities.is_empty(),
+                "{level} changes rendering only"
+            );
+        }
+
+        ctrl.level = DegradationLevel::Coalesce;
+        assert_eq!(
+            ctrl.protocol_notice(1).affected_capabilities,
+            vec!["state_stream"]
         );
     }
 

@@ -434,6 +434,10 @@ impl HeadlessRuntime {
     /// that `read_pixels()` returns actual rendered pixel data after this call.
     pub async fn render_frame(&mut self) -> FrameTelemetry {
         let frame_start = Instant::now();
+        // Include all active scene/compositor work performed for this frame;
+        // this boundary precedes expiry, animation, and Stage 3 work and ends
+        // only after Stage 7 completes.
+        let degradation_work_start = Instant::now();
         let state = self.state.lock().await;
         // Clone the Arc so we can release the SharedState lock before rendering.
         let scene_arc = state.scene.clone();
@@ -479,10 +483,6 @@ impl HeadlessRuntime {
         let _snap_ref = self.pipeline.hit_test_snapshot.load();
         let stage2_us = s2_start.elapsed().as_micros() as u64;
 
-        // The authoritative degradation workload boundary starts before Stage
-        // 3 and ends after Stage 7. It is distinct from end-to-end frame time.
-        let degradation_work_start = Instant::now();
-
         // Stage 3: Mutation Intake (headless — mutations committed before render)
         let s3_start = Instant::now();
         let stage3_us = s3_start.elapsed().as_micros() as u64;
@@ -512,12 +512,14 @@ impl HeadlessRuntime {
             .visible_tiles()
             .into_iter()
             .filter_map(|tile| {
-                let priority = scene_guard.leases.get(&tile.lease_id)?.priority;
-                (priority != 0).then_some(TileDescriptor {
-                    tile_id: tile.id,
-                    lease_priority: u32::from(priority),
-                    z_order: tile.z_order,
-                })
+                scene_guard
+                    .leases
+                    .get(&tile.lease_id)
+                    .map(|lease| TileDescriptor {
+                        tile_id: tile.id,
+                        lease_priority: u32::from(lease.priority),
+                        z_order: tile.z_order,
+                    })
             })
             .collect();
         let applied_degradation_level = self.degradation_controller.level();
@@ -644,6 +646,9 @@ impl HeadlessRuntime {
                 sample_count = event.sample_count,
                 window_duration_us = event.window_duration_us,
                 effective_cadence_hz = event.effective_cadence_hz,
+                entry_threshold_us = event.entry_threshold_us,
+                recovery_threshold_us = event.recovery_threshold_us,
+                recovery_source = ?event.recovery_source,
                 "runtime degradation transition"
             );
             let (runtime_level, _) = self.degradation_controller.protocol_level();

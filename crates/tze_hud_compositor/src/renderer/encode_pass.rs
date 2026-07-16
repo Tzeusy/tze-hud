@@ -41,6 +41,14 @@ use super::token_colors::{
     urgency_to_severity_color,
 };
 
+#[inline]
+fn simplify_flat_alpha(mut color: [f32; 4], level: tze_hud_scene::DegradationLevel) -> [f32; 4] {
+    if level >= tze_hud_scene::DegradationLevel::Significant && color[3] > 0.0 {
+        color[3] = 1.0;
+    }
+    color
+}
+
 // ─── Encode-pass impl block ───────────────────────────────────────────────────
 
 impl super::Compositor {
@@ -59,22 +67,24 @@ impl super::Compositor {
     /// alpha is correct.
     #[inline]
     pub(super) fn gpu_color(&self, rgba: Rgba) -> [f32; 4] {
+        let rgba = simplify_flat_alpha(rgba.to_array(), self.degradation_policy.level);
         if self.overlay_mode {
-            let a = rgba.a;
+            let a = rgba[3];
             [
-                srgb_to_linear(linear_to_srgb(rgba.r) * a),
-                srgb_to_linear(linear_to_srgb(rgba.g) * a),
-                srgb_to_linear(linear_to_srgb(rgba.b) * a),
+                srgb_to_linear(linear_to_srgb(rgba[0]) * a),
+                srgb_to_linear(linear_to_srgb(rgba[1]) * a),
+                srgb_to_linear(linear_to_srgb(rgba[2]) * a),
                 a,
             ]
         } else {
-            rgba.to_array()
+            rgba
         }
     }
 
     /// Same as [`gpu_color`] but for raw `[f32; 4]` arrays (assumed linear).
     #[inline]
     pub(super) fn gpu_color_raw(&self, color: [f32; 4]) -> [f32; 4] {
+        let color = simplify_flat_alpha(color, self.degradation_policy.level);
         if self.overlay_mode {
             let a = color[3];
             [
@@ -710,5 +720,27 @@ impl super::Compositor {
         pass.set_pipeline(pipeline);
         pass.set_vertex_buffer(0, vertex_buffer.slice(..));
         pass.draw(0..vertices.len() as u32, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod degradation_flat_alpha_tests {
+    use super::simplify_flat_alpha;
+    use tze_hud_scene::DegradationLevel;
+
+    #[test]
+    fn significant_policy_forces_visible_flat_geometry_opaque_but_preserves_clear() {
+        assert_eq!(
+            simplify_flat_alpha([0.2, 0.3, 0.4, 0.25], DegradationLevel::Moderate),
+            [0.2, 0.3, 0.4, 0.25]
+        );
+        assert_eq!(
+            simplify_flat_alpha([0.2, 0.3, 0.4, 0.25], DegradationLevel::Significant,),
+            [0.2, 0.3, 0.4, 1.0]
+        );
+        assert_eq!(
+            simplify_flat_alpha([0.0, 0.0, 0.0, 0.0], DegradationLevel::Significant),
+            [0.0, 0.0, 0.0, 0.0]
+        );
     }
 }

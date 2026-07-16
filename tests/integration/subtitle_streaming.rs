@@ -178,6 +178,18 @@ async fn connect_agent_with_zone_publish_cap(
     let _established = rx.next().await.ok_or("no SessionEstablished")??;
     // Consume SceneSnapshot
     let _snapshot = rx.next().await.ok_or("no SceneSnapshot")??;
+    // Consume the mandatory current degradation baseline.
+    let degradation = rx.next().await.ok_or("no DegradationNotice")??;
+    if !matches!(
+        &degradation.payload,
+        Some(session_proto::server_message::Payload::DegradationNotice(_))
+    ) {
+        return Err(format!(
+            "Expected DegradationNotice after SceneSnapshot, got: {:?}",
+            degradation.payload
+        )
+        .into());
+    }
 
     // Request a lease with publish_zone capability
     tx.send(session_proto::ClientMessage {
