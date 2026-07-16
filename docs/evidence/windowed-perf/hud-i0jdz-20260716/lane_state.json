@@ -35,6 +35,7 @@
     "overlay_p99_us": null,
     "composite_delta_p99_us": null,
     "budget_evaluated": false,
+    "dimension_comparability_evaluated": false,
     "watchdog_reason": "no-progress timeout",
     "watchdog_timeout_secs": 30,
     "warmup_frames_seen": 1,
@@ -50,6 +51,12 @@
       "the compositor dirty predicate becomes false after the first static frame",
       "benchmark_state.record is nested inside the dirty/present branch"
     ]
+  },
+  "future_measurement_preconditions": {
+    "equal_effective_dimensions_required": true,
+    "fullscreen_surface_seen": "3840x2160",
+    "current_harness_explicit_overlay_surface": "1920x1080",
+    "composite_delta_must_not_be_computed_on_mismatched_surfaces": true
   },
   "cleanup": {
     "temporary_task_removed": true,

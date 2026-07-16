@@ -16,6 +16,17 @@ No `overlay.json` or `windowed_fullscreen_vs_overlay_report.json` was produced.
 This is a failed measurement, not a performance pass, and the budget was not
 weakened or bypassed.
 
+Independent production-call-site review found a second precondition for the
+eventual rerun. The harness currently forwards its default explicit dimensions
+(`--width 1920 --height 1080`) to both modes. Fullscreen ignores those configured
+dimensions and uses the monitor, while the explicit flags disable overlay
+auto-sizing. This run's fullscreen artifact reports `3840x2160`; an unchanged
+post-fix rerun would therefore compare unequal pixel workloads. No invalid delta
+was emitted here because overlay never started. Before a future delta is
+accepted, the harness must make both effective surfaces equal and fail closed if
+the emitted dimensions differ. The separate focused P1 proposal is recorded in
+`follow_ups.json`.
+
 ## Traceable run identity
 
 - Assigned source HEAD: `09f69c6d2d82b065297602d44b4e50e97957f7a9`
@@ -74,7 +85,8 @@ does not make the benchmark workload advance.
 The correct follow-up is to keep the normal-runtime idle gate intact while
 making benchmark mode deterministically produce the requested sample frames.
 That behavior change needs a red-green regression test before implementation.
-The structured follow-up proposal is in `follow_ups.json`.
+The structured follow-up proposals are in `follow_ups.json`; the runtime fix and
+the equal-surface harness guard remain separate focused changes.
 
 ## Cleanup and production restoration
 
@@ -99,6 +111,27 @@ Machine-readable run and restoration state is in `lane_state.json`.
 - `fullscreen.json` — watchdog diagnostic emitted by the runtime
 - `logs/fullscreen.stdout.log` — runtime startup output
 - `logs/fullscreen.stderr.log` — non-zero benchmark exit diagnostic
-- `windowed-benchmark.toml` — exact generated runtime configuration
+- `windowed-benchmark.toml` — generated runtime configuration (content-preserving
+  copy; Windows line endings normalized)
 - `lane_state.json` — run identity, causal classification, and restoration proof
-- `follow_ups.json` — structured focused bug proposal
+- `follow_ups.json` — structured focused bug proposals
+
+The current app maps any benchmark watchdog failure to the generic stderr text
+`windowed benchmark artifact write failed`. In this run the partial artifact did
+write successfully; its committed contents match the remote JSON semantically
+(the copy normalized Windows line endings). Treat the stderr line as the
+expected non-zero watchdog exit, not as evidence that `fullscreen.json` failed
+to write.
+
+## Independent restoration revalidation
+
+At `2026-07-16T13:51:14Z`, the PR reviewer re-ran read-only live gates. The
+staged executable and harness still matched the recorded SHA-256 values; the
+committed fullscreen JSON, config, and per-mode logs matched the retained remote
+artifacts semantically; overlay and combined-report files were still absent.
+The same restored production PID `34996` was still running in the interactive
+desktop session, owned both listeners, and matched the live GPU lock. No staged
+HUD process or temporary benchmark task remained, both SSH roles passed, and MCP
+`initialize` returned HTTP 200. The live CPU/GPU/OS profile matched the TzeHouse
+reference identity. No secret-bearing task XML or private target identity was
+copied into this evidence tree.
