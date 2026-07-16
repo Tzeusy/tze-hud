@@ -1,0 +1,69 @@
+# Profile-Driven Operational Runtime Budget Reconciliation
+
+Issue: `hud-k3lfx`
+
+OpenSpec change: `profile-runtime-budget-envelope`
+
+Scope: configuration, runtime admission, scene resources, resource store, and compositor caches. Cadence/quiescence and device-specific implementation are excluded.
+
+## Finding
+
+The selected display profile is a frozen configuration object, not yet one operational authority. Production consumes `max_truncation_input_bytes` and validates configured agent ceilings, but session/lease defaults and memory-owning stores recreate independent defaults. This confirms `hud-48s45` F5/F6 and identifies the exact handoff seams below.
+
+## Production Consumer Inventory
+
+| Contract value or resource | Source today | Production consumer(s) | Current effect | Required owner after approval |
+|---|---|---|---|---|
+| Resolved profile identity and values | [`DisplayProfile`](../../crates/tze_hud_scene/src/config/mod.rs) and [`ConfigLoader::freeze`](../../crates/tze_hud_config/src/loader.rs) | [`RuntimeContext`](../../crates/tze_hud_runtime/src/runtime_context.rs) | Frozen and shared | `OperationalRuntimeEnvelope` derived once at freeze |
+| Registered-agent `max_tiles`, `max_texture_mb`, `max_update_hz` | [`RawAgentConfig`](../../crates/tze_hud_config/src/raw.rs) | [`loader::validate_agent_profile_ceilings`](../../crates/tze_hud_config/src/loader.rs) / [`agents::validate_agents`](../../crates/tze_hud_config/src/agents.rs) | Validated, then discarded; `ResolvedConfig` retains capabilities only | Retained effective override map in resolved config/envelope |
+| `max_truncation_input_bytes` | Selected profile | [`WindowedRuntime` compositor initialization](../../crates/tze_hud_runtime/src/windowed/mod.rs); [`HeadlessRuntime::new`](../../crates/tze_hud_runtime/src/headless.rs) | Governs truncation shaping in both production runtimes | Preserve as direct profile-derived render bound |
+| `max_agents` | Selected profile | No production admission consumer found | Informational/config-only | Resident-session limit in admission/session server |
+| `max_tiles` | Selected profile | Config validation only | Does not cap aggregate leased tiles or default leases | Aggregate scene counter plus per-agent default ceiling |
+| `max_texture_mb` | Selected profile | Config validation only | Does not configure resource store, lease defaults, or aggregate residency | Aggregate agent-leased texture authority; physical runtime memory remains separate |
+| `max_agent_update_hz` | Selected profile | Config validation only | Does not configure mutation intake/session defaults | Effective per-session update budget and aggregate admission input |
+| Per-session resource defaults | [`ResourceBudget::default()` and runtime session constants](../../crates/tze_hud_runtime/src/session.rs) | Production [`handle_lease_request`](../../crates/tze_hud_protocol/src/session_server/leases.rs) calls [`SceneGraph::grant_lease_with_priority`](../../crates/tze_hud_scene/src/graph/leases.rs), which stores `ResourceBudget::default()` | Every lease receives 8 tiles, 256 MiB, 30 Hz regardless of selected profile/agent override | Effective profile/override-derived budget passed into lease grant |
+| Session admission limits | [`SessionLimits`](../../crates/tze_hud_runtime/src/admission.rs) and protocol [`SessionConfig`](../../crates/tze_hud_protocol/src/session_server/config.rs) constants | `AdmissionController` has no production caller; protocol stream manages sessions independently | Profile `max_agents` is not enforced; runtime admission implementation is effectively test-only | One production admission path sourced from envelope |
+| Mutation budget enforcer | [`MutationIntakeStage`](../../crates/tze_hud_runtime/src/pipeline.rs) owns [`BudgetEnforcer`](../../crates/tze_hud_runtime/src/budget.rs) | Windowed/headless create `FramePipeline`, but production session establishment does not register an effective profile-derived session budget | Component behavior exists without end-to-end admission wiring | Register/unregister from production session lifecycle |
+| Scene resource store | [`ResourceStoreConfig::default()`](../../crates/tze_hud_resource/src/types.rs) (512 MiB decoded textures, 64 MiB font cache) | Constructed independently by protocol [`HudSessionImpl`](../../crates/tze_hud_protocol/src/session_server/service.rs), [`WindowedRuntime`](../../crates/tze_hud_runtime/src/windowed/mod.rs), and [`HeadlessRuntime`](../../crates/tze_hud_runtime/src/headless.rs) | Selected profile cannot lower or account this store | Class-scoped envelope limits and shared physical ledger |
+| Protocol in-memory widget asset store | [`WidgetAssetStore::default()`](../../crates/tze_hud_protocol/src/session.rs) (64 MiB total, 16 MiB per namespace) | Windowed/headless `SharedState` | Independent resident copy of upload bytes | Explicit resident-resource class or elimination of duplicate residency |
+| Durable runtime widget store | [`[widget_runtime_assets]` resolution](../../crates/tze_hud_config/src/runtime_widget_assets.rs) → [`RuntimeWidgetStoreConfig`](../../crates/tze_hud_resource/src/runtime_widget_store.rs) | Windowed/headless startup | Correctly governed by separate total/per-agent disk ceilings | Remain separate; loaded/rasterized copies debit resident ledger |
+| Widget raster caches | Five `OnceLock<Mutex<...>>` caches in [`tze_hud_compositor::widget`](../../crates/tze_hud_compositor/src/widget.rs) | Widget rasterization hot path | Fixed 32/48 MiB class caps, 208 MiB total; no profile input or common accounting | Profile-owned class ceiling plus aggregate ledger; retain safe LRU/no-cache behavior |
+| Font cache | [`ResourceStoreConfig::max_font_cache_bytes`](../../crates/tze_hud_resource/src/types.rs) and renderer/font internals | Resource/font paths | Independent 64 MiB ceiling and incomplete aggregate visibility | Profile-owned font class ceiling with ledger-visible usage |
+| Image/GPU texture cache | [`renderer::image_cache`](../../crates/tze_hud_compositor/src/renderer/image_cache.rs) plus scene references | Windowed/headless render paths | Evicts unused scene images, but has no profile-visible physical byte ledger | Charge actual CPU/GPU allocations once while retaining logical per-agent charges |
+| Frame cadence/degradation thresholds | CLI/env `opts.fps`; independent runtime constants | Windowed loop / degradation module | Outside this issue | `hud-le1e0` / `hud-0jfqd`; deliberately untouched |
+
+Repository-wide absence checks found no production caller of `AdmissionController::{new,with_limits,admit}` outside its own tests, and no production consumer of the selected profile's `max_agents`, `max_tiles`, `max_texture_mb`, or `max_agent_update_hz` beyond configuration validation. These are reachability gaps, not missing unit tests.
+
+## Ownership Boundary
+
+The reconciliation keeps three budgets distinct:
+
+1. **Logical per-agent/lease budget.** Shared resources are double-charged to each referencing agent, preventing coordinated bypass.
+2. **Physical resident-memory budget.** Each actual CPU/GPU allocation is charged once; distinct decoded and GPU copies are each real allocations.
+3. **Durable disk budget.** Content-addressed widget blobs on disk are separately governed and create a resident charge only when loaded/rasterized.
+
+This boundary preserves RFC 0011 semantics while giving the runtime an honest process-level memory view.
+
+## Contract Decision Gate
+
+The existing RFCs do not authorize silently folding runtime-owned font/widget caches into `max_texture_mb`: RFC 0006 describes that value as agent-leased texture memory, and RFC 0011 explicitly calls startup widget resources runtime-owned overhead.
+
+Options:
+
+1. Overload `max_texture_mb` to cover all resident CPU/GPU caches. Consequence: smallest schema, most semantic ambiguity, breaking reinterpretation.
+2. Add an explicit aggregate runtime-resident budget with resource/widget/font class sub-ceilings. Consequence: larger but explicit profile schema and clean accounting. **Recommended.**
+3. Leave fixed independent cache caps and wire only admission. Consequence: lower churn but no aggregate envelope; F5 remains unresolved.
+
+Default if unanswered: retain status quo and do not sync or implement the proposed contract. The OpenSpec delta and design remain reviewable seam artifacts; no runtime behavior changes in this issue.
+
+## Verification Contract
+
+After approval, completion requires behavior-executing tests that prove:
+
+- a tighter custom profile changes production session and lease limits;
+- valid per-agent limits cannot collectively exceed aggregate profile ceilings;
+- logical shared-resource charges and physical allocation charges remain distinct;
+- every memory-owning store/cache reports its class and aggregate usage from the enforcement ledger;
+- durable-only bytes do not count as resident;
+- cache pressure evicts or proceeds uncached without freeing current-frame resources; and
+- full workspace `check`/`clippy` plus relevant integration/headless suites remain green.
