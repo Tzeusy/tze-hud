@@ -31,6 +31,7 @@ use crate::types::ResourceId;
 #[derive(Clone, Debug)]
 pub struct FontBytesStore {
     inner: Arc<DashMap<ResourceId, Arc<[u8]>>>,
+    resident_ledger: Option<crate::ResidentLedger>,
 }
 
 impl FontBytesStore {
@@ -38,6 +39,36 @@ impl FontBytesStore {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(DashMap::new()),
+            resident_ledger: None,
+        }
+    }
+
+    pub fn new_with_resident_ledger(resident_ledger: crate::ResidentLedger) -> Self {
+        Self {
+            inner: Arc::new(DashMap::new()),
+            resident_ledger: Some(resident_ledger),
+        }
+    }
+
+    pub fn try_insert(
+        &self,
+        resource_id: ResourceId,
+        data: Arc<[u8]>,
+    ) -> Result<bool, crate::ResidentReserveError> {
+        use dashmap::mapref::entry::Entry;
+        match self.inner.entry(resource_id) {
+            Entry::Vacant(entry) => {
+                if let Some(ledger) = &self.resident_ledger {
+                    ledger.reserve(
+                        crate::ResidentClass::Font,
+                        format!("font:raw:{resource_id}"),
+                        data.len() as u64,
+                    )?;
+                }
+                entry.insert(data);
+                Ok(true)
+            }
+            Entry::Occupied(_) => Ok(false),
         }
     }
 
@@ -47,15 +78,7 @@ impl FontBytesStore {
     /// existing entry is kept and the new bytes are ignored — content-addressed
     /// identity guarantees the bytes are identical.
     pub fn insert(&self, resource_id: ResourceId, data: Arc<[u8]>) {
-        use dashmap::mapref::entry::Entry;
-        match self.inner.entry(resource_id) {
-            Entry::Vacant(e) => {
-                e.insert(data);
-            }
-            Entry::Occupied(_) => {
-                // Already present (dedup race) — keep existing bytes.
-            }
-        }
+        let _ = self.try_insert(resource_id, data);
     }
 
     /// Retrieve the raw bytes for `resource_id`.
@@ -71,7 +94,14 @@ impl FontBytesStore {
     /// Returns the removed `Arc<[u8]>` if present.
     #[inline]
     pub fn remove(&self, resource_id: &ResourceId) -> Option<Arc<[u8]>> {
-        self.inner.remove(resource_id).map(|(_, v)| v)
+        let value = self.inner.remove(resource_id).map(|(_, v)| v)?;
+        if let Some(ledger) = &self.resident_ledger {
+            ledger.release_evicted(
+                crate::ResidentClass::Font,
+                &crate::AllocationId(format!("font:raw:{resource_id}")),
+            );
+        }
+        Some(value)
     }
 
     /// Number of font entries currently held.
@@ -175,5 +205,23 @@ mod tests {
             store.get(&id2).is_some(),
             "original must see entries from clone"
         );
+    }
+
+    #[test]
+    fn font_source_admission_uses_font_class_and_is_atomic() {
+        let ledger = crate::ResidentLedger::new(crate::ResidentLedgerLimits {
+            aggregate_bytes: 4,
+            resource_bytes: 0,
+            widget_source_bytes: 0,
+            widget_raster_bytes: 0,
+            font_bytes: 4,
+        });
+        let store = FontBytesStore::new_with_resident_ledger(ledger.clone());
+        let id = rid(9);
+
+        assert!(store.try_insert(id, Arc::from(b"12345".as_ref())).is_err());
+        assert!(store.get(&id).is_none());
+        assert_eq!(ledger.snapshot().aggregate_bytes, 0);
+        assert_eq!(ledger.snapshot().font_bytes, 0);
     }
 }

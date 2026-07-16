@@ -65,6 +65,16 @@ pub struct RawDisplayProfile {
     pub max_tiles: Option<u32>,
     /// Override: max texture memory in MiB.
     pub max_texture_mb: Option<u32>,
+    /// Override: aggregate runtime-owned resident memory in MiB.
+    pub max_runtime_resident_mb: Option<u32>,
+    /// Override: scene resource/image resident memory in MiB.
+    pub max_resource_resident_mb: Option<u32>,
+    /// Override: retained widget source resident memory in MiB.
+    pub max_widget_asset_resident_mb: Option<u32>,
+    /// Override: widget raster cache resident memory in MiB.
+    pub max_widget_raster_cache_mb: Option<u32>,
+    /// Override: font resident memory in MiB.
+    pub max_font_resident_mb: Option<u32>,
     /// Override: max simultaneous agents.
     pub max_agents: Option<u32>,
     /// Override: max media streams.

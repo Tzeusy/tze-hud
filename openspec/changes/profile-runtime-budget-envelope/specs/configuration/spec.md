@@ -3,6 +3,8 @@
 ### Requirement: Profile-Owned Operational Runtime Envelope
 The selected display profile MUST freeze one operational runtime envelope at startup. The envelope MUST contain the profile identity, resident/embodied-session ceiling, aggregate leased-tile ceiling, aggregate logical agent-leased texture ceiling, per-agent update-rate ceiling, aggregate runtime-resident-memory ceiling, and named resident-memory sub-ceilings for resource/image residency, retained widget-asset sources, widget raster caches, and font residency. The resident-memory classes MUST be disjoint, and their sub-ceilings MUST fit within the aggregate runtime-resident-memory ceiling. The envelope MUST be immutable until restart.
 
+The `full-display` built-in profile MUST define `max_runtime_resident_mb = 1024`, `max_resource_resident_mb = 512`, `max_widget_asset_resident_mb = 192`, `max_widget_raster_cache_mb = 256`, and `max_font_resident_mb = 64`. The `headless` built-in profile MUST define `max_runtime_resident_mb = 512`, `max_resource_resident_mb = 256`, `max_widget_asset_resident_mb = 64`, `max_widget_raster_cache_mb = 128`, and `max_font_resident_mb = 64`. These class ceilings MUST be enforced independently with no borrowing between classes, and the aggregate ceiling MUST also be enforced.
+
 Source: RFC 0006 §3.1; heart-and-soul/efficiency.md §Compute budget
 Scope: v1-mandatory
 
@@ -13,6 +15,11 @@ Scope: v1-mandatory
 #### Scenario: Resident-memory sub-ceilings exceed aggregate
 - **WHEN** the sum of resource/image, widget-asset-source, widget-raster-cache, and font-residency sub-ceilings exceeds the profile's aggregate runtime-resident-memory ceiling
 - **THEN** configuration validation MUST reject startup with a structured profile-budget error identifying the aggregate and each sub-ceiling
+
+#### Scenario: Built-in resident-memory values are exact
+- **WHEN** startup selects `full-display` or `headless`
+- **THEN** the frozen envelope MUST contain the exact aggregate and per-class values specified above
+- **AND** each class MUST reject a reservation that exceeds its own remaining ceiling even when another class has unused capacity
 
 #### Scenario: Hot reload attempts to change envelope
 - **WHEN** a hot reload changes any operational-envelope field

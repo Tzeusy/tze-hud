@@ -88,6 +88,21 @@ Scope: v1-mandatory
 
 ---
 
+### Requirement: Runtime Resident-Memory Envelope
+The selected profile MUST freeze disjoint aggregate, resource, widget-source,
+widget-raster, and font resident byte ceilings at startup. Full-display MUST use
+1024/512/192/256/64 MiB respectively; headless MUST use
+512/256/64/128/64 MiB. Classes MUST NOT borrow capacity. Durable disk bytes and
+logical agent-leased texture bytes MUST remain separate accounting domains.
+Scope: v1-mandatory
+
+#### Scenario: Resident classes cannot borrow
+- **WHEN** one resident class reaches its ceiling while another has free capacity
+- **THEN** the allocation is denied or uses the consumer's safe no-cache fallback
+- **AND** no capacity is borrowed from the other class
+
+---
+
 ### Requirement: Mobile Profile Schema-Reserved
 The `mobile` profile MUST be schema-reserved. Setting `profile = "mobile"` at runtime MUST produce the structured error `CONFIG_MOBILE_PROFILE_NOT_EXERCISED` and the runtime MUST refuse to start. This is a hard startup error distinct from `CONFIG_UNKNOWN_PROFILE`. Setting `[display_profile].extends = "mobile"` MUST be syntactically valid (not a startup error) but MUST NOT activate any mobile runtime paths in v1; a custom profile that extends `mobile` produces a custom profile using the mobile budget values, but the Mobile Presence Node (MPN) display path is not exercised. Mobile capability negotiation is designed into the API (v1.md §"Mobile") but MUST NOT be implemented in v1.
 Source: RFC 0006 §3.3, §3.6

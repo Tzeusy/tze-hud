@@ -9,6 +9,7 @@
 //! `session_server/mod.rs` as a separate `impl HudSession for HudSessionImpl`
 //! block, which is valid Rust (split impl across files in the same module).
 
+use super::SharedMutationBudgetEnforcer;
 use super::stream_session::CapabilityRevocationEvent;
 use crate::convert;
 use crate::proto::session::DegradationNotice;
@@ -20,7 +21,7 @@ use tokio::sync::Mutex;
 use tze_hud_resource::{ResourceStore, ResourceStoreConfig};
 #[cfg(any(test, feature = "dev-mode"))]
 use tze_hud_scene::graph::SceneGraph;
-use tze_hud_scene::types::{GeometryPolicy, SceneId};
+use tze_hud_scene::types::{GeometryPolicy, ResourceBudget, SceneId};
 
 // ─── Service implementation ─────────────────────────────────────────────────
 
@@ -48,6 +49,12 @@ pub struct HudSessionImpl {
     /// For dev/test scenarios where no config is loaded, pass an empty map
     /// and set `fallback_unrestricted = true` to restore the legacy behaviour.
     pub(super) agent_capabilities: Arc<HashMap<String, Vec<String>>>,
+    /// Frozen per-agent mutation/lease budgets derived at runtime startup.
+    pub(super) agent_resource_budgets: Arc<HashMap<String, ResourceBudget>>,
+    /// Budget applied to agents without an explicit registered override.
+    pub(super) fallback_resource_budget: ResourceBudget,
+    /// Runtime-owned mutation-intake enforcement bridge.
+    pub(super) budget_enforcer: Option<SharedMutationBudgetEnforcer>,
     /// When true and an agent is not found in `agent_capabilities`, grant
     /// unrestricted capabilities (backwards-compatible dev mode).
     ///
@@ -139,6 +146,9 @@ impl HudSessionImpl {
             })),
             psk: psk.to_string(),
             agent_capabilities: Arc::new(HashMap::new()),
+            agent_resource_budgets: Arc::new(HashMap::new()),
+            fallback_resource_budget: ResourceBudget::default(),
+            budget_enforcer: None,
             fallback_unrestricted: true,
             degradation_notices,
             capability_revocation_tx,
@@ -199,6 +209,55 @@ impl HudSessionImpl {
         media_ingress_config: tze_hud_scene::config::MediaIngressConfig,
         degradation_notices: super::DegradationNoticeSender,
     ) -> Self {
+        Self::from_shared_state_with_runtime_envelope_and_degradation_notices(
+            state,
+            psk,
+            agent_capabilities,
+            HashMap::new(),
+            ResourceBudget::default(),
+            fallback_unrestricted,
+            media_ingress_config,
+            None,
+            degradation_notices,
+        )
+    }
+    /// Create from shared state with the immutable production runtime envelope.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_shared_state_with_runtime_envelope(
+        state: Arc<Mutex<SharedState>>,
+        psk: &str,
+        agent_capabilities: HashMap<String, Vec<String>>,
+        agent_resource_budgets: HashMap<String, ResourceBudget>,
+        fallback_resource_budget: ResourceBudget,
+        fallback_unrestricted: bool,
+        media_ingress_config: tze_hud_scene::config::MediaIngressConfig,
+        budget_enforcer: Option<SharedMutationBudgetEnforcer>,
+    ) -> Self {
+        Self::from_shared_state_with_runtime_envelope_and_degradation_notices(
+            state,
+            psk,
+            agent_capabilities,
+            agent_resource_budgets,
+            fallback_resource_budget,
+            fallback_unrestricted,
+            media_ingress_config,
+            budget_enforcer,
+            super::DegradationNoticeSender::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_shared_state_with_runtime_envelope_and_degradation_notices(
+        state: Arc<Mutex<SharedState>>,
+        psk: &str,
+        agent_capabilities: HashMap<String, Vec<String>>,
+        agent_resource_budgets: HashMap<String, ResourceBudget>,
+        fallback_resource_budget: ResourceBudget,
+        fallback_unrestricted: bool,
+        media_ingress_config: tze_hud_scene::config::MediaIngressConfig,
+        budget_enforcer: Option<SharedMutationBudgetEnforcer>,
+        degradation_notices: super::DegradationNoticeSender,
+    ) -> Self {
         let (capability_revocation_tx, _) =
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
         let input_event_tx = super::InputEventSender::new(super::BROADCAST_CHANNEL_CAPACITY);
@@ -210,6 +269,9 @@ impl HudSessionImpl {
             state,
             psk: psk.to_string(),
             agent_capabilities: Arc::new(agent_capabilities),
+            agent_resource_budgets: Arc::new(agent_resource_budgets),
+            fallback_resource_budget,
+            budget_enforcer,
             fallback_unrestricted,
             degradation_notices,
             capability_revocation_tx,

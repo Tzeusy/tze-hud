@@ -11,6 +11,9 @@ use super::upload::UploadByteRateLimiter;
 use crate::dedup::DedupWindow;
 use crate::lease::LeaseCorrelationCache;
 use tze_hud_scene::events::emission::AgentEventRateLimiter;
+use tze_hud_scene::types::{ResourceBudget, SceneId};
+
+use super::budget_gate::SharedMutationBudgetEnforcer;
 
 // ─── Session state ──────────────────────────────────────────────────────────
 
@@ -27,6 +30,9 @@ pub(super) struct StreamSession {
     /// CapabilityRequest evaluation.
     pub(super) policy_capabilities: Vec<String>,
     pub(super) lease_ids: Vec<tze_hud_scene::SceneId>,
+    pub(super) scene_session_id: SceneId,
+    pub(super) resource_budget: ResourceBudget,
+    pub(super) budget_enforcer: Option<SharedMutationBudgetEnforcer>,
     pub(super) subscriptions: Vec<String>,
     /// Fine-grained event type prefix filters per subscription category (RFC 0010 §7.2).
     ///

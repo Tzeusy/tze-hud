@@ -59,6 +59,7 @@ use tze_hud_widget::{RuntimeWidgetAssetError, register_runtime_widget_svg_asset}
 
 // ─── Submodules (SS-1..SS-7h) ────────────────────────────────────────────────
 
+pub mod budget_gate;
 pub mod config;
 pub mod degradation_notice_bus;
 pub mod emit_scene_event;
@@ -78,6 +79,10 @@ pub mod upload;
 pub mod widgets;
 pub mod zone_publish;
 
+pub use budget_gate::{
+    MutationBudgetDecision, MutationBudgetEnforcer, MutationBudgetUsage,
+    SharedMutationBudgetEnforcer,
+};
 pub use config::SessionConfig;
 pub use degradation_notice_bus::{DegradationNoticeReceiver, DegradationNoticeSender};
 // FreezeEnqueueResult, FREEZE_QUEUE_CAPACITY, and SessionFreezeQueue are used
@@ -485,6 +490,9 @@ impl HudSession for HudSessionImpl {
         let psk = self.psk.clone();
         // Clone the capability registry for use inside the session task.
         let agent_capabilities = self.agent_capabilities.clone();
+        let agent_resource_budgets = self.agent_resource_budgets.clone();
+        let fallback_resource_budget = self.fallback_resource_budget.clone();
+        let budget_enforcer = self.budget_enforcer.clone();
         let fallback_unrestricted = self.fallback_unrestricted;
         let media_ingress_config = self.media_ingress_config.clone();
         let degradation_notices = self.degradation_notices.clone();
@@ -573,6 +581,9 @@ impl HudSession for HudSessionImpl {
                         &tx,
                         &init,
                         &agent_capabilities,
+                        &agent_resource_budgets,
+                        &fallback_resource_budget,
+                        budget_enforcer.as_ref(),
                         fallback_unrestricted,
                         peer_ip,
                     )
@@ -585,6 +596,9 @@ impl HudSession for HudSessionImpl {
                         &tx,
                         &resume,
                         &agent_capabilities,
+                        &agent_resource_budgets,
+                        &fallback_resource_budget,
+                        budget_enforcer.as_ref(),
                         fallback_unrestricted,
                         peer_ip,
                     )
@@ -857,6 +871,9 @@ impl HudSession for HudSessionImpl {
             resource_store
                 .abort_all_uploads(&namespace_for_cleanup)
                 .await;
+            if let Some(enforcer) = &session.budget_enforcer {
+                enforcer.remove_session(session.scene_session_id);
+            }
         });
 
         // Return the receiver stream as the response

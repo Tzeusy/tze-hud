@@ -285,6 +285,7 @@ impl HeadlessRuntime {
         // glyphon text rendering is active for all runtime paths (not just tests).
         compositor.init_text_renderer(TextureFormat::Rgba8UnormSrgb);
         compositor.init_widget_renderer(TextureFormat::Rgba8UnormSrgb);
+        compositor.set_resident_ledger(runtime_context.resident_ledger.clone());
         // Apply the resolved per-surface truncation-input bound so the
         // viewport-adjacent-window fallback engages at the operator-configured
         // threshold rather than the compositor's built-in default (hud-59p2z).
@@ -368,11 +369,24 @@ impl HeadlessRuntime {
         let element_store_bootstrap = bootstrap_scene_element_store(&mut scene);
         let scene = Arc::new(Mutex::new(scene));
         let sessions = tze_hud_protocol::session::SessionRegistry::new(&config.psk);
+        let resident_limits = runtime_context.resident_store_limits();
         let state = Arc::new(Mutex::new(SharedState {
             scene,
             sessions,
-            resource_store: ResourceStore::new(ResourceStoreConfig::default()),
-            widget_asset_store: tze_hud_protocol::session::WidgetAssetStore::default(),
+            resource_store: ResourceStore::new_with_resident_ledger(
+                ResourceStoreConfig {
+                    max_total_texture_bytes: resident_limits.resource_bytes,
+                    max_font_cache_bytes: resident_limits.font_bytes,
+                    ..ResourceStoreConfig::default()
+                },
+                runtime_context.resident_ledger.clone(),
+            ),
+            widget_asset_store:
+                tze_hud_protocol::session::WidgetAssetStore::new_with_limits_and_resident_ledger(
+                    resident_limits.widget_source_bytes,
+                    resident_limits.widget_namespace_bytes,
+                    runtime_context.resident_ledger.clone(),
+                ),
             runtime_widget_store: runtime_widget_store.clone(),
             element_store: element_store_bootstrap.store,
             element_store_path: Some(element_store_bootstrap.path),
@@ -385,6 +399,12 @@ impl HeadlessRuntime {
             input_capture_tx: None,
             resolved_portal_tokens: std::collections::HashMap::new(),
         }));
+
+        tracing::info!(
+            target: "tze_hud::resident_accounting",
+            snapshot = %runtime_context.resident_accounting_snapshot(),
+            "headless runtime resident accounting initialised"
+        );
 
         let degradation_notices = DegradationNoticeSender::default();
         Ok(Self {
@@ -797,12 +817,25 @@ impl HeadlessRuntime {
         let agent_caps = self.runtime_context.snapshot_agent_capabilities();
 
         let service =
-            HudSessionImpl::from_shared_state_with_config_media_ingress_and_degradation_notices(
+            HudSessionImpl::from_shared_state_with_runtime_envelope_and_degradation_notices(
                 self.state.clone(),
                 &self.config.psk,
                 agent_caps,
+                self.runtime_context.snapshot_agent_resource_budgets(),
+                self.runtime_context.fallback_resource_budget(),
                 self.fallback_unrestricted,
                 self.runtime_context.media_ingress.clone(),
+                Some(std::sync::Arc::new(
+                    crate::RuntimeMutationBudgetEnforcer::with_limits(
+                        self.runtime_context
+                            .operational_envelope
+                            .max_resident_sessions,
+                        self.runtime_context.operational_envelope.max_leased_tiles,
+                        self.runtime_context
+                            .operational_envelope
+                            .max_agent_leased_texture_bytes,
+                    ),
+                )),
                 self.degradation_notices.clone(),
             );
 

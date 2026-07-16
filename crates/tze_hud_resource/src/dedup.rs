@@ -127,6 +127,8 @@ pub struct DedupIndex {
     /// without holding the shard lock.  Insertion is append-only; the record
     /// itself is never replaced (immutability guarantee).
     inner: Arc<DashMap<ResourceId, Arc<ResourceRecord>>>,
+    resident_ledger: Option<crate::ResidentLedger>,
+    font_bytes: Option<crate::FontBytesStore>,
 }
 
 impl DedupIndex {
@@ -134,6 +136,19 @@ impl DedupIndex {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(DashMap::new()),
+            resident_ledger: None,
+            font_bytes: None,
+        }
+    }
+
+    pub fn new_with_resident_ledger(
+        resident_ledger: crate::ResidentLedger,
+        font_bytes: crate::FontBytesStore,
+    ) -> Self {
+        Self {
+            inner: Arc::new(DashMap::new()),
+            resident_ledger: Some(resident_ledger),
+            font_bytes: Some(font_bytes),
         }
     }
 
@@ -215,7 +230,21 @@ impl DedupIndex {
     /// This frees the decoded in-memory representation once the last `Arc` to
     /// the `ResourceRecord` is dropped.
     pub fn remove(&self, resource_id: &ResourceId) -> Option<Arc<ResourceRecord>> {
-        self.inner.remove(resource_id).map(|(_, record)| record)
+        let record = self.inner.remove(resource_id).map(|(_, record)| record)?;
+        if matches!(
+            record.resource_type,
+            ResourceType::FontTtf | ResourceType::FontOtf
+        ) {
+            if let Some(font_bytes) = &self.font_bytes {
+                font_bytes.remove(resource_id);
+            }
+        } else if let Some(ledger) = &self.resident_ledger {
+            ledger.release_evicted(
+                crate::ResidentClass::Resource,
+                &crate::AllocationId(format!("resource-store:{resource_id}:decoded")),
+            );
+        }
+        Some(record)
     }
 }
 
@@ -330,5 +359,42 @@ mod tests {
         let id = ResourceId::from_content(b"len-test");
         index.insert(id, make_record(id, 64)).unwrap();
         assert_eq!(index.len(), 1);
+    }
+
+    #[test]
+    fn font_gc_releases_the_retained_source_copy_and_ledger_charge() {
+        let ledger = crate::ResidentLedger::new(crate::ResidentLedgerLimits {
+            aggregate_bytes: 16,
+            resource_bytes: 0,
+            widget_source_bytes: 0,
+            widget_raster_bytes: 0,
+            font_bytes: 16,
+        });
+        let font_bytes = crate::FontBytesStore::new_with_resident_ledger(ledger.clone());
+        let index = DedupIndex::new_with_resident_ledger(ledger.clone(), font_bytes.clone());
+        let id = ResourceId::from_content(b"font-gc");
+        font_bytes
+            .try_insert(id, Arc::from(b"font".as_ref()))
+            .unwrap();
+        index
+            .insert(
+                id,
+                ResourceRecord::new(
+                    id,
+                    ResourceType::FontTtf,
+                    &DecodedMeta {
+                        decoded_bytes: 4,
+                        width_px: 0,
+                        height_px: 0,
+                    },
+                ),
+            )
+            .unwrap();
+
+        index.remove(&id).expect("font record exists");
+
+        assert!(font_bytes.get(&id).is_none());
+        assert_eq!(ledger.snapshot().font_bytes, 0);
+        assert_eq!(ledger.snapshot().eviction_count, 1);
     }
 }

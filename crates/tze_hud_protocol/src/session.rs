@@ -122,6 +122,7 @@ pub struct WidgetAssetStore {
     pub max_total_bytes: u64,
     /// Per-namespace store budget cap.
     pub max_namespace_bytes: u64,
+    resident_ledger: Option<tze_hud_resource::ResidentLedger>,
 }
 
 impl WidgetAssetStore {
@@ -132,7 +133,47 @@ impl WidgetAssetStore {
             per_namespace_bytes: HashMap::new(),
             max_total_bytes,
             max_namespace_bytes,
+            resident_ledger: None,
         }
+    }
+
+    pub fn new_with_limits_and_resident_ledger(
+        max_total_bytes: u64,
+        max_namespace_bytes: u64,
+        resident_ledger: tze_hud_resource::ResidentLedger,
+    ) -> Self {
+        Self {
+            by_hash: HashMap::new(),
+            total_bytes: 0,
+            per_namespace_bytes: HashMap::new(),
+            max_total_bytes,
+            max_namespace_bytes,
+            resident_ledger: Some(resident_ledger),
+        }
+    }
+
+    pub fn reserve_resident_payload(
+        &self,
+        allocation_id: &str,
+        bytes: u64,
+    ) -> Result<bool, tze_hud_resource::ResidentReserveError> {
+        match &self.resident_ledger {
+            Some(ledger) => ledger.reserve(
+                tze_hud_resource::ResidentClass::WidgetSource,
+                allocation_id,
+                bytes,
+            ),
+            None => Ok(false),
+        }
+    }
+
+    pub fn release_resident_payload(&self, allocation_id: &str) -> bool {
+        self.resident_ledger.as_ref().is_some_and(|ledger| {
+            ledger.release(
+                tze_hud_resource::ResidentClass::WidgetSource,
+                &tze_hud_resource::AllocationId::from(allocation_id),
+            )
+        })
     }
 }
 
@@ -455,5 +496,27 @@ impl SessionRegistry {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod resident_widget_asset_tests {
+    use super::*;
+
+    #[test]
+    fn grpc_widget_payload_uses_widget_source_class() {
+        let ledger =
+            tze_hud_resource::ResidentLedger::new(tze_hud_resource::ResidentLedgerLimits {
+                aggregate_bytes: 4,
+                resource_bytes: 0,
+                widget_source_bytes: 4,
+                widget_raster_bytes: 0,
+                font_bytes: 0,
+            });
+        let store = WidgetAssetStore::new_with_limits_and_resident_ledger(4, 4, ledger.clone());
+
+        assert!(store.reserve_resident_payload("grpc:too-large", 5).is_err());
+        assert_eq!(ledger.snapshot().aggregate_bytes, 0);
+        assert_eq!(ledger.snapshot().widget_source_bytes, 0);
     }
 }

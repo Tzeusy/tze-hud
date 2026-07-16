@@ -20,6 +20,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::Status;
 use tze_hud_scene::events::emission::AgentEventRateLimiter;
+use tze_hud_scene::types::ResourceBudget;
 
 use super::freeze_queue::{FREEZE_QUEUE_CAPACITY, SessionFreezeQueue};
 use super::lifecycle::SessionState;
@@ -48,12 +49,16 @@ pub(super) fn authorization_scope_for_agent(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_session_init(
     state: &Arc<Mutex<SharedState>>,
     psk: &str,
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     init: &SessionInit,
     agent_capabilities: &HashMap<String, Vec<String>>,
+    agent_resource_budgets: &HashMap<String, ResourceBudget>,
+    fallback_resource_budget: &ResourceBudget,
+    budget_enforcer: Option<&super::SharedMutationBudgetEnforcer>,
     fallback_unrestricted: bool,
     peer_ip: Option<std::net::IpAddr>,
 ) -> Option<StreamSession> {
@@ -185,6 +190,40 @@ pub(super) async fn handle_session_init(
     let session_id = session_uuid.to_string();
     let namespace = init.agent_id.clone();
     let resume_token = uuid::Uuid::now_v7().as_bytes().to_vec();
+    let scene_session_id = tze_hud_scene::SceneId::from_uuid(session_uuid);
+    let resource_budget = agent_resource_budgets
+        .get(&init.agent_id)
+        .cloned()
+        .unwrap_or_else(|| fallback_resource_budget.clone());
+    if let Some(enforcer) = budget_enforcer {
+        if let super::MutationBudgetDecision::Reject {
+            error_code,
+            message,
+        }
+        | super::MutationBudgetDecision::Revoke {
+            error_code,
+            message,
+        } = enforcer.register_session(
+            scene_session_id,
+            namespace.clone(),
+            resource_budget.clone(),
+            agent_resource_budgets.contains_key(&init.agent_id),
+            super::MutationBudgetUsage::default(),
+        ) {
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: 1,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::SessionError(SessionError {
+                        code: error_code.to_string(),
+                        message,
+                        hint: String::new(),
+                    })),
+                }))
+                .await;
+            return None;
+        }
+    }
 
     // Register session in the session registry and capture upload rate config +
     // the runtime's resolved portal tokens for the handshake (hud-16um0).
@@ -217,6 +256,9 @@ pub(super) async fn handle_session_init(
         capabilities: granted_capabilities.clone(),
         policy_capabilities: policy_caps.clone(),
         lease_ids: Vec::new(),
+        scene_session_id,
+        resource_budget,
+        budget_enforcer: budget_enforcer.cloned(),
         subscriptions: sub_result.active.clone(),
         subscription_filters: std::collections::HashMap::new(),
         server_sequence: 0,
@@ -288,12 +330,16 @@ pub(super) async fn handle_session_init(
 ///    subscription/capability state.
 /// 4. The caller (main session loop) sends a [`SceneSnapshot`] immediately
 ///    after this function returns (same mechanism as new connections).
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_session_resume(
     state: &Arc<Mutex<SharedState>>,
     psk: &str,
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     resume: &SessionResume,
     agent_capabilities: &HashMap<String, Vec<String>>,
+    agent_resource_budgets: &HashMap<String, ResourceBudget>,
+    fallback_resource_budget: &ResourceBudget,
+    budget_enforcer: Option<&super::SharedMutationBudgetEnforcer>,
     fallback_unrestricted: bool,
     peer_ip: Option<std::net::IpAddr>,
 ) -> Option<StreamSession> {
@@ -351,10 +397,58 @@ pub(super) async fn handle_session_resume(
     };
 
     // Step 3: Build restored session.
-    let session_id = uuid::Uuid::now_v7().to_string();
+    let session_uuid = uuid::Uuid::now_v7();
+    let session_id = session_uuid.to_string();
     let namespace = resume.agent_id.clone();
     // Issue a fresh single-use token for the resumed session (RFC 0005 §6.3).
     let new_resume_token = uuid::Uuid::now_v7().as_bytes().to_vec();
+    let scene_session_id = tze_hud_scene::SceneId::from_uuid(session_uuid);
+    let resource_budget = agent_resource_budgets
+        .get(&resume.agent_id)
+        .cloned()
+        .unwrap_or_else(|| fallback_resource_budget.clone());
+    let restored_usage = {
+        let st = state.lock().await;
+        let scene = st.scene.lock().await;
+        prior_entry.orphaned_lease_ids.iter().fold(
+            super::MutationBudgetUsage::default(),
+            |mut total, lease_id| {
+                let usage = scene.lease_resource_usage(lease_id);
+                total.tiles = total.tiles.saturating_add(usage.tiles);
+                total.texture_bytes = total.texture_bytes.saturating_add(usage.texture_bytes);
+                total
+            },
+        )
+    };
+    if let Some(enforcer) = budget_enforcer {
+        if let super::MutationBudgetDecision::Reject {
+            error_code,
+            message,
+        }
+        | super::MutationBudgetDecision::Revoke {
+            error_code,
+            message,
+        } = enforcer.register_session(
+            scene_session_id,
+            namespace.clone(),
+            resource_budget.clone(),
+            agent_resource_budgets.contains_key(&resume.agent_id),
+            restored_usage,
+        ) {
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: 1,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::SessionError(SessionError {
+                        code: error_code.to_string(),
+                        message,
+                        hint: String::new(),
+                    })),
+                }))
+                .await;
+            return None;
+        }
+    }
 
     // Register the resumed agent in the session registry so shared-state
     // operations (e.g. lease grant, broadcast) can find it, and capture the
@@ -384,6 +478,9 @@ pub(super) async fn handle_session_resume(
         policy_capabilities: resume_policy_caps,
         // Restore orphaned leases so the agent can continue using them.
         lease_ids: prior_entry.orphaned_lease_ids.clone(),
+        scene_session_id,
+        resource_budget,
+        budget_enforcer: budget_enforcer.cloned(),
         // Restore subscription set from before the disconnect.
         subscriptions: prior_entry.subscriptions.clone(),
         // Subscription filters are not persisted across reconnects; agents must re-send

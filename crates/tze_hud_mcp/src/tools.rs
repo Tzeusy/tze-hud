@@ -1321,9 +1321,6 @@ pub struct WidgetAssetRegistry {
 #[derive(Debug)]
 struct RegisteredWidgetAsset {
     asset_handle: String,
-    // Retained for follow-up renderer/store integration.
-    #[allow(dead_code)]
-    payload: Vec<u8>,
 }
 
 impl WidgetAssetRegistry {
@@ -1333,27 +1330,17 @@ impl WidgetAssetRegistry {
         self.by_hash.get(hash)
     }
 
-    fn upsert(&mut self, hash: [u8; 32], asset_handle: String, payload: Vec<u8>) {
+    fn upsert(&mut self, hash: [u8; 32], asset_handle: String) {
         if self.by_hash.is_empty() {
             // Reserve a small initial slab to avoid repeated tiny growth churn.
             self.by_hash.reserve(64);
         }
-        self.by_hash.insert(
-            hash,
-            RegisteredWidgetAsset {
-                asset_handle,
-                payload,
-            },
-        );
+        self.by_hash
+            .insert(hash, RegisteredWidgetAsset { asset_handle });
     }
 
     fn is_at_capacity(&self) -> bool {
         self.by_hash.len() >= Self::MAX_ENTRIES
-    }
-
-    #[cfg(test)]
-    fn payload_by_hash(&self, hash: &[u8; 32]) -> Option<&[u8]> {
-        self.by_hash.get(hash).map(|entry| entry.payload.as_slice())
     }
 }
 
@@ -1535,7 +1522,9 @@ pub fn handle_register_widget_asset(
     }
 
     let asset_handle = format!("widget-asset:{}", bytes_to_hex(&expected_hash));
-    registry.upsert(expected_hash, asset_handle.clone(), payload);
+    // The MCP preflight index retains only metadata. The canonical runtime
+    // registration path owns the payload copy.
+    registry.upsert(expected_hash, asset_handle.clone());
     result.accepted = true;
     result.was_deduplicated = false;
     result.asset_handle = Some(asset_handle);
@@ -4643,8 +4632,10 @@ mod tests {
         assert!(first.asset_handle.is_some());
         let hash_raw = parse_blake3_hex_32(&hash_hex).unwrap();
         assert_eq!(
-            registry.payload_by_hash(&hash_raw),
-            Some(payload.as_bytes())
+            registry
+                .get_by_hash(&hash_raw)
+                .map(|entry| entry.asset_handle.as_str()),
+            first.asset_handle.as_deref()
         );
 
         let preflight = handle_register_widget_asset(
@@ -4791,7 +4782,7 @@ mod tests {
         for i in 0..WidgetAssetRegistry::MAX_ENTRIES {
             let mut hash = [0u8; 32];
             hash[..8].copy_from_slice(&(i as u64).to_le_bytes());
-            registry.upsert(hash, format!("widget-asset:{i}"), b"<svg/>".to_vec());
+            registry.upsert(hash, format!("widget-asset:{i}"));
         }
 
         let payload =

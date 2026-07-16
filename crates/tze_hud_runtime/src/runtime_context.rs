@@ -83,7 +83,13 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use tze_hud_config::HotReloadableConfig;
 use tze_hud_protocol::auth::CapabilityPolicy;
-use tze_hud_scene::config::{DisplayProfile, MediaIngressConfig, ResolvedConfig};
+use tze_hud_scene::config::{
+    DisplayProfile, MediaIngressConfig, RegisteredAgentBudgetOverrides, ResolvedConfig,
+};
+use tze_hud_scene::types::ResourceBudget;
+
+use crate::admission::{DEFAULT_MAX_GUEST_SESSIONS, SessionLimits};
+use crate::session::{HARD_MAX_TEXTURE_BYTES, HARD_MAX_TILES, HARD_MAX_UPDATE_RATE_HZ};
 
 // ─── FallbackPolicy ───────────────────────────────────────────────────────────
 
@@ -103,6 +109,70 @@ impl Default for FallbackPolicy {
     fn default() -> Self {
         Self::Guest
     }
+}
+
+// ─── Operational runtime envelope ────────────────────────────────────────────
+
+const MIB_BYTES: u64 = 1024 * 1024;
+
+/// Frozen runtime-owned resident-memory ceilings in accounted bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResidentMemoryEnvelope {
+    pub max_aggregate_bytes: u64,
+    pub max_resource_bytes: u64,
+    pub max_widget_asset_bytes: u64,
+    pub max_widget_raster_bytes: u64,
+    pub max_font_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeResidentStoreLimits {
+    pub resource_bytes: usize,
+    pub widget_source_bytes: u64,
+    pub widget_namespace_bytes: u64,
+    pub widget_raster_bytes: u64,
+    pub font_bytes: usize,
+}
+
+/// Immutable profile-derived limits consumed by runtime admission paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationalRuntimeEnvelope {
+    pub profile_name: String,
+    pub max_resident_sessions: u32,
+    pub max_leased_tiles: u32,
+    pub max_agent_leased_texture_bytes: u64,
+    pub max_agent_update_hz: u32,
+    pub resident_memory: ResidentMemoryEnvelope,
+}
+
+impl OperationalRuntimeEnvelope {
+    fn from_profile(profile: &DisplayProfile) -> Self {
+        Self {
+            profile_name: profile.name.clone(),
+            max_resident_sessions: profile.max_agents,
+            max_leased_tiles: profile.max_tiles,
+            max_agent_leased_texture_bytes: u64::from(profile.max_texture_mb) * MIB_BYTES,
+            max_agent_update_hz: profile.max_agent_update_hz,
+            resident_memory: ResidentMemoryEnvelope {
+                max_aggregate_bytes: u64::from(profile.max_runtime_resident_mb) * MIB_BYTES,
+                max_resource_bytes: u64::from(profile.max_resource_resident_mb) * MIB_BYTES,
+                max_widget_asset_bytes: u64::from(profile.max_widget_asset_resident_mb) * MIB_BYTES,
+                max_widget_raster_bytes: u64::from(profile.max_widget_raster_cache_mb) * MIB_BYTES,
+                max_font_bytes: u64::from(profile.max_font_resident_mb) * MIB_BYTES,
+            },
+        }
+    }
+}
+
+fn resident_ledger_for(envelope: &OperationalRuntimeEnvelope) -> tze_hud_resource::ResidentLedger {
+    let memory = &envelope.resident_memory;
+    tze_hud_resource::ResidentLedger::new(tze_hud_resource::ResidentLedgerLimits {
+        aggregate_bytes: memory.max_aggregate_bytes,
+        resource_bytes: memory.max_resource_bytes,
+        widget_source_bytes: memory.max_widget_asset_bytes,
+        widget_raster_bytes: memory.max_widget_raster_bytes,
+        font_bytes: memory.max_font_bytes,
+    })
 }
 
 // ─── RuntimeContext ───────────────────────────────────────────────────────────
@@ -129,6 +199,12 @@ pub struct RuntimeContext {
     /// Resolved display profile with budget values.
     pub profile: DisplayProfile,
 
+    /// Profile-derived operational limits, constructed once at startup.
+    pub operational_envelope: OperationalRuntimeEnvelope,
+
+    /// Shared physical resident-allocation authority for all cache classes.
+    pub resident_ledger: tze_hud_resource::ResidentLedger,
+
     /// Frozen Windows media-ingress configuration.
     ///
     /// Default-off unless the startup configuration explicitly enables the
@@ -138,6 +214,9 @@ pub struct RuntimeContext {
     /// Per-agent capability grants keyed by agent name.
     /// Populated from `[agents.registered]` in config.
     agent_capabilities: HashMap<String, Vec<String>>,
+
+    /// Validated per-agent budget overrides, frozen at startup.
+    agent_budget_overrides: HashMap<String, RegisteredAgentBudgetOverrides>,
 
     /// Policy to apply to agents not listed in `[agents.registered]`.
     pub fallback_policy: FallbackPolicy,
@@ -163,10 +242,15 @@ impl RuntimeContext {
     /// Hot-reloadable sections are initialized to defaults (all `None` / empty).
     /// They will be populated on the first SIGHUP or `ReloadConfig` RPC call.
     pub fn from_config(config: ResolvedConfig, fallback_policy: FallbackPolicy) -> Self {
+        let operational_envelope = OperationalRuntimeEnvelope::from_profile(&config.profile);
+        let resident_ledger = resident_ledger_for(&operational_envelope);
         Self {
             profile: config.profile,
+            operational_envelope,
+            resident_ledger,
             media_ingress: config.media_ingress,
             agent_capabilities: config.agent_capabilities,
+            agent_budget_overrides: config.agent_budget_overrides,
             fallback_policy,
             hot: ArcSwap::from_pointee(HotReloadableConfig::default()),
         }
@@ -183,10 +267,15 @@ impl RuntimeContext {
         fallback_policy: FallbackPolicy,
         hot: HotReloadableConfig,
     ) -> Self {
+        let operational_envelope = OperationalRuntimeEnvelope::from_profile(&config.profile);
+        let resident_ledger = resident_ledger_for(&operational_envelope);
         Self {
             profile: config.profile,
+            operational_envelope,
+            resident_ledger,
             media_ingress: config.media_ingress,
             agent_capabilities: config.agent_capabilities,
+            agent_budget_overrides: config.agent_budget_overrides,
             fallback_policy,
             hot: ArcSwap::from_pointee(hot),
         }
@@ -198,10 +287,16 @@ impl RuntimeContext {
     /// All unrecognized agents are treated as guests (no capabilities).
     /// Hot-reloadable sections are initialized to defaults.
     pub fn headless_default() -> Self {
+        let profile = DisplayProfile::headless();
+        let operational_envelope = OperationalRuntimeEnvelope::from_profile(&profile);
+        let resident_ledger = resident_ledger_for(&operational_envelope);
         Self {
-            profile: DisplayProfile::headless(),
+            profile,
+            operational_envelope,
+            resident_ledger,
             media_ingress: MediaIngressConfig::default(),
             agent_capabilities: HashMap::new(),
+            agent_budget_overrides: HashMap::new(),
             fallback_policy: FallbackPolicy::Guest,
             hot: ArcSwap::from_pointee(HotReloadableConfig::default()),
         }
@@ -289,6 +384,157 @@ impl RuntimeContext {
     pub fn snapshot_agent_capabilities(&self) -> HashMap<String, Vec<String>> {
         self.agent_capabilities.clone()
     }
+
+    /// Return the frozen effective budget for every registered agent.
+    pub fn snapshot_agent_resource_budgets(&self) -> HashMap<String, ResourceBudget> {
+        self.agent_capabilities
+            .keys()
+            .chain(self.agent_budget_overrides.keys())
+            .map(|name| (name.clone(), self.effective_resource_budget_for(name)))
+            .collect()
+    }
+
+    /// Return the frozen budget used for unregistered/guest agents.
+    pub fn fallback_resource_budget(&self) -> ResourceBudget {
+        self.effective_resource_budget_for("")
+    }
+
+    /// Exact startup limits consumed by production cache/store constructors.
+    pub fn resident_store_limits(&self) -> RuntimeResidentStoreLimits {
+        let resident = &self.operational_envelope.resident_memory;
+        RuntimeResidentStoreLimits {
+            resource_bytes: usize::try_from(resident.max_resource_bytes).unwrap_or(usize::MAX),
+            widget_source_bytes: resident.max_widget_asset_bytes,
+            widget_namespace_bytes: resident.max_widget_asset_bytes.min(16 * MIB_BYTES),
+            widget_raster_bytes: resident.max_widget_raster_bytes,
+            font_bytes: usize::try_from(resident.max_font_bytes).unwrap_or(usize::MAX),
+        }
+    }
+
+    /// Machine-readable startup snapshot for operators and tests.
+    pub fn resident_accounting_snapshot(&self) -> serde_json::Value {
+        let limits = self.resident_ledger.limits();
+        let usage = self.resident_ledger.snapshot();
+        let fallback = self.fallback_resource_budget();
+        serde_json::json!({
+            "profile": self.operational_envelope.profile_name,
+            "admission": {
+                "max_resident_sessions": self.operational_envelope.max_resident_sessions,
+                "max_guest_sessions": DEFAULT_MAX_GUEST_SESSIONS,
+                "max_leased_tiles": self.operational_envelope.max_leased_tiles,
+                "max_agent_leased_texture_bytes": self.operational_envelope.max_agent_leased_texture_bytes,
+                "max_agent_update_hz": self.operational_envelope.max_agent_update_hz,
+                "fallback_session": {
+                    "max_tiles": fallback.max_tiles,
+                    "max_nodes_per_tile": fallback.max_nodes_per_tile,
+                    "max_texture_bytes": fallback.max_texture_bytes,
+                    "max_update_rate_hz": fallback.max_update_rate_hz,
+                },
+                "absolute_hard_max": {
+                    "tiles": HARD_MAX_TILES,
+                    "texture_bytes": HARD_MAX_TEXTURE_BYTES,
+                    "update_rate_hz": HARD_MAX_UPDATE_RATE_HZ,
+                },
+            },
+            "limits": {
+                "aggregate_bytes": limits.aggregate_bytes,
+                "resource_bytes": limits.resource_bytes,
+                "widget_source_bytes": limits.widget_source_bytes,
+                "widget_raster_bytes": limits.widget_raster_bytes,
+                "font_bytes": limits.font_bytes,
+            },
+            "usage": {
+                "aggregate_bytes": usage.aggregate_bytes,
+                "resource_bytes": usage.resource_bytes,
+                "widget_source_bytes": usage.widget_source_bytes,
+                "widget_raster_bytes": usage.widget_raster_bytes,
+                "font_bytes": usage.font_bytes,
+                "allocation_count": usage.allocation_count,
+            },
+            "counters": {
+                "class_denials": usage.class_denial_count,
+                "aggregate_denials": usage.aggregate_denial_count,
+                "evictions": usage.eviction_count,
+            },
+            "accounted_byte_rules": {
+                "resource_cpu": "retained decoded/source allocation bytes",
+                "resource_gpu": "texture width * height * bytes_per_pixel * samples * mip factor",
+                "widget_source": "retained SVG byte vector length per owned copy",
+                "widget_raster": "RGBA8 width * height * 4 per cached GPU texture",
+                "font": "retained uploaded font source byte length per owned raw/font-system copy",
+                "measurement_scope": "deterministic admission quantities; excludes allocator metadata, driver padding, shared heaps, and process RSS",
+            },
+            "consumers": {
+                "session_admission": ["HudSessionImpl", "RuntimeMutationBudgetEnforcer"],
+                "lease_defaults": ["SceneGraph::try_grant_lease_for_session_with_budget"],
+                "aggregate_scene_resources": ["RuntimeMutationBudgetEnforcer"],
+                "resource": ["ResourceStore", "Compositor::image_bytes", "Compositor::image_texture_cache"],
+                "widget_source": ["WidgetAssetStore(gRPC fallback)", "WidgetAssetRegistry(MCP metadata-only)", "WidgetRenderer::svgs"],
+                "widget_raster": ["WidgetRenderer::textures"],
+                "font": ["FontBytesStore", "glyphon::FontSystem"],
+                "durable_disk_excluded": ["RuntimeWidgetStore"],
+            },
+        })
+    }
+
+    /// Return validated startup budget overrides for a registered agent.
+    pub fn agent_budget_overrides(
+        &self,
+        agent_name: &str,
+    ) -> Option<&RegisteredAgentBudgetOverrides> {
+        self.agent_budget_overrides.get(agent_name)
+    }
+
+    /// Build runtime session limits from the frozen profile envelope.
+    ///
+    /// Resident/embodied sessions consume the profile presence pool. Guests
+    /// retain the independent control-plane safety limit.
+    pub fn session_limits(&self) -> SessionLimits {
+        let max_resident =
+            usize::try_from(self.operational_envelope.max_resident_sessions).unwrap_or(usize::MAX);
+        SessionLimits::new(
+            max_resident,
+            DEFAULT_MAX_GUEST_SESSIONS,
+            max_resident.saturating_add(DEFAULT_MAX_GUEST_SESSIONS),
+        )
+    }
+
+    /// Resolve a per-session resource budget using config precedence.
+    ///
+    /// A registered override replaces the canonical default for its dimension,
+    /// then the value is capped by the selected profile and absolute runtime
+    /// hard maximum. Missing overrides retain canonical defaults.
+    pub fn effective_resource_budget_for(&self, agent_name: &str) -> ResourceBudget {
+        let canonical = ResourceBudget::default();
+        let overrides = self
+            .agent_budget_overrides(agent_name)
+            .copied()
+            .unwrap_or_default();
+
+        let requested_texture_bytes = overrides
+            .max_texture_mb
+            .map(|mib| u64::from(mib) * MIB_BYTES)
+            .unwrap_or(canonical.max_texture_bytes);
+        let requested_update_hz = overrides
+            .max_update_hz
+            .map(|hz| hz as f32)
+            .unwrap_or(canonical.max_update_rate_hz);
+
+        ResourceBudget {
+            max_tiles: overrides
+                .max_tiles
+                .unwrap_or(canonical.max_tiles)
+                .min(self.operational_envelope.max_leased_tiles)
+                .min(HARD_MAX_TILES),
+            max_texture_bytes: requested_texture_bytes
+                .min(self.operational_envelope.max_agent_leased_texture_bytes)
+                .min(HARD_MAX_TEXTURE_BYTES),
+            max_update_rate_hz: requested_update_hz
+                .min(self.operational_envelope.max_agent_update_hz as f32)
+                .min(HARD_MAX_UPDATE_RATE_HZ),
+            ..canonical
+        }
+    }
 }
 
 // ─── Shared runtime context type alias ───────────────────────────────────────
@@ -318,6 +564,7 @@ mod tests {
             profile: DisplayProfile::headless(),
             tab_names: vec!["main".to_string()],
             agent_capabilities,
+            agent_budget_overrides: HashMap::new(),
             media_ingress: Default::default(),
             source_path: None,
         }
@@ -331,6 +578,114 @@ mod tests {
         let ctx = RuntimeContext::from_config(config, FallbackPolicy::Guest);
         assert_eq!(ctx.profile.name, "headless");
         assert_eq!(ctx.profile.max_tiles, 256);
+    }
+
+    #[test]
+    fn from_config_derives_immutable_operational_envelope() {
+        let config = make_config(vec![]);
+        let ctx = RuntimeContext::from_config(config, FallbackPolicy::Guest);
+
+        assert_eq!(ctx.operational_envelope.profile_name, "headless");
+        assert_eq!(ctx.operational_envelope.max_resident_sessions, 8);
+        assert_eq!(ctx.operational_envelope.max_leased_tiles, 256);
+        assert_eq!(
+            ctx.operational_envelope.max_agent_leased_texture_bytes,
+            512 * 1024 * 1024
+        );
+        assert_eq!(ctx.operational_envelope.max_agent_update_hz, 60);
+        assert_eq!(
+            ctx.operational_envelope.resident_memory.max_aggregate_bytes,
+            512 * 1024 * 1024
+        );
+        assert_eq!(
+            ctx.operational_envelope.resident_memory.max_resource_bytes,
+            256 * 1024 * 1024
+        );
+        assert_eq!(
+            ctx.operational_envelope
+                .resident_memory
+                .max_widget_asset_bytes,
+            64 * 1024 * 1024
+        );
+        assert_eq!(
+            ctx.operational_envelope
+                .resident_memory
+                .max_widget_raster_bytes,
+            128 * 1024 * 1024
+        );
+        assert_eq!(
+            ctx.operational_envelope.resident_memory.max_font_bytes,
+            64 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn from_config_retains_registered_agent_budget_overrides() {
+        let mut config = make_config(vec![]);
+        config.agent_budget_overrides.insert(
+            "agent-a".into(),
+            RegisteredAgentBudgetOverrides {
+                max_tiles: Some(3),
+                max_texture_mb: Some(24),
+                max_update_hz: Some(7),
+            },
+        );
+        let ctx = RuntimeContext::from_config(config, FallbackPolicy::Guest);
+
+        assert_eq!(
+            ctx.agent_budget_overrides("agent-a"),
+            Some(&RegisteredAgentBudgetOverrides {
+                max_tiles: Some(3),
+                max_texture_mb: Some(24),
+                max_update_hz: Some(7),
+            })
+        );
+    }
+
+    #[test]
+    fn session_limits_use_profile_resident_ceiling_and_separate_guest_pool() {
+        let ctx = RuntimeContext::from_config(make_config(vec![]), FallbackPolicy::Guest);
+        let limits = ctx.session_limits();
+
+        assert_eq!(limits.max_resident, 8);
+        assert_eq!(limits.max_guest, DEFAULT_MAX_GUEST_SESSIONS);
+        assert_eq!(limits.max_total, 8 + DEFAULT_MAX_GUEST_SESSIONS);
+    }
+
+    #[test]
+    fn effective_budget_uses_canonical_defaults_capped_by_profile() {
+        let mut config = make_config(vec![]);
+        config.profile.max_tiles = 4;
+        config.profile.max_texture_mb = 128;
+        config.profile.max_agent_update_hz = 20;
+        let ctx = RuntimeContext::from_config(config, FallbackPolicy::Guest);
+
+        let budget = ctx.effective_resource_budget_for("unregistered");
+        assert_eq!(budget.max_tiles, 4);
+        assert_eq!(budget.max_texture_bytes, 128 * 1024 * 1024);
+        assert_eq!(budget.max_update_rate_hz, 20.0);
+    }
+
+    #[test]
+    fn registered_overrides_replace_defaults_then_obey_profile_and_hard_caps() {
+        let mut config = make_config(vec![]);
+        config.profile.max_tiles = 100;
+        config.profile.max_texture_mb = 4096;
+        config.profile.max_agent_update_hz = 240;
+        config.agent_budget_overrides.insert(
+            "agent-a".into(),
+            RegisteredAgentBudgetOverrides {
+                max_tiles: Some(80),
+                max_texture_mb: Some(3072),
+                max_update_hz: Some(180),
+            },
+        );
+        let ctx = RuntimeContext::from_config(config, FallbackPolicy::Guest);
+
+        let budget = ctx.effective_resource_budget_for("agent-a");
+        assert_eq!(budget.max_tiles, HARD_MAX_TILES);
+        assert_eq!(budget.max_texture_bytes, HARD_MAX_TEXTURE_BYTES);
+        assert_eq!(budget.max_update_rate_hz, HARD_MAX_UPDATE_RATE_HZ);
     }
 
     #[test]
@@ -512,6 +867,7 @@ mod tests {
         // Snapshot frozen state before reload.
         let profile_name_before = ctx.profile.name.clone();
         let max_tiles_before = ctx.profile.max_tiles;
+        let envelope_before = ctx.operational_envelope.clone();
 
         // Reload hot config.
         ctx.reload_hot_config(HotReloadableConfig {
@@ -527,6 +883,7 @@ mod tests {
         // Frozen fields unchanged.
         assert_eq!(ctx.profile.name, profile_name_before);
         assert_eq!(ctx.profile.max_tiles, max_tiles_before);
+        assert_eq!(ctx.operational_envelope, envelope_before);
         // Frozen agent registry unchanged.
         let policy = ctx.capability_policy_for("my-agent");
         assert!(
@@ -656,5 +1013,30 @@ mod tests {
                 .evaluate_capability_request(&["overlay_privileges".to_string()])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn headless_production_consumers_share_exact_store_limits() {
+        let ctx = RuntimeContext::headless_default();
+        assert_eq!(
+            ctx.resident_store_limits(),
+            RuntimeResidentStoreLimits {
+                resource_bytes: 256 * 1024 * 1024,
+                widget_source_bytes: 64 * 1024 * 1024,
+                widget_namespace_bytes: 16 * 1024 * 1024,
+                widget_raster_bytes: 128 * 1024 * 1024,
+                font_bytes: 64 * 1024 * 1024,
+            }
+        );
+        let snapshot = ctx.resident_accounting_snapshot();
+        assert_eq!(snapshot["limits"]["aggregate_bytes"], 512 * 1024 * 1024_u64);
+        assert_eq!(snapshot["usage"]["allocation_count"], 0);
+        assert_eq!(snapshot["admission"]["max_resident_sessions"], 8);
+        assert_eq!(snapshot["admission"]["max_leased_tiles"], 256);
+        assert_eq!(snapshot["counters"]["class_denials"], 0);
+        assert!(snapshot["accounted_byte_rules"]["measurement_scope"].is_string());
+        assert!(snapshot["consumers"]["resource"].is_array());
+        assert!(snapshot["consumers"]["widget_source"].is_array());
+        assert!(snapshot["consumers"]["font"].is_array());
     }
 }

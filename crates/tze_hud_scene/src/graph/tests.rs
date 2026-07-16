@@ -2897,6 +2897,58 @@ fn resource_refs_updated_on_update_node_content_resource_swap() {
     );
 }
 
+#[test]
+fn aggregate_budget_delta_tracks_sequential_updates_within_one_batch() {
+    let (mut scene, lease_id, tile_id, node_id, old_bytes) = scene_with_static_image_node(32, 32);
+    let first_bytes = 64_u64 * 64 * 4;
+    let final_bytes = 128_u64 * 128 * 4;
+    let image = |width, decoded_bytes| {
+        NodeData::StaticImage(StaticImageNode {
+            resource_id: make_test_image_resource(width, width).0,
+            width,
+            height: width,
+            decoded_bytes,
+            fit_mode: ImageFitMode::Contain,
+            bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+        })
+    };
+    let batch = crate::mutation::MutationBatch {
+        batch_id: SceneId::new(),
+        agent_namespace: "agent".to_string(),
+        mutations: vec![
+            crate::mutation::SceneMutation::UpdateNodeContent {
+                tile_id,
+                node_id,
+                data: image(64, first_bytes),
+            },
+            crate::mutation::SceneMutation::UpdateNodeContent {
+                tile_id,
+                node_id,
+                data: image(128, final_bytes),
+            },
+        ],
+        timing_hints: None,
+        lease_id: Some(lease_id),
+    };
+
+    let delta = scene.mutation_budget_delta(&lease_id, &batch);
+    assert_eq!(
+        delta.delta_texture_bytes,
+        i64::try_from(final_bytes - old_bytes).unwrap(),
+        "aggregate admission must charge the final batch state, not compare every update to the pre-batch state"
+    );
+    scene
+        .leases
+        .get_mut(&lease_id)
+        .expect("lease exists")
+        .resource_budget
+        .max_texture_bytes = final_bytes;
+    assert!(
+        scene.check_budget(&lease_id, &batch).is_ok(),
+        "per-session admission must evaluate the same final virtual batch state"
+    );
+}
+
 /// UpdateNodeContent with the SAME resource_id must not change the ref count.
 #[test]
 fn resource_refs_unchanged_on_update_node_content_same_resource() {

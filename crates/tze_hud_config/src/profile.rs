@@ -42,6 +42,14 @@ fn mobile_budget() -> DisplayProfile {
         // Mobile budget values are intentionally conservative.
         max_tiles: 128,
         max_texture_mb: 256,
+        // Mobile is schema-reserved and has no v1 execution path. Reuse the
+        // active headless operational envelope until mobile receives approved
+        // post-v1 values; do not infer device-specific budgets here.
+        max_runtime_resident_mb: 512,
+        max_resource_resident_mb: 256,
+        max_widget_asset_resident_mb: 64,
+        max_widget_raster_cache_mb: 128,
+        max_font_resident_mb: 64,
         max_agents: 4,
         max_agent_update_hz: 30,
         target_fps: 60,
@@ -188,6 +196,21 @@ pub(crate) fn profile_ceiling_for_validation(raw: &RawConfig) -> Option<DisplayP
                 max_texture_mb: dp
                     .and_then(|d| d.max_texture_mb)
                     .unwrap_or(base.max_texture_mb),
+                max_runtime_resident_mb: dp
+                    .and_then(|d| d.max_runtime_resident_mb)
+                    .unwrap_or(base.max_runtime_resident_mb),
+                max_resource_resident_mb: dp
+                    .and_then(|d| d.max_resource_resident_mb)
+                    .unwrap_or(base.max_resource_resident_mb),
+                max_widget_asset_resident_mb: dp
+                    .and_then(|d| d.max_widget_asset_resident_mb)
+                    .unwrap_or(base.max_widget_asset_resident_mb),
+                max_widget_raster_cache_mb: dp
+                    .and_then(|d| d.max_widget_raster_cache_mb)
+                    .unwrap_or(base.max_widget_raster_cache_mb),
+                max_font_resident_mb: dp
+                    .and_then(|d| d.max_font_resident_mb)
+                    .unwrap_or(base.max_font_resident_mb),
                 max_agents: dp.and_then(|d| d.max_agents).unwrap_or(base.max_agents),
                 max_agent_update_hz: dp
                     .and_then(|d| d.max_agent_update_hz)
@@ -229,10 +252,10 @@ pub fn validate_display_profile(raw: &RawConfig, errors: &mut Vec<ConfigError>) 
         None => return, // no [display_profile] section → nothing to validate here
     };
 
-    let extends = match &dp.extends {
-        Some(e) => e.as_str(),
-        None => return, // no extends → no extends-specific checks
-    };
+    // A custom profile without an explicit `extends` inherits full-display.
+    // Validation must use that same base or raw overrides can bypass both
+    // escalation and resident class-sum checks before freeze.
+    let extends = dp.extends.as_deref().unwrap_or("full-display");
 
     // ── Rule: headless MUST NOT be extended ───────────────────────────────────
     if extends == "headless" {
@@ -264,7 +287,8 @@ pub fn validate_display_profile(raw: &RawConfig, errors: &mut Vec<ConfigError>) 
     // ── Rule: profile/extends conflict ────────────────────────────────────────
     // If [runtime].profile names a built-in (not "custom") and [display_profile].extends
     // names a DIFFERENT built-in, that's a conflict.
-    if let Some(p) = runtime_profile
+    if dp.extends.is_some()
+        && let Some(p) = runtime_profile
         && matches!(p, "full-display" | "headless")
         && p != extends
     {
@@ -283,6 +307,7 @@ pub fn validate_display_profile(raw: &RawConfig, errors: &mut Vec<ConfigError>) 
     // Only run if the base profile is known (already checked above).
     let base = base_profile_for(extends).unwrap();
     validate_budget_escalation(dp, &base, errors);
+    validate_resident_budget(dp, &base, errors);
 }
 
 /// Check that overrides in `[display_profile]` do not exceed the base profile's budgets.
@@ -304,6 +329,31 @@ fn validate_budget_escalation(
             "display_profile.max_agent_update_hz",
             dp.max_agent_update_hz,
             base.max_agent_update_hz,
+        ),
+        (
+            "display_profile.max_runtime_resident_mb",
+            dp.max_runtime_resident_mb,
+            base.max_runtime_resident_mb,
+        ),
+        (
+            "display_profile.max_resource_resident_mb",
+            dp.max_resource_resident_mb,
+            base.max_resource_resident_mb,
+        ),
+        (
+            "display_profile.max_widget_asset_resident_mb",
+            dp.max_widget_asset_resident_mb,
+            base.max_widget_asset_resident_mb,
+        ),
+        (
+            "display_profile.max_widget_raster_cache_mb",
+            dp.max_widget_raster_cache_mb,
+            base.max_widget_raster_cache_mb,
+        ),
+        (
+            "display_profile.max_font_resident_mb",
+            dp.max_font_resident_mb,
+            base.max_font_resident_mb,
         ),
     ];
 
@@ -352,6 +402,42 @@ fn validate_budget_escalation(
             expected: "false (base profile disallows chrome zones)".into(),
             got: "true".into(),
             hint: "cannot enable allow_chrome_zones when the base profile disables it".into(),
+        });
+    }
+}
+
+/// Validate the resolved resident-memory class sum using widened arithmetic.
+fn validate_resident_budget(
+    dp: &RawDisplayProfile,
+    base: &DisplayProfile,
+    errors: &mut Vec<ConfigError>,
+) {
+    let aggregate = dp
+        .max_runtime_resident_mb
+        .unwrap_or(base.max_runtime_resident_mb);
+    let resource = dp
+        .max_resource_resident_mb
+        .unwrap_or(base.max_resource_resident_mb);
+    let widget_asset = dp
+        .max_widget_asset_resident_mb
+        .unwrap_or(base.max_widget_asset_resident_mb);
+    let widget_raster = dp
+        .max_widget_raster_cache_mb
+        .unwrap_or(base.max_widget_raster_cache_mb);
+    let font = dp.max_font_resident_mb.unwrap_or(base.max_font_resident_mb);
+
+    let class_total =
+        u64::from(resource) + u64::from(widget_asset) + u64::from(widget_raster) + u64::from(font);
+    if class_total > u64::from(aggregate) {
+        errors.push(ConfigError {
+            code: ConfigErrorCode::ProfileResidentBudgetInvalid,
+            field_path: "display_profile.max_runtime_resident_mb".into(),
+            expected: format!("resident class total <= aggregate={aggregate} MiB"),
+            got: format!(
+                "aggregate={aggregate}, resource={resource}, widget_asset={widget_asset}, \
+                 widget_raster={widget_raster}, font={font}, class_total={class_total} MiB"
+            ),
+            hint: "lower one or more resident class ceilings or raise the aggregate within the base-profile ceiling".into(),
         });
     }
 }
@@ -463,6 +549,19 @@ fn resolve_custom_profile(raw: &RawConfig) -> Result<DisplayProfile, Vec<ConfigE
         name: "custom".into(),
         max_tiles: dp.max_tiles.unwrap_or(base.max_tiles),
         max_texture_mb: dp.max_texture_mb.unwrap_or(base.max_texture_mb),
+        max_runtime_resident_mb: dp
+            .max_runtime_resident_mb
+            .unwrap_or(base.max_runtime_resident_mb),
+        max_resource_resident_mb: dp
+            .max_resource_resident_mb
+            .unwrap_or(base.max_resource_resident_mb),
+        max_widget_asset_resident_mb: dp
+            .max_widget_asset_resident_mb
+            .unwrap_or(base.max_widget_asset_resident_mb),
+        max_widget_raster_cache_mb: dp
+            .max_widget_raster_cache_mb
+            .unwrap_or(base.max_widget_raster_cache_mb),
+        max_font_resident_mb: dp.max_font_resident_mb.unwrap_or(base.max_font_resident_mb),
         max_agents: dp.max_agents.unwrap_or(base.max_agents),
         max_agent_update_hz: dp.max_agent_update_hz.unwrap_or(base.max_agent_update_hz),
         target_fps: dp.target_fps.unwrap_or(base.target_fps),
@@ -522,6 +621,11 @@ mod tests {
         assert_eq!(p.max_agents, 16, "full-display max_agents");
         assert_eq!(p.target_fps, 60, "full-display target_fps");
         assert_eq!(p.min_fps, 30, "full-display min_fps");
+        assert_eq!(p.max_runtime_resident_mb, 1024);
+        assert_eq!(p.max_resource_resident_mb, 512);
+        assert_eq!(p.max_widget_asset_resident_mb, 192);
+        assert_eq!(p.max_widget_raster_cache_mb, 256);
+        assert_eq!(p.max_font_resident_mb, 64);
     }
 
     // ── Spec §Display Profile headless ───────────────────────────────────────
@@ -535,6 +639,133 @@ mod tests {
         assert_eq!(p.max_agents, 8, "headless max_agents");
         assert_eq!(p.target_fps, 60, "headless target_fps");
         assert_eq!(p.min_fps, 1, "headless min_fps");
+        assert_eq!(p.max_runtime_resident_mb, 512);
+        assert_eq!(p.max_resource_resident_mb, 256);
+        assert_eq!(p.max_widget_asset_resident_mb, 64);
+        assert_eq!(p.max_widget_raster_cache_mb, 128);
+        assert_eq!(p.max_font_resident_mb, 64);
+    }
+
+    #[test]
+    fn resident_subceilings_exceeding_aggregate_are_rejected_without_overflow() {
+        let raw = RawConfig {
+            runtime: Some(RawRuntime {
+                profile: Some("custom".into()),
+                ..Default::default()
+            }),
+            display_profile: Some(RawDisplayProfile {
+                extends: Some("full-display".into()),
+                max_runtime_resident_mb: Some(u32::MAX),
+                max_resource_resident_mb: Some(u32::MAX),
+                max_widget_asset_resident_mb: Some(u32::MAX),
+                max_widget_raster_cache_mb: Some(u32::MAX),
+                max_font_resident_mb: Some(u32::MAX),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let mut errors = Vec::new();
+        validate_display_profile(&raw, &mut errors);
+
+        let error = errors
+            .iter()
+            .find(|error| matches!(error.code, ConfigErrorCode::ProfileResidentBudgetInvalid))
+            .expect("overflowing resident sub-ceiling total must be rejected");
+        assert!(error.got.contains("resource=4294967295"));
+        assert!(error.got.contains("aggregate=4294967295"));
+    }
+
+    #[test]
+    fn custom_resident_subceilings_without_extends_are_still_validated() {
+        let raw = RawConfig {
+            runtime: Some(RawRuntime {
+                profile: Some("custom".into()),
+                ..Default::default()
+            }),
+            display_profile: Some(RawDisplayProfile {
+                max_runtime_resident_mb: Some(1),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let mut errors = Vec::new();
+        validate_display_profile(&raw, &mut errors);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| matches!(error.code, ConfigErrorCode::ProfileResidentBudgetInvalid)),
+            "custom profiles without extends inherit full-display class ceilings and must not bypass aggregate validation: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn custom_profile_can_lower_every_resident_ceiling() {
+        let raw = RawConfig {
+            runtime: Some(RawRuntime {
+                profile: Some("custom".into()),
+                ..Default::default()
+            }),
+            display_profile: Some(RawDisplayProfile {
+                extends: Some("full-display".into()),
+                max_runtime_resident_mb: Some(400),
+                max_resource_resident_mb: Some(200),
+                max_widget_asset_resident_mb: Some(60),
+                max_widget_raster_cache_mb: Some(100),
+                max_font_resident_mb: Some(40),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let profile = resolve_profile(&raw, 8192, 60).expect("lower custom profile resolves");
+        assert_eq!(profile.max_runtime_resident_mb, 400);
+        assert_eq!(profile.max_resource_resident_mb, 200);
+        assert_eq!(profile.max_widget_asset_resident_mb, 60);
+        assert_eq!(profile.max_widget_raster_cache_mb, 100);
+        assert_eq!(profile.max_font_resident_mb, 40);
+    }
+
+    #[test]
+    fn built_in_resident_classes_exactly_partition_the_aggregate() {
+        for profile in [DisplayProfile::full_display(), DisplayProfile::headless()] {
+            let class_total = u64::from(profile.max_resource_resident_mb)
+                + u64::from(profile.max_widget_asset_resident_mb)
+                + u64::from(profile.max_widget_raster_cache_mb)
+                + u64::from(profile.max_font_resident_mb);
+            assert_eq!(
+                class_total,
+                u64::from(profile.max_runtime_resident_mb),
+                "{} class ceilings must exactly partition the aggregate",
+                profile.name
+            );
+        }
+    }
+
+    #[test]
+    fn custom_resident_overrides_take_precedence_and_omissions_inherit_base() {
+        let raw = RawConfig {
+            runtime: Some(RawRuntime {
+                profile: Some("custom".into()),
+                ..Default::default()
+            }),
+            display_profile: Some(RawDisplayProfile {
+                extends: Some("full-display".into()),
+                max_runtime_resident_mb: Some(1000),
+                max_resource_resident_mb: Some(400),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let profile = resolve_profile(&raw, 8192, 60).expect("custom profile resolves");
+        assert_eq!(profile.max_runtime_resident_mb, 1000);
+        assert_eq!(profile.max_resource_resident_mb, 400);
+        assert_eq!(profile.max_widget_asset_resident_mb, 192);
+        assert_eq!(profile.max_widget_raster_cache_mb, 256);
+        assert_eq!(profile.max_font_resident_mb, 64);
     }
 
     /// WHEN extends = "headless" THEN CONFIG_HEADLESS_NOT_EXTENDABLE (lines 68-69).

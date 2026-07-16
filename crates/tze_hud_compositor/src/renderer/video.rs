@@ -483,8 +483,19 @@ impl super::Compositor {
     /// Calling this multiple times replaces the existing renderer (e.g. on surface
     /// reconfiguration or format change). Any cached textures are discarded.
     pub fn init_widget_renderer(&mut self, format: wgpu::TextureFormat) {
-        self.widget_renderer = Some(WidgetRenderer::new(&self.device, format));
+        let mut renderer = WidgetRenderer::new(&self.device, format);
+        if let Some(ledger) = &self.resident_ledger {
+            renderer.set_resident_ledger(ledger.clone());
+        }
+        self.widget_renderer = Some(renderer);
         tracing::debug!(format = ?format, "widget renderer initialized");
+    }
+
+    pub fn set_resident_ledger(&mut self, ledger: tze_hud_resource::ResidentLedger) {
+        if let Some(renderer) = &mut self.widget_renderer {
+            renderer.set_resident_ledger(ledger.clone());
+        }
+        self.resident_ledger = Some(ledger);
     }
 
     /// Get a mutable reference to the widget renderer, if initialized.
@@ -527,13 +538,25 @@ impl super::Compositor {
         // removal takes effect on the next frame instead of rendering defaults.
         let instance_names: Vec<String> = registry.instances.keys().cloned().collect();
 
+        // Reclaim every safely inactive texture before admitting any new or
+        // replacement raster for this frame. Active publications form the
+        // current-frame guard set and are never evicted by this pass.
+        for instance_name in &instance_names {
+            let has_active_publication = registry
+                .active_publishes
+                .get(instance_name)
+                .is_some_and(|publishes| !publishes.is_empty());
+            if !has_active_publication {
+                wr.remove_texture(instance_name);
+            }
+        }
+
         for instance_name in instance_names {
             let has_active_publication = registry
                 .active_publishes
                 .get(&instance_name)
                 .is_some_and(|publishes| !publishes.is_empty());
             if !has_active_publication {
-                wr.remove_texture(&instance_name);
                 continue;
             }
 
