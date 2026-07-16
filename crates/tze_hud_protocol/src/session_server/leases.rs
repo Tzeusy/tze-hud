@@ -187,12 +187,49 @@ pub(super) async fn handle_lease_request(
     // conversion to u8 is always lossless.
     let priority_u8 = granted_priority as u8;
     let st = state.lock().await;
-    let lease_id = st.scene.lock().await.grant_lease_with_priority(
+    let lease_result = st.scene.lock().await.try_grant_lease_for_session_with_budget(
         &session.namespace,
+        session.scene_session_id,
         ttl,
         priority_u8,
         capabilities,
+        session.resource_budget.clone(),
     );
+    let lease_id = match lease_result {
+        Ok(lease_id) => lease_id,
+        Err(error) => {
+            let deny_reason = error.to_string();
+            let deny_code = "RESOURCE_EXHAUSTED".to_string();
+            if client_sequence > 0 {
+                session.lease_correlation_cache.insert(
+                    client_sequence,
+                    CachedLeaseResponse {
+                        granted: false,
+                        lease_id: Vec::new(),
+                        granted_ttl_ms: 0,
+                        granted_priority: 0,
+                        granted_capabilities: Vec::new(),
+                        deny_reason: deny_reason.clone(),
+                        deny_code: deny_code.clone(),
+                    },
+                );
+            }
+            let seq = session.next_server_seq();
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: seq,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::LeaseResponse(LeaseResponse {
+                        granted: false,
+                        deny_reason,
+                        deny_code,
+                        ..Default::default()
+                    })),
+                }))
+                .await;
+            return;
+        }
+    };
     session.lease_ids.push(lease_id);
     let lease_id_bytes = scene_id_to_bytes(lease_id);
 

@@ -177,12 +177,15 @@ pub(super) fn start_network_services(
 
     // Wire config-driven capability registry into the session service.
     let agent_caps = runtime_context.snapshot_agent_capabilities();
-    let service = HudSessionImpl::from_shared_state_with_config_and_media_ingress(
+    let service = HudSessionImpl::from_shared_state_with_runtime_envelope(
         shared_state,
         psk,
         agent_caps,
+        runtime_context.snapshot_agent_resource_budgets(),
+        runtime_context.fallback_resource_budget(),
         fallback_unrestricted,
         runtime_context.media_ingress.clone(),
+        Some(std::sync::Arc::new(crate::RuntimeMutationBudgetEnforcer::new())),
     );
 
     // Clone the broadcast senders before moving the service into the gRPC task.

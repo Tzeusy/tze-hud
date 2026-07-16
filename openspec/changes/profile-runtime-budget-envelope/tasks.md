@@ -13,7 +13,7 @@
 ## 3. Admission and Lease Wiring
 
 - [x] 3.1 Construct production session limits and per-agent effective `ResourceBudget` values from the operational envelope and retained overrides.
-- [ ] 3.2 Pass effective budgets into every production lease grant and register sessions with the mutation-intake budget enforcer.
+- [x] 3.2 Pass effective budgets into every production lease grant and register sessions with the mutation-intake budget enforcer.
 - [ ] 3.3 Enforce aggregate resident-session, leased-tile, and agent-leased texture ceilings atomically with behavior-executing multi-agent tests.
 
 ## 4. Resource and Cache Wiring

@@ -796,13 +796,15 @@ impl HeadlessRuntime {
         // guest policy (no capabilities) unless fallback_unrestricted is true (dev mode).
         let agent_caps = self.runtime_context.snapshot_agent_capabilities();
 
-        let service =
-            HudSessionImpl::from_shared_state_with_config_media_ingress_and_degradation_notices(
+        let service = HudSessionImpl::from_shared_state_with_runtime_envelope_and_degradation_notices(
                 self.state.clone(),
                 &self.config.psk,
                 agent_caps,
+                self.runtime_context.snapshot_agent_resource_budgets(),
+                self.runtime_context.fallback_resource_budget(),
                 self.fallback_unrestricted,
                 self.runtime_context.media_ingress.clone(),
+                Some(std::sync::Arc::new(crate::RuntimeMutationBudgetEnforcer::new())),
                 self.degradation_notices.clone(),
             );
 

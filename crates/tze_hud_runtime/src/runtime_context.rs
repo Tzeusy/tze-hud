@@ -356,6 +356,20 @@ impl RuntimeContext {
         self.agent_capabilities.clone()
     }
 
+    /// Return the frozen effective budget for every registered agent.
+    pub fn snapshot_agent_resource_budgets(&self) -> HashMap<String, ResourceBudget> {
+        self.agent_capabilities
+            .keys()
+            .chain(self.agent_budget_overrides.keys())
+            .map(|name| (name.clone(), self.effective_resource_budget_for(name)))
+            .collect()
+    }
+
+    /// Return the frozen budget used for unregistered/guest agents.
+    pub fn fallback_resource_budget(&self) -> ResourceBudget {
+        self.effective_resource_budget_for("")
+    }
+
     /// Return validated startup budget overrides for a registered agent.
     pub fn agent_budget_overrides(
         &self,

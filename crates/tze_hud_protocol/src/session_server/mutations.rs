@@ -23,6 +23,7 @@ use crate::proto::session::*;
 use crate::session::SharedState;
 
 use super::freeze_queue::FreezeEnqueueResult;
+use super::MutationBudgetDecision;
 use super::stream_session::StreamSession;
 use super::{
     DEFAULT_MAX_FUTURE_SCHEDULE_US, ElementStorePersistRequest, bytes_to_scene_id, now_ms,
@@ -38,6 +39,28 @@ struct ConvertedBatch {
     pending_touch_ids: Vec<(SceneId, ElementType)>,
     /// Elements that should have `last_published_at` updated, keyed by namespace string.
     pending_touch_names: Vec<(ElementType, String)>,
+}
+
+/// Derive the logical mutation-intake delta before scene commit.
+fn mutation_budget_delta(mutations: &[SceneMutation]) -> (i32, i64, u32) {
+    let mut tiles = 0_i32;
+    let mut max_nodes = 0_u32;
+    for mutation in mutations {
+        match mutation {
+            SceneMutation::CreateTile { .. } => tiles = tiles.saturating_add(1),
+            SceneMutation::DeleteTile { .. } => tiles = tiles.saturating_sub(1),
+            SceneMutation::SetTileRoot { descendants, .. } => {
+                max_nodes = max_nodes.max(
+                    u32::try_from(descendants.len().saturating_add(1)).unwrap_or(u32::MAX),
+                );
+            }
+            SceneMutation::AddNode { .. } => max_nodes = max_nodes.max(1),
+            _ => {}
+        }
+    }
+    // Logical agent-leased texture bytes are admitted by resource operations;
+    // mutation batches currently carry no decoded texture allocation delta.
+    (tiles, 0, max_nodes)
 }
 
 /// Convert a slice of proto [`MutationProto`] into a [`ConvertedBatch`].
@@ -1033,6 +1056,47 @@ pub(super) async fn handle_mutation_batch(
         pending_touch_ids,
         pending_touch_names,
     } = converted;
+    let budget_delta = mutation_budget_delta(&scene_mutations);
+    if let Some(enforcer) = &session.budget_enforcer {
+        match enforcer.check_mutation(
+            &session.namespace,
+            budget_delta.0,
+            budget_delta.1,
+            budget_delta.2,
+        ) {
+            MutationBudgetDecision::Allow => {}
+            MutationBudgetDecision::Reject { error_code, message }
+            | MutationBudgetDecision::Revoke { error_code, message } => {
+                let cached = CachedResult {
+                    accepted: false,
+                    created_ids: Vec::new(),
+                    error_code: error_code.to_string(),
+                    error_message: message,
+                };
+                if !batch.batch_id.is_empty() {
+                    session
+                        .dedup_window
+                        .insert(batch.batch_id.clone(), cached.clone());
+                }
+                let seq = session.next_server_seq();
+                drop(st);
+                let _ = tx
+                    .send(Ok(ServerMessage {
+                        sequence: seq,
+                        timestamp_wall_us: now_wall_us(),
+                        payload: Some(ServerPayload::MutationResult(MutationResult {
+                            batch_id: batch.batch_id,
+                            accepted: false,
+                            created_ids: Vec::new(),
+                            error_code: cached.error_code,
+                            error_message: cached.error_message,
+                        })),
+                    }))
+                    .await;
+                return;
+            }
+        }
+    }
 
     // Map the proto batch_id bytes to a SceneId for rejection-correlation.
     // Falls back (with a debug log) when the field is absent or malformed.
@@ -1061,6 +1125,13 @@ pub(super) async fn handle_mutation_batch(
 
     let seq = session.next_server_seq();
     if result.applied {
+        if let Some(enforcer) = &session.budget_enforcer {
+            enforcer.apply_mutation_delta(
+                &session.namespace,
+                budget_delta.0,
+                budget_delta.1,
+            );
+        }
         let mut persist_request = persist_created_tile_entries(&mut st, &result.created_ids).await;
         let now = now_ms();
         let mut touched = false;
@@ -1227,6 +1298,24 @@ pub(super) async fn apply_queued_batch_to_scene(
         pending_touch_ids,
         pending_touch_names,
     } = converted;
+    let budget_delta = mutation_budget_delta(&scene_mutations);
+    if let Some(enforcer) = &session.budget_enforcer {
+        if !matches!(
+            enforcer.check_mutation(
+                &session.namespace,
+                budget_delta.0,
+                budget_delta.1,
+                budget_delta.2,
+            ),
+            MutationBudgetDecision::Allow
+        ) {
+            tracing::warn!(
+                namespace = session.namespace,
+                "queued mutation batch skipped by runtime budget admission"
+            );
+            return;
+        }
+    }
 
     // Map the proto batch_id bytes to a SceneId for validation correlation.
     let scene_batch_id = proto_batch_id_to_scene_id(&batch.batch_id);
@@ -1251,6 +1340,13 @@ pub(super) async fn apply_queued_batch_to_scene(
         r
     };
     if result.applied {
+        if let Some(enforcer) = &session.budget_enforcer {
+            enforcer.apply_mutation_delta(
+                &session.namespace,
+                budget_delta.0,
+                budget_delta.1,
+            );
+        }
         let mut persist_request = persist_created_tile_entries(&mut st, &result.created_ids).await;
         let now = now_ms();
         let mut touched = false;

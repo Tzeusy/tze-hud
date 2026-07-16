@@ -98,6 +98,7 @@ pub mod headless;
 pub mod mcp;
 pub mod media_admission;
 pub mod media_ingress;
+pub mod mutation_budget_bridge;
 pub mod pipeline;
 pub mod portal_cadence;
 pub mod portal_projection_driver;
@@ -175,6 +176,7 @@ pub use channels::{
     frame_ready_channel,
 };
 pub use degradation::{DegradationConfig, DegradationController, DegradationLevel, TileDescriptor};
+pub use mutation_budget_bridge::RuntimeMutationBudgetEnforcer;
 pub use event_bus::{
     AGGREGATE_RATE_CAP, AggregateRateLimiter, ClassifiedEvent, EventBus, InterruptionClass,
     SubscriberQueue,
