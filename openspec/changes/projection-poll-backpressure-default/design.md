@@ -28,7 +28,7 @@ Keep `max_poll_response_bytes = 16384` unchanged and require the byte cap to sto
 
 ### Specify both cap orders explicitly
 
-Add one scenario where a fitting 33-item queue is limited by the 32-item count cap, and one where fewer than 32 items fit before the 16,384-byte cap. This makes the intended behavior unambiguous for the follow-on authority regression tests.
+Add one scenario using a configuration whose pending-input capacity exceeds 32, so a fitting 33-item queue is limited by the 32-item poll count cap without changing the default queue capacity. Add a second scenario where fewer than 32 items fit before the 16,384-byte cap. This makes the intended behavior unambiguous for the follow-on authority regression tests.
 
 ## Risks / Trade-offs
 

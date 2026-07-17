@@ -23,11 +23,11 @@ Unless deployment configuration sets stricter values, v1 defaults SHALL be: `max
 - **AND** it SHALL preserve the coherent visible transcript window required by the text-stream portal contract
 
 #### Scenario: poll item count cap binds independently of bytes
-- **WHEN** an attached LLM session omits `max_items` or requests a value greater than `max_poll_items` against 33 eligible FIFO input items whose combined response payload fits within `max_poll_response_bytes`
+- **WHEN** an attached LLM session omits `max_items` or requests a value greater than `max_poll_items`, omits `max_bytes` or requests a value greater than `max_poll_response_bytes`, and in a configuration whose `max_pending_input_items` exceeds `max_poll_items` polls 33 eligible FIFO input items whose combined response payload fits within `max_poll_response_bytes`
 - **THEN** the daemon SHALL return only the first 32 items and report the remaining pending item through compact remaining counts
 - **AND** it SHALL NOT return a thirty-third item merely because response-byte budget remains
 
 #### Scenario: poll response byte cap binds independently of item count
-- **WHEN** an attached LLM session omits `max_bytes` or requests a value greater than `max_poll_response_bytes` against 32 or fewer equal-sized eligible FIFO input items whose cumulative response payload exceeds `max_poll_response_bytes` before the item count cap is reached
+- **WHEN** an attached LLM session omits `max_bytes` or requests a value greater than `max_poll_response_bytes`, omits `max_items` or requests a value greater than `max_poll_items`, and has 32 or fewer equal-sized eligible FIFO input items whose cumulative response payload exceeds `max_poll_response_bytes` before the item count cap is reached
 - **THEN** the daemon SHALL return only the FIFO prefix that fits within `max_poll_response_bytes` and report the undelivered items through compact remaining counts and bytes
 - **AND** it SHALL NOT exceed the response-byte cap merely because fewer than `max_poll_items` items were returned
