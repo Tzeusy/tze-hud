@@ -83,6 +83,34 @@ This change is a contract-only bridge from doctrine to later implementation bead
 - *Any one-token increase fails:* maximally strict but makes deliberate schema growth unnecessarily disruptive.
 - *Twenty-percent threshold:* too loose for a deterministic product metric and can compound rapidly.
 
+### D6: The initial v1 token authority is the revised canonical-client packet
+
+**Choice:** The initial comparison authority is the owner-approved revised
+canonical-client packet from `hud-ht1k7`: `tiktoken-rs` `0.12.0`,
+`o200k_base`, vocabulary SHA-256
+`446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d`,
+fixture fingerprint
+`blake3:86774ba0b39a5d1e812a9705fe0221d3071425d3b73a2ad07aada041530c1601`,
+and the exact zone, portal, and widget values in the validation-framework
+delta. The initial baseline records `approval.status=owner_approved` and
+`approval.decision_reference=hud-ht1k7`. Zone and widget use MCP-standard
+`tools/call`; portal measurements retain the production client's operation
+discriminators.
+
+**Rationale:** An independent audit found that the superseded candidate used
+legacy bare-method envelopes for zone/widget and omitted the portal operation
+discriminators. Pinning the corrected framing, identity, fingerprints, and
+provenance prevents a future baseline edit from silently comparing a different
+client contract or laundering token growth.
+
+**Alternatives considered:**
+
+- *Retain the earlier candidate:* rejected because it measured a non-canonical
+  client shape and its approval did not transfer to the corrected packet.
+- *Keep the exact values only in the checker JSON:* rejected because the
+  normative OpenSpec contract must state the approved product budget, not
+  merely point at an implementation artifact.
+
 ## Risks / Trade-offs
 
 - **[Risk] The five-second settling allowance hides a slow animation or timer leak** → The artifact reports the actual quiescence transition time, and later implementation can tighten the deadline with evidence without weakening zero work during observation.
@@ -103,5 +131,5 @@ This change is a contract-only bridge from doctrine to later implementation bead
 
 ## Open Questions
 
-- Which repository-pinned tokenizer implementation and vocabulary will serve as the first authority? Implementation work must present measured candidates; this spec fixes the required identity/fingerprint semantics, not the package choice.
+- Resolved 2026-07-17 by owner decision `hud-ht1k7`: the first authority is `tiktoken-rs` `0.12.0` with `o200k_base` and vocabulary SHA-256 `446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d`.
 - Which existing CI lane can enforce two logical CPUs most reliably on the selected WARP or llvmpipe runner? The artifact must record and prove the chosen mechanism.
