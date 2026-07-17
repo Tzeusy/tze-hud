@@ -11,7 +11,7 @@ use std::time::Instant;
 use wgpu::util::DeviceExt;
 
 use tze_hud_scene::graph::SceneGraph;
-use tze_hud_scene::types::{NodeData, Rect, SceneId, TextMarkdownNode};
+use tze_hud_scene::types::{DragHandleElementKind, NodeData, Rect, SceneId, TextMarkdownNode};
 use tze_hud_telemetry::{
     ActualWorkItem, ChangeEfficiencyArtifact, ChangeMeasurementProvenance, ChangeMeasurementStatus,
     ChangeRenderWorkObservation, ClosureWorkItem, EfficiencyPacingIdentity, EfficiencyPacingMode,
@@ -88,7 +88,23 @@ impl RetainedChangeEfficiencyCapture {
 #[derive(Clone, PartialEq)]
 struct CanonicalSceneSnapshot {
     viewport: EfficiencyViewport,
+    scenario: CanonicalScenario,
     tiles: Vec<CanonicalTextTile>,
+}
+
+/// The only retained evidence layouts this private headless lane understands.
+///
+/// The transparent variant is deliberately a single dependency-expansion
+/// vector, not a general overlap planner: it proves that a z-higher translucent
+/// contributor is named and repainted without widening the product claim.
+#[derive(Clone, PartialEq)]
+enum CanonicalScenario {
+    OpaqueNonOverlapping,
+    TransparentOverlap {
+        lower_tile_id: SceneId,
+        upper_tile_id: SceneId,
+        overlap_bounds: Rect,
+    },
 }
 
 #[derive(Clone, PartialEq)]
@@ -96,16 +112,21 @@ struct CanonicalTextTile {
     tile_id: SceneId,
     node_id: SceneId,
     tile_bounds: Rect,
+    z_order: u32,
+    opacity: f32,
     text: TextMarkdownNode,
 }
 
 struct CanonicalTextChange {
     changed: CanonicalTextTile,
+    redraw_tiles: Vec<CanonicalTextTile>,
+    damage: PixelRect,
+    scenario: CanonicalScenario,
     next_snapshot: CanonicalSceneSnapshot,
 }
 
 enum RetainedPlan {
-    Partial(CanonicalTextChange),
+    Partial(Box<CanonicalTextChange>),
     FullFrame {
         diagnostic: Option<FullSurfaceInvalidation>,
     },
@@ -162,7 +183,7 @@ impl InvalidationPlanner {
                 if previous_snapshot == &next_snapshot {
                     return RetainedPlan::FullFrame { diagnostic: None };
                 }
-                let Some(changed) = changed_canonical_tile(previous_snapshot, &next_snapshot)
+                let Some(change) = planned_canonical_text_change(previous_snapshot, &next_snapshot)
                 else {
                     return RetainedPlan::FullFrame {
                         diagnostic: Some(full_surface_invalidation(
@@ -171,10 +192,10 @@ impl InvalidationPlanner {
                         )),
                     };
                 };
-                RetainedPlan::Partial(CanonicalTextChange {
-                    changed,
+                RetainedPlan::Partial(Box::new(CanonicalTextChange {
                     next_snapshot,
-                })
+                    ..change
+                }))
             }
         }
     }
@@ -281,9 +302,10 @@ impl Compositor {
                 .set_pending_full_surface_diagnostic(diagnostic);
             return None;
         };
+        let change = *change;
 
         let (telemetry, interval_duration_ms) =
-            match self.render_retained_text_change(scene, surface, &change.changed) {
+            match self.render_retained_text_change(scene, surface, &change) {
                 Some(result) => result,
                 None => {
                     self.retained_render_state.forget_snapshot();
@@ -297,7 +319,7 @@ impl Compositor {
             };
 
         let capture = RetainedChangeEfficiencyCapture::from_observed_runtime(
-            self.observed_change_artifact(&change.changed, width, height, interval_duration_ms),
+            self.observed_change_artifact(&change, width, height, interval_duration_ms),
         );
         self.retained_render_state
             .complete_partial(change.next_snapshot);
@@ -362,29 +384,64 @@ impl Compositor {
         &mut self,
         scene: &SceneGraph,
         surface: &HeadlessSurface,
-        changed: &CanonicalTextTile,
+        change: &CanonicalTextChange,
     ) -> Option<(tze_hud_telemetry::FrameTelemetry, u64)> {
         let frame_start = Instant::now();
         let (width, height) = surface.size();
-        let damage = pixel_rect_for_bounds(changed.tile_bounds, width, height)?;
-        let current_tile = scene.tiles.get(&changed.tile_id)?;
-        let current_node = scene.nodes.get(&changed.node_id)?;
-        let NodeData::TextMarkdown(current_text) = &current_node.data else {
-            return None;
+        let damage = change.damage;
+        let mut background_vertices = Vec::with_capacity(change.redraw_tiles.len() * 6);
+        let mut background_ranges = Vec::with_capacity(change.redraw_tiles.len());
+        let text_items = {
+            // The normal render pipeline commit-primes this cache before reaching
+            // the retained path. Decline to the full renderer if that invariant is
+            // unavailable; this proof lane must not reintroduce lossy markdown or
+            // an unbounded parse on its evidence frame.
+            let markdown_cache = self.markdown_cache();
+            let mut text_items = Vec::with_capacity(change.redraw_tiles.len());
+            for tile in &change.redraw_tiles {
+                let current_tile = scene.tiles.get(&tile.tile_id)?;
+                let current_node = scene.nodes.get(&tile.node_id)?;
+                let NodeData::TextMarkdown(current_text) = &current_node.data else {
+                    return None;
+                };
+                if current_text != &tile.text
+                    || !current_node.children.is_empty()
+                    || current_tile.bounds != tile.tile_bounds
+                    || current_tile.z_order != tile.z_order
+                    || current_tile.opacity != tile.opacity
+                {
+                    return None;
+                }
+
+                let background_color = self.tile_background_color(current_tile, scene)?;
+                let start = background_vertices.len() as u32;
+                background_vertices.extend_from_slice(&rect_vertices(
+                    tile.tile_bounds.x,
+                    tile.tile_bounds.y,
+                    tile.tile_bounds.width,
+                    tile.tile_bounds.height,
+                    width as f32,
+                    height as f32,
+                    self.gpu_color_raw(background_color),
+                ));
+                background_ranges.push(start..background_vertices.len() as u32);
+
+                let content_key = self.node_key_cache.get(&tile.node_id).copied()?;
+                let parsed = markdown_cache.get_by_key(&content_key)?;
+                let mut text_item = TextItem::from_text_markdown_cached(
+                    current_text,
+                    tile.tile_bounds.x,
+                    tile.tile_bounds.y,
+                    parsed,
+                );
+                // `collect_text_items` applies whole-tile opacity to glyphs;
+                // mirror that production rule so the translucent z-higher
+                // contributor is repainted exactly like the full frame.
+                text_item.opacity *= self.tile_effective_opacity(current_tile, scene);
+                text_items.push(text_item);
+            }
+            text_items
         };
-        if current_text != &changed.text || !current_node.children.is_empty() {
-            return None;
-        }
-        let background_color = self.tile_background_color(current_tile, scene)?;
-        let background_vertices = rect_vertices(
-            changed.tile_bounds.x,
-            changed.tile_bounds.y,
-            changed.tile_bounds.width,
-            changed.tile_bounds.height,
-            width as f32,
-            height as f32,
-            self.gpu_color_raw(background_color),
-        );
         let background_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -393,24 +450,11 @@ impl Compositor {
                 usage: wgpu::BufferUsages::VERTEX,
             });
 
-        // The normal render pipeline commit-primes this cache before reaching
-        // the retained path. Decline to the full renderer if that invariant is
-        // unavailable; this proof lane must not reintroduce lossy markdown or
-        // an unbounded parse on its evidence frame.
-        let content_key = self.node_key_cache.get(&changed.node_id).copied()?;
-        let markdown_cache = self.markdown_cache();
-        let parsed = markdown_cache.get_by_key(&content_key)?;
-        let text_item = TextItem::from_text_markdown_cached(
-            current_text,
-            changed.tile_bounds.x,
-            changed.tile_bounds.y,
-            parsed,
-        );
         let inline_backdrops = {
             let text_rasterizer = self.text_rasterizer.as_mut()?;
             text_rasterizer.update_viewport(&self.queue, width, height);
             text_rasterizer
-                .prepare_text_items(&self.device, &self.queue, &[text_item])
+                .prepare_text_items(&self.device, &self.queue, &text_items)
                 .ok()?
         };
         // The canonical lane admits plain text only; inline markdown backdrops
@@ -418,6 +462,52 @@ impl Compositor {
         if !inline_backdrops.is_empty() {
             return None;
         }
+
+        // A normal frame renders the passive drag grips in its top chrome pass.
+        // The canonical scene has neither portals nor active widget/zone content,
+        // so selecting only these already-declared closure tiles is equivalent to
+        // that pass for the damaged pixels. Dynamic grip state is rejected by
+        // `canonical_snapshot`; do not generalize this to arbitrary chrome.
+        let drag_handles: Vec<_> = self
+            .collect_drag_handle_entries(scene, width as f32, height as f32)
+            .into_iter()
+            .filter(|entry| {
+                change
+                    .redraw_tiles
+                    .iter()
+                    .any(|tile| tile.tile_id == entry.element_id)
+            })
+            .collect();
+        if drag_handles.len() != change.redraw_tiles.len()
+            || drag_handles
+                .iter()
+                .zip(&change.redraw_tiles)
+                .any(|(entry, tile)| {
+                    entry.element_id != tile.tile_id
+                        || entry.element_kind != DragHandleElementKind::Tile
+                        || entry.is_header_band
+                })
+        {
+            return None;
+        }
+        let mut drag_handle_vertices = Vec::new();
+        self.append_drag_handle_vertices(
+            scene,
+            &drag_handles,
+            &mut drag_handle_vertices,
+            width as f32,
+            height as f32,
+        );
+        if drag_handle_vertices.is_empty() {
+            return None;
+        }
+        let drag_handle_buffer =
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("retained_change_drag_handle"),
+                    contents: bytemuck::cast_slice(&drag_handle_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
 
         let frame = surface.acquire_frame()?;
         let encode_start = Instant::now();
@@ -449,7 +539,9 @@ impl Compositor {
                 pass.set_pipeline(&self.pipeline);
             }
             pass.set_vertex_buffer(0, background_buffer.slice(..));
-            pass.draw(0..background_vertices.len() as u32, 0..1);
+            for range in background_ranges {
+                pass.draw(range, 0..1);
+            }
         }
         {
             let text_rasterizer = self.text_rasterizer.as_ref()?;
@@ -473,6 +565,33 @@ impl Compositor {
         if let Some(text_rasterizer) = self.text_rasterizer.as_mut() {
             text_rasterizer.trim_atlas();
         }
+        {
+            // Repaint only the passive grips belonging to closure members. The
+            // scissor preserves every unaffected grip pixel; it repairs precisely
+            // the fragments overwritten by the retained tile backgrounds.
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("retained_change_drag_handle_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &frame.view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_scissor_rect(damage.x, damage.y, damage.width, damage.height);
+            if self.use_opaque_rect_pipeline() {
+                pass.set_pipeline(&self.clear_pipeline);
+            } else {
+                pass.set_pipeline(&self.pipeline);
+            }
+            pass.set_vertex_buffer(0, drag_handle_buffer.slice(..));
+            pass.draw(0..drag_handle_vertices.len() as u32, 0..1);
+        }
 
         // The readback copy preserves HeadlessRuntime's normal contract.  It is
         // not a render encode or texture upload and does not expand the damage.
@@ -489,7 +608,7 @@ impl Compositor {
         telemetry.tile_count = CANONICAL_TILE_COUNT as u32;
         telemetry.node_count = CANONICAL_TILE_COUNT as u32;
         telemetry.active_leases = scene.leases.len() as u32;
-        telemetry.tiles_layout_recomputed = 1;
+        telemetry.tiles_layout_recomputed = change.redraw_tiles.len() as u32;
         telemetry.stage6_render_encode_us = stage6_render_encode_us;
         telemetry.stage7_gpu_submit_us = stage7_gpu_submit_us;
         telemetry.frame_time_us = frame_start.elapsed().as_micros().max(1) as u64;
@@ -499,30 +618,97 @@ impl Compositor {
 
     fn observed_change_artifact(
         &self,
-        changed: &CanonicalTextTile,
+        change: &CanonicalTextChange,
         width: u32,
         height: u32,
         interval_duration_ms: u64,
     ) -> ChangeEfficiencyArtifact {
-        let node = NodeWorkItemId {
-            tile_id: changed.tile_id.to_string(),
-            node_id: changed.node_id.to_string(),
-        };
-        let render_plan = RenderPlanWorkItemId {
-            tile_id: changed.tile_id.to_string(),
-            plan_id: format!("{}:retained-text", changed.node_id),
-        };
-        let damage = tze_hud_telemetry::DamageWorkItemId {
-            tile_id: changed.tile_id.to_string(),
-            region_id: format!("{}:bounds", changed.tile_id),
-            bounds: pixel_rect_for_bounds(changed.tile_bounds, width, height)
+        let members: Vec<_> = change
+            .redraw_tiles
+            .iter()
+            .map(|tile| {
+                let reason = if tile.tile_id == change.changed.tile_id {
+                    InvalidationDependencyReason::DirectChange
+                } else {
+                    InvalidationDependencyReason::VisualOverlap
+                };
+                (tile, reason)
+            })
+            .collect();
+        let node_members: Vec<_> = members
+            .iter()
+            .map(|(tile, reason)| {
+                (
+                    NodeWorkItemId {
+                        tile_id: tile.tile_id.to_string(),
+                        node_id: tile.node_id.to_string(),
+                    },
+                    reason.clone(),
+                )
+            })
+            .collect();
+        let render_members: Vec<_> = members
+            .iter()
+            .map(|(tile, reason)| {
+                (
+                    RenderPlanWorkItemId {
+                        tile_id: tile.tile_id.to_string(),
+                        plan_id: format!("{}:retained-text", tile.node_id),
+                    },
+                    reason.clone(),
+                )
+            })
+            .collect();
+        let direct_damage = tze_hud_telemetry::DamageWorkItemId {
+            tile_id: change.changed.tile_id.to_string(),
+            region_id: format!("{}:bounds", change.changed.tile_id),
+            bounds: pixel_rect_for_bounds(change.changed.tile_bounds, width, height)
                 .expect("canonical planner already validated changed tile damage"),
         };
+        let damage_members = match &change.scenario {
+            CanonicalScenario::OpaqueNonOverlapping => {
+                vec![(direct_damage, InvalidationDependencyReason::DirectChange)]
+            }
+            CanonicalScenario::TransparentOverlap {
+                upper_tile_id,
+                overlap_bounds,
+                ..
+            } => {
+                let upper = change
+                    .redraw_tiles
+                    .iter()
+                    .find(|tile| tile.tile_id == *upper_tile_id)
+                    .expect("transparent-overlap planner supplies its upper tile");
+                vec![
+                    (direct_damage, InvalidationDependencyReason::DirectChange),
+                    (
+                        tze_hud_telemetry::DamageWorkItemId {
+                            tile_id: upper.tile_id.to_string(),
+                            region_id: format!("{}:overlap", upper.tile_id),
+                            bounds: pixel_rect_for_bounds(*overlap_bounds, width, height)
+                                .expect("transparent-overlap planner supplies viewport bounds"),
+                        },
+                        InvalidationDependencyReason::VisualOverlap,
+                    ),
+                ]
+            }
+        };
+        let (scenario_name, scenario_version) = match &change.scenario {
+            CanonicalScenario::OpaqueNonOverlapping => (
+                tze_hud_telemetry::ONE_NODE_FIFTY_TILE_SCENARIO_NAME,
+                tze_hud_telemetry::ONE_NODE_FIFTY_TILE_SCENARIO_VERSION,
+            ),
+            CanonicalScenario::TransparentOverlap { .. } => (
+                tze_hud_telemetry::TRANSPARENT_OVERLAP_FIFTY_TILE_SCENARIO_NAME,
+                tze_hud_telemetry::TRANSPARENT_OVERLAP_FIFTY_TILE_SCENARIO_VERSION,
+            ),
+        };
+        let scoped_encode_count = members.len() as u64;
         ChangeEfficiencyArtifact {
             schema_version: tze_hud_telemetry::CHANGE_EFFICIENCY_SCHEMA_VERSION,
             scenario: EfficiencyScenarioIdentity {
-                name: tze_hud_telemetry::ONE_NODE_FIFTY_TILE_SCENARIO_NAME.into(),
-                version: tze_hud_telemetry::ONE_NODE_FIFTY_TILE_SCENARIO_VERSION,
+                name: scenario_name.into(),
+                version: scenario_version,
             },
             runtime: EfficiencyRuntimeIdentity {
                 build: format!("tze_hud_compositor-{}", env!("CARGO_PKG_VERSION")),
@@ -541,24 +727,24 @@ impl Compositor {
             measurement_provenance: ChangeMeasurementProvenance::ObservedRetainedRuntime,
             scene_tile_count: CANONICAL_TILE_COUNT as u32,
             closure: InvalidationClosure {
-                layout: one_item_category(node.clone()),
-                raster: one_item_category(node),
+                layout: observed_category(node_members.clone()),
+                raster: observed_category(node_members),
                 texture_upload: TextureUploadCategory {
                     closure_items: vec![],
                     actual_work: vec![],
                 },
-                render_encoding: one_item_category(render_plan),
-                composition_damage: one_item_category(damage),
+                render_encoding: observed_category(render_members),
+                composition_damage: observed_category(damage_members),
             },
             render_observation: ChangeRenderWorkObservation {
                 full_surface_clear_operations: 0,
                 full_frame_encode_operations: 0,
-                scoped_render_encode_operations: 1,
+                scoped_render_encode_operations: scoped_encode_count,
             },
-            // The scoped background and single prepared text item are the two
-            // logical draws in this encoder.  The closure's render-plan work
-            // remains one item because both belong to the changed tile plan.
-            encoded_draw_calls: 2,
+            // Each closure tile contributes scoped background, prepared-text,
+            // and deterministic idle-grip work. This logical count remains
+            // distinct from render-plan membership and full-frame encodes.
+            encoded_draw_calls: scoped_encode_count * 3,
             full_surface_invalidation: None,
         }
     }
@@ -574,6 +760,12 @@ impl Compositor {
     fn retained_headless_policy_is_supported(&self) -> bool {
         self.degradation_policy.level == tze_hud_scene::DegradationLevel::Nominal
             && self.degradation_policy.suppressed_tiles.is_empty()
+            // The retained proof can reproduce only the deterministic idle
+            // drag-grip layer below. All other compositor-owned chrome remains
+            // a full-frame concern until it has its own bounded evidence lane.
+            && self.focus_ring_owner.is_none()
+            && self.resize_grip_hover.is_none()
+            && self.local_composer.is_none()
     }
 }
 
@@ -593,6 +785,10 @@ fn canonical_snapshot(
         || !scene.overlay.tile_unread_counts.is_empty()
         || !scene.overlay.tile_lifecycle_accents.is_empty()
         || !scene.overlay.tile_composer_interactions.is_empty()
+        // Idle hit regions are an output of the full baseline frame and do not
+        // affect pixels. A local hover/press state does, so retained rendering
+        // must decline rather than silently repaint it as idle chrome.
+        || !scene.overlay.drag_handle_states.is_empty()
         || !scene.overlay.drag_active_elements.is_empty()
         || scene.overlay.drag_handle_context_menu.is_some()
         || !scene.overlay.portal_surfaces.is_empty()
@@ -608,7 +804,10 @@ fn canonical_snapshot(
 
     let mut tiles = Vec::with_capacity(CANONICAL_TILE_COUNT);
     for tile in visible_tiles {
-        if tile.opacity != 1.0 || !rect_is_inside_viewport(tile.bounds, width, height) {
+        if !tile.opacity.is_finite()
+            || !(0.0..=1.0).contains(&tile.opacity)
+            || !rect_is_inside_viewport(tile.bounds, width, height)
+        {
             return None;
         }
         let root_id = tile.root_node?;
@@ -631,20 +830,62 @@ fn canonical_snapshot(
             tile_id: tile.id,
             node_id: root_id,
             tile_bounds: tile.bounds,
+            z_order: tile.z_order,
+            opacity: tile.opacity,
             text: text.clone(),
         });
     }
     tiles.sort_by_key(|tile| tile.tile_id);
-    if tiles.iter().enumerate().any(|(index, tile)| {
-        tiles[index + 1..]
-            .iter()
-            .any(|other| tile.tile_bounds.intersects(&other.tile_bounds))
-    }) {
-        return None;
-    }
+    let scenario = classify_canonical_scenario(&tiles)?;
     Some(CanonicalSceneSnapshot {
         viewport: EfficiencyViewport { width, height },
+        scenario,
         tiles,
+    })
+}
+
+fn classify_canonical_scenario(tiles: &[CanonicalTextTile]) -> Option<CanonicalScenario> {
+    let intersections: Vec<_> = tiles
+        .iter()
+        .enumerate()
+        .flat_map(|(index, tile)| {
+            tiles[index + 1..]
+                .iter()
+                .filter(move |other| tile.tile_bounds.intersects(&other.tile_bounds))
+                .map(move |other| (tile, other))
+        })
+        .collect();
+
+    if intersections.is_empty() {
+        return tiles
+            .iter()
+            .all(|tile| tile.opacity == 1.0)
+            .then_some(CanonicalScenario::OpaqueNonOverlapping);
+    }
+
+    let [(first, second)] = intersections.as_slice() else {
+        return None;
+    };
+    let (lower, upper) = if first.z_order < second.z_order {
+        (*first, *second)
+    } else if second.z_order < first.z_order {
+        (*second, *first)
+    } else {
+        return None;
+    };
+    if lower.opacity != 1.0
+        || !(upper.opacity > 0.0 && upper.opacity < 1.0)
+        || tiles.iter().any(|tile| {
+            tile.tile_id != lower.tile_id && tile.tile_id != upper.tile_id && tile.opacity != 1.0
+        })
+    {
+        return None;
+    }
+    let overlap_bounds = intersection_rect(lower.tile_bounds, upper.tile_bounds)?;
+    Some(CanonicalScenario::TransparentOverlap {
+        lower_tile_id: lower.tile_id,
+        upper_tile_id: upper.tile_id,
+        overlap_bounds,
     })
 }
 
@@ -659,6 +900,66 @@ fn is_canonical_plain_ascii_content(content: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b' ')
 }
 
+fn planned_canonical_text_change(
+    previous: &CanonicalSceneSnapshot,
+    current: &CanonicalSceneSnapshot,
+) -> Option<CanonicalTextChange> {
+    if previous.scenario != current.scenario {
+        return None;
+    }
+    let changed = changed_canonical_tile(previous, current)?;
+    match &current.scenario {
+        CanonicalScenario::OpaqueNonOverlapping => {
+            let damage = pixel_rect_for_bounds(
+                changed.tile_bounds,
+                current.viewport.width,
+                current.viewport.height,
+            )?;
+            Some(CanonicalTextChange {
+                changed: changed.clone(),
+                redraw_tiles: vec![changed],
+                damage,
+                scenario: current.scenario.clone(),
+                next_snapshot: current.clone(),
+            })
+        }
+        CanonicalScenario::TransparentOverlap {
+            lower_tile_id,
+            upper_tile_id,
+            overlap_bounds,
+        } => {
+            if changed.tile_id != *lower_tile_id {
+                return None;
+            }
+            let upper = current
+                .tiles
+                .iter()
+                .find(|tile| tile.tile_id == *upper_tile_id)?
+                .clone();
+            let mut redraw_tiles = vec![changed.clone(), upper];
+            redraw_tiles.sort_by_key(|tile| tile.z_order);
+            if redraw_tiles
+                .first()
+                .is_none_or(|tile| tile.tile_id != changed.tile_id)
+            {
+                return None;
+            }
+            let damage = pixel_rect_for_bounds(
+                union_rect(changed.tile_bounds, *overlap_bounds),
+                current.viewport.width,
+                current.viewport.height,
+            )?;
+            Some(CanonicalTextChange {
+                changed,
+                redraw_tiles,
+                damage,
+                scenario: current.scenario.clone(),
+                next_snapshot: current.clone(),
+            })
+        }
+    }
+}
+
 fn changed_canonical_tile(
     previous: &CanonicalSceneSnapshot,
     current: &CanonicalSceneSnapshot,
@@ -671,6 +972,8 @@ fn changed_canonical_tile(
         if before.tile_id != after.tile_id
             || before.node_id != after.node_id
             || before.tile_bounds != after.tile_bounds
+            || before.z_order != after.z_order
+            || before.opacity != after.opacity
         {
             return None;
         }
@@ -690,6 +993,25 @@ fn changed_canonical_tile(
         }
     }
     changed
+}
+
+fn intersection_rect(first: Rect, second: Rect) -> Option<Rect> {
+    if !first.intersects(&second) {
+        return None;
+    }
+    let left = first.x.max(second.x);
+    let top = first.y.max(second.y);
+    let right = (first.x + first.width).min(second.x + second.width);
+    let bottom = (first.y + first.height).min(second.y + second.height);
+    (right > left && bottom > top).then_some(Rect::new(left, top, right - left, bottom - top))
+}
+
+fn union_rect(first: Rect, second: Rect) -> Rect {
+    let left = first.x.min(second.x);
+    let top = first.y.min(second.y);
+    let right = (first.x + first.width).max(second.x + second.width);
+    let bottom = (first.y + first.height).max(second.y + second.height);
+    Rect::new(left, top, right - left, bottom - top)
 }
 
 fn same_ascii_glyph_inventory(before: &str, after: &str) -> bool {
@@ -754,6 +1076,28 @@ where
             identity,
             operations: 1,
         }],
+    }
+}
+
+fn observed_category<T>(members: Vec<(T, InvalidationDependencyReason)>) -> InvalidationCategory<T>
+where
+    T: Clone,
+{
+    InvalidationCategory {
+        closure_items: members
+            .iter()
+            .map(|(identity, dependency_reason)| ClosureWorkItem {
+                identity: identity.clone(),
+                dependency_reason: dependency_reason.clone(),
+            })
+            .collect(),
+        actual_work: members
+            .into_iter()
+            .map(|(identity, _)| ActualWorkItem {
+                identity,
+                operations: 1,
+            })
+            .collect(),
     }
 }
 
@@ -916,6 +1260,20 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_drag_handle_state_fails_closed_before_retained_planning() {
+        let mut scene = canonical_scene_with_first_content("AB");
+        scene
+            .overlay
+            .drag_handle_states
+            .insert("drag-handle:canonical".into(), Default::default());
+
+        assert!(
+            canonical_snapshot(&scene, 1_000, 500).is_none(),
+            "hover or press chrome must remain on the established full-frame path"
+        );
+    }
+
+    #[test]
     fn full_surface_reasons_are_structured_non_passing_diagnostics() {
         for (reason, capability) in [
             (
@@ -1001,6 +1359,7 @@ mod tests {
                     width: 1_000,
                     height: 500,
                 },
+                scenario: CanonicalScenario::OpaqueNonOverlapping,
                 tiles: vec![],
             }),
             ..RetainedRenderState::default()
