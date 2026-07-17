@@ -212,6 +212,36 @@ pub use self::network::render_attach_info;
 use self::network::{build_runtime_context, render_startup_banner, start_network_services};
 use self::portal::build_portal_projection_driver;
 
+fn publish_degradation_transition(
+    controller: &crate::degradation::DegradationController,
+    event: tze_hud_telemetry::DegradationEvent,
+    notices: Option<&tze_hud_protocol::session_server::DegradationNoticeSender>,
+    shared_state: &Arc<Mutex<tze_hud_protocol::session::SharedState>>,
+) {
+    tracing::warn!(
+        previous_level = event.previous_level,
+        new_level = event.new_level,
+        direction = ?event.direction,
+        p95_us = event.frame_time_p95_us,
+        sample_count = event.sample_count,
+        window_duration_us = event.window_duration_us,
+        effective_cadence_hz = event.effective_cadence_hz,
+        entry_threshold_us = event.entry_threshold_us,
+        recovery_threshold_us = event.recovery_threshold_us,
+        recovery_source = ?event.recovery_source,
+        "runtime degradation transition"
+    );
+    let (runtime_level, _) = controller.protocol_level();
+    shared_state.blocking_lock().degradation_level = runtime_level;
+    if let Some(notices) = notices {
+        let wall_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_micros() as u64)
+            .unwrap_or(0);
+        notices.publish_blocking(controller.protocol_notice(wall_us));
+    }
+}
+
 // ─── WindowedRuntime ─────────────────────────────────────────────────────────
 
 /// Shared state passed from the windowed runtime builder to the winit app.
@@ -291,6 +321,7 @@ struct WindowedRuntimeState {
     /// subscribe — the compositor still drains the present-ack queue.
     frame_presented_tx:
         Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::FramePresented>>,
+    degradation_notices: Option<tze_hud_protocol::session_server::DegradationNoticeSender>,
     /// Compositor and surface (Some until compositor thread is spawned and takes the compositor).
     compositor: Option<Compositor>,
     /// The window surface (main thread owns this for the lifetime of the window).
@@ -790,6 +821,17 @@ impl ApplicationHandler for WinitApp {
         self.refresh_widget_hover_tracking();
 
         let cfg = self.state.config.clone();
+        let monitor_refresh_millihz = window
+            .current_monitor()
+            .and_then(|monitor| monitor.refresh_rate_millihertz());
+        let degradation_effective_fps =
+            crate::degradation::effective_degradation_fps(cfg.target_fps, monitor_refresh_millihz);
+        tracing::info!(
+            target_fps = cfg.target_fps,
+            ?monitor_refresh_millihz,
+            degradation_effective_fps,
+            "windowed: froze startup degradation cadence"
+        );
         let window_clone = window.clone();
 
         // ── Resolve actual surface dimensions ─────────────────────────────
@@ -891,6 +933,7 @@ impl ApplicationHandler for WinitApp {
             .format;
         compositor.init_text_renderer(surface_format);
         compositor.init_widget_renderer(surface_format);
+        compositor.set_resident_ledger(self.state.runtime_context.resident_ledger.clone());
         // Apply the resolved per-surface truncation-input bound so the
         // viewport-adjacent-window fallback engages at the operator-configured
         // threshold rather than the compositor's built-in default (hud-59p2z).
@@ -979,6 +1022,8 @@ impl ApplicationHandler for WinitApp {
         // production render loop can broadcast `FramePresented`, mirroring the
         // headless producer. `None` in compositor-only mode (no gRPC session).
         let frame_presented_tx = self.state.frame_presented_tx.take();
+        let degradation_notices = self.state.degradation_notices.take();
+        let degradation_shared_state = Arc::clone(&self.state.shared_state);
         let shutdown = self.state.shutdown.clone();
         let benchmark_failed = self.state.benchmark_failed.clone();
         let telemetry_collector = TelemetryCollector::new();
@@ -1005,6 +1050,17 @@ impl ApplicationHandler for WinitApp {
 
                 let mut compositor = compositor;
                 let mut telemetry = telemetry_collector;
+                let degradation_clock_start = Instant::now();
+                let degradation_envelope =
+                    crate::degradation::DegradationEnvelope::from_effective_fps(
+                        degradation_effective_fps,
+                    )
+                    .expect("validated target cadence must produce a degradation envelope");
+                let mut degradation_controller =
+                    crate::degradation::DegradationController::with_envelope(
+                        crate::degradation::DegradationConfig::default(),
+                        degradation_envelope,
+                    );
 
                 // Hold a 1 ms OS timer resolution for the whole frame loop so the
                 // pacing sleep below does not overshoot the present budget on the
@@ -1107,6 +1163,10 @@ impl ApplicationHandler for WinitApp {
                     }
 
                     let frame_start = Instant::now();
+                    // Authoritative degradation workload boundary: all active
+                    // compositor work, including resize handling, before Stage 3
+                    // through successful Stage 7 completion.
+                    let degradation_work_start = Instant::now();
 
                     // ── Resize check ───────────────────────────────────────
                     // The main thread writes pending_resize_width/height on
@@ -1164,6 +1224,29 @@ impl ApplicationHandler for WinitApp {
                         // publications MUST be cleared before the next frame.
                         scene.drain_expired_zone_publications();
                         scene.drain_expired_widget_publications();
+
+                        // Snapshot identity, priority, z-order, and selected
+                        // policy atomically under this frame's scene lock.
+                        // Chrome is a separate compositor layer; every agent or
+                        // runtime tile, including priority zero, participates in
+                        // the one-tile Emergency selection.
+                        let degradation_tiles: Vec<crate::degradation::TileDescriptor> = scene
+                            .visible_tiles()
+                            .into_iter()
+                            .filter_map(|tile| {
+                                scene.leases.get(&tile.lease_id).map(|lease| {
+                                    crate::degradation::TileDescriptor {
+                                        tile_id: tile.id,
+                                        lease_priority: u32::from(lease.priority),
+                                        z_order: tile.z_order,
+                                    }
+                                })
+                            })
+                            .collect();
+                        let applied_degradation_level = degradation_controller.level();
+                        compositor.set_degradation_policy(
+                            degradation_controller.compositor_policy(&degradation_tiles),
+                        );
 
                         // ── Per-publication TTL fade-out sweep ───────────
                         // update_publication_animations seeds new state and ticks
@@ -1245,6 +1328,16 @@ impl ApplicationHandler for WinitApp {
                             // the lock without building vertices, encoding, or
                             // signalling the main thread to present.
                             drop(scene);
+                            let now_us = degradation_clock_start.elapsed().as_micros() as u64;
+                            if let Some(event) = degradation_controller.record_quiescent_at(now_us)
+                            {
+                                publish_degradation_transition(
+                                    &degradation_controller,
+                                    event,
+                                    degradation_notices.as_ref(),
+                                    &degradation_shared_state,
+                                );
+                            }
                         } else {
                             // ── Stage 5: Build under the scene lock (hud-uyhpn) ─
                             // Do ALL scene reads (vertex/geometry build, encode
@@ -1292,6 +1385,8 @@ impl ApplicationHandler for WinitApp {
                             let compositor_telemetry = compositor
                                 .present_windowed_frame(build, surface_for_compositor.as_ref());
                             let frame_submitted = compositor_telemetry.stage7_gpu_submit_us > 0;
+                            let degradation_work_time_us =
+                                degradation_work_start.elapsed().as_micros() as u64;
 
                             // ── Signal main thread to present ─────────────────
                             // Per spec §Compositor Thread Ownership (line 55):
@@ -1347,6 +1442,8 @@ impl ApplicationHandler for WinitApp {
                                 compositor_telemetry.frame_number,
                             );
                             telem.frame_time_us = frame_start.elapsed().as_micros() as u64;
+                            telem.degradation_work_time_us = degradation_work_time_us;
+                            telem.degradation_level = applied_degradation_level.as_u8();
                             telem.stage6_render_encode_us =
                                 compositor_telemetry.stage6_render_encode_us;
                             telem.stage7_gpu_submit_us = compositor_telemetry.stage7_gpu_submit_us;
@@ -1372,6 +1469,20 @@ impl ApplicationHandler for WinitApp {
                                 telem.input_to_next_present_us = next_present_us;
                             }
                             telemetry.record(telem);
+
+                            let completed_at_us =
+                                degradation_clock_start.elapsed().as_micros() as u64;
+                            if frame_submitted
+                                && let Some(event) = degradation_controller
+                                    .record_frame_at(degradation_work_time_us, completed_at_us)
+                            {
+                                publish_degradation_transition(
+                                    &degradation_controller,
+                                    event,
+                                    degradation_notices.as_ref(),
+                                    &degradation_shared_state,
+                                );
+                            }
 
                             if frame_submitted && benchmark_state.is_some() {
                                 pending_benchmark_sample = telemetry.records().last().cloned();
@@ -1469,6 +1580,7 @@ impl ApplicationHandler for WinitApp {
             tracing::warn!("compositor thread did not signal ready in time");
         } else {
             tracing::info!("windowed runtime initialised successfully");
+            tracing::info!(target: "tze_hud::resident_accounting", snapshot = %self.state.runtime_context.resident_accounting_snapshot(), "windowed runtime resident accounting initialised");
         }
 
         // Request first frame.
@@ -1791,6 +1903,8 @@ impl WindowedRuntime {
     /// Returns an error if the winit event loop or window creation fails.
     pub fn run(self) -> Result<(), Box<dyn std::error::Error>> {
         let cfg = self.config;
+        let (runtime_context, fallback_unrestricted): (SharedRuntimeContext, bool) =
+            build_runtime_context(&cfg);
 
         // Resolve the effective window mode, applying platform fallback checks.
         // Spec §Unsupported overlay fallback (line 185): if overlay is requested
@@ -1908,13 +2022,24 @@ impl WindowedRuntime {
         // side) so composer echo never try_locks the scene mutex.
         let active_tab_mirror = Arc::new(std::sync::Mutex::new(None));
         let chrome_state = Arc::new(std::sync::RwLock::new(crate::shell::ChromeState::new()));
+        let resident_limits = runtime_context.resident_store_limits();
         let shared_state = Arc::new(Mutex::new(SharedState {
             scene: Arc::clone(&shared_scene),
             sessions,
-            resource_store: tze_hud_resource::ResourceStore::new(
-                tze_hud_resource::ResourceStoreConfig::default(),
+            resource_store: tze_hud_resource::ResourceStore::new_with_resident_ledger(
+                tze_hud_resource::ResourceStoreConfig {
+                    max_total_texture_bytes: resident_limits.resource_bytes,
+                    max_font_cache_bytes: resident_limits.font_bytes,
+                    ..tze_hud_resource::ResourceStoreConfig::default()
+                },
+                runtime_context.resident_ledger.clone(),
             ),
-            widget_asset_store: tze_hud_protocol::session::WidgetAssetStore::default(),
+            widget_asset_store:
+                tze_hud_protocol::session::WidgetAssetStore::new_with_limits_and_resident_ledger(
+                    resident_limits.widget_source_bytes,
+                    resident_limits.widget_namespace_bytes,
+                    runtime_context.resident_ledger.clone(),
+                ),
             runtime_widget_store: runtime_widget_store.clone(),
             element_store: startup_element_store,
             element_store_path: Some(startup_element_store_path),
@@ -1955,9 +2080,6 @@ impl WindowedRuntime {
         //   - Config present → Guest (registered agents only, all others denied).
         //   - No config → Unrestricted (dev-friendly; any PSK-authenticated agent
         //     gets all capabilities without a registration entry).
-        let (runtime_context, fallback_unrestricted): (SharedRuntimeContext, bool) =
-            build_runtime_context(&cfg);
-
         // ── Network runtime + gRPC + MCP HTTP servers ──────────────────────────
         // Spawn the Tokio multi-thread runtime for all network tasks (gRPC, MCP).
         // The runtime is created before the winit event loop so that network
@@ -1979,6 +2101,7 @@ impl WindowedRuntime {
             element_repositioned_tx,
             input_event_tx,
             frame_presented_tx,
+            degradation_notices,
             grpc_bound_addr,
         ) = start_network_services(
             cfg.grpc_port,
@@ -2318,6 +2441,7 @@ impl WindowedRuntime {
             frame_ready_rx,
             frame_ready_tx: Some(frame_ready_tx),
             frame_presented_tx,
+            degradation_notices,
             compositor: None,
             window_surface: None,
             input_processor: InputProcessor::new(),

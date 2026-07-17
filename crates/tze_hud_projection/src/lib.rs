@@ -47,6 +47,8 @@ pub const DEFAULT_MAX_PENDING_INPUT_TOTAL_BYTES: usize = 32_768;
 pub const DEFAULT_MAX_POLL_ITEMS: usize = 8;
 /// Default maximum bytes returned by one pending-input poll.
 pub const DEFAULT_MAX_POLL_RESPONSE_BYTES: usize = 16_384;
+/// Default maximum projection summaries returned by one caller-scoped list.
+pub const DEFAULT_MAX_LIST_ITEMS: usize = 8;
 /// Default maximum HUD portal updates per second.
 pub const DEFAULT_MAX_PORTAL_UPDATES_PER_SECOND: u32 = 10;
 /// Default maximum retained publish-output logical-unit IDs per projection.
@@ -57,6 +59,12 @@ pub const DEFAULT_MAX_AUDIT_RECORDS: usize = 4_096;
 pub const OWNER_TOKEN_ENTROPY_BITS: usize = 256;
 /// Default owner-token lifetime in wall-clock microseconds.
 pub const DEFAULT_OWNER_TOKEN_TTL_WALL_US: u64 = 24 * 60 * 60 * 1_000_000;
+/// Default authenticated-operation gap before an attached projection is stale.
+pub const DEFAULT_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US: u64 = 30 * 1_000_000;
+/// Smallest accepted agent-liveness degradation threshold (one second).
+pub const MIN_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US: u64 = 1_000_000;
+/// Largest accepted agent-liveness degradation threshold (one hour).
+pub const MAX_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US: u64 = 60 * 60 * 1_000_000;
 /// One wall-clock second in microseconds, used for portal update-rate windows.
 pub const PORTAL_UPDATE_RATE_WINDOW_WALL_US: u64 = 1_000_000;
 

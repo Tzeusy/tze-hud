@@ -99,7 +99,7 @@ impl Compositor {
         telemetry: &mut FrameTelemetry,
     ) -> (Vec<RectVertex>, Vec<TexturedDrawCmd>, usize) {
         // Collect visible tiles, re-sorted with drag-z-order boost applied.
-        let tiles = Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene);
+        let tiles = Self::sort_tiles_with_drag_boost(self.policy_visible_tiles(scene), scene);
         telemetry.tile_count = tiles.len() as u32;
         telemetry.node_count = scene.node_count() as u32;
         telemetry.active_leases = scene.leases.len() as u32;
@@ -138,13 +138,18 @@ impl Compositor {
             ));
         }
 
-        // ── Ensure image textures are uploaded before rendering ──────────────
-        let mut image_refs = self.ensure_scene_image_textures(scene);
-        // Ensure icon textures (key_icon_map SVGs) are rasterized and cached.
-        // Merge their ResourceIds into the eviction-guard set so they survive.
-        let icon_refs = self.ensure_scene_icon_textures(scene);
-        image_refs.extend(icon_refs);
+        // ── Reclaim stale image textures before admitting this frame ─────────
+        // Collect the complete current-frame guard set first, then evict only
+        // allocations outside it. This creates headroom before cache admission
+        // while ensuring a resource referenced by this frame is never freed.
+        let mut image_refs = Self::scene_image_resource_ids(scene);
+        image_refs.extend(Self::scene_icon_resource_ids(scene));
         self.evict_unused_image_textures(&image_refs);
+
+        // Ensure current-frame image/icon textures only after the safe eviction
+        // pass, so class/aggregate reserve sees all reclaimable headroom.
+        self.ensure_scene_image_textures(scene);
+        self.ensure_scene_icon_textures(scene);
 
         // Update zone animation states (fade-in/fade-out) before rendering.
         // Must run before any render_zone_content call below.
@@ -221,9 +226,7 @@ impl Compositor {
             if let Some(accent) = scene.tile_lifecycle_accent(tile.id) {
                 // Fold the tile's effective + portal-transition opacity so the
                 // accent fades with the tile (matches the tile background).
-                let opacity = (Self::effective_tile_opacity(tile, scene)
-                    * self.portal_tile_anim_opacity(tile.id))
-                .clamp(0.0, 1.0);
+                let opacity = self.tile_effective_opacity(tile, scene);
                 if let Some((bar_w, color)) =
                     Self::lifecycle_accent_bar_geom(tile.bounds, accent, opacity)
                 {
@@ -1063,7 +1066,11 @@ impl Compositor {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            content_pass.set_pipeline(&self.pipeline);
+            if self.use_opaque_rect_pipeline() {
+                content_pass.set_pipeline(&self.clear_pipeline);
+            } else {
+                content_pass.set_pipeline(&self.pipeline);
+            }
             if let Some(ref buf) = content_buffer {
                 let bg_end = bg_vertex_count.min(content_vertices.len());
                 if bg_end > 0 {
@@ -1098,7 +1105,11 @@ impl Compositor {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            content_pass.set_pipeline(&self.pipeline);
+            if self.use_opaque_rect_pipeline() {
+                content_pass.set_pipeline(&self.clear_pipeline);
+            } else {
+                content_pass.set_pipeline(&self.pipeline);
+            }
             if let Some(ref buf) = content_buffer {
                 let bg_end = bg_vertex_count.min(content_vertices.len());
                 let rest_count = content_vertices.len().saturating_sub(bg_end);
@@ -1175,6 +1186,7 @@ impl Compositor {
                 vec![]
             };
         // Phase C: render passes (re-takes tr mutable borrow).
+        let use_opaque_rect_pipeline = self.use_opaque_rect_pipeline();
         if let Some(ref mut tr) = self.text_rasterizer {
             if let Some(ref result) = chrome_prepare_result {
                 match result {
@@ -1206,7 +1218,11 @@ impl Compositor {
                                     timestamp_writes: None,
                                     occlusion_query_set: None,
                                 });
-                            inline_pass.set_pipeline(&self.pipeline);
+                            if use_opaque_rect_pipeline {
+                                inline_pass.set_pipeline(&self.clear_pipeline);
+                            } else {
+                                inline_pass.set_pipeline(&self.pipeline);
+                            }
                             inline_pass.set_vertex_buffer(0, inline_buf.slice(..));
                             inline_pass.draw(0..chrome_inline_verts.len() as u32, 0..1);
                         }
@@ -1271,7 +1287,11 @@ impl Compositor {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            chrome_pass.set_pipeline(&self.pipeline);
+            if self.use_opaque_rect_pipeline() {
+                chrome_pass.set_pipeline(&self.clear_pipeline);
+            } else {
+                chrome_pass.set_pipeline(&self.pipeline);
+            }
             if let Some(ref buf) = chrome_buffer {
                 chrome_pass.set_vertex_buffer(0, buf.slice(..));
                 chrome_pass.draw(0..chrome_vertices.len() as u32, 0..1);

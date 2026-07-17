@@ -9,6 +9,7 @@
 //! `session_server/mod.rs` as a separate `impl HudSession for HudSessionImpl`
 //! block, which is valid Rust (split impl across files in the same module).
 
+use super::SharedMutationBudgetEnforcer;
 use super::stream_session::CapabilityRevocationEvent;
 use crate::convert;
 use crate::proto::session::DegradationNotice;
@@ -20,7 +21,7 @@ use tokio::sync::Mutex;
 use tze_hud_resource::{ResourceStore, ResourceStoreConfig};
 #[cfg(any(test, feature = "dev-mode"))]
 use tze_hud_scene::graph::SceneGraph;
-use tze_hud_scene::types::{GeometryPolicy, SceneId};
+use tze_hud_scene::types::{GeometryPolicy, ResourceBudget, SceneId};
 
 // ─── Service implementation ─────────────────────────────────────────────────
 
@@ -29,10 +30,8 @@ use tze_hud_scene::types::{GeometryPolicy, SceneId};
 /// Holds shared state (scene graph + session registry) and implements the
 /// `HudSession` trait generated from `session.proto`.
 ///
-/// `degradation_tx` is a broadcast channel used to deliver `DegradationNotice`
-/// messages to all active sessions unconditionally (RFC 0005 §3.4, §7.1).
-/// Each session handler task subscribes to this channel and forwards any
-/// received notices to the agent stream at Transactional traffic class.
+/// `degradation_notices` is a bounded per-session transactional hub. It applies
+/// producer backpressure instead of allowing lag/drop semantics.
 ///
 /// `agent_capabilities` drives per-agent capability gating at handshake time
 /// (configuration/spec.md §Requirement: Agent Registration, lines 136-147).
@@ -50,14 +49,19 @@ pub struct HudSessionImpl {
     /// For dev/test scenarios where no config is loaded, pass an empty map
     /// and set `fallback_unrestricted = true` to restore the legacy behaviour.
     pub(super) agent_capabilities: Arc<HashMap<String, Vec<String>>>,
+    /// Frozen per-agent mutation/lease budgets derived at runtime startup.
+    pub(super) agent_resource_budgets: Arc<HashMap<String, ResourceBudget>>,
+    /// Budget applied to agents without an explicit registered override.
+    pub(super) fallback_resource_budget: ResourceBudget,
+    /// Runtime-owned mutation-intake enforcement bridge.
+    pub(super) budget_enforcer: Option<SharedMutationBudgetEnforcer>,
     /// When true and an agent is not found in `agent_capabilities`, grant
     /// unrestricted capabilities (backwards-compatible dev mode).
     ///
     /// Production deployments MUST set this to `false`.
     pub(super) fallback_unrestricted: bool,
-    /// Broadcast sender for transactional server-push notices (DegradationNotice).
-    /// Cloned into each session handler task.
-    pub degradation_tx: tokio::sync::broadcast::Sender<DegradationNotice>,
+    /// Bounded never-drop sender for transactional degradation notices.
+    pub degradation_notices: super::DegradationNoticeSender,
     /// Broadcast sender for live capability revocation commands (RFC 0001 §3.3, GAP-G3-4).
     ///
     /// When the runtime calls `revoke_capability_on_lease`, it broadcasts a
@@ -114,8 +118,7 @@ impl HudSessionImpl {
     /// for backwards compatibility. Prefer `new_with_config` for production.
     #[cfg(any(test, feature = "dev-mode"))]
     pub fn new(scene: SceneGraph, psk: &str) -> Self {
-        let (degradation_tx, _) =
-            tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
+        let degradation_notices = super::DegradationNoticeSender::default();
         let (capability_revocation_tx, _) =
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
         let input_event_tx = super::InputEventSender::new(super::BROADCAST_CHANNEL_CAPACITY);
@@ -143,8 +146,11 @@ impl HudSessionImpl {
             })),
             psk: psk.to_string(),
             agent_capabilities: Arc::new(HashMap::new()),
+            agent_resource_budgets: Arc::new(HashMap::new()),
+            fallback_resource_budget: ResourceBudget::default(),
+            budget_enforcer: None,
             fallback_unrestricted: true,
-            degradation_tx,
+            degradation_notices,
             capability_revocation_tx,
             input_event_tx,
             element_repositioned_tx,
@@ -185,8 +191,73 @@ impl HudSessionImpl {
         fallback_unrestricted: bool,
         media_ingress_config: tze_hud_scene::config::MediaIngressConfig,
     ) -> Self {
-        let (degradation_tx, _) =
-            tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
+        Self::from_shared_state_with_config_media_ingress_and_degradation_notices(
+            state,
+            psk,
+            agent_capabilities,
+            fallback_unrestricted,
+            media_ingress_config,
+            super::DegradationNoticeSender::default(),
+        )
+    }
+
+    pub fn from_shared_state_with_config_media_ingress_and_degradation_notices(
+        state: Arc<Mutex<SharedState>>,
+        psk: &str,
+        agent_capabilities: HashMap<String, Vec<String>>,
+        fallback_unrestricted: bool,
+        media_ingress_config: tze_hud_scene::config::MediaIngressConfig,
+        degradation_notices: super::DegradationNoticeSender,
+    ) -> Self {
+        Self::from_shared_state_with_runtime_envelope_and_degradation_notices(
+            state,
+            psk,
+            agent_capabilities,
+            HashMap::new(),
+            ResourceBudget::default(),
+            fallback_unrestricted,
+            media_ingress_config,
+            None,
+            degradation_notices,
+        )
+    }
+    /// Create from shared state with the immutable production runtime envelope.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_shared_state_with_runtime_envelope(
+        state: Arc<Mutex<SharedState>>,
+        psk: &str,
+        agent_capabilities: HashMap<String, Vec<String>>,
+        agent_resource_budgets: HashMap<String, ResourceBudget>,
+        fallback_resource_budget: ResourceBudget,
+        fallback_unrestricted: bool,
+        media_ingress_config: tze_hud_scene::config::MediaIngressConfig,
+        budget_enforcer: Option<SharedMutationBudgetEnforcer>,
+    ) -> Self {
+        Self::from_shared_state_with_runtime_envelope_and_degradation_notices(
+            state,
+            psk,
+            agent_capabilities,
+            agent_resource_budgets,
+            fallback_resource_budget,
+            fallback_unrestricted,
+            media_ingress_config,
+            budget_enforcer,
+            super::DegradationNoticeSender::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_shared_state_with_runtime_envelope_and_degradation_notices(
+        state: Arc<Mutex<SharedState>>,
+        psk: &str,
+        agent_capabilities: HashMap<String, Vec<String>>,
+        agent_resource_budgets: HashMap<String, ResourceBudget>,
+        fallback_resource_budget: ResourceBudget,
+        fallback_unrestricted: bool,
+        media_ingress_config: tze_hud_scene::config::MediaIngressConfig,
+        budget_enforcer: Option<SharedMutationBudgetEnforcer>,
+        degradation_notices: super::DegradationNoticeSender,
+    ) -> Self {
         let (capability_revocation_tx, _) =
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
         let input_event_tx = super::InputEventSender::new(super::BROADCAST_CHANNEL_CAPACITY);
@@ -198,8 +269,11 @@ impl HudSessionImpl {
             state,
             psk: psk.to_string(),
             agent_capabilities: Arc::new(agent_capabilities),
+            agent_resource_budgets: Arc::new(agent_resource_budgets),
+            fallback_resource_budget,
+            budget_enforcer,
             fallback_unrestricted,
-            degradation_tx,
+            degradation_notices,
             capability_revocation_tx,
             input_event_tx,
             element_repositioned_tx,
@@ -237,7 +311,7 @@ impl HudSessionImpl {
 
         // Broadcast returns an error only when there are no active subscribers
         // (no sessions connected). That is not an error condition.
-        self.degradation_tx.send(notice).unwrap_or_default()
+        self.degradation_notices.publish(notice).await
     }
 
     /// Revoke a named capability from an active lease at runtime (RFC 0001 §3.3, GAP-G3-4).

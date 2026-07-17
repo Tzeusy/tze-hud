@@ -15,6 +15,16 @@ use tze_hud_scene::types::*;
 
 use crate::text::TextRasterizer;
 
+fn unreferenced_resource_ids<'a>(
+    cached_ids: impl Iterator<Item = &'a ResourceId>,
+    referenced_ids: &HashSet<ResourceId>,
+) -> Vec<ResourceId> {
+    cached_ids
+        .filter(|id| !referenced_ids.contains(id))
+        .copied()
+        .collect()
+}
+
 // ─── Image texture cache ────────────────────────────────────────────────────
 
 /// A cached GPU texture for a static image resource.
@@ -33,6 +43,27 @@ pub struct ImageTextureEntry {
     pub width: u32,
     /// Image height in pixels (needed for fit-mode UV calculations).
     pub height: u32,
+}
+
+fn downsample_rgba_nearest(
+    source: &[u8],
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+) -> Vec<u8> {
+    let mut target = vec![0; target_width as usize * target_height as usize * 4];
+    for y in 0..target_height {
+        let source_y = y.saturating_mul(source_height) / target_height;
+        for x in 0..target_width {
+            let source_x = x.saturating_mul(source_width) / target_width;
+            let source_offset = (source_y as usize * source_width as usize + source_x as usize) * 4;
+            let target_offset = (y as usize * target_width as usize + x as usize) * 4;
+            target[target_offset..target_offset + 4]
+                .copy_from_slice(&source[source_offset..source_offset + 4]);
+        }
+    }
+    target
 }
 
 /// GPU state and render pipeline.
@@ -397,9 +428,9 @@ impl super::Compositor {
     /// (matches `tze_hud_resource::ResourceId::as_bytes()`); duplicate calls
     /// with the same `resource_id` are no-ops.
     ///
-    /// Silently skips if the text renderer is not yet initialized (e.g. if
-    /// `init_text_renderer` has not been called).  Callers in the runtime may
-    /// defer font uploads until the compositor is ready.
+    /// Returns `true` when the font was loaded/already present. Returns `false`
+    /// when the text renderer is not initialized or resident admission denies
+    /// the new copy, allowing the runtime handoff to report the real outcome.
     ///
     /// # Truncation cache invalidation
     ///
@@ -411,9 +442,28 @@ impl super::Compositor {
     /// the scene version has changed.  The cadence gate is bypassed for
     /// forced primes (see `prime_truncation_cache`), ensuring the new font is
     /// reflected immediately on the next commit.  [hud-v2z6u]
-    pub fn load_font_bytes(&mut self, resource_id: [u8; 32], data: &[u8]) {
+    pub fn load_font_bytes(&mut self, resource_id: [u8; 32], data: &[u8]) -> bool {
         if let Some(rasterizer) = &mut self.text_rasterizer {
             let was_new = !rasterizer.has_font(&resource_id);
+            if was_new
+                && let Some(ledger) = &self.resident_ledger
+                && ledger
+                    .reserve(
+                        tze_hud_resource::ResidentClass::Font,
+                        format!(
+                            "font:glyphon:{}",
+                            crate::text::format_resource_id(&resource_id)
+                        ),
+                        data.len() as u64,
+                    )
+                    .is_err()
+            {
+                tracing::warn!(
+                    resource_id = %crate::text::format_resource_id(&resource_id),
+                    "font residency admission denied"
+                );
+                return false;
+            }
             rasterizer.load_font_bytes(resource_id, data);
             if was_new {
                 // A new font changes shaping widths — cached truncation points
@@ -426,8 +476,10 @@ impl super::Compositor {
                     "load_font_bytes: new font loaded — truncation cache invalidated [hud-v2z6u]"
                 );
             }
+            true
         } else {
             tracing::debug!("load_font_bytes called before text renderer is initialized — skipped");
+            false
         }
     }
 
@@ -487,6 +539,17 @@ impl super::Compositor {
         if let std::collections::hash_map::Entry::Vacant(entry) =
             self.image_bytes.entry(resource_id)
         {
+            if let Some(ledger) = &self.resident_ledger
+                && ledger
+                    .reserve(
+                        tze_hud_resource::ResidentClass::Resource,
+                        format!("image:{resource_id}:cpu"),
+                        rgba_data.len() as u64,
+                    )
+                    .is_err()
+            {
+                return;
+            }
             entry.insert(rgba_data);
             self.image_dims.insert(resource_id, (width, height));
         }
@@ -533,13 +596,48 @@ impl super::Compositor {
             );
             return false;
         }
+        let reduce_quality = self.degradation_policy.level
+            >= tze_hud_scene::DegradationLevel::Moderate
+            && (img_width > self.degradation_policy.texture_quality_threshold_px
+                || img_height > self.degradation_policy.texture_quality_threshold_px);
+        let (texture_width, texture_height) = if reduce_quality {
+            (
+                ((img_width as f32 * self.degradation_policy.texture_scale_factor).round() as u32)
+                    .max(1),
+                ((img_height as f32 * self.degradation_policy.texture_scale_factor).round() as u32)
+                    .max(1),
+            )
+        } else {
+            (img_width, img_height)
+        };
+        let scaled_rgba = reduce_quality.then(|| {
+            downsample_rgba_nearest(
+                &rgba_data,
+                img_width,
+                img_height,
+                texture_width,
+                texture_height,
+            )
+        });
+        let upload_rgba = scaled_rgba.as_deref().unwrap_or(&rgba_data);
+        if let Some(ledger) = &self.resident_ledger
+            && ledger
+                .reserve(
+                    tze_hud_resource::ResidentClass::Resource,
+                    format!("image:{resource_id}:gpu"),
+                    upload_rgba.len() as u64,
+                )
+                .is_err()
+        {
+            return false;
+        }
 
         // Create GPU texture.
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some(&format!("img_tex_{resource_id}")),
             size: wgpu::Extent3d {
-                width: img_width,
-                height: img_height,
+                width: texture_width,
+                height: texture_height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -558,15 +656,15 @@ impl super::Compositor {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &rgba_data,
+            upload_rgba,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(img_width * 4),
-                rows_per_image: Some(img_height),
+                bytes_per_row: Some(texture_width * 4),
+                rows_per_image: Some(texture_height),
             },
             wgpu::Extent3d {
-                width: img_width,
-                height: img_height,
+                width: texture_width,
+                height: texture_height,
                 depth_or_array_layers: 1,
             },
         );
@@ -593,8 +691,8 @@ impl super::Compositor {
             ImageTextureEntry {
                 _texture: texture,
                 bind_group,
-                width: img_width,
-                height: img_height,
+                width: texture_width,
+                height: texture_height,
             },
         );
 
@@ -777,10 +875,56 @@ impl super::Compositor {
     /// `ResourceId`s that appeared in zone publications or tile nodes during
     /// this frame. Any cache entry not in this set is dropped.
     pub fn evict_unused_image_textures(&mut self, referenced_ids: &HashSet<ResourceId>) {
+        let stale_texture_ids =
+            unreferenced_resource_ids(self.image_texture_cache.keys(), referenced_ids);
+        let stale_byte_ids = unreferenced_resource_ids(self.image_bytes.keys(), referenced_ids);
+        if let Some(ledger) = &self.resident_ledger {
+            for id in &stale_texture_ids {
+                ledger.release_evicted(
+                    tze_hud_resource::ResidentClass::Resource,
+                    &tze_hud_resource::AllocationId(format!("image:{id}:gpu")),
+                );
+            }
+            for id in &stale_byte_ids {
+                ledger.release_evicted(
+                    tze_hud_resource::ResidentClass::Resource,
+                    &tze_hud_resource::AllocationId(format!("image:{id}:cpu")),
+                );
+            }
+        }
         self.image_texture_cache
             .retain(|id, _| referenced_ids.contains(id));
         // Also evict bytes and dims for resources no longer referenced.
         self.image_bytes.retain(|id, _| referenced_ids.contains(id));
         self.image_dims.retain(|id, _| referenced_ids.contains(id));
+    }
+}
+
+#[cfg(test)]
+mod degradation_texture_tests {
+    use std::collections::{HashMap, HashSet};
+
+    use super::{downsample_rgba_nearest, unreferenced_resource_ids};
+    use tze_hud_scene::types::ResourceId;
+
+    #[test]
+    fn current_frame_references_are_never_eviction_candidates() {
+        let current = ResourceId::of(b"current-frame");
+        let stale = ResourceId::of(b"stale-frame");
+        let cached = HashMap::from([(current, ()), (stale, ())]);
+        let referenced = HashSet::from([current]);
+
+        let candidates = unreferenced_resource_ids(cached.keys(), &referenced);
+
+        assert_eq!(candidates, vec![stale]);
+    }
+
+    #[test]
+    fn nearest_downsample_is_deterministic_and_preserves_rgba_pixels() {
+        let source = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        assert_eq!(
+            downsample_rgba_nearest(&source, 2, 2, 1, 1),
+            vec![1, 2, 3, 4]
+        );
     }
 }

@@ -1321,9 +1321,6 @@ pub struct WidgetAssetRegistry {
 #[derive(Debug)]
 struct RegisteredWidgetAsset {
     asset_handle: String,
-    // Retained for follow-up renderer/store integration.
-    #[allow(dead_code)]
-    payload: Vec<u8>,
 }
 
 impl WidgetAssetRegistry {
@@ -1333,27 +1330,17 @@ impl WidgetAssetRegistry {
         self.by_hash.get(hash)
     }
 
-    fn upsert(&mut self, hash: [u8; 32], asset_handle: String, payload: Vec<u8>) {
+    fn upsert(&mut self, hash: [u8; 32], asset_handle: String) {
         if self.by_hash.is_empty() {
             // Reserve a small initial slab to avoid repeated tiny growth churn.
             self.by_hash.reserve(64);
         }
-        self.by_hash.insert(
-            hash,
-            RegisteredWidgetAsset {
-                asset_handle,
-                payload,
-            },
-        );
+        self.by_hash
+            .insert(hash, RegisteredWidgetAsset { asset_handle });
     }
 
     fn is_at_capacity(&self) -> bool {
         self.by_hash.len() >= Self::MAX_ENTRIES
-    }
-
-    #[cfg(test)]
-    fn payload_by_hash(&self, hash: &[u8; 32]) -> Option<&[u8]> {
-        self.by_hash.get(hash).map(|entry| entry.payload.as_slice())
     }
 }
 
@@ -1535,7 +1522,9 @@ pub fn handle_register_widget_asset(
     }
 
     let asset_handle = format!("widget-asset:{}", bytes_to_hex(&expected_hash));
-    registry.upsert(expected_hash, asset_handle.clone(), payload);
+    // The MCP preflight index retains only metadata. The canonical runtime
+    // registration path owns the payload copy.
+    registry.upsert(expected_hash, asset_handle.clone());
     result.accepted = true;
     result.was_deduplicated = false;
     result.asset_handle = Some(asset_handle);
@@ -2195,6 +2184,61 @@ pub fn handle_inject_composer_paste(
     Ok(InjectComposerPasteResult { injected, text_len })
 }
 
+// ─── portal_projection_list ──────────────────────────────────────────────────
+
+/// Parameters for `portal_projection_list`.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PortalProjectionListParams {}
+
+/// Content-free result from `portal_projection_list`.
+#[derive(Debug, Serialize)]
+pub struct PortalProjectionListResult {
+    /// Bounded summaries owned by the resident caller.
+    pub projections: Vec<crate::portal_op::ProjectionListEntry>,
+}
+
+/// List the resident caller's active projections for recovery or reconciliation.
+///
+/// The operation is read-only and returns no transcript text, pending-input
+/// text, owner tokens, lease data, or other principals' sessions.
+///
+/// Side effects: sends one read-only request to the runtime authority channel.
+/// State: current caller-scoped authority state; no client-held projection state.
+/// Idempotency: yes — repeated calls return the current bounded summaries only.
+/// Failure: internal when the authority channel is unavailable or dropped;
+/// authority rejections retain their stable `PROJECTION_*` code.
+/// Concurrency: awaits an independent one-shot reply; authority operations are
+/// serialized by the runtime event loop.
+pub async fn handle_portal_projection_list(
+    params: Value,
+    portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
+) -> McpResult<PortalProjectionListResult> {
+    let _: PortalProjectionListParams = parse_params(params)?;
+    let tx = portal_op_tx.ok_or_else(|| {
+        McpError::Internal(
+            "portal authority not wired — runtime must enable portal_op channel".to_string(),
+        )
+    })?;
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    tx.send(crate::portal_op::PortalOp::List { reply: reply_tx })
+        .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
+
+    match reply_rx.await {
+        Ok(Ok(batch)) => Ok(PortalProjectionListResult {
+            projections: batch.projections,
+        }),
+        Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
+            error_code: rejection.error_code,
+            operation: "portal_projection_list",
+        }),
+        Err(_) => Err(McpError::Internal(
+            "portal authority did not respond (channel dropped)".to_string(),
+        )),
+    }
+}
+
 // ─── portal_projection_attach ────────────────────────────────────────────────
 
 /// Parameters for `portal_projection_attach`.
@@ -2300,7 +2344,7 @@ pub async fn handle_portal_projection_attach(
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
             error_code: rejection.error_code,
-            message: rejection.message,
+            operation: "portal_projection_attach",
         }),
         Err(_) => Err(McpError::Internal(
             "portal authority did not respond (channel dropped)".to_string(),
@@ -2426,7 +2470,7 @@ pub async fn handle_portal_projection_publish(
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
             error_code: rejection.error_code,
-            message: rejection.message,
+            operation: "portal_projection_publish",
         }),
         Err(_) => Err(McpError::Internal(
             "portal authority did not respond (channel dropped)".to_string(),
@@ -2534,7 +2578,7 @@ pub async fn handle_portal_projection_publish_status(
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
             error_code: rejection.error_code,
-            message: rejection.message,
+            operation: "portal_projection_publish_status",
         }),
         Err(_) => Err(McpError::Internal(
             "portal authority did not respond (channel dropped)".to_string(),
@@ -2638,7 +2682,7 @@ pub async fn handle_portal_projection_get_pending_input(
             Ok(Err(rejection)) => {
                 return Err(McpError::ProjectionRejected {
                     error_code: rejection.error_code,
-                    message: rejection.message,
+                    operation: "portal_projection_get_pending_input",
                 });
             }
             Err(_) => {
@@ -2768,7 +2812,7 @@ pub async fn handle_portal_projection_acknowledge_input(
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
             error_code: rejection.error_code,
-            message: rejection.message,
+            operation: "portal_projection_acknowledge_input",
         }),
         Err(_) => Err(McpError::Internal(
             "portal authority did not respond (channel dropped)".to_string(),
@@ -2854,7 +2898,7 @@ pub async fn handle_portal_projection_detach(
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
             error_code: rejection.error_code,
-            message: rejection.message,
+            operation: "portal_projection_detach",
         }),
         Err(_) => Err(McpError::Internal(
             "portal authority did not respond (channel dropped)".to_string(),
@@ -2981,7 +3025,7 @@ pub async fn handle_portal_projection_cleanup(
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
             error_code: rejection.error_code,
-            message: rejection.message,
+            operation: "portal_projection_cleanup",
         }),
         Err(_) => Err(McpError::Internal(
             "portal authority did not respond (channel dropped)".to_string(),
@@ -4643,8 +4687,10 @@ mod tests {
         assert!(first.asset_handle.is_some());
         let hash_raw = parse_blake3_hex_32(&hash_hex).unwrap();
         assert_eq!(
-            registry.payload_by_hash(&hash_raw),
-            Some(payload.as_bytes())
+            registry
+                .get_by_hash(&hash_raw)
+                .map(|entry| entry.asset_handle.as_str()),
+            first.asset_handle.as_deref()
         );
 
         let preflight = handle_register_widget_asset(
@@ -4791,7 +4837,7 @@ mod tests {
         for i in 0..WidgetAssetRegistry::MAX_ENTRIES {
             let mut hash = [0u8; 32];
             hash[..8].copy_from_slice(&(i as u64).to_le_bytes());
-            registry.upsert(hash, format!("widget-asset:{i}"), b"<svg/>".to_vec());
+            registry.upsert(hash, format!("widget-asset:{i}"));
         }
 
         let payload =
@@ -6310,6 +6356,67 @@ mod tests {
         assert_eq!(p.expects_reply, Some(true));
     }
 
+    #[tokio::test]
+    async fn portal_list_rejects_caller_supplied_scope_or_credentials() {
+        for params in [
+            json!({ "projection_id": "another-callers-projection" }),
+            json!({ "owner_token": "not-an-input-to-list" }),
+        ] {
+            let error = handle_portal_projection_list(params, None)
+                .await
+                .expect_err("list must reject caller-supplied scope or credentials");
+            assert!(
+                matches!(error, McpError::InvalidParams(_)),
+                "list must reject unexpected arguments before checking runtime wiring: {error:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn portal_list_forwards_op_and_returns_content_free_summaries() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        let responder = tokio::spawn(async move {
+            match rx.recv().await.expect("op must be sent") {
+                crate::portal_op::PortalOp::List { reply } => {
+                    reply
+                        .send(Ok(crate::portal_op::ProjectionListBatch {
+                            projections: vec![crate::portal_op::ProjectionListEntry {
+                                projection_id: "alpha".to_string(),
+                                display_name: "Alpha session".to_string(),
+                                lifecycle_state: "active".to_string(),
+                                unread_output_count: 2,
+                                pending_input_count: 1,
+                            }],
+                        }))
+                        .expect("reply must send");
+                }
+                other => panic!("unexpected op: {other:?}"),
+            }
+        });
+
+        let result = handle_portal_projection_list(json!({}), Some(&tx))
+            .await
+            .expect("caller-scoped list must succeed");
+        responder.await.expect("responder task must finish");
+
+        assert_eq!(result.projections.len(), 1);
+        assert_eq!(result.projections[0].projection_id, "alpha");
+        let payload = serde_json::to_value(result).expect("list result must serialize");
+        assert_eq!(
+            payload,
+            json!({
+                "projections": [{
+                    "projection_id": "alpha",
+                    "display_name": "Alpha session",
+                    "lifecycle_state": "active",
+                    "unread_output_count": 2,
+                    "pending_input_count": 1,
+                }]
+            }),
+            "MCP list must expose only the bounded summary contract"
+        );
+    }
+
     // ── portal_projection get_pending_input / acknowledge / detach (hud-bq0gl.1) ─
 
     #[tokio::test]
@@ -6571,11 +6678,16 @@ mod tests {
             other => panic!("expected ProjectionRejected, got {other:?}"),
         }
 
-        // On the wire: error.data.error_code is the stable PROJECTION_* string.
+        // On the wire: the rejection has its dedicated application code plus
+        // deterministic recovery guidance, rather than JSON-RPC Internal.
         let wire: crate::error::JsonRpcError = err.into();
-        assert_eq!(wire.code, crate::error::codes::INTERNAL_ERROR);
+        assert_eq!(wire.code, -32103);
         let data = wire.data.expect("rejection must carry structured data");
         assert_eq!(data["error_code"], "PROJECTION_TOKEN_EXPIRED");
+        assert_eq!(
+            data["hint"]["recovery_operation"],
+            "portal_projection_attach"
+        );
     }
 
     #[tokio::test]

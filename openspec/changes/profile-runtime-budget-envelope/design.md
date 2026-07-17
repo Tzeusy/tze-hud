@@ -68,7 +68,7 @@ This prevents a coordinated agent bypass without falsely claiming that logical p
 
 `[widget_runtime_assets]` continues to govern the durable on-disk SVG footprint. Loading/rasterizing a durable asset creates resident allocations that debit the operational resident-memory envelope; merely storing its bytes on disk does not.
 
-### 5. Hard gate: choose the profile schema for runtime-owned resident caches
+### 5. Approved profile schema for runtime-owned resident caches
 
 Three contract shapes were evaluated:
 
@@ -76,7 +76,16 @@ Three contract shapes were evaluated:
 2. **Add an explicit aggregate resident-memory field with disjoint class sub-ceilings (recommended).** Preserve `max_texture_mb` for logical agent-leased texture authority; add `max_runtime_resident_mb` plus `max_resource_resident_mb`, `max_widget_asset_resident_mb`, `max_widget_raster_cache_mb`, and `max_font_resident_mb`, requiring sub-ceilings to fit within the aggregate. The resource class covers scene-resource retained/decoded bytes and their GPU image copies; the widget-asset class covers retained runtime SVG source copies in both gRPC and MCP ingress plus renderer registration; raster and font residency remain separate. This is explicit, observable, and extensible without hidden ratios.
 3. **Keep independent fixed cache caps.** Wire admission only. Lowest code churn, but fails the requested aggregate envelope and keeps desktop-headroom assumptions.
 
-Recommendation: option 2. Consequence: the profile schema and built-in defaults grow, and operators can lower each resident class coherently. Option 1 is harder to reason about and is semantically breaking; option 3 leaves the identified seam open. Because selecting among these changes a design contract and built-in profile semantics, canonical spec sync and implementation remain gated on owner approval. If unanswered, the default is status quo: this reviewable change artifact may merge, but do not sync its delta into canonical specs, implement it, or reinterpret `max_texture_mb`.
+The owner approved option 2 on 2026-07-17. The profile schema and built-in defaults grow so operators can lower each resident class coherently. Option 1 is harder to reason about and is semantically breaking; option 3 leaves the identified seam open.
+
+The approved built-in resident-memory ceilings are:
+
+| Profile | Aggregate | Resource/image | Widget source | Widget raster | Font |
+|---|---:|---:|---:|---:|---:|
+| `full-display` | 1024 MiB | 512 MiB | 192 MiB | 256 MiB | 64 MiB |
+| `headless` | 512 MiB | 256 MiB | 64 MiB | 128 MiB | 64 MiB |
+
+These are strict, disjoint class ceilings. Unused capacity in one class MUST NOT be borrowed by another class. The aggregate remains an independently enforced ceiling even though the approved built-in class ceilings sum exactly to it. Durable `[widget_runtime_assets]` disk bytes and the agent-leased logical `max_texture_mb` authority remain separate domains and MUST NOT be folded into these values.
 
 ## Risks / Trade-offs
 
@@ -88,7 +97,7 @@ Recommendation: option 2. Consequence: the profile schema and built-in defaults 
 
 ## Migration Plan
 
-1. Obtain owner approval for option 2 and its built-in full-display/headless values.
+1. Record the owner-approved option 2 full-display/headless values and domain-separation rules in the change artifacts.
 2. Preserve the reconciled 60 Hz headless `max_agent_update_hz` authority while wiring admission; do not reuse it as compositor cadence.
 3. Add profile fields, validation, and config-freeze tests without changing runtime consumers.
 4. Introduce `OperationalRuntimeEnvelope`, the dependency-safe accounting contract, and production-consumer construction tests.
@@ -100,5 +109,4 @@ Rollback is a normal commit revert before canonical spec sync. No data migration
 
 ## Open Questions
 
-- Owner approval of option 2 versus options 1/3.
-- Exact built-in `max_runtime_resident_mb` and per-class values for `full-display` and `headless`; current independent caps are inputs, not an upper-bound compatibility baseline, because font residency and the image/GPU path are not completely capped today.
+None for the v1 profile-runtime budget envelope. Mobile/device-specific values remain explicitly out of scope.

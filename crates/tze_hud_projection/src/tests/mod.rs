@@ -740,6 +740,107 @@ fn stable_error_code_set_is_append_only_wire_shape() {
 }
 
 #[test]
+fn list_projections_is_caller_scoped_bounded_and_content_free() {
+    let mut authority = ProjectionAuthority::new(ProjectionBounds {
+        max_list_items: 2,
+        ..ProjectionBounds::default()
+    })
+    .expect("bounded authority must be valid");
+
+    let mut alpha = attach_request("alpha", "attach-alpha");
+    alpha.display_name = "Alpha session".to_string();
+    let alpha_token = authority
+        .handle_attach(alpha, "resident-a", 10)
+        .owner_token
+        .expect("alpha attach must issue owner token");
+
+    let mut beta = attach_request("beta", "attach-beta");
+    beta.display_name = "Beta session".to_string();
+    assert!(authority.handle_attach(beta, "resident-a", 11).accepted);
+
+    let mut gamma = attach_request("gamma", "attach-gamma");
+    gamma.display_name = "Gamma session".to_string();
+    assert!(authority.handle_attach(gamma, "resident-a", 12).accepted);
+
+    let mut foreign = attach_request("foreign", "attach-foreign");
+    foreign.display_name = "Foreign session".to_string();
+    assert!(authority.handle_attach(foreign, "resident-b", 13).accepted);
+
+    let mut output = output_request("alpha", &alpha_token, "publish-alpha");
+    output.output_text = "private transcript must never leak".to_string();
+    assert!(
+        authority
+            .handle_publish_output(output, "resident-a", 14)
+            .accepted
+    );
+    authority
+        .enqueue_input(
+            "alpha",
+            "input-alpha",
+            "private input must never leak".to_string(),
+            15,
+            1_000,
+            None,
+        )
+        .expect("pending input must be accepted");
+
+    let response = authority.handle_list_projections(
+        ListProjectionsRequest {
+            request_id: "list-resident-a".to_string(),
+            client_timestamp_wall_us: 16,
+        },
+        "resident-a",
+        16,
+    );
+
+    assert!(response.accepted);
+    assert_eq!(response.projections.len(), 2, "hard list cap must apply");
+    assert_eq!(
+        response
+            .projections
+            .iter()
+            .map(|projection| projection.projection_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "beta"],
+        "entries must be deterministic and exclude both capped and foreign sessions"
+    );
+
+    let alpha = &response.projections[0];
+    assert_eq!(alpha.display_name, "Alpha session");
+    assert_eq!(alpha.lifecycle_state, ProjectionLifecycleState::Active);
+    assert_eq!(alpha.unread_output_count, 1);
+    assert_eq!(alpha.pending_input_count, 1);
+
+    let payload = serde_json::to_string(&response).expect("list response must serialize");
+    for forbidden in [
+        "private transcript must never leak",
+        "private input must never leak",
+        "output_text",
+        "submission_text",
+        "owner_token",
+        "resident-b",
+    ] {
+        assert!(
+            !payload.contains(forbidden),
+            "list payload must not expose {forbidden:?}: {payload}"
+        );
+    }
+}
+
+#[test]
+fn list_bound_must_be_non_zero() {
+    let error = ProjectionAuthority::new(ProjectionBounds {
+        max_list_items: 0,
+        ..ProjectionBounds::default()
+    })
+    .expect_err("a zero list cap would make the low-token contract unusable");
+    assert!(
+        matches!(error, ProjectionContractError::InvalidArgument(ref message) if message.contains("non-zero")),
+        "list cap validation must fail closed"
+    );
+}
+
+#[test]
 fn attach_materializes_content_layer_projected_portal_and_reuses_idempotently() {
     let mut authority = ProjectionAuthority::default();
     let first = authority.handle_attach(attach_request("projection-a", "req-a"), "caller-a", 10);
@@ -1632,6 +1733,7 @@ fn default_bounds_match_projection_spec_values() {
         bounds.max_poll_response_bytes,
         DEFAULT_MAX_POLL_RESPONSE_BYTES
     );
+    assert_eq!(bounds.max_list_items, DEFAULT_MAX_LIST_ITEMS);
     assert_eq!(
         bounds.max_portal_updates_per_second,
         DEFAULT_MAX_PORTAL_UPDATES_PER_SECOND
@@ -2508,7 +2610,7 @@ fn stale_or_overbroad_lease_identity_cannot_authorize_republish() {
 }
 
 #[test]
-fn reconnect_updates_bookkeeping_and_requires_fresh_lease() {
+fn same_session_reconnect_preserves_advisory_lease() {
     let mut authority = ProjectionAuthority::default();
     attach(&mut authority, "projection-a");
     authority
@@ -2523,11 +2625,49 @@ fn reconnect_updates_bookkeeping_and_requires_fresh_lease() {
 
     let mut reconnected = connection_metadata(&["create_tiles", "modify_own_tiles"]);
     reconnected.connection_id = "connection-2".to_string();
-    reconnected.authenticated_session_id = "runtime-session-2".to_string();
     reconnected.connected_at_wall_us = 40;
     reconnected.last_reconnect_wall_us = 40;
     authority
         .record_hud_connection("projection-a", reconnected)
+        .unwrap();
+
+    let summary = authority.state_summary("projection-a").unwrap();
+    assert_eq!(summary.reconnect.reconnect_count, 1);
+    assert_eq!(summary.reconnect.last_reconnect_wall_us, Some(40));
+    assert!(summary.has_advisory_lease);
+    assert_eq!(
+        authority.authorize_portal_republish(
+            "projection-a",
+            "lease-1",
+            &[String::from("create_tiles")],
+            41
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn authenticated_session_takeover_drops_advisory_lease() {
+    let mut authority = ProjectionAuthority::default();
+    attach(&mut authority, "projection-a");
+    authority
+        .record_hud_connection(
+            "projection-a",
+            connection_metadata(&["create_tiles", "modify_own_tiles"]),
+        )
+        .unwrap();
+    authority
+        .record_advisory_lease("projection-a", advisory_lease(&["create_tiles"], 100), 22)
+        .unwrap();
+
+    let mut takeover = connection_metadata(&["create_tiles", "modify_own_tiles"]);
+    // Keep the transport identity stable: the authenticated-session identity is
+    // the takeover boundary, independently of a transport rotation.
+    takeover.authenticated_session_id = "runtime-session-2".to_string();
+    takeover.connected_at_wall_us = 40;
+    takeover.last_reconnect_wall_us = 40;
+    authority
+        .record_hud_connection("projection-a", takeover)
         .unwrap();
 
     let summary = authority.state_summary("projection-a").unwrap();
@@ -2543,24 +2683,6 @@ fn reconnect_updates_bookkeeping_and_requires_fresh_lease() {
         ),
         Err(ProjectionErrorCode::ProjectionUnauthorized)
     );
-
-    authority
-        .record_advisory_lease("projection-a", advisory_lease(&["create_tiles"], 100), 42)
-        .unwrap();
-    authority.mark_hud_disconnected("projection-a", 50).unwrap();
-    let mut after_disconnect = connection_metadata(&["create_tiles"]);
-    after_disconnect.connection_id = "connection-3".to_string();
-    after_disconnect.authenticated_session_id = "runtime-session-3".to_string();
-    after_disconnect.connected_at_wall_us = 60;
-    after_disconnect.last_reconnect_wall_us = 60;
-    authority
-        .record_hud_connection("projection-a", after_disconnect)
-        .unwrap();
-
-    let summary = authority.state_summary("projection-a").unwrap();
-    assert_eq!(summary.reconnect.reconnect_count, 2);
-    assert_eq!(summary.reconnect.last_disconnect_wall_us, Some(50));
-    assert!(!summary.has_advisory_lease);
 }
 
 #[test]
@@ -2594,6 +2716,228 @@ fn heartbeat_requires_live_connection_and_is_monotonic() {
     assert_eq!(
         authority.record_heartbeat("projection-a", 41),
         Err(ProjectionErrorCode::ProjectionHudUnavailable)
+    );
+}
+
+#[test]
+fn agent_liveness_gap_degrades_portal_without_escalating_attention() {
+    let mut authority = ProjectionAuthority::new(ProjectionBounds {
+        agent_liveness_degraded_after_wall_us: 1_000_000,
+        ..ProjectionBounds::default()
+    })
+    .unwrap();
+    attach(&mut authority, "projection-a");
+
+    assert!(
+        authority
+            .sweep_agent_liveness_degradation(1_000_009)
+            .is_empty(),
+        "the configured threshold is a lower bound, not an early warning"
+    );
+    assert_eq!(
+        authority.sweep_agent_liveness_degradation(1_000_010),
+        vec!["projection-a".to_string()],
+        "an idle attached projection must enter Degraded at the threshold"
+    );
+
+    let summary = authority.state_summary("projection-a").unwrap();
+    assert_eq!(summary.lifecycle_state, ProjectionLifecycleState::Degraded);
+    assert_eq!(summary.reconnect.last_heartbeat_wall_us, Some(10));
+    let state = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .unwrap();
+    assert!(
+        state.connection_degraded,
+        "agent-side liveness loss must reuse the token-styled stale treatment"
+    );
+    assert_eq!(
+        state.attention,
+        ProjectedPortalAttention::Ambient,
+        "going stale is ambient state, never an attention escalation"
+    );
+    assert!(
+        authority
+            .sweep_agent_liveness_degradation(2_000_000)
+            .is_empty(),
+        "the transition is one-shot while the same session stays degraded"
+    );
+}
+
+#[test]
+fn agent_liveness_authenticated_projection_operations_refresh_and_recover() {
+    let mut authority = ProjectionAuthority::new(ProjectionBounds {
+        agent_liveness_degraded_after_wall_us: 1_000_000,
+        ..ProjectionBounds::default()
+    })
+    .unwrap();
+    let owner_token = attach(&mut authority, "projection-a");
+    authority
+        .enqueue_input(
+            "projection-a",
+            "input-1",
+            "operator input".to_string(),
+            20,
+            10_000_000,
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(
+        authority.sweep_agent_liveness_degradation(1_000_010),
+        vec!["projection-a".to_string()]
+    );
+
+    let denied = authority.handle_publish_output(
+        output_request("projection-a", "wrong-owner-token", "req-denied"),
+        "caller-a",
+        1_000_019,
+    );
+    assert!(!denied.accepted);
+    assert_eq!(
+        authority
+            .state_summary("projection-a")
+            .unwrap()
+            .reconnect
+            .last_heartbeat_wall_us,
+        Some(10),
+        "a failed token check must not refresh liveness"
+    );
+
+    let poll = authority.handle_get_pending_input(
+        GetPendingInputRequest {
+            envelope: envelope(
+                ProjectionOperation::GetPendingInput,
+                "projection-a",
+                "req-poll-recover",
+            ),
+            owner_token: owner_token.clone(),
+            max_items: Some(1),
+            max_bytes: None,
+        },
+        "caller-a",
+        1_000_020,
+    );
+    assert!(poll.accepted);
+    assert_eq!(
+        authority
+            .state_summary("projection-a")
+            .unwrap()
+            .lifecycle_state,
+        ProjectionLifecycleState::Active,
+        "an authenticated poll recovers a liveness-degraded session"
+    );
+    assert_eq!(
+        authority
+            .state_summary("projection-a")
+            .unwrap()
+            .reconnect
+            .last_heartbeat_wall_us,
+        Some(1_000_020)
+    );
+
+    assert_eq!(
+        authority.sweep_agent_liveness_degradation(2_000_020),
+        vec!["projection-a".to_string()]
+    );
+    let ack = authority.handle_acknowledge_input(
+        AcknowledgeInputRequest {
+            envelope: envelope(
+                ProjectionOperation::AcknowledgeInput,
+                "projection-a",
+                "req-ack-recover",
+            ),
+            owner_token: owner_token.clone(),
+            input_id: "input-1".to_string(),
+            ack_state: InputAckState::Handled,
+            ack_message: None,
+            not_before_wall_us: None,
+        },
+        "caller-a",
+        2_000_030,
+    );
+    assert!(ack.accepted);
+    assert_eq!(
+        authority
+            .state_summary("projection-a")
+            .unwrap()
+            .reconnect
+            .last_heartbeat_wall_us,
+        Some(2_000_030),
+        "an authenticated acknowledgement counts as liveness"
+    );
+
+    assert_eq!(
+        authority.sweep_agent_liveness_degradation(3_000_030),
+        vec!["projection-a".to_string()]
+    );
+    let status = authority.handle_publish_status(
+        status_request("projection-a", &owner_token, "req-status-recover"),
+        "caller-a",
+        3_000_040,
+    );
+    assert!(status.accepted);
+    assert_eq!(
+        authority
+            .state_summary("projection-a")
+            .unwrap()
+            .reconnect
+            .last_heartbeat_wall_us,
+        Some(3_000_040),
+        "an authenticated status update counts as liveness"
+    );
+
+    assert_eq!(
+        authority.sweep_agent_liveness_degradation(4_000_040),
+        vec!["projection-a".to_string()]
+    );
+    let publish = authority.handle_publish_output(
+        output_request("projection-a", &owner_token, "req-publish-recover"),
+        "caller-a",
+        4_000_050,
+    );
+    assert!(publish.accepted);
+    let recovered = authority
+        .projected_portal_state("projection-a", &ProjectedPortalPolicy::permit_all())
+        .unwrap();
+    assert_eq!(
+        recovered.lifecycle_state,
+        Some(ProjectionLifecycleState::Active)
+    );
+    assert!(!recovered.connection_degraded);
+    assert_eq!(
+        authority
+            .state_summary("projection-a")
+            .unwrap()
+            .reconnect
+            .last_heartbeat_wall_us,
+        Some(4_000_050),
+        "an authenticated output publish counts as liveness"
+    );
+}
+
+#[test]
+fn agent_liveness_threshold_is_bounded_and_has_a_safe_default() {
+    let defaults = ProjectionBounds::default();
+    assert!(
+        defaults.agent_liveness_degraded_after_wall_us >= MIN_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US
+    );
+    assert!(
+        defaults.agent_liveness_degraded_after_wall_us <= MAX_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US
+    );
+    assert!(
+        ProjectionAuthority::new(ProjectionBounds {
+            agent_liveness_degraded_after_wall_us: 0,
+            ..defaults.clone()
+        })
+        .is_err()
+    );
+    assert!(
+        ProjectionAuthority::new(ProjectionBounds {
+            agent_liveness_degraded_after_wall_us: MAX_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US
+                .saturating_add(1),
+            ..defaults
+        })
+        .is_err()
     );
 }
 

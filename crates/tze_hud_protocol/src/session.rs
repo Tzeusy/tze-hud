@@ -54,12 +54,48 @@ pub enum RuntimeDegradationLevel {
     RenderingSimplified = 5,
     SheddingTiles = 6,
     AudioOnlyFallback = 7,
+    TextureQualityReduced = 8,
+    EmergencyRendering = 9,
 }
 
 impl RuntimeDegradationLevel {
     /// Convert to the proto enum integer value.
     pub fn to_proto_i32(self) -> i32 {
         self as i32
+    }
+
+    /// Decode only assigned append-only values. Unspecified and future values
+    /// fail closed instead of being interpreted as Normal.
+    pub fn from_proto_i32(value: i32) -> Option<Self> {
+        match value {
+            1 => Some(Self::Normal),
+            2 => Some(Self::CoalescingMore),
+            3 => Some(Self::MediaQualityReduced),
+            4 => Some(Self::StreamsReduced),
+            5 => Some(Self::RenderingSimplified),
+            6 => Some(Self::SheddingTiles),
+            7 => Some(Self::AudioOnlyFallback),
+            8 => Some(Self::TextureQualityReduced),
+            9 => Some(Self::EmergencyRendering),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod degradation_level_tests {
+    use super::RuntimeDegradationLevel;
+
+    #[test]
+    fn append_only_mapping_rejects_unspecified_and_future_values() {
+        for value in 1..=9 {
+            let level = RuntimeDegradationLevel::from_proto_i32(value)
+                .expect("assigned degradation value must decode");
+            assert_eq!(level.to_proto_i32(), value);
+        }
+        assert_eq!(RuntimeDegradationLevel::from_proto_i32(0), None);
+        assert_eq!(RuntimeDegradationLevel::from_proto_i32(10), None);
+        assert_eq!(RuntimeDegradationLevel::from_proto_i32(-1), None);
     }
 }
 
@@ -86,6 +122,7 @@ pub struct WidgetAssetStore {
     pub max_total_bytes: u64,
     /// Per-namespace store budget cap.
     pub max_namespace_bytes: u64,
+    resident_ledger: Option<tze_hud_resource::ResidentLedger>,
 }
 
 impl WidgetAssetStore {
@@ -96,7 +133,47 @@ impl WidgetAssetStore {
             per_namespace_bytes: HashMap::new(),
             max_total_bytes,
             max_namespace_bytes,
+            resident_ledger: None,
         }
+    }
+
+    pub fn new_with_limits_and_resident_ledger(
+        max_total_bytes: u64,
+        max_namespace_bytes: u64,
+        resident_ledger: tze_hud_resource::ResidentLedger,
+    ) -> Self {
+        Self {
+            by_hash: HashMap::new(),
+            total_bytes: 0,
+            per_namespace_bytes: HashMap::new(),
+            max_total_bytes,
+            max_namespace_bytes,
+            resident_ledger: Some(resident_ledger),
+        }
+    }
+
+    pub fn reserve_resident_payload(
+        &self,
+        allocation_id: &str,
+        bytes: u64,
+    ) -> Result<bool, tze_hud_resource::ResidentReserveError> {
+        match &self.resident_ledger {
+            Some(ledger) => ledger.reserve(
+                tze_hud_resource::ResidentClass::WidgetSource,
+                allocation_id,
+                bytes,
+            ),
+            None => Ok(false),
+        }
+    }
+
+    pub fn release_resident_payload(&self, allocation_id: &str) -> bool {
+        self.resident_ledger.as_ref().is_some_and(|ledger| {
+            ledger.release(
+                tze_hud_resource::ResidentClass::WidgetSource,
+                &tze_hud_resource::AllocationId::from(allocation_id),
+            )
+        })
     }
 }
 
@@ -419,5 +496,27 @@ impl SessionRegistry {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod resident_widget_asset_tests {
+    use super::*;
+
+    #[test]
+    fn grpc_widget_payload_uses_widget_source_class() {
+        let ledger =
+            tze_hud_resource::ResidentLedger::new(tze_hud_resource::ResidentLedgerLimits {
+                aggregate_bytes: 4,
+                resource_bytes: 0,
+                widget_source_bytes: 4,
+                widget_raster_bytes: 0,
+                font_bytes: 0,
+            });
+        let store = WidgetAssetStore::new_with_limits_and_resident_ledger(4, 4, ledger.clone());
+
+        assert!(store.reserve_resident_payload("grpc:too-large", 5).is_err());
+        assert_eq!(ledger.snapshot().aggregate_bytes, 0);
+        assert_eq!(ledger.snapshot().widget_source_bytes, 0);
     }
 }

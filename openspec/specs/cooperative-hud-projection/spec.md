@@ -36,23 +36,17 @@ the hosting/transport shape (in-process vs. external daemon) differs, and the
 external-daemon model remains future work (see
 `external-agent-projection-authority`).
 
-The "Low-Token LLM-Facing Operations" requirement says MCP-exposed operations
-"SHALL be served by the external projection authority rather than the runtime v1
-MCP bridge." In v1 the served subset (`attach`, `publish_output`) is wired through
-the runtime MCP server's dedicated portal-projection tools
-(`portal_projection_attach`, `portal_projection_publish`,
-`crates/tze_hud_mcp/src/server.rs` ~556-565), which forward to the in-process
-authority over `portal_op_tx` — they are a projection facade distinct from the
-zone/widget publishing tools, not the generic v1 bridge. These two tools are not
-yet reachable by an external session: they are classified Resident and rejected
-with `CAPABILITY_REQUIRED` unless the caller holds `resident_mcp`
-(`crates/tze_hud_mcp/src/server.rs` ~198-199, ~396), while the runtime's HTTP MCP
-transport mints only bearer/guest contexts with no capabilities
-(`crates/tze_hud_runtime/src/mcp.rs` ~256-260). The resident-capable ingress that
-makes the served subset reachable externally is tracked by hud-bq0gl.1. The
-remaining operations (`publish_status`, `get_pending_input`, `acknowledge_input`,
-`detach`, `cleanup`) have no MCP method at all yet (tracked by hud-bq0gl.1/.3); the
-external-daemon transport in the original requirement is aspirational.
+The "Low-Token LLM-Facing Operations" requirement's external-authority wording
+names the logical authority boundary, not a separate v1 process. In v1 all eight
+operations are wired through the runtime MCP server's dedicated resident facade:
+`portal_projection_list`, `portal_projection_attach`,
+`portal_projection_publish`, `portal_projection_publish_status`,
+`portal_projection_get_pending_input`, `portal_projection_acknowledge_input`,
+`portal_projection_detach`, and `portal_projection_cleanup`. They forward over
+`portal_op_tx` to the in-process authority and remain distinct from generic
+zone/widget publishing. Each requires the `resident_mcp` capability, minted only
+for the configured resident principal after normal MCP authentication. The
+separate external-daemon transport remains future work.
 
 ## Requirements
 ### Requirement: Cooperative Attachment Contract
@@ -95,11 +89,11 @@ For v1, projection state SHALL be memory-only and SHALL NOT persist transcript t
 - **AND** it MUST NOT use stale lease identity or request lease capabilities broader than the authenticated session grants
 
 ### Requirement: Low-Token LLM-Facing Operations
-The projection contract SHALL expose a small provider-neutral operation set suitable for a skill, local command, or external projection-daemon MCP server. If exposed through MCP, projection operations SHALL be served by the external projection authority rather than the runtime v1 MCP bridge. The normative operation set SHALL include attach, publish_output, publish_status, get_pending_input, acknowledge_input, detach, and cleanup. Operation responses SHALL be bounded by default and MUST NOT return unbounded transcripts, unbounded inbox history, or raw runtime scene state.
+The projection contract SHALL expose a small provider-neutral operation set suitable for a skill, local command, or projection-authority MCP facade. The normative operation set SHALL include list, attach, publish_output, publish_status, get_pending_input, acknowledge_input, detach, and cleanup. Operation responses SHALL be bounded by default and MUST NOT return unbounded transcripts, unbounded inbox history, raw runtime scene state, or ownership credentials outside a successful attach response.
 
-Every operation request SHALL include `operation`, `projection_id`, `request_id`, and `client_timestamp_wall_us`. Every operation except `attach` SHALL also include the current `owner_token`. The `attach` request SHALL include `display_name`; all other attach fields are optional: `provider_kind` (defaults to `other` when absent), `workspace_hint`, `repository_hint`, `icon_profile_hint`, `content_classification`, `hud_target`, and `idempotency_key`. When `provider_kind` is absent, the authority SHALL treat the attached session as provider kind `other`. The `publish_output` request SHALL include `output_text`, optional `output_kind`, optional `content_classification`, optional `logical_unit_id`, and optional `coalesce_key`. The `publish_status` request SHALL include `lifecycle_state` and optional bounded `status_text`. The `get_pending_input` request MAY include `max_items`, `max_bytes`, and `wait_ms`. When `wait_ms` is provided and non-zero, the serving adapter SHALL block the call until at least one pending item is available or the wait elapses, polling the authority at a sub-second interval; the wait MUST be capped at a configured maximum (v1 default: 30 000 ms) and MUST NOT block the runtime drain loop or windowed event thread. Empty polls over the wait window SHALL be side-effect-free: no inbox item SHALL transition to `delivered` unless items are actually returned to the caller. The `acknowledge_input` request SHALL include `input_id`, `ack_state`, optional bounded `ack_message`, and optional `not_before_wall_us` valid only when `ack_state = deferred`. When present, `not_before_wall_us` SHALL use wall-clock semantics, MUST be before the item's `expires_at_wall_us`, and MUST NOT be accepted for terminal acknowledgement states. The `detach` and `cleanup` requests SHALL include bounded `reason`.
+Every projection-scoped operation request SHALL include `operation`, `projection_id`, `request_id`, and `client_timestamp_wall_us`. Every projection-scoped operation except `attach` and operator-authorized `cleanup` SHALL also include the current `owner_token`. The caller-scoped `list` request SHALL include `operation`, `request_id`, and `client_timestamp_wall_us`, and SHALL NOT require or accept a `projection_id` or `owner_token`; the resident MCP facade MAY generate its authority request metadata internally. The `attach` request SHALL include `display_name`; all other attach fields are optional: `provider_kind` (defaults to `other` when absent), `workspace_hint`, `repository_hint`, `icon_profile_hint`, `content_classification`, `hud_target`, and `idempotency_key`. When `provider_kind` is absent, the authority SHALL treat the attached session as provider kind `other`. The `publish_output` request SHALL include `output_text`, optional `output_kind`, optional `content_classification`, optional `logical_unit_id`, and optional `coalesce_key`. The `publish_status` request SHALL include `lifecycle_state` and optional bounded `status_text`. The `get_pending_input` request MAY include `max_items`, `max_bytes`, and `wait_ms`. When `wait_ms` is provided and non-zero, the serving adapter SHALL block the call until at least one pending item is available or the wait elapses, polling the authority at a sub-second interval; the wait MUST be capped at a configured maximum (v1 default: 30 000 ms) and MUST NOT block the runtime drain loop or windowed event thread. Empty polls over the wait window SHALL be side-effect-free: no inbox item SHALL transition to `delivered` unless items are actually returned to the caller. The `acknowledge_input` request SHALL include `input_id`, `ack_state`, optional bounded `ack_message`, and optional `not_before_wall_us` valid only when `ack_state = deferred`. When present, `not_before_wall_us` SHALL use wall-clock semantics, MUST be before the item's `expires_at_wall_us`, and MUST NOT be accepted for terminal acknowledgement states. The `detach` and `cleanup` requests SHALL include bounded `reason`.
 
-Every operation response SHALL include `request_id`, `projection_id`, `accepted`, `error_code`, `server_timestamp_wall_us`, and a bounded `status_summary`. Successful `attach` responses SHALL include an `owner_token` and initial lifecycle state. Error codes SHALL be stable append-only strings. The initial error-code set SHALL include `PROJECTION_NOT_FOUND`, `PROJECTION_ALREADY_ATTACHED`, `PROJECTION_UNAUTHORIZED`, `PROJECTION_TOKEN_EXPIRED`, `PROJECTION_INVALID_ARGUMENT`, `PROJECTION_OUTPUT_TOO_LARGE`, `PROJECTION_INPUT_TOO_LARGE`, `PROJECTION_INPUT_QUEUE_FULL`, `PROJECTION_RATE_LIMITED`, `PROJECTION_STATE_CONFLICT`, `PROJECTION_HUD_UNAVAILABLE`, and `PROJECTION_INTERNAL_ERROR`.
+Every authority operation response SHALL include `request_id`, `projection_id` (a caller-scope marker for `list`), `accepted`, `error_code`, `server_timestamp_wall_us`, and a bounded `status_summary`. Successful `attach` responses SHALL include an `owner_token` and initial lifecycle state. A successful `list` response SHALL contain at most `max_list_items` summaries, sorted deterministically by `projection_id`; each summary SHALL contain only `projection_id`, `display_name`, `lifecycle_state`, `unread_output_count`, and `pending_input_count`. It SHALL NOT include transcript text, pending-input text, owner tokens or verifiers, caller identity, classification, lease data, reconnect state, or raw scene data. Error codes SHALL be stable append-only strings. The initial error-code set SHALL include `PROJECTION_NOT_FOUND`, `PROJECTION_ALREADY_ATTACHED`, `PROJECTION_UNAUTHORIZED`, `PROJECTION_TOKEN_EXPIRED`, `PROJECTION_INVALID_ARGUMENT`, `PROJECTION_OUTPUT_TOO_LARGE`, `PROJECTION_INPUT_TOO_LARGE`, `PROJECTION_INPUT_QUEUE_FULL`, `PROJECTION_RATE_LIMITED`, `PROJECTION_STATE_CONFLICT`, `PROJECTION_HUD_UNAVAILABLE`, and `PROJECTION_INTERNAL_ERROR`.
 
 #### Scenario: agent publishes output without transcript drain
 - **WHEN** an attached LLM session calls `publish_output` with a new assistant message or status fragment
@@ -110,6 +104,17 @@ Every operation response SHALL include `request_id`, `projection_id`, `accepted`
 - **WHEN** an attached LLM session calls `get_pending_input`
 - **THEN** the daemon SHALL return only pending unacknowledged submissions up to configured count and byte limits
 - **AND** it SHALL include compact counts for remaining pending items if more input is queued
+
+#### Scenario: caller-scoped list is bounded and content-free
+- **WHEN** a resident principal calls `list` after an interrupted client flow or to reconcile its projected portals
+- **THEN** the authority SHALL return at most `max_list_items` deterministic summaries for projections attached by that same principal
+- **AND** each summary SHALL contain only projection ID, display name, lifecycle state, unread-output count, and pending-input count
+- **AND** it SHALL NOT return another principal's projection, transcript text, pending-input text, owner token, caller identity, classification, lease metadata, reconnect state, or raw runtime scene data
+
+#### Scenario: list does not manage portal lifecycle
+- **WHEN** a caller uses `list` to discover an orphaned or interrupted projection
+- **THEN** the operation SHALL remain read-only reconciliation
+- **AND** it SHALL NOT attach, detach, cleanup, rotate an owner token, acquire or revoke a lease, or change any projection lifecycle state
 
 #### Scenario: bounded long-poll returns on input or timeout
 - **WHEN** an attached LLM session calls `get_pending_input` with a non-zero `wait_ms`
@@ -132,7 +137,7 @@ Every operation response SHALL include `request_id`, `projection_id`, `accepted`
 - **AND** the audit record SHALL NOT contain transcript text or HUD input text
 
 ### Requirement: Projection Operation Authorization
-Every LLM-facing projection operation SHALL be authenticated, bound to the owning projection session, and authorized for the requested projection ID before it can read or mutate projection state. Projection credentials or local IPC authority MUST be unguessable or OS-protected. Cross-projection publish, status update, pending-input read, acknowledgement, detach, and cleanup attempts SHALL be denied with stable error codes and auditable records.
+Every LLM-facing projection operation SHALL be authenticated. Projection-scoped operations SHALL be bound to the owning projection session and authorized for the requested projection ID before they can read or mutate projection state; caller-scoped `list` SHALL be authorized to enumerate only summaries attached by its authenticated resident principal. Projection credentials or local IPC authority MUST be unguessable or OS-protected. Cross-projection publish, status update, pending-input read, acknowledgement, detach, cleanup, and cross-principal list attempts SHALL be denied or filtered with stable error codes and auditable records.
 
 Successful attach SHALL issue an owner token with at least 128 bits of entropy; the v1 implementation issues 256-bit tokens (`OWNER_TOKEN_ENTROPY_BITS = 256`, `crates/tze_hud_projection/src/lib.rs`). The projection authority SHALL store only a verifier or protected representation of the token. Every non-attach owner operation SHALL present the owner token. Owner cleanup SHALL require the owner token. Operator cleanup or override SHALL use a separate explicit operator-authority credential or local override path, SHALL NOT require the owner token, and SHALL be audited distinctly from owner cleanup. Owner tokens SHALL expire or rotate on detach, owner cleanup, operator cleanup, projection expiry, host restart, and explicit operator revocation. Same-OS-user execution alone SHALL NOT authorize cross-projection reads or mutations.
 
@@ -144,6 +149,11 @@ Every owner token SHALL also carry a wall-clock expiry deadline established at a
 - **WHEN** session A calls `get_pending_input` for projection ID owned by session B
 - **THEN** the projection authority SHALL deny the request with a stable authorization error code
 - **AND** it SHALL NOT return pending input, transcript content, identity metadata, or lifecycle state for session B
+
+#### Scenario: cross-principal list is filtered
+- **WHEN** resident principal A calls `list` while resident principal B has active projections
+- **THEN** the authority SHALL return only principal A's bounded summaries
+- **AND** it SHALL NOT reveal principal B's projection ID, display name, lifecycle state, unread count, pending count, or any private content
 
 #### Scenario: unauthorized cleanup is denied
 - **WHEN** a caller without ownership or explicit operator authority calls `cleanup` for another projection
@@ -259,9 +269,9 @@ Projection identity, transcript content, status metadata, unread indicators, pen
 - **AND** it SHALL NOT escalate interruption class solely because backlog grows
 
 ### Requirement: Bounded Backpressure and Expiry
-Projection operations SHALL enforce configurable bounds for output payload size, retained transcript bytes, pending input count, pending input byte size, polling result size, and portal update rate. When bounds are exceeded, the daemon SHALL reject, truncate, coalesce, expire, or summarize according to explicit policy while preserving transactional HUD input semantics.
+Projection operations SHALL enforce configurable bounds for output payload size, retained transcript bytes, pending input count, pending input byte size, polling result size, caller-scoped list result size, and portal update rate. When bounds are exceeded, the daemon SHALL reject, truncate, coalesce, expire, or summarize according to explicit policy while preserving transactional HUD input semantics.
 
-Unless deployment configuration sets stricter values, v1 defaults SHALL be: `max_output_bytes_per_call = 16384`, `max_status_text_bytes = 512`, `max_retained_transcript_bytes = 262144`, `max_visible_transcript_bytes = 16384`, `max_pending_input_items = 32`, `max_pending_input_bytes_per_item = 4096`, `max_pending_input_total_bytes = 32768`, `max_poll_items = 8`, `max_poll_response_bytes = 16384`, `max_portal_updates_per_second = 10`, and `owner_token_ttl_wall_us = 86_400_000_000` (24 hours; see the Projection Operation Authorization requirement). Oversized output and input submissions SHALL be rejected with stable error codes rather than truncated silently. Retained transcript overflow SHALL prune oldest non-visible logical units first while preserving coherent visible-window order. Portal update-rate overflow SHALL coalesce output by `coalesce_key` or append order into the next permitted visible-window update.
+Unless deployment configuration sets stricter values, v1 defaults SHALL be: `max_output_bytes_per_call = 16384`, `max_status_text_bytes = 512`, `max_retained_transcript_bytes = 262144`, `max_visible_transcript_bytes = 16384`, `max_pending_input_items = 32`, `max_pending_input_bytes_per_item = 4096`, `max_pending_input_total_bytes = 32768`, `max_poll_items = 8`, `max_poll_response_bytes = 16384`, `max_list_items = 8`, `max_portal_updates_per_second = 10`, and `owner_token_ttl_wall_us = 86_400_000_000` (24 hours; see the Projection Operation Authorization requirement). Oversized output and input submissions SHALL be rejected with stable error codes rather than truncated silently. Retained transcript overflow SHALL prune oldest non-visible logical units first while preserving coherent visible-window order. Portal update-rate overflow SHALL coalesce output by `coalesce_key` or append order into the next permitted visible-window update.
 
 #### Scenario: oversized output is bounded
 - **WHEN** an attached LLM session publishes output larger than the configured per-operation limit

@@ -742,9 +742,30 @@ Budget checks happen in stage 3 (Mutation Intake) before the scene is modified. 
 
 ### 6.1 Trigger Condition
 
-The degradation policy evaluates after every frame. Trigger: `frame_time_p95 > 14ms` measured over a rolling 10-frame window.
+The runtime freezes an immutable degradation envelope at startup from the
+validated effective Windows presentation cadence. The effective cadence is the
+resolved `target_fps`, capped by monitor refresh when that refresh is known.
+Measured presentation intervals are observability only and never mutate the
+envelope. Let `P = floor(1_000_000 / effective_fps)` microseconds:
 
-The 10-frame window (166ms at 60fps) gives the system time to absorb transient spikes (a single expensive frame during a large scene change) without triggering degradation for a momentary blip.
+- entry threshold `E = min(14_000, ceil(21 * P / 25))` microseconds;
+- entry duration `10 * P` microseconds;
+- minimum entry samples: 10 successfully presented active frames.
+
+At 60 Hz this yields exactly 14 ms and approximately 166 ms. The absolute
+14 ms ceiling remains in force at slower cadences; shorter periods derive a
+threshold ahead of the presentation deadline. This generic Windows formula
+does not create or validate a 90/120 Hz device lane.
+
+The controller consumes `FrameTelemetry.degradation_work_time_us`, measured
+from the beginning of active runtime/compositor work before Stage 3 through
+successful Stage 7 completion. `FrameTelemetry.frame_time_us` retains its
+Stage-1-through-Stage-7 latency meaning and must not be silently reinterpreted
+where the windowed producer lacks Stage-1 provenance. Samples carry monotonic
+completion timestamps. Nearest-rank p95 is computed over the elapsed window;
+both the duration and minimum sample count must be satisfied. Each transition
+advances exactly one level and clears all samples, preventing cascade from a
+single burst.
 
 ### 6.2 Degradation Ladder
 
@@ -806,9 +827,20 @@ Post-v1 RFC revisions must re-insert "reduce concurrent streams" (between Levels
 
 ### 6.3 Hysteresis
 
-Recovery requires `frame_time_p95 < 12ms` sustained over a 30-frame window (500ms at 60fps). This prevents oscillation between levels. Recovery moves up one level at a time; reaching Normal from Level 5 requires 5 × 30 frames of clean performance.
+Recovery uses `R = min(12_000, ceil(18 * P / 25))` microseconds over
+`30 * P` elapsed microseconds with at least 30 successfully presented active
+samples. At 60 Hz this is exactly 12 ms over approximately 500 ms. Recovery
+moves one level at a time and clears samples after each transition; reaching
+Normal from Level 5 therefore requires five successive recovery durations. The
+entry/recovery formulas retain a positive hysteresis band.
 
-The 12ms recovery threshold vs 14ms trigger threshold is a 2ms hysteresis band. This absorbs measurement noise and prevents flickering between states at the boundary.
+Quiescent recovery does not synthesize zero-time frames. The scheduler may mark
+the runtime quiescent only when the canonical no-render predicate proves that no
+scene or geometry change, animation, publication expiry, reveal, scroll,
+composer caret, resize, capture, benchmark, or other presentation deadline is
+pending. From the first such monotonic instant, the controller may recover at
+most one level per full recovery duration. Any presentation-relevant work clears
+quiescence.
 
 ### 6.4 Degradation Observability
 
@@ -819,13 +851,33 @@ Each degradation level change is emitted as a telemetry event:
   "event": "degradation_level_change",
   "from_level": 0,
   "to_level": 1,
-  "trigger_p95_ms": 14.7,
-  "window_frames": 10,
+  "trigger_p95_us": 14700,
+  "sample_count": 10,
+  "window_duration_us": 166660,
+  "effective_cadence_hz": 60,
+  "entry_threshold_us": 14000,
+  "recovery_threshold_us": 12000,
+  "recovery_source": "active_frames",
   "timestamp_ms": 1234567890
 }
 ```
 
-The current degradation level is always visible in the `TelemetryRecord`. Agents can subscribe to `DegradationEvent` notifications to reduce their own update rate proactively.
+Every successfully presented frame reports the policy applied to that frame plus
+`degradation_work_time_us`. A transition selected from frame N applies no
+earlier than frame N+1; frame N reports its old applied policy. Quiescent
+transitions emit the structured event without emitting a synthetic frame record.
+
+Exactly one object owns history and transitions:
+`tze_hud_runtime::DegradationController`. The scene-side degradation tracker is
+not a production frame-path authority. Under the frame N+1 scene lock, the
+runtime atomically snapshots policy level, stable tile `SceneId`, lease
+priority, z-order, scene version, and geometry epoch. Suppression uses stable
+IDs and is recomputed after relevant scene changes. Chrome and human override
+controls are never suppressible, and degradation never mutates scene or lease
+state.
+
+Agents receive the exact transactional `DegradationNotice` mapping and ordering
+defined by RFC 0005 §3.4.
 
 ---
 
@@ -1139,3 +1191,4 @@ pub struct FrameTimingRecord {
 |-------|------|----------|-------|---------|
 | A1 | 2026-04-19 | hud-ora8.1.9 | Amendment: media worker lifecycle | Converted RFC 0002 §2.8 ("Future: Media Worker Boundary") from reservation to normative lifecycle spec. Added worker state machine (SPAWNING → RUNNING → DRAINING → TERMINATED; FAILED terminal state). Defined three-condition activation gate: capability grant (RFC 0008 A1 `media-ingress`), budget headroom check (pool slot, per-session stream cap, global texture headroom), and role-authority re-check (RFC 0009 A1: owner or admin). Specified shared worker pool: N = 2–4 slots, priority-based preemption (lease_priority sort per RFC 0008 §2.2), budget-pressure contraction to 1 slot at degradation Level 2+. Defined degradation trigger authority: runtime-automatic (ladder advance), watchdog-automatic (per-worker threshold), operator-manual (Level 0 override); agents may only self-close, not demand degradation. Specified watchdog targets: CPU time (200ms/10s), GPU texture occupancy (256 MiB), ring-buffer occupancy (75%/30-frame sustained), decoder lifetime (24h), leases held (per §4.3 envelope). Documented in-process tokio task model (E24 COMPATIBLE verdict, `docs/decisions/e24-in-process-worker-posture.md`): session coordinator + watchdog tasks on network tokio runtime; GStreamer pipeline pool as black box; GPU device ownership invariant unchanged from §2.8; cross-agent isolation via session_id tagging on DecodedFrameReady. Added RFC 0014 forward cross-references. Full amendment document: `about/legends-and-lore/rfcs/reviews/0002-amendment-media-worker-lifecycle.md` (issue hud-ora8.1.9). |
 | A2 | 2026-07-16 | hud-sjqqv / owner decisions hud-0jfqd and hud-sm6uh | Headless quiescence and pacing authority | Reconciled the stale default-60fps headless timer with efficiency doctrine and the `efficiency-budgets` delta. Normal headless operation is event/deadline-driven; fixed 60fps pacing is explicit benchmark/test-only active work, carries pacing identity, and cannot satisfy quiescent-idle evidence. Clarified that configured target fps does not authorize idle GPU submissions or presents. |
+| A3 | 2026-07-16 | hud-cpj4v / owner decision hud-o5snv | Production degradation cadence and wiring | Replaced fixed-frame trigger semantics with an immutable cadence-derived envelope calibrated to 14/12 ms at 60 Hz, defined the authoritative active-work metric, elapsed-window p95/reset rules, quiescent recovery, sole controller ownership, atomic stable-SceneId policy snapshots, and N-to-N+1 observability. |

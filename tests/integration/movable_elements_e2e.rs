@@ -810,7 +810,8 @@ async fn agent_receives_element_repositioned_event_with_old_and_new_geometry() {
 
     let mut stream = client.session(stream).await.unwrap().into_inner();
 
-    // Drain SessionEstablished + SceneSnapshot.
+    // Drain SessionEstablished + SceneSnapshot + current DegradationNotice.
+    stream.next().await;
     stream.next().await;
     stream.next().await;
 

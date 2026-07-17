@@ -87,8 +87,15 @@ impl SceneGraph {
         priority: u8,
         capabilities: Vec<Capability>,
     ) -> SceneId {
-        self.try_grant_lease_for_session(namespace, session_id, ttl_ms, priority, capabilities)
-            .expect("lease grant failed cap check")
+        self.try_grant_lease_for_session_with_budget(
+            namespace,
+            session_id,
+            ttl_ms,
+            priority,
+            capabilities,
+            ResourceBudget::default(),
+        )
+        .expect("lease grant failed cap check")
     }
 
     /// Try to grant a lease, returning an error if runtime or session caps are exceeded.
@@ -111,6 +118,27 @@ impl SceneGraph {
         ttl_ms: u64,
         priority: u8,
         capabilities: Vec<Capability>,
+    ) -> Result<SceneId, LeaseError> {
+        self.try_grant_lease_for_session_with_budget(
+            namespace,
+            session_id,
+            ttl_ms,
+            priority,
+            capabilities,
+            ResourceBudget::default(),
+        )
+    }
+
+    /// Try to grant a lease with the session's frozen effective resource budget.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_grant_lease_for_session_with_budget(
+        &mut self,
+        namespace: &str,
+        session_id: SceneId,
+        ttl_ms: u64,
+        priority: u8,
+        capabilities: Vec<Capability>,
+        resource_budget: ResourceBudget,
     ) -> Result<SceneId, LeaseError> {
         // Check runtime-wide cap
         let non_terminal_count = self
@@ -161,7 +189,7 @@ impl SceneGraph {
                 ttl_ms,
                 renewal_policy: RenewalPolicy::default(),
                 capabilities,
-                resource_budget: ResourceBudget::default(),
+                resource_budget,
                 spatial_budget: Default::default(),
                 suspended_at_ms: None,
                 ttl_remaining_at_suspend_ms: None,

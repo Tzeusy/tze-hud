@@ -502,3 +502,9 @@ Agent (remote)                         │ MediaIngressOpen (gRPC, RFC 0005 A1)
 | Media worker lifecycle | `legends-and-lore/rfcs/reviews/0002-amendment-media-worker-lifecycle.md` |
 | Audio-routing crate audit | `docs/audits/cpal-audio-io-crate-audit.md` |
 | GStreamer pipeline audit | `docs/audits/gstreamer-media-pipeline-audit.md` |
+
+Runtime cache admission flows through the profile-frozen resident ledger:
+resource upload/decoded copies use the resource class, widget SVG source and
+raster textures use separate widget classes, and font bytes use the font class.
+Logical lease texture accounting and durable disk storage do not enter this
+physical resident ledger.

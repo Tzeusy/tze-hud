@@ -4,6 +4,53 @@ These payloads are provider-neutral. Use the same schema through an external pro
 
 Replace timestamps with wall-clock microseconds and generate unique request IDs.
 
+## MCP Wire Envelope
+
+Use the standard MCP `tools/call` method as the primary wire dialect. Put the
+per-operation payloads below in `params.arguments` and name the corresponding
+`portal_projection_*` tool in `params.name`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "portal_projection_attach",
+    "arguments": { "operation": "attach", "projection_id": "..." }
+  }
+}
+```
+
+The runtime retains direct tool-name methods only as a legacy fallback for
+older lightweight clients. Both dialects use the same tool names, operation
+payloads, authorization, and capability gates.
+
+## List
+
+`list` is caller-scoped recovery/reconciliation, not an owner-token operation.
+The authority-level request contains `operation: "list"`, a request ID, and a
+timestamp but deliberately no projection ID or owner token. The Resident MCP
+facade generates that metadata, so call it with an empty arguments object:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "portal_projection_list",
+    "arguments": {}
+  }
+}
+```
+
+The result contains at most eight `projections` entries. Each entry has only
+`projection_id`, `display_name`, `lifecycle_state`, `unread_output_count`, and
+`pending_input_count`. It never returns transcript text, pending-input text,
+owner tokens, lease data, or another resident principal's sessions, and it does
+not attach, detach, clean up, rotate a token, or change lifecycle state.
+
 ## Attach
 
 Codex:
@@ -63,6 +110,14 @@ opencode:
 
 Successful attach responses include `owner_token`, `request_id`, `projection_id`, `accepted`, `error_code`, `server_timestamp_wall_us`, bounded `status_summary`, and lifecycle state. The `owner_token` is returned only by successful `attach`; later operation responses must not return it. Repeating attach for a live projection through the authenticated Resident MCP surface with the same non-empty `idempotency_key` rotates and returns a fresh token, invalidates the prior token, and preserves the original expiry deadline. Missing or unrelated keys do not rotate ownership.
 
+The preferred `portal_client.py` persists that original idempotency key and a
+bounded client-authored tail at
+`~/.local/state/tze_hud/portal-continuity/<projection_id>.json`. The private
+state file is not a runtime snapshot: it contains no owner token, pending
+input, acknowledgement, or viewer-authored turn. After successful attach, the
+client stores the new owner token separately and replays the tail before
+returning.
+
 ## Publish Output
 
 Accepted `output_kind` values: `assistant` *(default)*, `tool`, `status`, `error`, `other`.
@@ -83,6 +138,27 @@ Any other value is rejected. Omit `output_kind` to get the `assistant` default.
   "coalesce_key": "latest-summary"
 }
 ```
+
+For continuity-safe publishing, every client-authored record has a stable
+`logical_unit_id`. A replay sends that same ID, so an authority that already
+saw it accepts the operation idempotently without duplicating the unit. A
+streaming/progress replacement uses a new logical unit ID with the same
+`coalesce_key`; the local `portal-continuity` tail replaces its earlier record
+under that key, and a fresh runtime reconstructs only the latest value. The
+tail preserves each record's `output_kind` and `content_classification`.
+
+The replay ceremony is:
+
+1. authenticated `attach` with the original `idempotency_key`;
+2. atomically replace the separate 0600 owner-token file;
+3. replay bounded `portal-continuity` records in retained order with their
+   original `logical_unit_id` and optional `coalesce_key`;
+4. resume live publishing.
+
+Running the ceremony twice is safe. On a live authority, logical-unit
+idempotency prevents duplicates; after a runtime restart or grace expiry, the
+fresh portal receives the bounded authored tail. Viewer-authored HUD input is
+never part of this replay.
 
 ## Publish Status
 

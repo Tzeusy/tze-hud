@@ -13,10 +13,17 @@ import pytest
 CLIENT_PATH = (
     Path(__file__).parents[2] / "hud-projection" / "scripts" / "portal_client.py"
 )
-SPEC = importlib.util.spec_from_file_location("portal_client_token_rotation", CLIENT_PATH)
+SPEC = importlib.util.spec_from_file_location(
+    "portal_client_token_rotation", CLIENT_PATH
+)
 assert SPEC is not None and SPEC.loader is not None
 portal_client = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(portal_client)
+
+
+@pytest.fixture(autouse=True)
+def continuity_dir(tmp_path: Path) -> None:
+    portal_client.CONTINUITY_DIR = str(tmp_path / "continuity")
 
 
 def attach_args() -> SimpleNamespace:
@@ -44,8 +51,9 @@ def test_matching_replay_replaces_stale_token_file(tmp_path: Path) -> None:
         }
     }
 
-    with mock.patch.object(portal_client, "call_tool", return_value=response), mock.patch.object(
-        portal_client, "emit"
+    with (
+        mock.patch.object(portal_client, "call_tool", return_value=response),
+        mock.patch.object(portal_client, "emit"),
     ):
         portal_client.cmd_attach(attach_args())
 
@@ -60,9 +68,10 @@ def test_accepted_replay_without_token_fails_instead_of_reusing_stale_token(
     token_file.write_text("stale-token", encoding="utf-8")
     response = {"result": {"accepted": True, "owner_token": None}}
 
-    with mock.patch.object(portal_client, "call_tool", return_value=response), pytest.raises(
-        SystemExit
-    ) as exc:
+    with (
+        mock.patch.object(portal_client, "call_tool", return_value=response),
+        pytest.raises(SystemExit) as exc,
+    ):
         portal_client.cmd_attach(attach_args())
 
     assert exc.value.code == 2
@@ -81,9 +90,10 @@ def test_attach_conflict_is_not_masked_by_existing_token_file(tmp_path: Path) ->
         }
     }
 
-    with mock.patch.object(portal_client, "call_tool", return_value=response), pytest.raises(
-        SystemExit
-    ) as exc:
+    with (
+        mock.patch.object(portal_client, "call_tool", return_value=response),
+        pytest.raises(SystemExit) as exc,
+    ):
         portal_client.cmd_attach(attach_args())
 
     assert exc.value.code == 2

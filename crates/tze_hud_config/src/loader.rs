@@ -33,7 +33,8 @@
 use std::collections::HashMap;
 
 use tze_hud_scene::config::{
-    ConfigError, ConfigErrorCode, ConfigLoader, ParseError, ResolvedConfig, is_canonical_capability,
+    ConfigError, ConfigErrorCode, ConfigLoader, ParseError, RegisteredAgentBudgetOverrides,
+    ResolvedConfig, is_canonical_capability,
 };
 
 use crate::agents;
@@ -405,12 +406,21 @@ impl ConfigLoader for TzeHudConfig {
             .collect();
 
         let mut agent_capabilities: HashMap<String, Vec<String>> = HashMap::new();
+        let mut agent_budget_overrides = HashMap::new();
         if let Some(agents) = &self.raw.agents
             && let Some(registered) = &agents.registered
         {
             for (name, agent) in registered {
                 agent_capabilities
                     .insert(name.clone(), agent.capabilities.clone().unwrap_or_default());
+                agent_budget_overrides.insert(
+                    name.clone(),
+                    RegisteredAgentBudgetOverrides {
+                        max_tiles: agent.max_tiles,
+                        max_texture_mb: agent.max_texture_mb,
+                        max_update_hz: agent.max_update_hz,
+                    },
+                );
             }
         }
 
@@ -420,6 +430,7 @@ impl ConfigLoader for TzeHudConfig {
             profile,
             tab_names,
             agent_capabilities,
+            agent_budget_overrides,
             media_ingress: media_ingress::resolve_media_ingress(&self.raw),
             source_path,
         })

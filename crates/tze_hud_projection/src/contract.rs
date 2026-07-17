@@ -76,6 +76,7 @@ pub const INITIAL_ERROR_CODES: [ProjectionErrorCode; 12] = [
 #[serde(rename_all = "snake_case")]
 pub enum ProjectionOperation {
     Attach,
+    List,
     PublishOutput,
     PublishStatus,
     GetPendingInput,
@@ -221,6 +222,7 @@ pub enum PortalInputFeedbackState {
 #[serde(rename_all = "snake_case")]
 pub enum ProjectionAuditCategory {
     Attach,
+    CallerList,
     OwnerPublish,
     OwnerStatus,
     OwnerInputRead,
@@ -245,10 +247,14 @@ pub struct ProjectionBounds {
     pub max_pending_input_total_bytes: usize,
     pub max_poll_items: usize,
     pub max_poll_response_bytes: usize,
+    pub max_list_items: usize,
     pub max_portal_updates_per_second: u32,
     pub max_seen_logical_units: usize,
     pub max_audit_records: usize,
     pub owner_token_ttl_wall_us: u64,
+    /// Maximum wall-clock gap between authenticated owner operations before the
+    /// projection is presented as stale. Applied when the authority is built.
+    pub agent_liveness_degraded_after_wall_us: u64,
 }
 
 impl Default for ProjectionBounds {
@@ -263,10 +269,13 @@ impl Default for ProjectionBounds {
             max_pending_input_total_bytes: crate::DEFAULT_MAX_PENDING_INPUT_TOTAL_BYTES,
             max_poll_items: crate::DEFAULT_MAX_POLL_ITEMS,
             max_poll_response_bytes: crate::DEFAULT_MAX_POLL_RESPONSE_BYTES,
+            max_list_items: crate::DEFAULT_MAX_LIST_ITEMS,
             max_portal_updates_per_second: crate::DEFAULT_MAX_PORTAL_UPDATES_PER_SECOND,
             max_seen_logical_units: crate::DEFAULT_MAX_SEEN_LOGICAL_UNITS,
             max_audit_records: crate::DEFAULT_MAX_AUDIT_RECORDS,
             owner_token_ttl_wall_us: crate::DEFAULT_OWNER_TOKEN_TTL_WALL_US,
+            agent_liveness_degraded_after_wall_us:
+                crate::DEFAULT_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US,
         }
     }
 }
@@ -282,6 +291,7 @@ impl ProjectionBounds {
             || self.max_pending_input_total_bytes == 0
             || self.max_poll_items == 0
             || self.max_poll_response_bytes == 0
+            || self.max_list_items == 0
             || self.max_portal_updates_per_second == 0
             || self.max_seen_logical_units == 0
             || self.max_audit_records == 0
@@ -295,6 +305,16 @@ impl ProjectionBounds {
             return Err(ProjectionContractError::InvalidArgument(
                 "visible transcript bound cannot exceed retained transcript bound".to_string(),
             ));
+        }
+        if !(crate::MIN_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US
+            ..=crate::MAX_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US)
+            .contains(&self.agent_liveness_degraded_after_wall_us)
+        {
+            return Err(ProjectionContractError::InvalidArgument(format!(
+                "agent liveness threshold must be within {}..={} wall-clock microseconds",
+                crate::MIN_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US,
+                crate::MAX_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US
+            )));
         }
         Ok(())
     }
@@ -321,6 +341,27 @@ impl OperationEnvelope {
             &self.projection_id,
             crate::MAX_PROJECTION_ID_BYTES,
         )?;
+        validate_non_empty_bounded("request_id", &self.request_id, crate::MAX_REQUEST_ID_BYTES)?;
+        if self.client_timestamp_wall_us == 0 {
+            return Err(ProjectionContractError::InvalidArgument(
+                "client_timestamp_wall_us must be non-zero".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// `list` request. Enumeration is caller-scoped rather than projection-scoped,
+/// so it deliberately carries no projection ID or owner token.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListProjectionsRequest {
+    pub request_id: String,
+    pub client_timestamp_wall_us: u64,
+}
+
+impl ListProjectionsRequest {
+    pub fn validate(&self) -> Result<(), ProjectionContractError> {
         validate_non_empty_bounded("request_id", &self.request_id, crate::MAX_REQUEST_ID_BYTES)?;
         if self.client_timestamp_wall_us == 0 {
             return Err(ProjectionContractError::InvalidArgument(
@@ -794,6 +835,19 @@ pub struct ProjectionStateSummary {
     pub reconnect: ReconnectBookkeeping,
 }
 
+/// Bounded caller-visible metadata for one active projection.
+///
+/// This intentionally excludes transcript text, pending-input text, owner
+/// tokens, classification, leases, and caller identity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectionListEntry {
+    pub projection_id: String,
+    pub display_name: String,
+    pub lifecycle_state: ProjectionLifecycleState,
+    pub unread_output_count: usize,
+    pub pending_input_count: usize,
+}
+
 /// Common operation response envelope.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectionResponse {
@@ -808,6 +862,9 @@ pub struct ProjectionResponse {
     pub owner_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle_state: Option<ProjectionLifecycleState>,
+    /// Caller-scoped summaries returned only by the `list` operation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projections: Vec<ProjectionListEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_input: Vec<PendingInputItem>,
     #[serde(default)]
@@ -836,6 +893,7 @@ impl ProjectionResponse {
             status_summary: bounded_copy(status_summary.into(), crate::MAX_STATUS_SUMMARY_BYTES),
             owner_token: None,
             lifecycle_state: None,
+            projections: Vec::new(),
             pending_input: Vec::new(),
             pending_remaining_count: 0,
             pending_remaining_bytes: 0,
@@ -860,6 +918,7 @@ impl ProjectionResponse {
             status_summary: bounded_copy(status_summary.into(), crate::MAX_STATUS_SUMMARY_BYTES),
             owner_token: None,
             lifecycle_state: None,
+            projections: Vec::new(),
             pending_input: Vec::new(),
             pending_remaining_count: 0,
             pending_remaining_bytes: 0,

@@ -52,16 +52,17 @@ use std::collections::HashMap;
 use tze_hud_config::{resolve_portal_tokens, tokens::DesignTokenMap};
 use tze_hud_input::{DraftNotificationBatch, InputProcessor};
 pub use tze_hud_mcp::portal_op::{
-    PendingInputBatch, PendingInputEntry, PortalOp, PortalOpRejection,
+    PendingInputBatch, PendingInputEntry, PortalOp, PortalOpRejection, ProjectionListBatch,
+    ProjectionListEntry,
 };
 use tze_hud_projection::{
     AcknowledgeInputRequest, AdapterDraftBatch, AdapterDraftCancel, AdapterDraftNotification,
     AdapterDraftSubmission, AdapterGeometrySnapshot, AdapterPortalRect, AttachRequest,
     CleanupAuthority, CleanupRequest, ContentClassification, DetachRequest, GetPendingInputRequest,
-    HudConnectionMetadata, InputAckState, OperationEnvelope, OutputKind, PendingInputItem,
-    PortalInputFeedback, ProjectedPortalPolicy, ProjectionAuthority, ProjectionBounds,
-    ProjectionErrorCode, ProjectionLifecycleState, ProjectionOperation, ProviderKind,
-    PublishOutputRequest, PublishStatusRequest,
+    HudConnectionMetadata, InputAckState, ListProjectionsRequest, OperationEnvelope, OutputKind,
+    PendingInputItem, PortalInputFeedback, ProjectedPortalPolicy, ProjectionAuthority,
+    ProjectionBounds, ProjectionErrorCode, ProjectionLifecycleState, ProjectionOperation,
+    ProviderKind, PublishOutputRequest, PublishStatusRequest,
     resident_grpc::{
         ResidentGrpcPortalAdapter, ResidentGrpcPortalCommandKind, ResidentGrpcPortalConfig,
         portal_visual_tokens_from_part_tokens,
@@ -115,6 +116,15 @@ const PORTAL_LINE_HEIGHT_MULTIPLIER: f32 = 1.4;
 /// This namespace is used when creating portal tiles and publishing content.
 /// It is distinct from any agent-facing namespace.
 pub const PORTAL_DRIVER_NAMESPACE: &str = "tze_hud_portal_driver";
+
+/// Current authenticated resident-principal identity at the projection seam.
+///
+/// The MCP configuration supports one resident principal today, so all
+/// resident projection operations share this stable non-secret identity. The
+/// authority still enforces its caller-scoped filter, allowing a future
+/// authenticated multi-principal transport to pass distinct identities without
+/// broadening this list operation's visibility.
+const MCP_PORTAL_CALLER_IDENTITY: &str = "mcp-portal";
 
 /// Default z-order for portal tiles created by the in-process driver.
 const PORTAL_Z_ORDER: u32 = 160;
@@ -362,6 +372,12 @@ fn pending_input_entry_from_item(item: &PendingInputItem) -> PendingInputEntry {
 struct DriveEntry {
     /// gRPC adapter that renders markdown and tracks tile state.
     adapter: ResidentGrpcPortalAdapter,
+    /// SceneGraph lease governing this projection's stale-surface grace.
+    ///
+    /// In-process projections attach their tile to this lease. Bridge-routed
+    /// projections deliberately keep it tile-less: the SceneGraph lease state
+    /// remains the single grace clock while the bridge owns the visible tile.
+    scene_lease_id: Option<SceneId>,
     /// Scene tile ID assigned to this portal, or `None` if not yet created.
     tile_scene_id: Option<SceneId>,
     /// Estimated total content height (px) from the last `RenderPortal` drain.
@@ -393,6 +409,9 @@ struct DriveEntry {
     /// re-deriving that from authority state every publish (which would inflate
     /// the reconnect bookkeeping on normal, non-recovery publishes).
     hud_disconnected: bool,
+    /// Agent-op staleness latch, distinct from HUD transport disconnection.
+    /// Both use the same stale treatment and scene lease grace path.
+    agent_liveness_degraded: bool,
     /// One-shot flag requesting a forced degraded repaint on the next drain
     /// (hud-h3mvo).
     ///
@@ -449,6 +468,10 @@ struct InProcessPortalDriveState {
     /// Scene tiles whose projection state has been accepted for detach/cleanup,
     /// but whose tile removal must wait until the next drain has scene access.
     pending_tile_removals: Vec<SceneId>,
+    /// Projection leases whose clean detach was accepted while scene access was
+    /// unavailable. Revoking them on the next drain prevents empty 24-hour lease
+    /// records from accumulating after normal detach/reattach cycles.
+    pending_lease_revocations: Vec<SceneId>,
     /// Current resolved design-token overrides (flat key → value strings).
     token_overrides: DesignTokenMap,
     /// Per-projection transport routing (hud-g7ool). Absent ⇒ the default
@@ -464,6 +487,7 @@ impl InProcessPortalDriveState {
         Self {
             entries: HashMap::new(),
             pending_tile_removals: Vec::new(),
+            pending_lease_revocations: Vec::new(),
             token_overrides: DesignTokenMap::new(),
             projection_transports: HashMap::new(),
         }
@@ -498,9 +522,11 @@ impl InProcessPortalDriveState {
             projection_id.to_string(),
             DriveEntry {
                 adapter,
+                scene_lease_id: None,
                 tile_scene_id: None,
                 prev_content_height_px: 0.0,
                 hud_disconnected: false,
+                agent_liveness_degraded: false,
                 needs_degraded_repaint: false,
                 activity_cue_clear_due_us: None,
                 activity_cue_carried_unread: 0,
@@ -513,10 +539,13 @@ impl InProcessPortalDriveState {
         // (hud-g7ool); the tombstone to the bridge is sent by the driver's
         // `detach_projection` before this runs.
         self.projection_transports.remove(projection_id);
-        if let Some(entry) = self.entries.remove(projection_id)
-            && let Some(tile_id) = entry.tile_scene_id
-        {
-            self.pending_tile_removals.push(tile_id);
+        if let Some(entry) = self.entries.remove(projection_id) {
+            if let Some(tile_id) = entry.tile_scene_id {
+                self.pending_tile_removals.push(tile_id);
+            }
+            if let Some(lease_id) = entry.scene_lease_id {
+                self.pending_lease_revocations.push(lease_id);
+            }
         }
     }
 
@@ -540,6 +569,10 @@ impl InProcessPortalDriveState {
     fn drain_pending_tile_removals(&mut self) -> Vec<SceneId> {
         self.pending_tile_removals.drain(..).collect()
     }
+
+    fn drain_pending_lease_revocations(&mut self) -> Vec<SceneId> {
+        self.pending_lease_revocations.drain(..).collect()
+    }
 }
 
 /// In-process projection authority driver.
@@ -550,10 +583,9 @@ impl InProcessPortalDriveState {
 pub struct InProcessPortalDriver {
     authority: ProjectionAuthority,
     drive: InProcessPortalDriveState,
-    /// Scene lease ID for the driver's portal tiles.
-    ///
-    /// Granted once at driver construction (or lazily on first use) and renewed
-    /// as needed.
+    /// Test-only observation alias for the most recently granted projection
+    /// lease. Production lifecycle decisions use only the owning DriveEntry.
+    #[cfg(test)]
     lease_id: Option<SceneId>,
     /// Publish-to-present latency bucket (hud-ttq97).
     ///
@@ -607,6 +639,7 @@ impl InProcessPortalDriver {
         Self {
             authority,
             drive: InProcessPortalDriveState::new(),
+            #[cfg(test)]
             lease_id: None,
             portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
             drain_deferral_count: 0,
@@ -1055,6 +1088,50 @@ impl InProcessPortalDriver {
     pub fn dispatch_portal_op(&mut self, op: PortalOp) {
         let now_us = now_wall_us();
         match op {
+            PortalOp::List { reply } => {
+                let request = ListProjectionsRequest {
+                    request_id: uuid::Uuid::now_v7().to_string(),
+                    client_timestamp_wall_us: now_us.max(1),
+                };
+                let response = self.authority.handle_list_projections(
+                    request,
+                    MCP_PORTAL_CALLER_IDENTITY,
+                    now_us,
+                );
+                if response.accepted {
+                    let batch = ProjectionListBatch {
+                        projections: response
+                            .projections
+                            .into_iter()
+                            .map(|projection| ProjectionListEntry {
+                                projection_id: projection.projection_id,
+                                display_name: projection.display_name,
+                                lifecycle_state: lifecycle_state_wire(projection.lifecycle_state),
+                                unread_output_count: projection.unread_output_count,
+                                pending_input_count: projection.pending_input_count,
+                            })
+                            .collect(),
+                    };
+                    tracing::debug!(
+                        projection_count = batch.projections.len(),
+                        "portal_op: List accepted"
+                    );
+                    let _ = reply.send(Ok(batch));
+                } else {
+                    let error_code = response
+                        .error_code
+                        .unwrap_or(ProjectionErrorCode::ProjectionInternalError);
+                    tracing::warn!(
+                        error_code = %error_code,
+                        "portal_op: List denied"
+                    );
+                    let _ = reply.send(Err(PortalOpRejection::new(
+                        error_code,
+                        response.status_summary,
+                    )));
+                }
+            }
+
             PortalOp::Attach {
                 projection_id,
                 display_name,
@@ -1105,7 +1182,9 @@ impl InProcessPortalDriver {
                     hud_target,
                     idempotency_key,
                 };
-                let resp = self.authority.handle_attach(req, "mcp-portal", now_us);
+                let resp = self
+                    .authority
+                    .handle_attach(req, MCP_PORTAL_CALLER_IDENTITY, now_us);
                 if resp.accepted {
                     // Wire the drive state so the drain loop can materialise tiles.
                     //
@@ -1219,9 +1298,9 @@ impl InProcessPortalDriver {
                     coalesce_key,
                     expects_reply: expects_reply.unwrap_or(false),
                 };
-                let resp = self
-                    .authority
-                    .handle_publish_output(req, "mcp-portal", now_us);
+                let resp =
+                    self.authority
+                        .handle_publish_output(req, MCP_PORTAL_CALLER_IDENTITY, now_us);
                 if resp.accepted {
                     // A successful owner publish after an ungraceful drop is the
                     // reconnect signal: restore the connection so the degraded
@@ -1282,9 +1361,9 @@ impl InProcessPortalDriver {
                     lifecycle_state,
                     status_text,
                 };
-                let resp = self
-                    .authority
-                    .handle_publish_status(req, "mcp-portal", now_us);
+                let resp =
+                    self.authority
+                        .handle_publish_status(req, MCP_PORTAL_CALLER_IDENTITY, now_us);
                 if resp.accepted {
                     // Echo the authority's applied lifecycle state back so the MCP
                     // caller can observe the round-trip. Fall back to the request
@@ -1329,9 +1408,11 @@ impl InProcessPortalDriver {
                     max_items,
                     max_bytes,
                 };
-                let resp = self
-                    .authority
-                    .handle_get_pending_input(req, "mcp-portal", now_us);
+                let resp = self.authority.handle_get_pending_input(
+                    req,
+                    MCP_PORTAL_CALLER_IDENTITY,
+                    now_us,
+                );
                 if resp.accepted {
                     let items = resp
                         .pending_input
@@ -1397,9 +1478,11 @@ impl InProcessPortalDriver {
                     ack_message,
                     not_before_wall_us,
                 };
-                let resp = self
-                    .authority
-                    .handle_acknowledge_input(req, "mcp-portal", now_us);
+                let resp = self.authority.handle_acknowledge_input(
+                    req,
+                    MCP_PORTAL_CALLER_IDENTITY,
+                    now_us,
+                );
                 if resp.accepted {
                     tracing::debug!(
                         proj_id = %projection_id,
@@ -1437,7 +1520,9 @@ impl InProcessPortalDriver {
                     owner_token,
                     reason,
                 };
-                let resp = self.authority.handle_detach(req, "mcp-portal", now_us);
+                let resp = self
+                    .authority
+                    .handle_detach(req, MCP_PORTAL_CALLER_IDENTITY, now_us);
                 if resp.accepted {
                     // The authority purged its session + coalescer entry. Drop
                     // the driver-side drive entry / tile mapping so the next
@@ -1494,7 +1579,9 @@ impl InProcessPortalDriver {
                     operator_authority,
                     reason,
                 };
-                let resp = self.authority.handle_cleanup(req, "mcp-portal", now_us);
+                let resp = self
+                    .authority
+                    .handle_cleanup(req, MCP_PORTAL_CALLER_IDENTITY, now_us);
                 if resp.accepted {
                     // Cleanup purges authority state through either owner-token or
                     // operator-authority paths. Drop driver-side state as well so
@@ -1574,7 +1661,7 @@ impl InProcessPortalDriver {
     /// This is the read-only first step of the two-phase tab resolution used by
     /// the `CreatePortalTile` drain arm.  The caller is responsible for calling
     /// `switch_active_tab` on the returned ID — but only **after** both
-    /// `ensure_driver_lease` and `create_tile` have succeeded.  Deferring the
+    /// `ensure_projection_lease` and `create_tile` have succeeded. Deferring the
     /// switch ensures that a failing cycle leaves `scene.active_tab` unchanged
     /// (the projection stays attached and self-heals on its next publish).
     ///
@@ -1614,8 +1701,34 @@ impl InProcessPortalDriver {
     ) {
         self.drain_pending_tile_removals(scene);
 
+        // Agent-side liveness sweep (hud-ccj2o). Authentication recency lives
+        // in the projection authority; presentation and removal stay runtime-
+        // owned. Synchronize degradation and recovery before lease handling so
+        // a recovered owner can reactivate an orphaned lease before rendering.
+        self.authority
+            .sweep_agent_liveness_degradation(now_us.max(1));
+        let liveness_states: Vec<(String, bool)> = self
+            .drive
+            .entries
+            .keys()
+            .map(|id| (id.clone(), self.authority.is_agent_liveness_degraded(id)))
+            .collect();
+        for (projection_id, degraded) in liveness_states {
+            let Some(entry) = self.drive.entries.get_mut(&projection_id) else {
+                continue;
+            };
+            if entry.agent_liveness_degraded == degraded {
+                continue;
+            }
+            entry.agent_liveness_degraded = degraded;
+            entry.needs_degraded_repaint = true;
+            if degraded {
+                entry.activity_cue_clear_due_us = None;
+            }
+        }
+
         // Resume-side of the lease-grace lifecycle (hud-i429x): if an owner
-        // returned within grace, reconnect the orphaned driver lease BEFORE the
+        // returned within grace, reconnect its orphaned lease BEFORE the
         // render due-loop below, so a resumed publish paints under an Active lease
         // (`set_tile_root_checked` → `require_active_lease`) instead of being
         // rejected and dropped. The orphan + reap half runs at the end of drain.
@@ -1741,6 +1854,17 @@ impl InProcessPortalDriver {
             // Non-bridged projections (the default, and the shipped config) fall
             // through to the unchanged in-process path and are never teed.
             if self.effective_transport(&proj_id) == PortalTransport::ResidentGrpcBridge {
+                // The bridge owns the visible tile, but the runtime still owns
+                // stale-surface governance. A tile-less per-projection lease
+                // supplies the same SceneGraph grace clock as the in-process
+                // path without creating a second timer.
+                if self.ensure_projection_lease(&proj_id, scene).is_none() {
+                    tracing::warn!(
+                        proj_id = %proj_id,
+                        "portal drain: could not obtain bridge governance lease"
+                    );
+                    continue;
+                }
                 if let Some(tx) = &self.resident_grpc_bridge_tx {
                     let _ = tx.try_send(BridgeMessage::Publish {
                         projection_id: proj_id.clone(),
@@ -1755,7 +1879,7 @@ impl InProcessPortalDriver {
 
             // Check if the drive entry exists and what kind of command to issue.
             // We do this before taking a mutable borrow of drive.entries so that
-            // `ensure_driver_lease` (which borrows `self` mutably) can be called
+            // `ensure_projection_lease` (which borrows `self` mutably) can be called
             // without a concurrent mutable borrow through `entry`.
             let entry_exists = self.drive.entries.contains_key(&proj_id);
             if !entry_exists {
@@ -1788,7 +1912,7 @@ impl InProcessPortalDriver {
                     //
                     // Tab activation is DEFERRED (hud-zccuf): we find/create the
                     // host tab here but only call `switch_active_tab` after both
-                    // `ensure_driver_lease` and `create_tile` succeed.  A failing
+                    // `ensure_projection_lease` and `create_tile` succeed. A failing
                     // cycle must not leave a premature `active_tab` mutation — the
                     // projection stays attached and self-heals on its next publish.
                     let pending_tab_activation; // committed in the Ok arm below
@@ -1829,19 +1953,19 @@ impl InProcessPortalDriver {
 
                     // Ensure the driver has an active lease in the scene.
                     // Must be called BEFORE taking entry borrow to avoid borrow conflict.
-                    let lease_id = match self.ensure_driver_lease(scene) {
+                    let lease_id = match self.ensure_projection_lease(&proj_id, scene) {
                         Some(id) => id,
                         None => {
                             tracing::warn!(
                                 proj_id = %proj_id,
-                                "portal drain: could not obtain driver lease — \
+                                "portal drain: could not obtain projection lease — \
                                  CreatePortalTile deferred"
                             );
                             continue;
                         }
                     };
 
-                    // Now take the mutable entry borrow after ensure_driver_lease is done.
+                    // Now take the mutable entry borrow after lease acquisition.
                     let Some(entry) = self.drive.entries.get_mut(&proj_id) else {
                         continue;
                     };
@@ -2474,10 +2598,11 @@ impl InProcessPortalDriver {
         }
     }
 
-    /// Ensure the driver has an active lease in the scene graph.
+    /// Ensure one projection has an active lease in the scene graph.
     ///
     /// Returns the cached lease only if it is still **Active** (mutations
-    /// allowed); otherwise grants a fresh one and caches it.
+    /// allowed). An Orphaned lease remains authoritative until reconnect or
+    /// expiry; terminal/missing leases are replaced and cached.
     ///
     /// The active-state check (not mere map presence) is load-bearing for the
     /// post-grace re-attach path: when a prior portal's lease orphans and its
@@ -2489,14 +2614,26 @@ impl InProcessPortalDriver {
     /// `create_tile` would fail its `require_active_lease` check and the new
     /// session would silently get no portal — never reviving the removed surface
     /// nor presenting pre-death content as live, but also never coming back.
-    fn ensure_driver_lease(&mut self, scene: &mut SceneGraph) -> Option<SceneId> {
-        if let Some(lease_id) = self.lease_id {
+    fn ensure_projection_lease(
+        &mut self,
+        projection_id: &str,
+        scene: &mut SceneGraph,
+    ) -> Option<SceneId> {
+        let cached = self.drive.entries.get(projection_id)?.scene_lease_id;
+        if let Some(lease_id) = cached {
             // Reuse only if the cached lease is still Active. A terminal
             // (Expired/Revoked) or orphaned/suspended lease must NOT be reused —
             // `lease_capabilities` would still return `Some` for an Expired
             // lease left resident by grace-period reaping, so we check liveness.
             if scene.lease_is_active(&lease_id) {
                 return Some(lease_id);
+            }
+            // Never replace an Orphaned lease while its stale-surface grace is
+            // running. Authenticated recovery reconnects this exact lease at the
+            // top of the drain; stale traffic must not obtain a fresh lease and
+            // silently escape the existing grace bound.
+            if scene.lease_is_orphaned(&lease_id) {
+                return None;
             }
         }
         // Grant a new lease for the portal driver.
@@ -2506,11 +2643,16 @@ impl InProcessPortalDriver {
             86_400_000, // 24h in ms
             vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
-        self.lease_id = Some(new_lease);
+        self.drive.entries.get_mut(projection_id)?.scene_lease_id = Some(new_lease);
+        #[cfg(test)]
+        {
+            // Test observation only; production lifecycle code never consults it.
+            self.lease_id = Some(new_lease);
+        }
         Some(new_lease)
     }
 
-    /// Reconnect the orphaned driver lease when an owner returns within grace —
+    /// Reconnect an orphaned projection lease when its owner returns within grace —
     /// run at the TOP of `drain_inner`, BEFORE the render due-loop (hud-i429x).
     ///
     /// Ordering is load-bearing: a resume publish is rendered by the due-loop via
@@ -2525,28 +2667,31 @@ impl InProcessPortalDriver {
     /// the grace clock so the reaper leaves the resumed surface alone
     /// (resume-within-grace, hud-xlx1r).
     ///
-    /// KNOWN LIMITATION (shared driver lease): all in-process portals share ONE
-    /// driver lease, so a partial reconnect (some owners return, some do not)
-    /// reconnects the whole lease. The still-disconnected siblings are then no
-    /// longer under an Orphaned lease, so the grace reaper cannot bound their stale
-    /// windows. This is unreachable on the only production trigger today — a whole-
-    /// channel drop (`mark_all_projections_disconnected`) also closes the portal_op
-    /// channel, so no per-projection reconnect can arrive — but per-session drop
-    /// wiring (hud-b2llg) will need per-projection lease granularity; tracked as a
-    /// follow-up.
+    /// Lease ownership is per projection: recovering one owner never reconnects
+    /// a stale sibling's lease or extends that sibling's stale-content window.
     fn reconnect_lease_grace_on_resume(&mut self, scene: &mut SceneGraph) {
-        let Some(lease_id) = self.lease_id else {
-            return;
-        };
-        let any_live = self.drive.entries.values().any(|e| !e.hud_disconnected);
-        if any_live && scene.lease_is_orphaned(&lease_id) {
+        let reconnects: Vec<(String, SceneId)> = self
+            .drive
+            .entries
+            .iter()
+            .filter_map(|(projection_id, entry)| {
+                (!entry.hud_disconnected && !entry.agent_liveness_degraded)
+                    .then_some(entry.scene_lease_id)
+                    .flatten()
+                    .filter(|lease_id| scene.lease_is_orphaned(lease_id))
+                    .map(|lease_id| (projection_id.clone(), lease_id))
+            })
+            .collect();
+        for (projection_id, lease_id) in reconnects {
             match scene.reconnect_lease(&lease_id, scene.now_millis()) {
                 Ok(()) => tracing::info!(
-                    "portal: driver lease reconnected within grace — resuming the same surface"
+                    proj_id = %projection_id,
+                    "portal: projection lease reconnected within grace — resuming the same surface"
                 ),
                 Err(error) => tracing::warn!(
+                    proj_id = %projection_id,
                     ?error,
-                    "portal: failed to reconnect driver lease within grace"
+                    "portal: failed to reconnect projection lease within grace"
                 ),
             }
         }
@@ -2571,64 +2716,61 @@ impl InProcessPortalDriver {
     /// content-TTL sweep relies on (hud-vfwb1). The steps are cheap map scans, both
     /// no-ops on the common all-live path:
     ///
-    /// 1. ORPHAN — once EVERY attached projection under the shared lease is latched
-    ///    disconnected (`hud_disconnected`), orphan the still-Active lease so the
-    ///    grace clock starts (`disconnect_lease` also badges the owned tiles; the
-    ///    transcript already carries the `connection_degraded` dim). Gated on
-    ///    all-disconnected, not any: the whole-channel drop
-    ///    (`mark_all_projections_disconnected`) is the only production trigger
-    ///    today, and orphaning a shared lease while one projection is still live
-    ///    would wrongly badge it. Orphaning at drain END (after the degraded
-    ///    repaint) keeps that repaint under the still-Active lease.
-    /// 2. REAP — expire the driver lease iff it is Orphaned and its grace has
-    ///    elapsed, then drop every drive entry whose tile was removed and
-    ///    `expire_projection` it in the authority so no further `ProjectedPortalState`
-    ///    is produced (stale content can never be re-materialised). Gated on
-    ///    Orphaned so a continuously-live portal is never reaped on the lease's long
-    ///    resident TTL. `expire_lease` bumps the scene version, so the removal
-    ///    repaints even on an idle frame.
+    /// 1. ORPHAN — each disconnected or agent-stale projection orphans its own
+    ///    Active lease. In-process tiles receive the scene disconnection badge;
+    ///    bridge-routed projections use a tile-less lease with the same clock.
+    /// 2. REAP — expire each elapsed orphan lease, then remove that one projection
+    ///    from authority and drive state. Bridge entries also emit a `Detach`
+    ///    tombstone. A continuously-live projection's Active lease is never reaped
+    ///    on its long resident TTL.
     fn sweep_lease_grace(&mut self, scene: &mut SceneGraph) {
-        let Some(lease_id) = self.lease_id else {
-            return;
-        };
         // Stamp lifecycle transitions with the scene's own clock so the grace
         // bound checked by `expire_lease` is in the same domain.
         let now_ms = scene.now_millis();
 
-        // 1. ORPHAN: every live projection dropped → start grace on the lease.
-        let all_disconnected = !self.drive.entries.is_empty()
-            && self.drive.entries.values().all(|e| e.hud_disconnected);
-        if all_disconnected && scene.lease_is_active(&lease_id) {
-            match scene.disconnect_lease(&lease_id, now_ms) {
+        let lifecycle: Vec<(String, SceneId, bool)> = self
+            .drive
+            .entries
+            .iter()
+            .filter_map(|(projection_id, entry)| {
+                entry.scene_lease_id.map(|lease_id| {
+                    (
+                        projection_id.clone(),
+                        lease_id,
+                        entry.hud_disconnected || entry.agent_liveness_degraded,
+                    )
+                })
+            })
+            .collect();
+
+        // 1. ORPHAN: each stale projection starts its own grace clock.
+        for (projection_id, lease_id, stale) in &lifecycle {
+            if !stale || !scene.lease_is_active(lease_id) {
+                continue;
+            }
+            match scene.disconnect_lease(lease_id, now_ms) {
                 Ok(()) => tracing::info!(
-                    "portal: driver lease orphaned on ungraceful drop — \
+                    proj_id = %projection_id,
+                    "portal: projection lease orphaned on ungraceful drop — \
                      degraded window now bounded by lease grace"
                 ),
                 Err(error) => tracing::warn!(
+                    proj_id = %projection_id,
                     ?error,
-                    "portal: failed to orphan driver lease on ungraceful drop"
+                    "portal: failed to orphan projection lease on ungraceful drop"
                 ),
             }
         }
 
-        // 2. REAP: grace elapsed → remove the surface via the orphan path.
-        // Gate on Orphaned so an Active lease is never reaped on its 24h resident
-        // TTL — only the disconnect/grace path removes a portal here.
-        if !scene.lease_is_orphaned(&lease_id) {
-            return;
+        // 2. REAP: each elapsed orphan lease identifies exactly one projection.
+        // This remains valid for bridge-only shadow leases whose removed-tile
+        // list is intentionally empty.
+        let mut reaped = Vec::new();
+        for (projection_id, lease_id, _) in &lifecycle {
+            if scene.lease_is_orphaned(lease_id) && scene.expire_lease(lease_id).is_some() {
+                reaped.push(projection_id.clone());
+            }
         }
-        let Some(expiry) = scene.expire_lease(&lease_id) else {
-            return;
-        };
-        let removed: std::collections::HashSet<SceneId> =
-            expiry.removed_tiles.iter().copied().collect();
-        let reaped: Vec<String> = self
-            .drive
-            .entries
-            .iter()
-            .filter(|(_, e)| e.tile_scene_id.is_some_and(|t| removed.contains(&t)))
-            .map(|(id, _)| id.clone())
-            .collect();
         for proj_id in reaped {
             self.authority.expire_projection(&proj_id);
             if self.effective_transport(&proj_id) == PortalTransport::ResidentGrpcBridge {
@@ -2662,6 +2804,19 @@ impl InProcessPortalDriver {
                         "portal drain: failed to remove detached projection tile"
                     );
                 }
+            }
+        }
+        for lease_id in self.drive.drain_pending_lease_revocations() {
+            match scene.revoke_lease(lease_id) {
+                Ok(()) => tracing::info!(
+                    lease_id = ?lease_id,
+                    "portal drain: revoked detached projection lease"
+                ),
+                Err(error) => tracing::warn!(
+                    lease_id = ?lease_id,
+                    ?error,
+                    "portal drain: failed to revoke detached projection lease"
+                ),
             }
         }
     }
@@ -4073,6 +4228,75 @@ mod tests {
             "hud-bq0gl.2 regression: portal content published via dispatch_portal_op \
              must flow through drain_inner and set tile_follow_tail_at_tail (spec §3.2); \
              removing the dispatch_portal_op → authority wiring causes this to fail"
+        );
+    }
+
+    #[test]
+    fn dispatch_portal_op_list_maps_only_content_free_summaries() {
+        let mut driver = InProcessPortalDriver::new();
+        let (attach_tx, attach_rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: "listed-projection".to_string(),
+            display_name: "Listed projection".to_string(),
+            idempotency_key: None,
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
+            reply: attach_tx,
+        });
+        let owner_token = attach_rx
+            .blocking_recv()
+            .expect("attach reply must arrive")
+            .expect("attach must be accepted");
+
+        let (publish_tx, publish_rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::PublishOutput {
+            projection_id: "listed-projection".to_string(),
+            owner_token,
+            output_text: "private transcript must not be listed".to_string(),
+            logical_unit_id: Some("listed-output".to_string()),
+            output_kind: None,
+            content_classification: None,
+            coalesce_key: None,
+            expects_reply: None,
+            reply: publish_tx,
+        });
+        publish_rx
+            .blocking_recv()
+            .expect("publish reply must arrive")
+            .expect("publish must be accepted");
+        driver
+            .authority_mut()
+            .enqueue_input(
+                "listed-projection",
+                "listed-input",
+                "private input must not be listed".to_string(),
+                1,
+                1_000,
+                None,
+            )
+            .expect("test input must be accepted");
+
+        let (list_tx, list_rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::List { reply: list_tx });
+        let batch = list_rx
+            .blocking_recv()
+            .expect("list reply must arrive")
+            .expect("list must be accepted");
+
+        assert_eq!(batch.projections.len(), 1);
+        assert_eq!(batch.projections[0].projection_id, "listed-projection");
+        assert_eq!(batch.projections[0].unread_output_count, 1);
+        assert_eq!(batch.projections[0].pending_input_count, 1);
+        let payload = serde_json::to_string(&batch).expect("list batch must serialize");
+        assert!(
+            !payload.contains("private transcript must not be listed")
+                && !payload.contains("private input must not be listed")
+                && !payload.contains("owner_token"),
+            "driver list mapping must never forward portal content or owner credentials: {payload}"
         );
     }
 
@@ -7326,7 +7550,8 @@ mod tests {
     // bridge tears down the remote portal (absorbs hud-sjdkk).
 
     /// (a) A projection routed to the bridge is materialised SOLELY over the
-    /// bridge: no in-process scene tile, no scene mutation, exactly one `Publish`.
+    /// bridge: no in-process scene tile, one tile-less governance lease, exactly
+    /// one `Publish`.
     #[test]
     fn bridged_projection_materialises_via_bridge_and_suppresses_direct_path() {
         let mut driver = InProcessPortalDriver::new();
@@ -7346,7 +7571,8 @@ mod tests {
         publish(&mut driver, proj, &token, "bridged line", 100);
         driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
 
-        // In-process direct path suppressed: no scene tile, scene untouched.
+        // In-process direct path suppressed: no scene tile. The sole scene
+        // mutation is the tile-less lease used for stale-surface governance.
         assert!(
             driver
                 .drive
@@ -7358,9 +7584,9 @@ mod tests {
             "a bridged projection must NOT create an in-process scene tile"
         );
         assert_eq!(
-            scene.version, version_before,
-            "a bridged projection must not mutate the in-process scene \
-             (direct-scene path suppressed)"
+            scene.version,
+            version_before + 1,
+            "a bridged projection creates only its tile-less governance lease"
         );
 
         // The bridge is the sole materialiser: exactly one Publish for this proj.
@@ -7519,8 +7745,9 @@ mod tests {
              this is the wiring hud-hfuxy adds"
         );
         assert_eq!(
-            scene.version, version_before,
-            "a bridge-routed projection must not mutate the in-process scene"
+            scene.version,
+            version_before + 1,
+            "a bridge-routed projection creates only its tile-less governance lease"
         );
 
         let mut publishes = 0;
@@ -7668,10 +7895,13 @@ mod tests {
             "a bridged pure drop must forward exactly one degraded Publish to the bridge"
         );
 
-        // The in-process scene is untouched (bridged path never paints a tile).
+        // The bridged path paints no local tile. Its one scene mutation here is
+        // orphaning the tile-less governance lease to start the shared grace
+        // mechanism.
         assert_eq!(
-            scene.version, version_before_drop_drain,
-            "a bridged projection's degraded drain must not mutate the in-process scene"
+            scene.version,
+            version_before_drop_drain + 1,
+            "a bridged degraded drain only orphans its tile-less governance lease"
         );
 
         // One-shot: the flag is consumed so an idle degraded bridged entry is not
@@ -7773,6 +8003,12 @@ mod tests {
             .expect("drive entry must exist")
             .tile_scene_id
             .expect("drain must create a portal tile");
+        let lease_id = driver
+            .drive
+            .entries
+            .get(proj)
+            .and_then(|entry| entry.scene_lease_id)
+            .expect("materialised projection must own a lease");
         assert!(
             scene.tiles.contains_key(&tile_id),
             "precondition: projected tile must exist before cleanup"
@@ -7820,6 +8056,10 @@ mod tests {
         assert!(
             scene.drain_removed_tile_ids().contains(&tile_id),
             "accepted cleanup must publish a removed-tile notification for external state pruning"
+        );
+        assert!(
+            !scene.lease_is_active(&lease_id),
+            "accepted cleanup must revoke the detached projection's lease"
         );
     }
 
@@ -8262,6 +8502,314 @@ mod tests {
             scene.tile_count(),
             0,
             "draining after reap does not revive the surface"
+        );
+    }
+
+    /// hud-ccj2o: agent-side silence uses the same governed orphan/grace window
+    /// as an explicit upstream drop. The liveness threshold opens Degraded; it
+    /// does not create a second independent surface-expiry timer.
+    #[test]
+    fn agent_liveness_degradation_is_bounded_by_existing_lease_grace() {
+        use std::sync::Arc;
+        use tze_hud_scene::TestClock;
+
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                agent_liveness_degraded_after_wall_us: 1_000_000,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
+            drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
+        };
+
+        let projection_id = "proj-agent-liveness-grace";
+        let token = attach_and_get_token(&mut driver, projection_id);
+        driver.attach_projection(projection_id, Vec::new());
+        publish(
+            &mut driver,
+            projection_id,
+            &token,
+            "last live output",
+            1_100,
+        );
+
+        let clock = TestClock::new(1_000);
+        let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, Arc::new(clock.clone()));
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_100);
+        let lease = driver
+            .lease_id
+            .expect("first drain grants the portal lease");
+        assert_eq!(scene.tile_count(), 1);
+        assert!(scene.lease_is_active(&lease));
+
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_001_100);
+        assert!(
+            scene.lease_is_orphaned(&lease),
+            "the authority liveness transition must open the existing scene lease grace"
+        );
+        assert!(
+            driver
+                .authority_mut()
+                .projected_portal_state(projection_id, &ProjectedPortalPolicy::permit_all())
+                .expect("stale portal is retained during grace")
+                .connection_degraded
+        );
+        assert_eq!(scene.tile_count(), 1, "stale content remains during grace");
+
+        clock.advance(SceneGraph::DEFAULT_GRACE_PERIOD_MS + 1);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_300);
+        assert_eq!(
+            scene.tile_count(),
+            0,
+            "lease grace expiry removes stale content"
+        );
+        assert!(
+            driver
+                .authority_mut()
+                .projected_portal_state(projection_id, &ProjectedPortalPolicy::permit_all())
+                .is_none(),
+            "the grace-reaped projection cannot rematerialize stale state"
+        );
+    }
+
+    /// Review regression for hud-ccj2o: recovering one projection must not
+    /// reconnect a stale sibling's grace clock. Each projection owns its own
+    /// governed surface lifecycle even though both are driven by one runtime.
+    #[test]
+    fn partial_agent_liveness_recovery_reaps_only_the_stale_projection() {
+        use std::sync::Arc;
+        use tze_hud_scene::TestClock;
+
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                agent_liveness_degraded_after_wall_us: 1_000_000,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
+            drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
+        };
+
+        let projection_a = "proj-liveness-recovered";
+        let projection_b = "proj-liveness-stale";
+        let token_a = attach_and_get_token(&mut driver, projection_a);
+        let token_b = attach_and_get_token(&mut driver, projection_b);
+        driver.attach_projection(projection_a, Vec::new());
+        driver.attach_projection(projection_b, Vec::new());
+        publish(&mut driver, projection_a, &token_a, "live A", 1_100);
+        publish(&mut driver, projection_b, &token_b, "live B", 1_100);
+
+        let clock = TestClock::new(1_000);
+        let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, Arc::new(clock.clone()));
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_100);
+        assert_eq!(scene.tile_count(), 2, "both projections start live");
+
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_001_100);
+        assert!(driver.authority.is_agent_liveness_degraded(projection_a));
+        assert!(driver.authority.is_agent_liveness_degraded(projection_b));
+
+        // Authenticated owner traffic recovers A only, within scene lease grace.
+        publish(
+            &mut driver,
+            projection_a,
+            &token_a,
+            "A recovered",
+            1_001_101,
+        );
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_001_101);
+        assert!(!driver.authority.is_agent_liveness_degraded(projection_a));
+        assert!(driver.authority.is_agent_liveness_degraded(projection_b));
+
+        clock.advance(SceneGraph::DEFAULT_GRACE_PERIOD_MS + 1);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_001_102);
+
+        assert!(
+            driver.drive.entries.contains_key(projection_a),
+            "the authenticated projection must survive"
+        );
+        assert!(
+            driver
+                .authority
+                .projected_portal_state(projection_a, &ProjectedPortalPolicy::permit_all())
+                .is_some(),
+            "the authenticated projection must remain materialisable"
+        );
+        assert!(
+            !driver.drive.entries.contains_key(projection_b),
+            "the independently stale projection must be reaped after grace"
+        );
+        assert!(
+            driver
+                .authority
+                .projected_portal_state(projection_b, &ProjectedPortalPolicy::permit_all())
+                .is_none(),
+            "the grace-reaped sibling must not rematerialise stale state"
+        );
+        assert_eq!(scene.tile_count(), 1, "only A's governed surface remains");
+    }
+
+    /// Review regression for hud-ccj2o: a bridge-routed projection has no local
+    /// tile, but it still needs the same SceneGraph lease-grace governance. On
+    /// expiry the remote materialiser receives one tombstone and both runtime
+    /// state holders forget the projection.
+    #[test]
+    fn bridged_agent_liveness_grace_expiry_emits_detach_and_reaps_state() {
+        use std::sync::Arc;
+        use tze_hud_scene::TestClock;
+
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                agent_liveness_degraded_after_wall_us: 1_000_000,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
+            drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<BridgeMessage>(16);
+        driver.set_resident_grpc_bridge_tx(Some(tx));
+
+        let projection_id = "proj-bridged-liveness-grace";
+        let token = attach_and_get_token(&mut driver, projection_id);
+        driver.attach_projection(projection_id, Vec::new());
+        driver.set_projection_transport(projection_id, PortalTransport::ResidentGrpcBridge);
+        publish(&mut driver, projection_id, &token, "bridged live", 1_100);
+
+        let clock = TestClock::new(1_000);
+        let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, Arc::new(clock.clone()));
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_100);
+        assert!(matches!(rx.try_recv(), Ok(BridgeMessage::Publish { .. })));
+        assert_eq!(scene.tile_count(), 0, "bridge path owns the visible tile");
+
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_001_100);
+        let degraded = rx.try_recv().expect("degraded state is forwarded");
+        assert!(matches!(
+            degraded,
+            BridgeMessage::Publish { ref state, .. } if state.connection_degraded
+        ));
+
+        clock.advance(SceneGraph::DEFAULT_GRACE_PERIOD_MS + 1);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_001_101);
+
+        let mut detaches = 0;
+        while let Ok(message) = rx.try_recv() {
+            if let BridgeMessage::Detach { projection_id: id } = message {
+                assert_eq!(id, projection_id);
+                detaches += 1;
+            }
+        }
+        assert_eq!(
+            detaches, 1,
+            "grace expiry emits exactly one remote tombstone"
+        );
+        assert!(!driver.drive.entries.contains_key(projection_id));
+        assert!(
+            driver
+                .authority
+                .projected_portal_state(projection_id, &ProjectedPortalPolicy::permit_all())
+                .is_none(),
+            "grace expiry removes authority state too"
+        );
+
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_001_102);
+        assert!(rx.try_recv().is_err(), "reaping is one-shot");
+    }
+
+    /// The bridge shadow lease follows the same resume contract as a local
+    /// surface: authenticated traffic within grace reconnects that projection's
+    /// lease, keeps authority/drive state, and suppresses the expiry tombstone.
+    #[test]
+    fn bridged_agent_liveness_recovery_within_grace_prevents_detach() {
+        use std::sync::Arc;
+        use tze_hud_scene::TestClock;
+
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                agent_liveness_degraded_after_wall_us: 1_000_000,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("portal_publish_to_present"),
+            drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<BridgeMessage>(16);
+        driver.set_resident_grpc_bridge_tx(Some(tx));
+
+        let projection_id = "proj-bridged-liveness-resume";
+        let token = attach_and_get_token(&mut driver, projection_id);
+        driver.attach_projection(projection_id, Vec::new());
+        driver.set_projection_transport(projection_id, PortalTransport::ResidentGrpcBridge);
+        publish(&mut driver, projection_id, &token, "bridged live", 1_100);
+
+        let clock = TestClock::new(1_000);
+        let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, Arc::new(clock.clone()));
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_100);
+        while rx.try_recv().is_ok() {}
+
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_001_100);
+        while rx.try_recv().is_ok() {}
+
+        clock.advance(5_000);
+        publish(
+            &mut driver,
+            projection_id,
+            &token,
+            "bridged recovered",
+            1_001_101,
+        );
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_001_101);
+        assert!(!driver.authority.is_agent_liveness_degraded(projection_id));
+        while rx.try_recv().is_ok() {}
+
+        clock.advance(SceneGraph::DEFAULT_GRACE_PERIOD_MS + 1);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_001_102);
+
+        assert!(
+            driver.drive.entries.contains_key(projection_id),
+            "recovery within grace keeps drive state"
+        );
+        assert!(
+            driver
+                .authority
+                .projected_portal_state(projection_id, &ProjectedPortalPolicy::permit_all())
+                .is_some(),
+            "recovery within grace keeps authority state"
+        );
+        let mut detaches = 0;
+        while let Ok(message) = rx.try_recv() {
+            if matches!(message, BridgeMessage::Detach { .. }) {
+                detaches += 1;
+            }
+        }
+        assert_eq!(
+            detaches, 0,
+            "a reconnected bridge projection must not receive a grace-expiry tombstone"
         );
     }
 

@@ -13,6 +13,27 @@ use tze_hud_scene::graph::SceneGraph;
 /// it does not protect against separate test binary runs.
 static ENV_VAR_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[test]
+fn adapter_identity_preserves_actual_wgpu_fields_without_a_gpu() {
+    let identity = CompositorAdapterInfo::from(wgpu::AdapterInfo {
+        name: "llvmpipe (LLVM 19.1.7, 256 bits)".to_string(),
+        vendor: 0x10005,
+        device: 0,
+        device_type: wgpu::DeviceType::Cpu,
+        driver: "llvmpipe".to_string(),
+        driver_info: "Mesa 24.2".to_string(),
+        backend: wgpu::Backend::Vulkan,
+    });
+
+    assert_eq!(identity.name, "llvmpipe (LLVM 19.1.7, 256 bits)");
+    assert_eq!(identity.backend, "Vulkan");
+    assert_eq!(identity.device_type, "Cpu");
+    assert_eq!(identity.driver, "llvmpipe");
+    assert_eq!(identity.driver_info, "Mesa 24.2");
+    assert_eq!(identity.vendor, 0x10005);
+    assert_eq!(identity.device, 0);
+}
+
 /// Returns `true` when the test should be skipped due to missing GPU.
 ///
 /// Tests that require a wgpu adapter (GPU or software renderer) hang

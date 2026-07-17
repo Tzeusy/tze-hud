@@ -14,6 +14,11 @@ name = "cooperative-projection-readback"
 path = "src/bin/cooperative_projection_readback.rs"
 required-features = ["headless"]
 
+[[bin]]
+name = "vertical-flow-readback"
+path = "src/bin/vertical_flow_readback.rs"
+required-features = ["headless"]
+
 [features]
 # Enable headless GPU rendering so Layer 1/2 images can be sourced live.
 headless = ["dep:tze_hud_compositor", "dep:tze_hud_runtime", "tze_hud_runtime/headless"]

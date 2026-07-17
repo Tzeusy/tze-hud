@@ -96,14 +96,20 @@ impl Compositor {
             // Zones with backdrop_radius use the SDF rounded-rect pipeline instead.
             // Skip flat-rect backdrop emission for those zones; collect_all_rounded_rect_cmds
             // handles their backdrops separately in encode_rounded_rect_pass.
-            let use_rounded_rect = policy.backdrop_radius.is_some_and(|r| r > 0.0);
+            let use_rounded_rect = self.degradation_policy.level
+                < tze_hud_scene::DegradationLevel::Significant
+                && policy.backdrop_radius.is_some_and(|r| r > 0.0);
 
             // Determine current animation opacity for this zone.
-            let anim_opacity = self
-                .zone_animation_states
-                .get(zone_name)
-                .map(|s| s.current_opacity())
-                .unwrap_or(1.0);
+            let anim_opacity =
+                if self.degradation_policy.level >= tze_hud_scene::DegradationLevel::Significant {
+                    1.0
+                } else {
+                    self.zone_animation_states
+                        .get(zone_name)
+                        .map(|s| s.current_opacity())
+                        .unwrap_or(1.0)
+                };
 
             // Resolve and emit backdrop quads based on the zone's contention policy.
             //

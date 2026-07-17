@@ -28,6 +28,8 @@ pub enum ConfigErrorCode {
     HeadlessNotExtendable,
     ProfileExtendsConflictsWithProfile,
     ProfileBudgetEscalation,
+    /// Resident-memory class ceilings do not fit within the aggregate ceiling.
+    ProfileResidentBudgetInvalid,
     ProfileCapabilityEscalation,
     UnknownZoneType,
     UnknownCapability,
@@ -126,6 +128,16 @@ pub struct DisplayProfile {
     pub name: String,
     pub max_tiles: u32,
     pub max_texture_mb: u32,
+    /// Aggregate runtime-owned resident-memory ceiling in MiB.
+    pub max_runtime_resident_mb: u32,
+    /// Scene resource/image CPU and GPU residency ceiling in MiB.
+    pub max_resource_resident_mb: u32,
+    /// Retained runtime widget source residency ceiling in MiB.
+    pub max_widget_asset_resident_mb: u32,
+    /// Widget raster cache residency ceiling in MiB.
+    pub max_widget_raster_cache_mb: u32,
+    /// Font face, glyph, and atlas residency ceiling in MiB.
+    pub max_font_resident_mb: u32,
     pub max_agents: u32,
     /// Maximum agent update rate in Hz (per-agent state-stream ceiling).
     ///
@@ -156,6 +168,11 @@ impl DisplayProfile {
             name: "full-display".into(),
             max_tiles: 1024,
             max_texture_mb: 2048,
+            max_runtime_resident_mb: 1024,
+            max_resource_resident_mb: 512,
+            max_widget_asset_resident_mb: 192,
+            max_widget_raster_cache_mb: 256,
+            max_font_resident_mb: 64,
             max_agents: 16,
             max_agent_update_hz: 60,
             target_fps: 60,
@@ -172,6 +189,11 @@ impl DisplayProfile {
             name: "headless".into(),
             max_tiles: 256,
             max_texture_mb: 512,
+            max_runtime_resident_mb: 512,
+            max_resource_resident_mb: 256,
+            max_widget_asset_resident_mb: 64,
+            max_widget_raster_cache_mb: 128,
+            max_font_resident_mb: 64,
             max_agents: 8,
             max_agent_update_hz: 60,
             target_fps: 60,
@@ -185,6 +207,14 @@ impl DisplayProfile {
 
 // ─── Resolved Config ──────────────────────────────────────────────────────────
 
+/// Validated optional per-agent budget overrides retained at config freeze.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RegisteredAgentBudgetOverrides {
+    pub max_tiles: Option<u32>,
+    pub max_texture_mb: Option<u32>,
+    pub max_update_hz: Option<u32>,
+}
+
 /// A fully validated, frozen configuration.
 ///
 /// Returned by `ConfigLoader::freeze()`.
@@ -193,6 +223,8 @@ pub struct ResolvedConfig {
     pub profile: DisplayProfile,
     pub tab_names: Vec<String>,
     pub agent_capabilities: std::collections::HashMap<String, Vec<String>>,
+    /// Per-agent budget overrides keyed by registered agent name.
+    pub agent_budget_overrides: std::collections::HashMap<String, RegisteredAgentBudgetOverrides>,
     /// Frozen Windows media-ingress config. Defaults to disabled.
     pub media_ingress: MediaIngressConfig,
     /// Sourced TOML file path.

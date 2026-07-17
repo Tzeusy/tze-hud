@@ -39,6 +39,30 @@ use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::*;
 use tze_hud_telemetry::FrameTelemetry;
 
+/// Runtime-selected render policy for one frame.
+///
+/// The suppression set is computed under the same scene lock as the frame
+/// build and uses stable tile identities. The compositor never derives or
+/// advances degradation state independently.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompositorDegradationPolicy {
+    pub level: DegradationLevel,
+    pub suppressed_tiles: HashSet<SceneId>,
+    pub texture_quality_threshold_px: u32,
+    pub texture_scale_factor: f32,
+}
+
+impl Default for CompositorDegradationPolicy {
+    fn default() -> Self {
+        Self {
+            level: DegradationLevel::Nominal,
+            suppressed_tiles: HashSet::new(),
+            texture_quality_threshold_px: 512,
+            texture_scale_factor: 0.5,
+        }
+    }
+}
+
 pub mod animation;
 pub mod draw_cmds;
 pub mod easing;
@@ -83,9 +107,47 @@ pub use viewer_echo::{
     ViewerEchoStore,
 };
 
+/// Stable, dependency-free identity for the adapter selected by wgpu.
+///
+/// Benchmark and validation crates use this instead of depending directly on
+/// wgpu merely to prove which renderer executed a constrained lane.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompositorAdapterInfo {
+    /// Adapter name reported by wgpu (for example, `llvmpipe`).
+    pub name: String,
+    /// Debug-stable wgpu backend name (for example, `Vulkan`).
+    pub backend: String,
+    /// Debug-stable wgpu device type (for example, `Cpu`).
+    pub device_type: String,
+    /// Adapter driver name reported by wgpu.
+    pub driver: String,
+    /// Adapter driver version/details reported by wgpu.
+    pub driver_info: String,
+    /// PCI vendor identifier reported by the adapter when available.
+    pub vendor: u32,
+    /// PCI device identifier reported by the adapter when available.
+    pub device: u32,
+}
+
+impl From<wgpu::AdapterInfo> for CompositorAdapterInfo {
+    fn from(info: wgpu::AdapterInfo) -> Self {
+        Self {
+            name: info.name,
+            backend: format!("{:?}", info.backend),
+            device_type: format!("{:?}", info.device_type),
+            driver: info.driver,
+            driver_info: info.driver_info,
+            vendor: info.vendor,
+            device: info.device,
+        }
+    }
+}
+
 pub struct Compositor {
+    pub(crate) resident_ledger: Option<tze_hud_resource::ResidentLedger>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    adapter_info: CompositorAdapterInfo,
     pipeline: wgpu::RenderPipeline,
     /// Pipeline with no blending — writes RGBA directly. Used to clear
     /// the framebuffer to transparent in overlay mode (LoadOp::Clear
@@ -128,6 +190,7 @@ pub struct Compositor {
     /// interpolation is skipped and final parameter values are applied
     /// immediately to reduce re-rasterization under load.
     pub degradation_level: DegradationLevel,
+    degradation_policy: CompositorDegradationPolicy,
     /// Optional text rasterizer (glyphon). Absent until `init_text_renderer`
     /// is called. When `None`, TextMarkdownNode and zone StreamText content
     /// renders as solid-color rectangles only (no glyph output).
@@ -641,6 +704,7 @@ impl Compositor {
             })
             .await
             .ok_or(CompositorError::NoAdapter)?;
+        let adapter_info = CompositorAdapterInfo::from(adapter.get_info());
 
         let (device, queue) = adapter
             .request_device(
@@ -683,6 +747,7 @@ impl Compositor {
         Ok(Self {
             device,
             queue,
+            adapter_info,
             pipeline,
             clear_pipeline,
             texture_rect_pipeline,
@@ -696,8 +761,10 @@ impl Compositor {
             overlay_mode: false,
             debug_zone_tints: std::env::var("TZE_HUD_DEBUG_ZONES").is_ok_and(|v| v == "1"),
             degradation_level: DegradationLevel::Nominal,
+            degradation_policy: CompositorDegradationPolicy::default(),
             text_rasterizer: None,
             widget_renderer: None,
+            resident_ledger: None,
             zone_animation_states: HashMap::new(),
             prev_active_zones: HashMap::new(),
             portal_tile_anim_states: HashMap::new(),
@@ -978,6 +1045,7 @@ impl Compositor {
         let compositor = Self {
             device,
             queue,
+            adapter_info: CompositorAdapterInfo::from(adapter_info),
             pipeline,
             clear_pipeline,
             texture_rect_pipeline,
@@ -991,8 +1059,10 @@ impl Compositor {
             overlay_mode: false,
             debug_zone_tints: std::env::var("TZE_HUD_DEBUG_ZONES").is_ok_and(|v| v == "1"),
             degradation_level: DegradationLevel::Nominal,
+            degradation_policy: CompositorDegradationPolicy::default(),
             text_rasterizer: None,
             widget_renderer: None,
+            resident_ledger: None,
             zone_animation_states: HashMap::new(),
             prev_active_zones: HashMap::new(),
             portal_tile_anim_states: HashMap::new(),
@@ -1043,6 +1113,11 @@ impl Compositor {
 
         let window_surface = WindowSurface::new(surface, config);
         Ok((compositor, window_surface))
+    }
+
+    /// Identity of the adapter selected when this compositor was created.
+    pub fn adapter_info(&self) -> &CompositorAdapterInfo {
+        &self.adapter_info
     }
 
     /// Create a render pipeline targeting a specific texture format.
@@ -1687,6 +1762,8 @@ impl Compositor {
         // gets shaped. Gated per-tile to portal surfaces below.
         let transcript_max_measure_px = resolve_transcript_max_measure_px(&self.token_map);
 
+        let policy_visible_tiles = self.policy_visible_tiles(scene);
+
         // Safe: checked is_none() above and returned; rasterizer stays Some
         // (this method holds &mut self exclusively).
         let rasterizer = self
@@ -1699,7 +1776,7 @@ impl Compositor {
         // mid-read (hud-33qo7).
         let markdown_cache = self.markdown_primer.load();
         let mut live_items: Vec<crate::text::TextItem> = Vec::new();
-        for tile in scene.visible_tiles() {
+        for tile in policy_visible_tiles {
             let tile_x = tile.bounds.x;
             let tile_y = tile.bounds.y;
             // Determine whether this tile is currently following its tail.
@@ -1786,6 +1863,31 @@ impl Compositor {
     /// [`Compositor::evict_unused_image_textures`] once per frame so that
     /// stale cache entries are reclaimed and the cache does not grow without
     /// bound across frames.
+    fn scene_image_resource_ids(scene: &SceneGraph) -> HashSet<ResourceId> {
+        let mut referenced = HashSet::new();
+        for node in scene.nodes.values() {
+            if let NodeData::StaticImage(img) = &node.data {
+                referenced.insert(img.resource_id);
+            }
+        }
+        for publishes in scene.zone_registry.active_publishes.values() {
+            for record in publishes {
+                match &record.content {
+                    ZoneContent::StaticImage(resource_id) => {
+                        referenced.insert(*resource_id);
+                    }
+                    ZoneContent::Notification(payload) if !payload.icon.is_empty() => {
+                        if let Some(resource_id) = parse_notification_icon(&payload.icon) {
+                            referenced.insert(resource_id);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        referenced
+    }
+
     fn ensure_scene_image_textures(&mut self, scene: &SceneGraph) -> HashSet<ResourceId> {
         let mut referenced: HashSet<ResourceId> = HashSet::new();
 
@@ -1852,6 +1954,16 @@ impl Compositor {
     /// SVG rasterization only occurs on cache miss (init-time / first-seen
     /// path).  Subsequent calls are O(1) per path due to the cache hit-check
     /// guard in `ensure_icon_texture`.
+    fn scene_icon_resource_ids(scene: &SceneGraph) -> HashSet<ResourceId> {
+        scene
+            .zone_registry
+            .zones
+            .values()
+            .flat_map(|zone| zone.rendering_policy.key_icon_map.values())
+            .map(|svg_path| ResourceId::of(svg_path.as_bytes()))
+            .collect()
+    }
+
     fn ensure_scene_icon_textures(&mut self, scene: &SceneGraph) -> HashSet<ResourceId> {
         let mut icon_ids: HashSet<ResourceId> = HashSet::new();
         for zone_def in scene.zone_registry.zones.values() {
@@ -2079,7 +2191,7 @@ impl Compositor {
                 occlusion_query_set: None,
             });
 
-            if use_overlay_pipeline {
+            if use_overlay_pipeline || self.use_opaque_rect_pipeline() {
                 render_pass.set_pipeline(&self.clear_pipeline);
             } else {
                 render_pass.set_pipeline(&self.pipeline);
@@ -2119,7 +2231,7 @@ impl Compositor {
                 occlusion_query_set: None,
             });
 
-            if use_overlay_pipeline {
+            if use_overlay_pipeline || self.use_opaque_rect_pipeline() {
                 render_pass.set_pipeline(&self.clear_pipeline);
             } else {
                 render_pass.set_pipeline(&self.pipeline);
@@ -2145,6 +2257,7 @@ impl Compositor {
         // `collect_encode_inputs` (Phase A/B). Here we only replay the prepared
         // TextAreas (Phase C) and always trim the atlas — no scene access.
         let inline_verts = &inputs.inline_verts;
+        let use_opaque_rect_pipeline = self.use_opaque_rect_pipeline();
         if let Some(ref mut tr) = self.text_rasterizer {
             if inputs.render_text {
                 // ── Inline backdrop pass (Phase 2, hud-9ieev) ────────────────
@@ -2173,7 +2286,7 @@ impl Compositor {
                         timestamp_writes: None,
                         occlusion_query_set: None,
                     });
-                    if use_overlay_pipeline {
+                    if use_overlay_pipeline || use_opaque_rect_pipeline {
                         inline_pass.set_pipeline(&self.clear_pipeline);
                     } else {
                         inline_pass.set_pipeline(&self.pipeline);

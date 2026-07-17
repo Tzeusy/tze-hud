@@ -19,6 +19,151 @@ impl SceneGraph {
         usage
     }
 
+    /// Compute the logical lease-usage delta represented by a batch.
+    ///
+    /// This is the transport/runtime admission input. It deliberately counts
+    /// shared logical references per lease; physical resident allocation is a
+    /// separate resource-ledger domain.
+    pub fn mutation_budget_delta(
+        &self,
+        lease_id: &SceneId,
+        batch: &crate::mutation::MutationBatch,
+    ) -> crate::lease::BudgetDelta {
+        let mut delta_tiles = 0_i32;
+        let mut delta_texture_bytes = 0_i64;
+        let mut max_nodes_in_batch = 0_u32;
+        let mut projected_tile_texture_bytes = std::collections::HashMap::<SceneId, u64>::new();
+        let mut projected_node_texture_bytes = std::collections::HashMap::<SceneId, u64>::new();
+        for mutation in &batch.mutations {
+            match mutation {
+                crate::mutation::SceneMutation::CreateTile { .. } => {
+                    delta_tiles = delta_tiles.saturating_add(1);
+                }
+                crate::mutation::SceneMutation::DeleteTile { tile_id } => {
+                    if let Some(tile) = self.tiles.get(tile_id)
+                        && tile.lease_id == *lease_id
+                    {
+                        delta_tiles = delta_tiles.saturating_sub(1);
+                        let old_bytes = projected_tile_texture_bytes
+                            .remove(tile_id)
+                            .unwrap_or_else(|| {
+                                tile.root_node
+                                    .map(|root| self.sum_texture_bytes(root))
+                                    .unwrap_or(0)
+                            });
+                        delta_texture_bytes = delta_texture_bytes
+                            .saturating_sub(i64::try_from(old_bytes).unwrap_or(i64::MAX));
+                    }
+                }
+                crate::mutation::SceneMutation::SetTileRoot {
+                    tile_id,
+                    node,
+                    descendants,
+                } => {
+                    max_nodes_in_batch = max_nodes_in_batch.max(
+                        u32::try_from(descendants.len().saturating_add(1)).unwrap_or(u32::MAX),
+                    );
+                    let old_bytes = projected_tile_texture_bytes
+                        .get(tile_id)
+                        .copied()
+                        .unwrap_or_else(|| {
+                            self.tiles
+                                .get(tile_id)
+                                .and_then(|tile| tile.root_node)
+                                .map(|root| self.sum_texture_bytes(root))
+                                .unwrap_or(0)
+                        });
+                    let new_bytes = Self::count_texture_bytes_in_node(node).saturating_add(
+                        descendants
+                            .iter()
+                            .map(Self::count_texture_bytes_in_node)
+                            .sum(),
+                    );
+                    delta_texture_bytes = delta_texture_bytes.saturating_add(
+                        i64::try_from(new_bytes)
+                            .unwrap_or(i64::MAX)
+                            .saturating_sub(i64::try_from(old_bytes).unwrap_or(i64::MAX)),
+                    );
+                    projected_tile_texture_bytes.insert(*tile_id, new_bytes);
+                    projected_node_texture_bytes
+                        .insert(node.id, Self::count_texture_bytes_in_node(node));
+                    for descendant in descendants {
+                        projected_node_texture_bytes
+                            .insert(descendant.id, Self::count_texture_bytes_in_node(descendant));
+                    }
+                }
+                crate::mutation::SceneMutation::AddNode { tile_id, node, .. } => {
+                    max_nodes_in_batch = max_nodes_in_batch.max(1);
+                    let added = Self::count_texture_bytes_in_node(node);
+                    delta_texture_bytes = delta_texture_bytes
+                        .saturating_add(i64::try_from(added).unwrap_or(i64::MAX));
+                    let tile_bytes =
+                        projected_tile_texture_bytes
+                            .entry(*tile_id)
+                            .or_insert_with(|| {
+                                self.tiles
+                                    .get(tile_id)
+                                    .and_then(|tile| tile.root_node)
+                                    .map(|root| self.sum_texture_bytes(root))
+                                    .unwrap_or(0)
+                            });
+                    *tile_bytes = tile_bytes.saturating_add(added);
+                    projected_node_texture_bytes.insert(node.id, added);
+                }
+                crate::mutation::SceneMutation::UpdateNodeContent {
+                    tile_id,
+                    node_id,
+                    data: NodeData::StaticImage(new_image),
+                    ..
+                } => {
+                    let old_bytes = projected_node_texture_bytes
+                        .get(node_id)
+                        .copied()
+                        .unwrap_or_else(|| {
+                            self.nodes
+                                .get(node_id)
+                                .and_then(|node| match &node.data {
+                                    NodeData::StaticImage(image) => Some(image.decoded_bytes),
+                                    _ => None,
+                                })
+                                .unwrap_or(0)
+                        });
+                    let new_bytes = if new_image.decoded_bytes == 0 {
+                        old_bytes
+                    } else {
+                        new_image.decoded_bytes
+                    };
+                    let change = i64::try_from(new_bytes)
+                        .unwrap_or(i64::MAX)
+                        .saturating_sub(i64::try_from(old_bytes).unwrap_or(i64::MAX));
+                    delta_texture_bytes = delta_texture_bytes.saturating_add(change);
+                    projected_node_texture_bytes.insert(*node_id, new_bytes);
+                    let tile_bytes =
+                        projected_tile_texture_bytes
+                            .entry(*tile_id)
+                            .or_insert_with(|| {
+                                self.tiles
+                                    .get(tile_id)
+                                    .and_then(|tile| tile.root_node)
+                                    .map(|root| self.sum_texture_bytes(root))
+                                    .unwrap_or(0)
+                            });
+                    if change >= 0 {
+                        *tile_bytes = tile_bytes.saturating_add(change as u64);
+                    } else {
+                        *tile_bytes = tile_bytes.saturating_sub(change.unsigned_abs());
+                    }
+                }
+                _ => {}
+            }
+        }
+        crate::lease::BudgetDelta {
+            delta_tiles,
+            max_nodes_in_batch,
+            delta_texture_bytes,
+        }
+    }
+
     /// Check if a mutation batch would exceed the lease's resource budget.
     ///
     /// Returns Ok(()) if within budget, or Err with the specific violation.
@@ -34,44 +179,58 @@ impl SceneGraph {
         let budget = &lease.resource_budget;
         let usage = self.lease_resource_usage(lease_id);
 
-        // Count new tiles in batch
-        let new_tiles: u32 = batch
-            .mutations
-            .iter()
-            .filter(|m| matches!(m, crate::mutation::SceneMutation::CreateTile { .. }))
-            .count() as u32;
-
-        if new_tiles > 0 {
-            let projected = usage.tiles as u64 + new_tiles as u64;
-            if projected > budget.max_tiles as u64 {
-                return Err(BudgetError {
-                    resource: "tiles".to_string(),
-                    current: usage.tiles as u64,
-                    limit: budget.max_tiles as u64,
-                    requested: new_tiles as u64,
-                });
-            }
+        let budget_delta = self.mutation_budget_delta(lease_id, batch);
+        let projected_tiles = if budget_delta.delta_tiles >= 0 {
+            usage.tiles.saturating_add(budget_delta.delta_tiles as u32)
+        } else {
+            usage
+                .tiles
+                .saturating_sub(budget_delta.delta_tiles.unsigned_abs())
+        };
+        if projected_tiles > budget.max_tiles {
+            return Err(BudgetError {
+                resource: "tiles".to_string(),
+                current: usage.tiles as u64,
+                limit: budget.max_tiles as u64,
+                requested: budget_delta.delta_tiles.max(0) as u64,
+            });
         }
 
-        // Running projected texture total for the batch.  We accumulate deltas
-        // across SetTileRoot and UpdateNodeContent mutations so that a batch
-        // with multiple texture swaps is evaluated against the cumulative
-        // projected usage, not independently against the initial snapshot.
-        let mut projected_tex = usage.texture_bytes;
+        let projected_texture_bytes = if budget_delta.delta_texture_bytes >= 0 {
+            usage
+                .texture_bytes
+                .saturating_add(budget_delta.delta_texture_bytes as u64)
+        } else {
+            usage
+                .texture_bytes
+                .saturating_sub(budget_delta.delta_texture_bytes.unsigned_abs())
+        };
+        if projected_texture_bytes > budget.max_texture_bytes {
+            return Err(BudgetError {
+                resource: "texture_bytes".to_string(),
+                current: usage.texture_bytes,
+                limit: budget.max_texture_bytes,
+                requested: budget_delta.delta_texture_bytes.max(0) as u64,
+            });
+        }
 
-        // Count new nodes per tile (AddNode / SetTileRoot)
+        // Count nodes against a virtual post-mutation view so multiple node
+        // operations on one tile cannot bypass or overstate the ceiling.
+        let mut projected_node_counts = usage.nodes_per_tile.clone();
         for mutation in &batch.mutations {
             match mutation {
                 crate::mutation::SceneMutation::AddNode { tile_id, node, .. } => {
-                    let current = usage.nodes_per_tile.get(tile_id).copied().unwrap_or(0);
-                    let new_count = Self::fresh_batch_node_count(node);
-                    let projected = current as u64 + new_count as u64;
-                    if projected > budget.max_nodes_per_tile as u64 {
+                    let added = Self::fresh_batch_node_count(node);
+                    let projected = projected_node_counts
+                        .entry(*tile_id)
+                        .or_insert_with(|| usage.nodes_per_tile.get(tile_id).copied().unwrap_or(0));
+                    *projected = projected.saturating_add(added);
+                    if *projected > budget.max_nodes_per_tile {
                         return Err(BudgetError {
                             resource: "nodes_per_tile".to_string(),
-                            current: current as u64,
+                            current: projected.saturating_sub(added) as u64,
                             limit: budget.max_nodes_per_tile as u64,
-                            requested: new_count as u64,
+                            requested: added as u64,
                         });
                     }
                 }
@@ -83,78 +242,20 @@ impl SceneGraph {
                     // SetTileRoot replaces the entire tree, so count new tree size.
                     // With an inline subtree (hud-ga4md) the root plus every fresh
                     // descendant counts against the per-tile node budget.
-                    let new_count =
-                        Self::fresh_batch_node_count(node) as u64 + descendants.len() as u64;
-                    if new_count > budget.max_nodes_per_tile as u64 {
+                    let new_count = Self::fresh_batch_node_count(node)
+                        .saturating_add(u32::try_from(descendants.len()).unwrap_or(u32::MAX));
+                    projected_node_counts.insert(*tile_id, new_count);
+                    if new_count > budget.max_nodes_per_tile {
                         return Err(BudgetError {
                             resource: "nodes_per_tile".to_string(),
                             current: 0,
                             limit: budget.max_nodes_per_tile as u64,
-                            requested: new_count,
+                            requested: new_count as u64,
                         });
                     }
-                    // Check texture bytes in new tree against the running projected total.
-                    // Sum the root and every inline descendant's texture bytes.
-                    let new_tex = Self::count_texture_bytes_in_node(node)
-                        + descendants
-                            .iter()
-                            .map(Self::count_texture_bytes_in_node)
-                            .sum::<u64>();
-                    let old_tile_tex = self
-                        .tiles
-                        .get(tile_id)
-                        .and_then(|t| t.root_node)
-                        .map(|r| self.sum_texture_bytes(r))
-                        .unwrap_or(0);
-                    let other_tex = projected_tex.saturating_sub(old_tile_tex);
-                    if other_tex.saturating_add(new_tex) > budget.max_texture_bytes {
-                        return Err(BudgetError {
-                            resource: "texture_bytes".to_string(),
-                            current: other_tex,
-                            limit: budget.max_texture_bytes,
-                            requested: new_tex,
-                        });
-                    }
-                    // Advance the running projected total for subsequent mutations.
-                    projected_tex = other_tex.saturating_add(new_tex);
                 }
-                crate::mutation::SceneMutation::UpdateNodeContent {
-                    node_id,
-                    data: NodeData::StaticImage(new_si),
-                    ..
-                } => {
-                    // UpdateNodeContent on a StaticImage node swaps the texture.
-                    // Compute the old texture bytes for this specific node (if any),
-                    // subtract them from the running projected total, and check
-                    // whether the replacement fits within the budget.
-                    //
-                    // If the resource_id is unchanged and decoded_bytes == 0, the
-                    // preservation logic in update_node_content_impl will restore the
-                    // stored value — so the net texture delta is zero and no budget
-                    // violation can occur.  If decoded_bytes > 0, the caller has
-                    // supplied a concrete new size and we must validate it.
-                    let new_tex = new_si.decoded_bytes;
-                    if new_tex > 0 {
-                        let old_tex = self
-                            .nodes
-                            .get(node_id)
-                            .map(|n| match &n.data {
-                                NodeData::StaticImage(si) => si.decoded_bytes,
-                                _ => 0,
-                            })
-                            .unwrap_or(0);
-                        let other_tex = projected_tex.saturating_sub(old_tex);
-                        if other_tex.saturating_add(new_tex) > budget.max_texture_bytes {
-                            return Err(BudgetError {
-                                resource: "texture_bytes".to_string(),
-                                current: other_tex,
-                                limit: budget.max_texture_bytes,
-                                requested: new_tex,
-                            });
-                        }
-                        // Advance the running projected total for subsequent mutations.
-                        projected_tex = other_tex.saturating_add(new_tex);
-                    }
+                crate::mutation::SceneMutation::DeleteTile { tile_id } => {
+                    projected_node_counts.remove(tile_id);
                 }
                 _ => {}
             }

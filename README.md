@@ -39,10 +39,11 @@ cargo build --bin tze_hud --release
 scripts/quickstart.sh --window-mode overlay   # scaffolds config + PSK, prints ATTACH INFO, launches
 ```
 
-`scripts/quickstart.sh --print-attach-info` prints the MCP endpoint, credentials,
-and a paste-ready MCP client config **without** opening a window (useful for
-wiring up your Claude/Codex MCP client first, or on a headless box). The rest of
-this README is the deeper build/test/deploy reference.
+`scripts/quickstart.sh --print-attach-info` prints the MCP endpoint and a
+redacted client-config template **without** opening a window. To create a
+ready-to-use mode-600 config with the bearer already wired, run
+`scripts/quickstart.sh --emit-mcp-config=tze-hud.mcp.json`. The rest of this
+README is the deeper build/test/deploy reference.
 
 ---
 

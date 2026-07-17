@@ -123,6 +123,12 @@ async fn perform_handshake(
         other => panic!("Expected SceneSnapshot after SessionEstablished, got: {other:?}"),
     }
 
+    let third = stream.next().await.unwrap().unwrap();
+    match third.payload {
+        Some(ServerPayload::DegradationNotice(_)) => {}
+        other => panic!("Expected DegradationNotice after SceneSnapshot, got: {other:?}"),
+    }
+
     (tx, established, stream)
 }
 

@@ -68,6 +68,7 @@ pub mod font_bytes_store;
 pub mod font_cache;
 pub mod gc;
 pub mod refcount;
+pub mod resident_ledger;
 pub mod runtime_widget_store;
 pub mod sharing;
 pub mod store;
@@ -82,6 +83,10 @@ pub use font_bytes_store::FontBytesStore;
 pub use font_cache::{CachedFontHandle, FontCache, FontCacheEntry, FontCacheKey, FontOrigin};
 pub use gc::{GcClock, GcConfig, GcResult, GcRunner, TestClockMs, WallClock};
 pub use refcount::{GcCandidateTable, RefcountError, RefcountLayer};
+pub use resident_ledger::{
+    AllocationId, ResidentClass, ResidentLedger, ResidentLedgerLimits, ResidentLedgerSnapshot,
+    ResidentReserveError,
+};
 pub use runtime_widget_store::{
     PutOutcome as RuntimeWidgetStorePutOutcome, RuntimeWidgetAssetRecord, RuntimeWidgetStore,
     RuntimeWidgetStoreConfig, RuntimeWidgetStoreError,

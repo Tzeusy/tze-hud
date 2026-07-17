@@ -326,7 +326,8 @@ impl Compositor {
         // Collect owned tile geometry first: the `&Tile`s borrow `scene`
         // immutably for their lifetime, which would otherwise conflict with the
         // `scene.overlay` mutation below.
-        let mut ordered_tiles = Self::sort_tiles_with_drag_boost(scene.visible_tiles(), scene);
+        let mut ordered_tiles =
+            Self::sort_tiles_with_drag_boost(self.policy_visible_tiles(scene), scene);
         ordered_tiles.reverse();
         let tile_geoms: Vec<(SceneId, Rect)> = ordered_tiles
             .into_iter()

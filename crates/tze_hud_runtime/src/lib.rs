@@ -98,6 +98,7 @@ pub mod headless;
 pub mod mcp;
 pub mod media_admission;
 pub mod media_ingress;
+pub mod mutation_budget_bridge;
 pub mod pipeline;
 pub mod portal_cadence;
 pub mod portal_projection_driver;
@@ -192,6 +193,7 @@ pub use media_admission::{
     REMEMBER_TTL_US, SessionCapabilityCache, SessionCapabilityGrant, SignalingRateLimiter,
     now_us as media_now_us, now_us_monotonic as media_now_us_monotonic, runtime_level_to_e25_step,
 };
+pub use mutation_budget_bridge::RuntimeMutationBudgetEnforcer;
 pub use quiet_hours::{
     GateDecision, QuietHoursConfig, QuietHoursGate, ZoneContentionPolicy, ZoneQueue,
 };

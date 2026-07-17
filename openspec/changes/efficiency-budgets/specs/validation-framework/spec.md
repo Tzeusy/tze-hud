@@ -18,9 +18,42 @@ Scope: v1-mandatory
 - **THEN** the gate MUST report an invalid artifact and MUST NOT infer a pass from an absent or defaulted value
 
 ### Requirement: Canonical LLM Flow Byte and Token Calibration
-Layer 3 SHALL measure the request, response, and total UTF-8 byte and token footprints of three versioned canonical LLM flows: (1) one MCP `publish_to_zone` call carrying the canonical zone fixture; (2) one text-stream portal turn consisting of `portal_projection_attach`, `portal_projection_publish`, one long-poll `portal_projection_get_pending_input`, and `portal_projection_acknowledge_input`; and (3) one MCP `publish_to_widget` call carrying the canonical widget fixture. The fixture set MUST pin canonical content, JSON-RPC framing, operation order, IDs, timestamps, and deterministic authority responses. Dynamic credentials or secrets MUST NOT be captured; variable-width dynamic values MUST be replaced before measurement by fixed canonical sentinels of the same schema role. Measurement SHALL include serialized JSON-RPC message bodies and exclude transport headers and bearer credentials. Token counts MUST use a repository-pinned tokenizer name, version, vocabulary fingerprint, and explicit counting policy. Each artifact MUST report per-operation and per-flow request bytes, response bytes, total bytes, request tokens, response tokens, and total tokens, plus a canonical-flow fingerprint.
-Source: about/heart-and-soul/efficiency.md section "Token budget"; openspec/specs/cooperative-hud-projection/spec.md; openspec/specs/session-protocol/spec.md requirement "MCP Guest Tool Surface"; openspec/specs/widget-system/spec.md
+Layer 3 SHALL measure the request, response, and total UTF-8 byte and token footprints of three versioned canonical LLM flows: (1) one MCP `publish_to_zone` call carrying the canonical zone fixture; (2) one text-stream portal turn consisting of `portal_projection_attach`, `portal_projection_publish`, one long-poll `portal_projection_get_pending_input`, and `portal_projection_acknowledge_input`; and (3) one MCP `publish_to_widget` call carrying the canonical widget fixture. The zone and widget fixtures MUST use the MCP-standard `tools/call` envelopes; the portal fixtures MUST carry the production portal client's operation discriminators. The fixture set MUST pin canonical content, JSON-RPC framing, operation order, IDs, timestamps, and deterministic authority responses. Dynamic credentials or secrets MUST NOT be captured; variable-width dynamic values MUST be replaced before measurement by fixed canonical sentinels of the same schema role. Measurement SHALL include serialized JSON-RPC message bodies and exclude transport headers and bearer credentials. Token counts MUST use a repository-pinned tokenizer name, version, vocabulary fingerprint, and explicit counting policy. Each artifact MUST report per-operation and per-flow request bytes, response bytes, total bytes, request tokens, response tokens, and total tokens, plus a canonical-flow fingerprint.
+Source: about/heart-and-soul/efficiency.md section "Token budget"; openspec/specs/cooperative-hud-projection/spec.md; openspec/specs/session-protocol/spec.md requirement "MCP Guest Tool Surface"; openspec/specs/widget-system/spec.md; owner decision `hud-ht1k7` (2026-07-17)
 Scope: v1-mandatory
+
+The initial v1 comparison authority SHALL use `tiktoken-rs` `0.12.0` with
+the `o200k_base` vocabulary, vocabulary fingerprint
+`sha256:446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d`,
+and counting policy `each canonical JSON-RPC body independently; UTF-8 bytes;
+encode_with_special_tokens; operation and flow totals are integer sums`. It
+MUST use fixture fingerprint
+`blake3:86774ba0b39a5d1e812a9705fe0221d3071425d3b73a2ad07aada041530c1601`.
+Every initial flow version is `1`, with these approved flow fingerprints:
+
+| Flow | Flow fingerprint |
+|---|---|
+| `publish_to_zone` | `blake3:82a47f35fb8516932e604a1148198cc7b1e5c4e35b33d5e366432cffba7de51e` |
+| `portal_projection` | `blake3:a0286e519a10f45b00ff6e578c6c81b95e9e2690d523293df89fc4c2c55273b3` |
+| `publish_to_widget` | `blake3:e37e93be69e0e0855bc099e25c970fdfdb2192baa22dcb8caa4af511b80232cd` |
+
+The checked-in initial baseline SHALL contain exactly these approved
+per-operation values:
+
+| Flow | Operation | Request bytes | Request tokens | Response bytes | Response tokens | Total bytes | Total tokens |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `publish_to_zone` | `publish_to_zone` | 477 | 141 | 192 | 56 | 669 | 197 |
+| `portal_projection` | `portal_projection_attach` | 535 | 148 | 120 | 33 | 655 | 181 |
+| `portal_projection` | `portal_projection_publish` | 489 | 125 | 105 | 28 | 594 | 153 |
+| `portal_projection` | `portal_projection_get_pending_input` | 368 | 107 | 416 | 103 | 784 | 210 |
+| `portal_projection` | `portal_projection_acknowledge_input` | 419 | 114 | 89 | 25 | 508 | 139 |
+| `publish_to_widget` | `publish_to_widget` | 357 | 112 | 182 | 56 | 539 | 168 |
+
+| Flow total | Total bytes | Total tokens |
+|---|---:|---:|
+| `publish_to_zone` | 669 | 197 |
+| `portal_projection` | 2541 | 683 |
+| `publish_to_widget` | 539 | 168 |
 
 #### Scenario: Zone publish footprint is deterministic
 - **WHEN** the canonical `publish_to_zone` fixture is measured twice with the same runtime build, tokenizer identity, and flow version
@@ -34,12 +67,16 @@ Scope: v1-mandatory
 - **WHEN** the canonical `publish_to_widget` fixture is measured twice with the same runtime build, tokenizer identity, and flow version
 - **THEN** the serialized request and response bytes and tokens MUST be identical across both runs and MUST be reported separately and as totals
 
+#### Scenario: Initial v1 packet preserves the owner-approved integers
+- **WHEN** the checked-in initial token-footprint comparison authority is loaded
+- **THEN** it MUST contain every tokenizer, vocabulary, fixture, flow-version, flow-fingerprint, per-operation, and per-flow value stated above, and its approval record MUST identify `hud-ht1k7` as the initial owner decision
+
 #### Scenario: Tokenizer or fixture drift invalidates comparison
-- **WHEN** the tokenizer name, tokenizer version, vocabulary fingerprint, canonical-flow version, or canonical-flow fingerprint differs from the approved baseline
+- **WHEN** the tokenizer name, tokenizer version, vocabulary fingerprint, fixture fingerprint, canonical-flow version, canonical-flow fingerprint, or operation set differs from the approved baseline
 - **THEN** the result MUST be marked `baseline_incompatible` and MUST NOT be reported as a pass or regression against that baseline
 
 ### Requirement: Canonical LLM Flow Regression Gate
-Each canonical LLM flow SHALL have a checked-in owner-approved baseline containing the flow version and fingerprint, tokenizer identity, and every per-operation and per-flow request/response/total byte and token value emitted by the calibration artifact. On a compatible measurement, the gate MUST compare every emitted byte and token value with its matching baseline value. An increase greater than 5 percent in any compared value MUST fail the gate. An increase greater than 0 and no greater than 5 percent MUST pass only with a structured regression warning showing the absolute and percentage delta. A decrease SHALL pass and be reported as an improvement. An intentional schema, fixture, or tokenizer change requires a newly versioned candidate baseline and explicit owner approval before it can become the comparison authority; a missing or unapproved baseline MUST fail closed.
+Each canonical LLM flow SHALL have a checked-in owner-approved baseline containing the flow version and fingerprint, tokenizer identity, fixture fingerprint, and every per-operation and per-flow request/response/total byte and token value emitted by the calibration artifact. The initial v1 authority SHALL be the exact packet above and SHALL record `approval.status = owner_approved` plus a non-empty `approval.decision_reference` of `hud-ht1k7`. CI MUST first prove two independent canonical measurements byte-identical, then invoke the regression checker against that checked-in authority. On a compatible measurement, the gate MUST compare every emitted byte and token value with its matching baseline value. The exact failure predicate is `measured * 100 > baseline * 105`; an increase greater than 5 percent in any compared value MUST fail the gate. An increase greater than 0 and no greater than 5 percent MUST pass only with a structured regression warning showing the absolute and percentage delta. A decrease SHALL pass and be reported as an improvement. An intentional schema, fixture, tokenizer, vocabulary, flow-version, or flow-fingerprint change requires a newly versioned candidate baseline, explicit owner approval, and a non-empty decision reference before it can become the comparison authority; a missing, unapproved, or unreferenced baseline MUST return `baseline_incompatible` and fail closed.
 Source: about/heart-and-soul/efficiency.md section "Token budget"; validation.md section "Tests as the engine of recursive self-improvement"; about/craft-and-care/engineering-bar.md section 2
 Scope: v1-mandatory
 
@@ -57,7 +94,11 @@ Scope: v1-mandatory
 
 #### Scenario: Baseline update requires owner approval
 - **WHEN** a flow schema, fixture, or tokenizer change produces a candidate baseline
-- **THEN** the candidate MUST NOT replace the checked-in comparison authority or allow the gate to pass until its new version, rationale, and measured counts receive explicit owner approval
+- **THEN** the candidate MUST NOT replace the checked-in comparison authority or allow the gate to pass until its new version, rationale, measured counts, and non-empty approval decision reference receive explicit owner approval
+
+#### Scenario: Missing approval provenance fails closed
+- **WHEN** a baseline is marked owner-approved without a non-empty decision reference, or its `approval.status` is absent or not `owner_approved`
+- **THEN** CI MUST return `baseline_incompatible` and fail rather than treating any measured growth as an approved comparison
 
 ## MODIFIED Requirements
 

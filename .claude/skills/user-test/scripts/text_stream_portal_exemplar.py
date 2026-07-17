@@ -5765,6 +5765,9 @@ async def run_scenario(args: argparse.Namespace) -> int:
         }, target=args.target, doc=args.doc, phases=args.phases)
 
         await client.connect()
+        # Keep this evidence client below the production profile's 30 Hz
+        # per-agent mutation envelope while it fans out portal setup batches.
+        client.configure_batch_pacing(0.035)
         # hud-16um0: prefer the runtime's resolved portal tokens (delivered on the
         # session handshake) so the runtime's ACTIVE profile drives the live look,
         # instead of resolving against the client-side mirror. Falls back to the

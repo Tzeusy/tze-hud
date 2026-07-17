@@ -5,6 +5,7 @@ use winit::event::MouseScrollDelta;
 
 use crate::channels::{INPUT_EVENT_CAPACITY, InputEvent};
 use tze_hud_protocol::proto::{EventBatch, InputEnvelope};
+use tze_hud_scene::MonoUs;
 use tze_hud_scene::graph::SceneGraph;
 
 pub(super) fn normalize_mouse_wheel_delta(delta: &MouseScrollDelta) -> (f32, f32) {
@@ -51,6 +52,7 @@ pub(super) fn dispatch_scroll_offset_event_to_namespace(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_micros() as u64;
+    let timestamp_mono_us = monotonic_us_since_start();
 
     use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
     let batch = EventBatch {
@@ -60,7 +62,7 @@ pub(super) fn dispatch_scroll_offset_event_to_namespace(
             event: Some(InputEvent::ScrollOffsetChanged(
                 tze_hud_protocol::proto::ScrollOffsetChangedEvent {
                     tile_id: ev.tile_id.as_uuid().as_bytes().to_vec(),
-                    timestamp_mono_us: 0, // monotonic clock not wired here; v1 leaves unset
+                    timestamp_mono_us: timestamp_mono_us.as_u64(),
                     offset_x: ev.offset_x,
                     offset_y: ev.offset_y,
                 },
@@ -409,6 +411,7 @@ pub(super) fn dispatch_focus_event(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_micros() as u64;
+    let timestamp_mono_us = monotonic_us_since_start();
 
     use tze_hud_input::{FocusLostReason, FocusSource};
     use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
@@ -446,7 +449,7 @@ pub(super) fn dispatch_focus_event(
                     tze_hud_protocol::proto::FocusLostEvent {
                         tile_id: tile_id_bytes,
                         node_id: node_id_bytes,
-                        timestamp_mono_us: 0, // monotonic clock not wired here; v1 leaves unset
+                        timestamp_mono_us: timestamp_mono_us.as_u64(),
                         reason: proto_reason as i32,
                     },
                 )),
@@ -479,7 +482,7 @@ pub(super) fn dispatch_focus_event(
                     tze_hud_protocol::proto::FocusGainedEvent {
                         tile_id: tile_id_bytes,
                         node_id: node_id_bytes,
-                        timestamp_mono_us: 0, // monotonic clock not wired here; v1 leaves unset
+                        timestamp_mono_us: timestamp_mono_us.as_u64(),
                         source: proto_source as i32,
                     },
                 )),
@@ -540,9 +543,7 @@ pub(super) fn dispatch_pointer_event(
         .unwrap_or_default()
         .as_micros() as u64;
 
-    // Monotonic microseconds since process start — same clock source used by
-    // the keyboard and scene-graph event paths (see `nanoseconds_since_start`).
-    let timestamp_mono_us = (nanoseconds_since_start() / 1_000).max(1);
+    let timestamp_mono_us = monotonic_us_since_start();
 
     let event = match dispatch.kind {
         AgentDispatchKind::PointerDown => {
@@ -550,7 +551,7 @@ pub(super) fn dispatch_pointer_event(
                 tile_id: tile_id_bytes,
                 node_id: node_id_bytes,
                 interaction_id: dispatch.interaction_id,
-                timestamp_mono_us,
+                timestamp_mono_us: timestamp_mono_us.as_u64(),
                 device_id: dispatch.device_id.to_string(),
                 local_x: dispatch.local_x,
                 local_y: dispatch.local_y,
@@ -564,7 +565,7 @@ pub(super) fn dispatch_pointer_event(
                 tile_id: tile_id_bytes,
                 node_id: node_id_bytes,
                 interaction_id: dispatch.interaction_id,
-                timestamp_mono_us,
+                timestamp_mono_us: timestamp_mono_us.as_u64(),
                 device_id: dispatch.device_id.to_string(),
                 local_x: dispatch.local_x,
                 local_y: dispatch.local_y,
@@ -577,7 +578,7 @@ pub(super) fn dispatch_pointer_event(
                 tile_id: tile_id_bytes,
                 node_id: node_id_bytes,
                 interaction_id: dispatch.interaction_id,
-                timestamp_mono_us,
+                timestamp_mono_us: timestamp_mono_us.as_u64(),
                 device_id: dispatch.device_id.to_string(),
                 local_x: dispatch.local_x,
                 local_y: dispatch.local_y,
@@ -634,6 +635,7 @@ pub(super) fn dispatch_capture_released_event(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_micros() as u64;
+    let timestamp_mono_us = monotonic_us_since_start();
 
     let proto_reason = match dispatch.capture_released_reason {
         Some(CaptureReleasedReason::AgentReleased) => {
@@ -669,7 +671,7 @@ pub(super) fn dispatch_capture_released_event(
                 tze_hud_protocol::proto::CaptureReleasedEvent {
                     tile_id: tile_id_bytes,
                     node_id: node_id_bytes,
-                    timestamp_mono_us: 0, // monotonic clock not wired here; v1 leaves unset
+                    timestamp_mono_us: timestamp_mono_us.as_u64(),
                     device_id: dispatch.device_id.to_string(),
                     reason: proto_reason as i32,
                 },
@@ -757,6 +759,14 @@ pub(super) fn nanoseconds_since_start() -> u64 {
     static START: OnceLock<Instant> = OnceLock::new();
     let start = START.get_or_init(Instant::now);
     start.elapsed().as_nanos() as u64
+}
+
+/// Monotonic microseconds since process start for `_mono_us` input payloads.
+///
+/// `MonoUs(0)` is the protocol's "not set" sentinel, so production dispatches
+/// clamp the first sub-microsecond sample to one.
+pub(super) fn monotonic_us_since_start() -> MonoUs {
+    MonoUs((nanoseconds_since_start() / 1_000).max(1))
 }
 
 /// Map a winit `PhysicalKey` to a compact u32 key code.
@@ -947,6 +957,102 @@ mod tests {
             Some(InputEvent::PointerUp(ev)) => ev.timestamp_mono_us,
             other => panic!("expected pointer event, got: {other:?}"),
         }
+    }
+
+    fn assert_set_mono_timestamp(timestamp_mono_us: u64, event_name: &str) {
+        assert!(
+            tze_hud_scene::MonoUs(timestamp_mono_us).is_set(),
+            "{event_name} must carry a set timestamp_mono_us for latency measurement"
+        );
+    }
+
+    #[test]
+    fn scroll_offset_dispatch_propagates_set_mono_timestamp() {
+        use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
+
+        let (tx, mut rx) = test_input_event_channel();
+        let tx_opt = Some(tx);
+        dispatch_scroll_offset_event_to_namespace(
+            &tx_opt,
+            "scroll-agent".to_string(),
+            tze_hud_input::ScrollOffsetChangedEvent {
+                tile_id: tze_hud_scene::SceneId::new(),
+                offset_x: 12.0,
+                offset_y: 34.0,
+            },
+        );
+
+        let (namespace, batch) = rx.try_recv().expect("scroll event must be sent");
+        assert_eq!(namespace, "scroll-agent");
+        let Some(InputEvent::ScrollOffsetChanged(event)) = &batch.events[0].event else {
+            panic!("expected ScrollOffsetChanged event");
+        };
+        assert_set_mono_timestamp(event.timestamp_mono_us, "ScrollOffsetChangedEvent");
+    }
+
+    #[test]
+    fn focus_dispatch_propagates_set_mono_timestamps() {
+        use tze_hud_input::{FocusGainedEvent, FocusLostEvent, FocusLostReason, FocusSource};
+        use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
+
+        let (tx, mut rx) = test_input_event_channel();
+        let tx_opt = Some(tx);
+        let transition = tze_hud_input::FocusTransition {
+            lost: Some((
+                FocusLostEvent {
+                    tile_id: tze_hud_scene::SceneId::new(),
+                    node_id: Some(tze_hud_scene::SceneId::new()),
+                    reason: FocusLostReason::ClickElsewhere,
+                },
+                "lost-agent".to_string(),
+            )),
+            gained: Some((
+                FocusGainedEvent {
+                    tile_id: tze_hud_scene::SceneId::new(),
+                    node_id: Some(tze_hud_scene::SceneId::new()),
+                    source: FocusSource::Click,
+                },
+                "gained-agent".to_string(),
+            )),
+            ring_update: None,
+        };
+
+        dispatch_focus_event(&tx_opt, transition);
+
+        let (lost_namespace, lost_batch) = rx.try_recv().expect("focus-lost event must be sent");
+        assert_eq!(lost_namespace, "lost-agent");
+        let Some(InputEvent::FocusLost(event)) = &lost_batch.events[0].event else {
+            panic!("expected FocusLost event");
+        };
+        assert_set_mono_timestamp(event.timestamp_mono_us, "FocusLostEvent");
+
+        let (gained_namespace, gained_batch) =
+            rx.try_recv().expect("focus-gained event must be sent");
+        assert_eq!(gained_namespace, "gained-agent");
+        let Some(InputEvent::FocusGained(event)) = &gained_batch.events[0].event else {
+            panic!("expected FocusGained event");
+        };
+        assert_set_mono_timestamp(event.timestamp_mono_us, "FocusGainedEvent");
+    }
+
+    #[test]
+    fn capture_release_dispatch_propagates_set_mono_timestamp() {
+        use tze_hud_input::{AgentDispatchKind, CaptureReleasedReason};
+        use tze_hud_protocol::proto::input_envelope::Event as InputEvent;
+
+        let (tx, mut rx) = test_input_event_channel();
+        let tx_opt = Some(tx);
+        let mut dispatch = make_agent_dispatch(AgentDispatchKind::CaptureReleased);
+        dispatch.capture_released_reason = Some(CaptureReleasedReason::PointerUp);
+
+        dispatch_capture_released_event(&tx_opt, dispatch);
+
+        let (namespace, batch) = rx.try_recv().expect("capture-release event must be sent");
+        assert_eq!(namespace, "test-agent");
+        let Some(InputEvent::CaptureReleased(event)) = &batch.events[0].event else {
+            panic!("expected CaptureReleased event");
+        };
+        assert_set_mono_timestamp(event.timestamp_mono_us, "CaptureReleasedEvent");
     }
 
     /// `dispatch_pointer_event` must set `timestamp_mono_us > 0` for PointerDown,

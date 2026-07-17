@@ -27,9 +27,18 @@ scripts/quickstart.sh --window-mode overlay
 ```
 
 `quickstart.sh` scaffolds a minimal config, generates a strong PSK, prints the
-**ATTACH INFO** block (MCP URL + credentials + a paste-ready MCP config
-snippet), and launches the runtime. Then jump to
+redacted **ATTACH INFO** block (MCP URL + credential instructions + a client
+config template), and launches the runtime. Then jump to
 [Step 4: attach a session](#step-4-attach-an-llm-session).
+
+To create a ready-to-use client config without building or launching the
+runtime, use the protected-file form (implemented by
+[`scripts/quickstart.sh`](../scripts/quickstart.sh)):
+
+```bash
+scripts/quickstart.sh --emit-mcp-config=tze-hud.mcp.json
+# Creates a new mode-600 file and refuses to overwrite an existing file.
+```
 
 To see the attach block **without** launching a window (e.g. to wire up your MCP
 client first, or on a headless box):
@@ -93,6 +102,13 @@ This writes two files in the current directory (both idempotent):
   runtime's built-in zero-config placement, size, and design-token defaults —
   no widget wiring is required for session projection.
 - `tze_hud.psk` — a freshly generated strong pre-shared key (`chmod 600`).
+
+To scaffold those files and also create a secret-bearing MCP client config,
+run `scripts/quickstart.sh --emit-mcp-config=tze-hud.mcp.json`. The output file
+is created with mode `600`; the script fails rather than replacing an existing
+client config. The bare `--emit-mcp-config` form instead writes exactly one JSON
+document to stdout and exits, for piping into a client-specific merge command.
+Treat that stdout as a secret: do not paste it into logs or tickets.
 
 **Manual equivalent** (if you prefer):
 
@@ -171,8 +187,14 @@ attach hint, never the PSK. (A disabled service — `--mcp-port 0` or
 
 ## Step 4 — Attach an LLM session
 
-Point your LLM client's MCP config at the runtime (substitute your PSK from
-`tze_hud.psk`):
+Generate a client config with the endpoint and bearer already wired:
+
+```bash
+scripts/quickstart.sh --emit-mcp-config=tze-hud.mcp.json
+```
+
+Merge the resulting `mcpServers.tze-hud-runtime` entry into your LLM client's
+MCP settings. If you prefer to do that manually, the equivalent shape is:
 
 ```json
 {
@@ -185,6 +207,17 @@ Point your LLM client's MCP config at the runtime (substitute your PSK from
   }
 }
 ```
+
+`--print-attach-info` remains deliberately redacted. To get both its discovery
+text and a protected credential file in one headless run, use:
+
+```bash
+scripts/quickstart.sh --print-attach-info \
+  --emit-mcp-config=tze-hud.mcp.json
+```
+
+The bare stdout form is rejected when combined with `--print-attach-info`, so a
+headless/redacted command can never print the PSK accidentally.
 
 Then, inside that session, opt into projection. If your client supports the
 bundled skill, just say **"project this session to the HUD"** — that loads the
@@ -235,7 +268,7 @@ curl -s -X POST http://127.0.0.1:9090/mcp \
 | `refusing startup with default PSK value "tze-hud-key"` | Set a non-trivial PSK (`--psk` / `TZE_HUD_PSK`). `quickstart.sh` generates one. |
 | Nothing printed on stdout after launch | The runtime always prints a one-time non-secret startup banner (bind addrs + attach hint). *Structured* logs beyond it are gated behind the `TZE_HUD_LOG` env filter — run with `TZE_HUD_LOG=info` for detailed startup/bind logs. (`quickstart.sh` prints the attach block regardless.) |
 | Projection tool call rejected `CAPABILITY_REQUIRED` | `TZE_HUD_MCP_RESIDENT_PRINCIPAL` is not set equal to the PSK, or the bearer differs from the PSK. Make principal == bearer == PSK. |
-| `No active tab` on the autonomous test VM | Known runtime bug (hud-d5rcd) on the WARP-rendered VM: call MCP `create_tab {"name":"Main"}` once before portal work. Not needed on a normal GPU desktop where `[[tabs]]` materializes. |
+| `No active tab` on the autonomous test VM | WARP-VM-specific fallback: call MCP `create_tab {"name":"Main"}` once before portal work. The general config-tab bootstrap is fixed; this is not needed on a normal GPU desktop where `[[tabs]]` materializes. |
 | Window won't open on a headless box | Expected — you need a real display server. Use overlay/fullscreen on a desktop, or the TigerVNC path in `README.md`. |
 
 ---

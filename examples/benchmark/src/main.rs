@@ -9,6 +9,7 @@
 //! cargo run --bin benchmark --features headless -- --emit telemetry.json
 //! cargo run --bin benchmark --features headless -- --emit telemetry.json --frames 300
 //! cargo run --bin benchmark --features headless -- --emit telemetry.json --cpu-only
+//! taskset --cpu-list 0-1 target/release/benchmark --constrained-envelope --emit telemetry.json
 //! ```
 //!
 //! ## Calibration workloads
@@ -37,6 +38,99 @@ use serde::{Deserialize, Serialize};
 use tze_hud_scene::calibration::CalibrationResult;
 use tze_hud_telemetry::{HardwareFactors, SessionSummary, ValidationReport};
 
+#[cfg(feature = "headless")]
+const CALIBRATION_VECTOR_VERSION: &str = "tze_hud.cpu-gpu-upload.v1";
+#[cfg(feature = "headless")]
+const BENCHMARK_WIDTH: u32 = 1920;
+#[cfg(feature = "headless")]
+const BENCHMARK_HEIGHT: u32 = 1080;
+
+/// Operating-system identity captured by the constrained benchmark lane.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OperatingSystemIdentity {
+    pub family: String,
+    pub name: String,
+    pub version: String,
+    pub architecture: String,
+}
+
+/// Proof that the benchmark process actually ran with the requested CPU limit.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CpuConstraintIdentity {
+    pub model: String,
+    pub logical_cpu_limit: usize,
+    pub allowed_cpu_list: String,
+    pub enforcement_mechanism: String,
+    pub enforced: bool,
+}
+
+/// Optional memory constraint recorded for the lane.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MemoryConstraintIdentity {
+    pub limit_bytes: Option<u64>,
+    pub enforcement_mechanism: String,
+}
+
+/// Actual renderer and adapter selected by the headless compositor.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RendererAdapterIdentity {
+    pub requested_software: bool,
+    pub backend: String,
+    pub adapter_identity: String,
+    pub device_type: String,
+    pub driver: String,
+    pub driver_info: String,
+    pub vendor_id: u32,
+    pub device_id: u32,
+    pub verified_software: bool,
+}
+
+/// Render target used by the versioned calibration and benchmark vectors.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ViewportIdentity {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Complete execution identity for the constrained-envelope proxy lane.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConstrainedProfileIdentity {
+    pub schema: String,
+    pub lane: String,
+    pub low_power_proxy: bool,
+    pub device_qualification: bool,
+    pub operating_system: OperatingSystemIdentity,
+    pub cpu: CpuConstraintIdentity,
+    pub memory: MemoryConstraintIdentity,
+    pub renderer: RendererAdapterIdentity,
+    pub viewport: ViewportIdentity,
+    pub calibration_vector_version: String,
+}
+
+/// Count unique CPUs described by Linux's CPU-list syntax (`0-2,5`).
+#[cfg(any(feature = "headless", test))]
+fn logical_cpu_count(cpu_list: &str) -> Option<usize> {
+    let mut cpus = std::collections::BTreeSet::new();
+    if cpu_list.trim().is_empty() {
+        return None;
+    }
+
+    for segment in cpu_list.split(',') {
+        let segment = segment.trim();
+        let mut bounds = segment.split('-');
+        let first = bounds.next()?.parse::<usize>().ok()?;
+        let last = match bounds.next() {
+            Some(value) => value.parse::<usize>().ok()?,
+            None => first,
+        };
+        if bounds.next().is_some() || last < first {
+            return None;
+        }
+        cpus.extend(first..=last);
+    }
+    (!cpus.is_empty()).then_some(cpus.len())
+}
+
 // ─── Shared output types (always compiled — needed for tests) ─────────────────
 
 /// GPU fill/composition calibration result.
@@ -48,6 +142,9 @@ pub struct GpuCalibrationResult {
     pub gpu_factor: f64,
     /// Duration of the calibration run in microseconds.
     pub calibration_duration_us: u64,
+    /// Actual adapter selected by the calibration runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<RendererAdapterIdentity>,
 }
 
 /// Texture-upload calibration result.
@@ -90,6 +187,9 @@ pub struct BenchmarkOutput {
     pub sessions: Vec<ScenarioResult>,
     /// Layer-3 validation report (runs against the steady-state session).
     pub validation: ValidationReport,
+    /// Present only when `--constrained-envelope` requests fail-closed proxy proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constrained_profile: Option<ConstrainedProfileIdentity>,
 }
 
 // ─── Headless implementation ──────────────────────────────────────────────────
@@ -146,8 +246,8 @@ mod headless_impl {
 
     fn benchmark_config(psk: &str) -> HeadlessConfig {
         HeadlessConfig {
-            width: 1920,
-            height: 1080,
+            width: BENCHMARK_WIDTH,
+            height: BENCHMARK_HEIGHT,
             grpc_port: 0,
             bind_all_interfaces: false,
             psk: psk.to_string(),
@@ -164,6 +264,8 @@ mod headless_impl {
         pub frames: u64,
         /// Skip GPU and upload calibration (CPU-only mode for faster iteration).
         pub cpu_only: bool,
+        /// Emit execution identity for the two-CPU software-renderer proxy lane.
+        pub constrained_envelope: bool,
     }
 
     pub fn parse_args() -> Args {
@@ -171,6 +273,7 @@ mod headless_impl {
         let mut emit = None;
         let mut frames = 120u64;
         let mut cpu_only = false;
+        let mut constrained_envelope = false;
 
         let mut i = 1;
         while i < args.len() {
@@ -207,6 +310,9 @@ mod headless_impl {
                 "--cpu-only" => {
                     cpu_only = true;
                 }
+                "--constrained-envelope" => {
+                    constrained_envelope = true;
+                }
                 _ => {}
             }
             i += 1;
@@ -216,6 +322,108 @@ mod headless_impl {
             emit,
             frames,
             cpu_only,
+            constrained_envelope,
+        }
+    }
+
+    fn os_release_value(contents: &str, key: &str) -> Option<String> {
+        contents.lines().find_map(|line| {
+            let (candidate, value) = line.split_once('=')?;
+            (candidate == key).then(|| value.trim_matches('"').to_string())
+        })
+    }
+
+    fn cpu_model() -> String {
+        std::fs::read_to_string("/proc/cpuinfo")
+            .ok()
+            .and_then(|contents| {
+                contents.lines().find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    (key.trim() == "model name").then(|| value.trim().to_string())
+                })
+            })
+            .or_else(|| std::env::var("PROCESSOR_IDENTIFIER").ok())
+            .unwrap_or_default()
+    }
+
+    fn allowed_cpu_list() -> String {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|contents| {
+                contents.lines().find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    (key.trim() == "Cpus_allowed_list").then(|| value.trim().to_string())
+                })
+            })
+            .unwrap_or_default()
+    }
+
+    fn memory_constraint() -> MemoryConstraintIdentity {
+        let limit = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
+            .ok()
+            .and_then(|value| {
+                let value = value.trim();
+                (value != "max")
+                    .then(|| value.parse::<u64>().ok())
+                    .flatten()
+            });
+        MemoryConstraintIdentity {
+            limit_bytes: limit,
+            enforcement_mechanism: if limit.is_some() {
+                "cgroup v2 memory.max".to_string()
+            } else {
+                "none".to_string()
+            },
+        }
+    }
+
+    fn collect_constrained_profile(
+        renderer: Option<RendererAdapterIdentity>,
+    ) -> ConstrainedProfileIdentity {
+        let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+        let allowed_cpu_list = allowed_cpu_list();
+        let logical_cpu_limit = logical_cpu_count(&allowed_cpu_list).unwrap_or(0);
+        let family = std::env::consts::OS.to_string();
+
+        ConstrainedProfileIdentity {
+            schema: "tze_hud.constrained_profile.v1".to_string(),
+            lane: if family == "linux" {
+                "llvmpipe-two-logical-cpus".to_string()
+            } else {
+                "warp-two-logical-cpus".to_string()
+            },
+            low_power_proxy: true,
+            device_qualification: false,
+            operating_system: OperatingSystemIdentity {
+                family,
+                name: os_release_value(&os_release, "NAME").unwrap_or_default(),
+                version: os_release_value(&os_release, "VERSION_ID").unwrap_or_default(),
+                architecture: std::env::consts::ARCH.to_string(),
+            },
+            cpu: CpuConstraintIdentity {
+                model: cpu_model(),
+                logical_cpu_limit,
+                allowed_cpu_list,
+                enforcement_mechanism: "linux sched affinity (taskset)".to_string(),
+                enforced: logical_cpu_limit == 2,
+            },
+            memory: memory_constraint(),
+            renderer: renderer.unwrap_or(RendererAdapterIdentity {
+                requested_software: false,
+                backend: String::new(),
+                adapter_identity: String::new(),
+                device_type: String::new(),
+                driver: String::new(),
+                driver_info: String::new(),
+                vendor_id: 0,
+                device_id: 0,
+                verified_software: false,
+            }),
+            viewport: ViewportIdentity {
+                width: BENCHMARK_WIDTH,
+                height: BENCHMARK_HEIGHT,
+            },
+            calibration_vector_version: CALIBRATION_VECTOR_VERSION.to_string(),
         }
     }
 
@@ -320,9 +528,33 @@ mod headless_impl {
                     fps: 0.0,
                     gpu_factor: f64::NAN,
                     calibration_duration_us: start.elapsed().as_micros() as u64,
+                    adapter: None,
                 };
             }
         };
+        let adapter_info = runtime.compositor.adapter_info();
+        let requested_software =
+            std::env::var("HEADLESS_FORCE_SOFTWARE").is_ok_and(|value| value.trim() == "1");
+        let adapter_name = adapter_info.name.to_lowercase();
+        let verified_software = requested_software
+            && adapter_info.device_type.eq_ignore_ascii_case("cpu")
+            && ((cfg!(target_os = "linux")
+                && adapter_info.backend.eq_ignore_ascii_case("vulkan")
+                && (adapter_name.contains("llvmpipe") || adapter_name.contains("softpipe")))
+                || (cfg!(target_os = "windows")
+                    && adapter_info.backend.eq_ignore_ascii_case("dx12")
+                    && adapter_name.contains("warp")));
+        let selected_adapter = Some(RendererAdapterIdentity {
+            requested_software,
+            backend: adapter_info.backend.clone(),
+            adapter_identity: adapter_info.name.clone(),
+            device_type: adapter_info.device_type.clone(),
+            driver: adapter_info.driver.clone(),
+            driver_info: adapter_info.driver_info.clone(),
+            vendor_id: adapter_info.vendor,
+            device_id: adapter_info.device,
+            verified_software,
+        });
 
         // Set up a multi-tile scene with overlapping alpha-blended tiles
         {
@@ -336,6 +568,7 @@ mod headless_impl {
                         fps: 0.0,
                         gpu_factor: f64::NAN,
                         calibration_duration_us: start.elapsed().as_micros() as u64,
+                        adapter: selected_adapter,
                     };
                 }
             };
@@ -399,6 +632,7 @@ mod headless_impl {
             fps,
             gpu_factor,
             calibration_duration_us: start.elapsed().as_micros() as u64,
+            adapter: selected_adapter,
         }
     }
 
@@ -1519,6 +1753,13 @@ mod headless_impl {
         }
 
         // ── Emit output ───────────────────────────────────────────────────────
+        let constrained_profile = args.constrained_envelope.then(|| {
+            collect_constrained_profile(
+                gpu_result
+                    .as_ref()
+                    .and_then(|result| result.adapter.clone()),
+            )
+        });
         let output = BenchmarkOutput {
             calibration: CalibrationOutput {
                 cpu: cpu_result,
@@ -1533,6 +1774,7 @@ mod headless_impl {
                 scene_lock_paced_contention,
             ],
             validation,
+            constrained_profile,
         };
 
         let json =
@@ -1579,6 +1821,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn constrained_cpu_list_counts_ranges_and_singletons() {
+        assert_eq!(logical_cpu_count("0-1"), Some(2));
+        assert_eq!(logical_cpu_count("0,2-3,7"), Some(4));
+        assert_eq!(logical_cpu_count("3"), Some(1));
+        assert_eq!(logical_cpu_count("3-1"), None);
+        assert_eq!(logical_cpu_count(""), None);
+    }
+
+    #[test]
+    fn constrained_profile_is_explicitly_a_non_device_proxy() {
+        let profile = ConstrainedProfileIdentity {
+            schema: "tze_hud.constrained_profile.v1".to_string(),
+            lane: "llvmpipe-two-logical-cpus".to_string(),
+            low_power_proxy: true,
+            device_qualification: false,
+            operating_system: OperatingSystemIdentity {
+                family: "linux".to_string(),
+                name: "Ubuntu".to_string(),
+                version: "24.04".to_string(),
+                architecture: "x86_64".to_string(),
+            },
+            cpu: CpuConstraintIdentity {
+                model: "CI proxy".to_string(),
+                logical_cpu_limit: 2,
+                allowed_cpu_list: "0-1".to_string(),
+                enforcement_mechanism: "linux sched affinity".to_string(),
+                enforced: true,
+            },
+            memory: MemoryConstraintIdentity {
+                limit_bytes: None,
+                enforcement_mechanism: "none".to_string(),
+            },
+            renderer: RendererAdapterIdentity {
+                requested_software: true,
+                backend: "Vulkan".to_string(),
+                adapter_identity: "llvmpipe".to_string(),
+                device_type: "Cpu".to_string(),
+                driver: "llvmpipe".to_string(),
+                driver_info: "Mesa 24.2".to_string(),
+                vendor_id: 0,
+                device_id: 0,
+                verified_software: true,
+            },
+            viewport: ViewportIdentity {
+                width: 1920,
+                height: 1080,
+            },
+            calibration_vector_version: "tze_hud.cpu-gpu-upload.v1".to_string(),
+        };
+
+        let json = serde_json::to_value(&profile).unwrap();
+        assert_eq!(json["low_power_proxy"], true);
+        assert_eq!(json["device_qualification"], false);
+        assert_eq!(json["cpu"]["logical_cpu_limit"], 2);
+        assert_eq!(json["renderer"]["verified_software"], true);
+    }
+
+    #[test]
     fn test_benchmark_output_serializes_round_trip() {
         let cpu = CalibrationResult {
             speed_factor: 1.0,
@@ -1606,6 +1906,7 @@ mod tests {
                 summary,
             }],
             validation,
+            constrained_profile: None,
         };
 
         let json = serde_json::to_string_pretty(&output).unwrap();
@@ -1625,6 +1926,7 @@ mod tests {
             fps: 350.0,
             gpu_factor: 1.43,
             calibration_duration_us: 500_000,
+            adapter: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("fps"));

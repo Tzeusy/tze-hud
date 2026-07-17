@@ -15,6 +15,8 @@ use crate::{
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
+const LIST_PROJECTIONS_AUDIT_SCOPE_ID: &str = "caller-scope";
+
 impl ProjectionResponse {
     fn with_portal_update_state(mut self, session: &ProjectionSession) -> Self {
         self.portal_update_ready = session.last_publish_portal_update_ready;
@@ -26,6 +28,10 @@ impl ProjectionResponse {
 #[derive(Clone, Debug)]
 struct ProjectionSession {
     projection_id: String,
+    /// Non-secret authenticated principal identity that created the projection.
+    /// Enumeration uses this to preserve cross-principal isolation without
+    /// exposing it in any caller-facing projection summary.
+    caller_identity: String,
     provider_kind: ProviderKind,
     display_name: String,
     workspace_hint: Option<String>,
@@ -47,6 +53,9 @@ struct ProjectionSession {
     hud_connection: Option<HudConnectionMetadata>,
     advisory_lease: Option<AdvisoryLeaseIdentity>,
     reconnect: ReconnectBookkeeping,
+    /// Set only by the runtime-owned liveness sweep, so automatic staleness can
+    /// recover independently of an owner-authored `Degraded` status.
+    agent_liveness_degraded_since_wall_us: Option<u64>,
     retained_transcript: VecDeque<TranscriptUnit>,
     retained_transcript_bytes: usize,
     /// The viewer's own accepted submissions (the INPUT history), held as a
@@ -193,6 +202,75 @@ impl ProjectionAuthority {
         })
     }
 
+    /// Return the caller's active projections as bounded, content-free
+    /// summaries. This is a read-only reconciliation primitive; it does not
+    /// rotate ownership, recover a lease, or change portal lifecycle state.
+    pub fn handle_list_projections(
+        &mut self,
+        request: ListProjectionsRequest,
+        caller_identity: &str,
+        server_timestamp_wall_us: u64,
+    ) -> ProjectionResponse {
+        if let Err(error) = request.validate() {
+            return self.list_validation_denial(
+                &request,
+                caller_identity,
+                server_timestamp_wall_us,
+                error,
+                ProjectionAuditCategory::BoundsDenied,
+            );
+        }
+        if let Err(error) = validate_non_empty_bounded(
+            "caller_identity",
+            caller_identity,
+            MAX_CALLER_IDENTITY_BYTES,
+        ) {
+            return self.list_validation_denial(
+                &request,
+                "invalid-caller",
+                server_timestamp_wall_us,
+                error,
+                ProjectionAuditCategory::AuthDenied,
+            );
+        }
+
+        let mut projections: Vec<ProjectionListEntry> = self
+            .sessions
+            .values()
+            .filter(|session| session.caller_identity == caller_identity)
+            .filter(|session| server_timestamp_wall_us < session.owner_token_expires_at_wall_us)
+            .map(|session| ProjectionListEntry {
+                projection_id: session.projection_id.clone(),
+                display_name: session.display_name.clone(),
+                lifecycle_state: session.lifecycle_state,
+                unread_output_count: session.unread_output_count,
+                pending_input_count: session
+                    .pending_input
+                    .iter()
+                    .filter(|item| !item.delivery_state.is_terminal())
+                    .count(),
+            })
+            .collect();
+        projections.sort_unstable_by(|left, right| left.projection_id.cmp(&right.projection_id));
+        projections.truncate(self.bounds.max_list_items);
+
+        let mut response = ProjectionResponse::accepted(
+            &request.request_id,
+            LIST_PROJECTIONS_AUDIT_SCOPE_ID,
+            server_timestamp_wall_us,
+            "caller-scoped projection summaries",
+        );
+        response.projections = projections;
+        self.audit_list_response(
+            &request,
+            caller_identity,
+            server_timestamp_wall_us,
+            &response,
+            ProjectionAuditCategory::CallerList,
+        );
+        response
+    }
+
     pub fn visible_transcript_window(&self, projection_id: &str) -> Option<Vec<TranscriptUnit>> {
         self.sessions.get(projection_id).map(|session| {
             visible_transcript_window(session, self.bounds.max_visible_transcript_bytes)
@@ -328,15 +406,17 @@ impl ProjectionAuthority {
             .reconnect
             .last_reconnect_wall_us
             .is_some_and(|last| last < metadata.last_reconnect_wall_us);
-        let connection_changed = session.hud_connection.as_ref().is_some_and(|connection| {
-            connection.connection_id != metadata.connection_id
-                || connection.authenticated_session_id != metadata.authenticated_session_id
+        // A transport connection can rotate when the same authenticated session
+        // reconnects. Only a different authenticated session is a takeover that
+        // must not inherit the prior advisory lease.
+        let session_takeover = session.hud_connection.as_ref().is_some_and(|connection| {
+            connection.authenticated_session_id != metadata.authenticated_session_id
         });
         if is_reconnect {
             session.reconnect.reconnect_count += 1;
         }
         session.reconnect.last_reconnect_wall_us = Some(metadata.last_reconnect_wall_us);
-        if is_reconnect || connection_changed {
+        if session_takeover {
             session.advisory_lease = None;
         }
         session.hud_connection = Some(metadata);
@@ -385,8 +465,7 @@ impl ProjectionAuthority {
         {
             return Err(ProjectionErrorCode::ProjectionStateConflict);
         }
-        session.reconnect.last_heartbeat_wall_us = Some(heartbeat_wall_us);
-        promote_to_active_if_recovering(session);
+        record_authenticated_agent_liveness(session, heartbeat_wall_us);
         Ok(())
     }
 
@@ -622,6 +701,45 @@ impl ProjectionAuthority {
         before - self.sessions.len()
     }
 
+    /// Mark attached projections stale after a bounded gap in authenticated
+    /// owner traffic. Presentation cadence and lease-grace cleanup remain owned
+    /// by the runtime caller; this returns only newly transitioned IDs.
+    pub fn sweep_agent_liveness_degradation(
+        &mut self,
+        server_timestamp_wall_us: u64,
+    ) -> Vec<String> {
+        let threshold = self.bounds.agent_liveness_degraded_after_wall_us;
+        let mut degraded = Vec::new();
+        for (projection_id, session) in &mut self.sessions {
+            if session.agent_liveness_degraded_since_wall_us.is_some()
+                || !matches!(
+                    session.lifecycle_state,
+                    ProjectionLifecycleState::Attached | ProjectionLifecycleState::Active
+                )
+            {
+                continue;
+            }
+            let Some(last_liveness_wall_us) = session.reconnect.last_heartbeat_wall_us else {
+                continue;
+            };
+            if server_timestamp_wall_us.saturating_sub(last_liveness_wall_us) < threshold {
+                continue;
+            }
+            session.agent_liveness_degraded_since_wall_us = Some(server_timestamp_wall_us);
+            session.lifecycle_state = ProjectionLifecycleState::Degraded;
+            degraded.push(projection_id.clone());
+        }
+        degraded.sort_unstable();
+        degraded
+    }
+
+    /// Whether this projection's stale state was opened by the liveness sweep.
+    pub fn is_agent_liveness_degraded(&self, projection_id: &str) -> bool {
+        self.sessions
+            .get(projection_id)
+            .is_some_and(|session| session.agent_liveness_degraded_since_wall_us.is_some())
+    }
+
     #[cfg(test)]
     pub fn owner_token_verifier_for_test(&self, projection_id: &str) -> Option<&str> {
         self.sessions
@@ -746,6 +864,7 @@ impl ProjectionAuthority {
                         .get_mut(&request.envelope.projection_id)
                         .expect("session existence checked above");
                     existing.owner_token_verifier = verifier_for_secret(&owner_token);
+                    record_authenticated_agent_liveness(existing, server_timestamp_wall_us);
                     existing.lifecycle_state
                 };
                 let mut response = ProjectionResponse::accepted(
@@ -803,6 +922,10 @@ impl ProjectionAuthority {
             request.envelope.projection_id.clone(),
             ProjectionSession {
                 projection_id: request.envelope.projection_id.clone(),
+                caller_identity: bounded_copy(
+                    caller_identity.to_string(),
+                    MAX_CALLER_IDENTITY_BYTES,
+                ),
                 provider_kind: request.provider_kind,
                 display_name: request.display_name,
                 workspace_hint: request.workspace_hint,
@@ -823,7 +946,11 @@ impl ProjectionAuthority {
                 attach_idempotency_key: request.idempotency_key,
                 hud_connection: None,
                 advisory_lease: None,
-                reconnect: ReconnectBookkeeping::default(),
+                reconnect: ReconnectBookkeeping {
+                    last_heartbeat_wall_us: Some(server_timestamp_wall_us),
+                    ..ReconnectBookkeeping::default()
+                },
+                agent_liveness_degraded_since_wall_us: None,
                 retained_transcript: VecDeque::new(),
                 retained_transcript_bytes: 0,
                 input_history: VecDeque::new(),
@@ -1588,6 +1715,7 @@ impl ProjectionAuthority {
         if !constant_time_eq(&session.owner_token_verifier, &presented) {
             return Err(ProjectionErrorCode::ProjectionUnauthorized);
         }
+        record_authenticated_agent_liveness(session, server_timestamp_wall_us);
         Ok(session)
     }
 
@@ -1617,6 +1745,31 @@ impl ProjectionAuthority {
         response
     }
 
+    fn list_validation_denial(
+        &mut self,
+        request: &ListProjectionsRequest,
+        caller_identity: &str,
+        server_timestamp_wall_us: u64,
+        error: ProjectionContractError,
+        category: ProjectionAuditCategory,
+    ) -> ProjectionResponse {
+        let response = ProjectionResponse::denied(
+            &request.request_id,
+            LIST_PROJECTIONS_AUDIT_SCOPE_ID,
+            server_timestamp_wall_us,
+            error.code(),
+            error.to_string(),
+        );
+        self.audit_list_response(
+            request,
+            caller_identity,
+            server_timestamp_wall_us,
+            &response,
+            category,
+        );
+        response
+    }
+
     fn audit_from_response(
         &mut self,
         envelope: &OperationEnvelope,
@@ -1627,6 +1780,31 @@ impl ProjectionAuthority {
     ) {
         self.audit(ProjectionAuditEvent {
             envelope,
+            caller_identity,
+            server_timestamp_wall_us,
+            accepted: response.accepted,
+            error_code: response.error_code,
+            reason: &response.status_summary,
+            category,
+        });
+    }
+
+    fn audit_list_response(
+        &mut self,
+        request: &ListProjectionsRequest,
+        caller_identity: &str,
+        server_timestamp_wall_us: u64,
+        response: &ProjectionResponse,
+        category: ProjectionAuditCategory,
+    ) {
+        let envelope = OperationEnvelope {
+            operation: ProjectionOperation::List,
+            projection_id: LIST_PROJECTIONS_AUDIT_SCOPE_ID.to_string(),
+            request_id: request.request_id.clone(),
+            client_timestamp_wall_us: request.client_timestamp_wall_us,
+        };
+        self.audit(ProjectionAuditEvent {
+            envelope: &envelope,
             caller_identity,
             server_timestamp_wall_us,
             accepted: response.accepted,
@@ -1739,20 +1917,13 @@ fn projected_portal_state(
     // without any transcript/identity leak. The richer `lifecycle_state` below
     // stays redaction-gated.
     //
-    // The signal is keyed off `hud_connection`/`last_disconnect_wall_us`, NOT
-    // `lifecycle_state`, because owner traffic clears the lifecycle latch but not
-    // the connection: `handle_publish_output` accepts owner publishes while the
-    // HUD is gone (`hud_connection == None`) and `append_transcript_unit`
-    // promotes `HudUnavailable` back to `Active`. Deriving from `lifecycle_state`
-    // would silently drop the stale treatment during the orphan/grace window even
-    // though `authorize_portal_republish` still fails — the surface would un-dim
-    // and re-enable input without the HUD ever reconnecting. Only
-    // `record_hud_connection` restores `hud_connection = Some`, so this latch
-    // clears exactly on a genuine reconnect. `last_disconnect_wall_us.is_some()`
-    // gates out a freshly-attached, never-connected portal (which is "connecting",
-    // not "disconnected").
-    let connection_degraded =
-        session.hud_connection.is_none() && session.reconnect.last_disconnect_wall_us.is_some();
+    // HUD-side drops are keyed off connection bookkeeping rather than lifecycle,
+    // because owner traffic can mutate lifecycle while the HUD is still gone.
+    // Agent-side silence uses its dedicated runtime-owned marker so an explicit
+    // owner-authored Degraded status remains semantically distinct.
+    let connection_degraded = session.agent_liveness_degraded_since_wall_us.is_some()
+        || (session.hud_connection.is_none()
+            && session.reconnect.last_disconnect_wall_us.is_some());
     // Content-free "ever connected" signal (portal-chat-grade-affordances
     // §Connecting State Distinction). True once the session has a live HUD
     // connection OR has recorded a disconnect (connected-then-dropped still
@@ -2166,6 +2337,30 @@ fn promote_to_active_if_recovering(session: &mut ProjectionSession) {
         session.lifecycle_state,
         ProjectionLifecycleState::Attached | ProjectionLifecycleState::HudUnavailable
     ) {
+        session.lifecycle_state = ProjectionLifecycleState::Active;
+    }
+}
+
+/// Refresh server-observed agent recency only after authentication succeeds.
+/// Automatic liveness degradation recovers to Active; owner-authored Degraded
+/// has no liveness marker and is preserved.
+fn record_authenticated_agent_liveness(
+    session: &mut ProjectionSession,
+    server_timestamp_wall_us: u64,
+) {
+    session.reconnect.last_heartbeat_wall_us = Some(
+        session
+            .reconnect
+            .last_heartbeat_wall_us
+            .map_or(server_timestamp_wall_us, |last| {
+                last.max(server_timestamp_wall_us)
+            }),
+    );
+    if session
+        .agent_liveness_degraded_since_wall_us
+        .take()
+        .is_some()
+    {
         session.lifecycle_state = ProjectionLifecycleState::Active;
     }
 }
