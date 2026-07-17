@@ -20,10 +20,11 @@ projection_id `claude-promo-demo`, provider_kind `claude`. Date 2026-07-17.
 | 6 | `poll` (long-poll 30 s × 4) | 1 | returned `PROJECTION_NOT_FOUND` — runtime had restarted hours after deploy; error was **self-describing** with `recovery_operation: portal_projection_attach` hint |
 | 7 | re-`attach` (idempotency replay) | 1 | `continuity_replayed_count: 5` — client-authored tail reconstructed the portal on the fresh runtime; no manual state handling |
 | 8 | `poll` (long-poll 30 s × 4) | 1 | clean empty (`no pending input`), projection alive |
-| 9 | `detach` | 1 | at session wind-down |
+| 9 | re-`attach` (after deliberate orphan-path idle test reaped the session) | 1 | `continuity_replayed_count: 5` again — third successful replay |
+| 10 | `detach` (reason recorded) | 1 | `projection detached and private state purged` |
 
-**Totals**: 13 tool invocations for a full multi-turn lifecycle including a
-runtime-restart recovery. Minimal "attach and say hello": **2 calls**. Canonical
+**Totals**: 15 tool invocations for a full multi-turn lifecycle including a
+runtime-restart recovery AND a lease-reap recovery. Minimal "attach and say hello": **2 calls**. Canonical
 conversational turn: **3 calls** (publish → long-poll → ack); the measured token cost of
 that flow is 683 tokens on the approved hud-ht1k7 baseline (piggyback proposal
 hud-vconx would collapse it to 2 calls).
