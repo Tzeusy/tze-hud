@@ -2389,22 +2389,34 @@ impl InProcessPortalDriver {
         // materialised solely over the resident gRPC bridge and has no in-process
         // tile (`tile_scene_id.is_none()`), so the tile-only filter would exclude it
         // and its degraded state would never be forwarded to the bridge on a pure
-        // drop — the remote portal would keep its live paint. Admit an entry when it
-        // has a tile OR is bridged; the loop tees the degraded state for the bridged
-        // case and repaints the tile for the in-process case. The in-process-without-
-        // tile case stays excluded (nothing to dim), so that path is unchanged.
+        // drop — the remote portal would keep its live paint. A tile-less
+        // in-process entry is also admitted long enough to consume its one-shot
+        // flag: it has no surface to materialise, so retaining that flag would
+        // manufacture permanent `ImmediateWork` retries after liveness/drop.
         let degraded_repaint_ids: Vec<String> = self
             .drive
             .entries
             .iter()
-            .filter(|(id, e)| {
-                e.needs_degraded_repaint
-                    && (e.tile_scene_id.is_some()
-                        || self.effective_transport(id) == PortalTransport::ResidentGrpcBridge)
-            })
+            .filter(|(_, entry)| entry.needs_degraded_repaint)
             .map(|(id, _)| id.clone())
             .collect();
         for proj_id in degraded_repaint_ids {
+            let transport = self.effective_transport(&proj_id);
+            if transport == PortalTransport::InProcess
+                && self
+                    .drive
+                    .entries
+                    .get(&proj_id)
+                    .is_some_and(|entry| entry.tile_scene_id.is_none())
+            {
+                // There is no in-process tile to repaint. Clear this one-shot
+                // obligation after the authoritative drain, while preserving the
+                // first immediate wake that brought us here.
+                if let Some(entry) = self.drive.entries.get_mut(&proj_id) {
+                    entry.needs_degraded_repaint = false;
+                }
+                continue;
+            }
             // Re-derive state so the repaint reflects the current (degraded)
             // connection latch. If the session vanished between the drop and
             // here, drop the now-orphaned drive entry instead of repainting.
@@ -2444,7 +2456,7 @@ impl InProcessPortalDriver {
             // `connection_degraded`). Clear the one-shot flag here: the in-process arm
             // below is what clears it for the tiled path, so without this a tile-less
             // bridged entry would re-tee a `Publish` every drain.
-            if self.effective_transport(&proj_id) == PortalTransport::ResidentGrpcBridge {
+            if transport == PortalTransport::ResidentGrpcBridge {
                 if let Some(entry) = self.drive.entries.get_mut(&proj_id) {
                     entry.needs_degraded_repaint = false;
                 }
@@ -7432,6 +7444,104 @@ mod tests {
                 .connection_degraded
         );
         assert!(!driver.drive.entries[projection_id].needs_degraded_repaint);
+    }
+
+    /// A projection can be attached before it has published any content, so it
+    /// has no in-process tile to repaint. Its liveness transition still needs
+    /// one authority sweep, but must not leave inert repaint debt that schedules
+    /// `ImmediateWork` at roughly 1ms forever.
+    #[test]
+    fn attach_only_liveness_degradation_consumes_unmaterializable_repaint_debt() {
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                agent_liveness_degraded_after_wall_us: 1_000_000,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("attach_only_liveness"),
+            drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
+        };
+        let projection_id = "attach-only-liveness";
+        let attached_at_us = 1_000;
+        let _token = attach_and_get_token_at(&mut driver, projection_id, attached_at_us);
+        driver.attach_projection(projection_id, Vec::new());
+
+        let mut scene = SceneGraph::new(800.0, 600.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+        let liveness_deadline_us = attached_at_us.saturating_add(1_000_000);
+        assert_eq!(
+            driver.next_wake_deadline(&scene),
+            Some(PortalWakeDeadline {
+                wall_us: liveness_deadline_us,
+                family: PortalDeadlineFamily::AgentLiveness,
+            })
+        );
+
+        driver.drain_inner(
+            &mut scene,
+            &mut processor,
+            Some(tab_id),
+            liveness_deadline_us,
+        );
+
+        assert!(driver.authority.is_agent_liveness_degraded(projection_id));
+        let entry = &driver.drive.entries[projection_id];
+        assert!(
+            entry.tile_scene_id.is_none(),
+            "attach-only projections have no in-process surface to repaint"
+        );
+        assert!(
+            !entry.needs_degraded_repaint,
+            "a tile-less in-process projection must consume repaint debt after the liveness sweep"
+        );
+        assert_eq!(
+            driver.next_wake_deadline(&scene),
+            None,
+            "no tile, lease, or timed portal work remains after the one-shot liveness transition"
+        );
+    }
+
+    /// A channel-drop path must retain its first immediate drain so real work is
+    /// not delayed, then consume the repaint flag when the attached projection
+    /// has no in-process tile to materialise.
+    #[test]
+    fn attach_only_drop_consumes_unmaterializable_repaint_debt_after_one_drain() {
+        let mut driver = InProcessPortalDriver::new();
+        let projection_id = "attach-only-drop";
+        let _token = attach_and_get_token(&mut driver, projection_id);
+        driver.attach_projection(projection_id, Vec::new());
+
+        let mut scene = SceneGraph::new(800.0, 600.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+
+        assert!(driver.mark_projection_disconnected_at(projection_id, 2_000));
+        assert_eq!(
+            driver
+                .next_wake_deadline(&scene)
+                .map(|deadline| deadline.family),
+            Some(PortalDeadlineFamily::ImmediateWork),
+            "the initial drop still receives an immediate authoritative drain"
+        );
+
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 2_000);
+
+        let entry = &driver.drive.entries[projection_id];
+        assert!(entry.tile_scene_id.is_none());
+        assert!(
+            !entry.needs_degraded_repaint,
+            "the first drain must consume drop repaint debt that has no tile to paint"
+        );
+        assert_eq!(
+            driver.next_wake_deadline(&scene),
+            None,
+            "the dropped attach-only projection must not schedule repeated ~1ms ImmediateWork wakes"
+        );
     }
 
     /// A fully-idle in-process portal must quiesce its activity cue on its own:
