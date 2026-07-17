@@ -7237,6 +7237,10 @@ async fn test_input_capture_release_delivers_event() {
                         crate::proto::CaptureReleasedReason::AgentReleased as i32,
                         "reason must be AGENT_RELEASED"
                     );
+                    assert!(
+                        ev.timestamp_mono_us > 0,
+                        "synthetic capture-release fallback must carry a monotonic timestamp"
+                    );
                 }
                 other => panic!("Expected CaptureReleasedEvent, got: {other:?}"),
             }

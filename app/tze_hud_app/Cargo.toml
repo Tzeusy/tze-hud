@@ -20,12 +20,10 @@ tracing-subscriber = { workspace = true }
 tze_hud_scene = { path = "../../crates/tze_hud_scene", version = "0.1.0" }
 toml = { workspace = true }
 
-# Windows: embed the application manifest (tze_hud.manifest) at build time.
-# The manifest declares PerMonitorV2 DPI awareness, ensuring that winit's
-# MonitorHandle::size() and window.inner_size() always return physical pixels
-# regardless of launch context (interactive session or scheduled task).
-# Only active on Windows; ignored on other platforms.
-[target.'cfg(windows)'.build-dependencies]
+# Build scripts compile for the host even when Cargo targets Windows, so this
+# dependency must be available during Linux-to-Windows cross-builds. build.rs
+# invokes it only when CARGO_CFG_TARGET_OS is windows.
+[build-dependencies]
 embed-resource = "3"
 
 [lints]
