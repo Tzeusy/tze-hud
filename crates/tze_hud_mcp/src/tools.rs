@@ -2188,6 +2188,7 @@ pub fn handle_inject_composer_paste(
 
 /// Parameters for `portal_projection_list`.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PortalProjectionListParams {}
 
 /// Content-free result from `portal_projection_list`.
@@ -6353,6 +6354,22 @@ mod tests {
         }))
         .expect("publish params with expects_reply must parse");
         assert_eq!(p.expects_reply, Some(true));
+    }
+
+    #[tokio::test]
+    async fn portal_list_rejects_caller_supplied_scope_or_credentials() {
+        for params in [
+            json!({ "projection_id": "another-callers-projection" }),
+            json!({ "owner_token": "not-an-input-to-list" }),
+        ] {
+            let error = handle_portal_projection_list(params, None)
+                .await
+                .expect_err("list must reject caller-supplied scope or credentials");
+            assert!(
+                matches!(error, McpError::InvalidParams(_)),
+                "list must reject unexpected arguments before checking runtime wiring: {error:?}"
+            );
+        }
     }
 
     #[tokio::test]

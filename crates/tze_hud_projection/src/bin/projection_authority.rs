@@ -1206,23 +1206,25 @@ fn dispatch_line(
             }
             result
         }),
-        ProjectionOperation::List => deserialize_then(value, |request: ListProjectionsRequest| {
-            let result = authority.handle_list_projections(
-                request,
-                caller_identity,
-                server_timestamp_wall_us,
-            );
-            if result.accepted {
-                debug!(projection_count = result.projections.len(), "list accepted");
-            } else {
-                warn!(
-                    error_code = ?result.error_code,
-                    status_summary = %result.status_summary,
-                    "list rejected"
+        ProjectionOperation::List => {
+            deserialize_list_then(value, |request: ListProjectionsRequest| {
+                let result = authority.handle_list_projections(
+                    request,
+                    caller_identity,
+                    server_timestamp_wall_us,
                 );
-            }
-            result
-        }),
+                if result.accepted {
+                    debug!(projection_count = result.projections.len(), "list accepted");
+                } else {
+                    warn!(
+                        error_code = ?result.error_code,
+                        status_summary = %result.status_summary,
+                        "list rejected"
+                    );
+                }
+                result
+            })
+        }
         ProjectionOperation::PublishOutput => {
             deserialize_then(value, |request: PublishOutputRequest| {
                 let proj_id = request.envelope.projection_id.clone();
@@ -1783,6 +1785,18 @@ where
             format!("invalid operation payload: {error}"),
         ),
     }
+}
+
+/// The dispatcher consumes `operation`; strict list deserialization owns every
+/// remaining caller-provided field.
+fn deserialize_list_then(
+    mut value: Value,
+    dispatch: impl FnOnce(ListProjectionsRequest) -> ProjectionResponse,
+) -> ProjectionResponse {
+    if let Value::Object(fields) = &mut value {
+        fields.remove("operation");
+    }
+    deserialize_then(value, dispatch)
 }
 
 fn malformed_response(

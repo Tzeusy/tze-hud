@@ -354,6 +354,7 @@ impl OperationEnvelope {
 /// `list` request. Enumeration is caller-scoped rather than projection-scoped,
 /// so it deliberately carries no projection ID or owner token.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListProjectionsRequest {
     pub request_id: String,
     pub client_timestamp_wall_us: u64,
