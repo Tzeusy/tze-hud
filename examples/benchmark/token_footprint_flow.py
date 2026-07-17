@@ -18,6 +18,13 @@ PORTAL_OPERATIONS = {
     "portal_projection_get_pending_input": "get_pending_input",
     "portal_projection_acknowledge_input": "acknowledge_input",
 }
+MODE_LEGACY_V1 = "legacy-v1"
+MODE_PIGGYBACK_CANDIDATE_V2 = "piggyback-candidate-v2"
+MODE = os.environ.get("TOKEN_FOOTPRINT_MODE", MODE_LEGACY_V1)
+if MODE not in {MODE_LEGACY_V1, MODE_PIGGYBACK_CANDIDATE_V2}:
+    raise RuntimeError(
+        "TOKEN_FOOTPRINT_MODE must be legacy-v1 or piggyback-candidate-v2"
+    )
 transactions = []
 
 
@@ -160,7 +167,7 @@ def main():
         },
     )
     owner_token = attach["owner_token"]
-    invoke_portal_tool(
+    publish = invoke_portal_tool(
         "portal_projection_publish",
         {
             "projection_id": "token-calibration-portal",
@@ -172,16 +179,23 @@ def main():
             "expects_reply": True,
         },
     )
-    pending = invoke_portal_tool(
-        "portal_projection_get_pending_input",
-        {
-            "projection_id": "token-calibration-portal",
-            "owner_token": owner_token,
-            "max_items": 1,
-            "max_bytes": 4096,
-            "wait_ms": 1_000,
-        },
-    )
+    if MODE == MODE_PIGGYBACK_CANDIDATE_V2:
+        pending = publish.get("pending_input")
+        if not isinstance(pending, dict):
+            raise RuntimeError(
+                "piggyback candidate publish returned no pending_input payload"
+            )
+    else:
+        pending = invoke_portal_tool(
+            "portal_projection_get_pending_input",
+            {
+                "projection_id": "token-calibration-portal",
+                "owner_token": owner_token,
+                "max_items": 1,
+                "max_bytes": 4096,
+                "wait_ms": 1_000,
+            },
+        )
     input_id = pending["items"][0]["input_id"]
     invoke_portal_tool(
         "portal_projection_acknowledge_input",

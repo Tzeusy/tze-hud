@@ -18,9 +18,51 @@ mod calibration {
     };
 
     const PSK: &str = "token-calibration-resident-psk";
-    const CANONICAL_FLOW_VERSION: u32 = 1;
+    const LEGACY_FLOW_VERSION: u32 = 1;
+    const PIGGYBACK_PORTAL_FLOW_VERSION: u32 = 2;
     const VOCAB_FINGERPRINT: &str =
         "sha256:446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d";
+
+    /// The approved v1 baseline remains the default. The piggyback mode is an
+    /// isolated, deliberately unapproved v2 candidate that the fail-closed v1
+    /// checker never reads as its baseline.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum CalibrationMode {
+        LegacyV1,
+        PiggybackCandidateV2,
+    }
+
+    impl CalibrationMode {
+        fn parse(value: &str) -> Self {
+            match value {
+                "legacy-v1" => Self::LegacyV1,
+                "piggyback-candidate-v2" => Self::PiggybackCandidateV2,
+                _ => {
+                    panic!("invalid --mode {value:?}; expected legacy-v1 or piggyback-candidate-v2")
+                }
+            }
+        }
+
+        fn python_value(self) -> &'static str {
+            match self {
+                Self::LegacyV1 => "legacy-v1",
+                Self::PiggybackCandidateV2 => "piggyback-candidate-v2",
+            }
+        }
+
+        fn flow_version(self, flow_name: &str) -> u32 {
+            match (self, flow_name) {
+                (Self::PiggybackCandidateV2, "portal_projection") => PIGGYBACK_PORTAL_FLOW_VERSION,
+                _ => LEGACY_FLOW_VERSION,
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct CalibrationArgs {
+        output_path: PathBuf,
+        mode: CalibrationMode,
+    }
 
     #[derive(Debug, Deserialize)]
     struct DriverOutput {
@@ -134,14 +176,28 @@ mod calibration {
 
     fn spawn_portal_driver(
         mut rx: mpsc::UnboundedReceiver<PortalOp>,
+        mode: CalibrationMode,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut driver = InProcessPortalDriver::new();
             let mut input_injected = false;
             while let Some(op) = rx.recv().await {
                 let is_attach = matches!(&op, PortalOp::Attach { .. });
+                let is_publish = matches!(
+                    &op,
+                    PortalOp::PublishOutput { .. } | PortalOp::PublishOutputWithPendingInput { .. }
+                );
                 driver.dispatch_portal_op(op);
-                if is_attach && !input_injected {
+                // The v1 calibration injects after its publish, so that the
+                // response stays body-identical to the approved legacy
+                // acknowledgement and the existing explicit poll receives the
+                // fixture input. The v2 candidate injects after attach, making
+                // that same input available to the publish-response piggyback.
+                let should_inject = match mode {
+                    CalibrationMode::LegacyV1 => is_publish,
+                    CalibrationMode::PiggybackCandidateV2 => is_attach,
+                };
+                if should_inject && !input_injected {
                     driver
                         .authority_mut()
                         .enqueue_input(
@@ -159,7 +215,7 @@ mod calibration {
         })
     }
 
-    fn run_python_driver(address: SocketAddr) -> DriverOutput {
+    fn run_python_driver(address: SocketAddr, mode: CalibrationMode) -> DriverOutput {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let driver = root.join("examples/benchmark/token_footprint_flow.py");
         let portal_client = root.join(".claude/skills/hud-projection/scripts/portal_client.py");
@@ -168,6 +224,7 @@ mod calibration {
             .env("HUD_MCP_URL", format!("http://{address}/mcp"))
             .env("HUD_PSK", PSK)
             .env("PORTAL_CLIENT_PATH", portal_client)
+            .env("TOKEN_FOOTPRINT_MODE", mode.python_value())
             .output()
             .expect("launch token-footprint Python flow driver");
         assert!(
@@ -201,7 +258,7 @@ mod calibration {
         format!("blake3:{}", hasher.finalize().to_hex())
     }
 
-    fn build_output(driver: DriverOutput) -> CalibrationOutput {
+    fn build_output(driver: DriverOutput, mode: CalibrationMode) -> CalibrationOutput {
         let bpe = tiktoken_rs::o200k_base().expect("load bundled o200k_base vocabulary");
         let mut grouped: BTreeMap<String, Vec<Transaction>> = BTreeMap::new();
         for transaction in driver.transactions {
@@ -253,10 +310,11 @@ mod calibration {
                     },
                 );
             }
+            let flow_version = mode.flow_version(&flow_name);
             flows.insert(
                 flow_name,
                 FlowMeasurement {
-                    flow_version: CANONICAL_FLOW_VERSION,
+                    flow_version,
                     flow_fingerprint: fingerprint(flow_parts),
                     operations,
                     total: flow_total,
@@ -279,21 +337,48 @@ mod calibration {
         }
     }
 
-    fn parse_output_path() -> PathBuf {
-        let args: Vec<String> = std::env::args().collect();
-        match args.as_slice() {
-            [_, flag, path] if flag == "--output" => PathBuf::from(path),
-            _ => panic!("usage: token_footprint_calibration --output <path>"),
+    fn parse_args() -> CalibrationArgs {
+        let mut output_path = None;
+        let mut mode = CalibrationMode::LegacyV1;
+        let mut args = std::env::args().skip(1);
+
+        while let Some(flag) = args.next() {
+            match flag.as_str() {
+                "--output" => {
+                    let path = args
+                        .next()
+                        .unwrap_or_else(|| panic!("--output requires a path"));
+                    output_path = Some(PathBuf::from(path));
+                }
+                "--mode" => {
+                    let value = args.next().unwrap_or_else(|| {
+                        panic!("--mode requires legacy-v1 or piggyback-candidate-v2")
+                    });
+                    mode = CalibrationMode::parse(&value);
+                }
+                _ => panic!(
+                    "usage: token_footprint_calibration --output <path> [--mode legacy-v1|piggyback-candidate-v2]"
+                ),
+            }
+        }
+
+        CalibrationArgs {
+            output_path: output_path.unwrap_or_else(|| {
+                panic!(
+                    "usage: token_footprint_calibration --output <path> [--mode legacy-v1|piggyback-candidate-v2]"
+                )
+            }),
+            mode,
         }
     }
 
     pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
-        let output_path = parse_output_path();
+        let args = parse_args();
         let runtime = HeadlessRuntime::new(headless_config()).await?;
         prepare_scene(&runtime).await;
         let scene = scene_handle(&runtime).await;
         let (portal_tx, portal_rx) = mpsc::unbounded_channel();
-        let portal_task = spawn_portal_driver(portal_rx);
+        let portal_task = spawn_portal_driver(portal_rx, args.mode);
         let shutdown = ShutdownToken::new();
         let config = McpServerConfig {
             bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
@@ -308,12 +393,14 @@ mod calibration {
             Some(portal_tx.clone()),
         )
         .await?;
-        let driver_output = tokio::task::spawn_blocking(move || run_python_driver(address)).await?;
-        let output = build_output(driver_output);
-        if let Some(parent) = output_path.parent() {
+        let mode = args.mode;
+        let driver_output =
+            tokio::task::spawn_blocking(move || run_python_driver(address, mode)).await?;
+        let output = build_output(driver_output, args.mode);
+        if let Some(parent) = args.output_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&output_path, serde_json::to_vec_pretty(&output)?)?;
+        std::fs::write(&args.output_path, serde_json::to_vec_pretty(&output)?)?;
         shutdown.trigger(ShutdownReason::Clean);
         server_task.await?;
         drop(portal_tx);
@@ -362,6 +449,22 @@ mod calibration {
             assert_ne!(
                 fingerprint(["ab".to_string(), "c".to_string()]),
                 fingerprint(["a".to_string(), "bc".to_string()])
+            );
+        }
+
+        #[test]
+        fn piggyback_candidate_versions_only_the_changed_portal_flow() {
+            assert_eq!(
+                CalibrationMode::PiggybackCandidateV2.flow_version("portal_projection"),
+                PIGGYBACK_PORTAL_FLOW_VERSION
+            );
+            assert_eq!(
+                CalibrationMode::PiggybackCandidateV2.flow_version("publish_to_zone"),
+                LEGACY_FLOW_VERSION
+            );
+            assert_eq!(
+                CalibrationMode::LegacyV1.flow_version("portal_projection"),
+                LEGACY_FLOW_VERSION
             );
         }
     }

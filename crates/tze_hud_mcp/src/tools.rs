@@ -2387,6 +2387,23 @@ pub struct PortalProjectionPublishResult {
     pub accepted: bool,
     /// Human-readable status summary.
     pub status_summary: String,
+    /// The bounded next viewer turn returned only for question publishes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_input: Option<PortalProjectionPublishPendingInput>,
+}
+
+/// Bounded pending-input payload piggybacked on a question publish response.
+///
+/// `remaining_bytes` deliberately stays internal to the authority's existing
+/// poll back-pressure logic. The LLM-facing piggyback only needs the delivered
+/// items and compact count needed to know whether to publish again for another
+/// turn.
+#[derive(Debug, Serialize)]
+pub struct PortalProjectionPublishPendingInput {
+    /// HUD-originated items delivered through the normal inbox state machine.
+    pub items: Vec<crate::portal_op::PendingInputEntry>,
+    /// Eligible items that did not fit the bounded piggyback response.
+    pub remaining_count: usize,
 }
 
 /// Publish output text to an existing projection session (hud-bq0gl.2).
@@ -2409,7 +2426,10 @@ pub struct PortalProjectionPublishResult {
 /// `expects_reply` (a.k.a. `Question`) is an optional bool signaling that this
 /// output is a question awaiting a viewer reply. Omitted/`false` is the exact
 /// pre-existing behavior (no rendered cue); `true` drives a minimal, ambient,
-/// token-styled cue on the portal (hud-jip0k). Backward-compatible opt-in.
+/// token-styled cue on the portal (hud-jip0k) and may piggyback the next
+/// bounded pending HUD input in `pending_input`. An empty inbox omits that
+/// field entirely, preserving the compact legacy acknowledgement response.
+/// Backward-compatible opt-in.
 ///
 /// Accepted `output_kind` values (snake_case): `assistant` (default), `tool`,
 /// `status`, `error`, `other`. Any other value is rejected with
@@ -2449,16 +2469,72 @@ pub async fn handle_portal_projection_publish(
         )
     })?;
 
+    let PortalProjectionPublishParams {
+        projection_id,
+        owner_token,
+        output_text,
+        logical_unit_id,
+        output_kind,
+        content_classification,
+        coalesce_key,
+        expects_reply,
+    } = p;
+
+    if expects_reply == Some(true) {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tx.send(crate::portal_op::PortalOp::PublishOutputWithPendingInput {
+            projection_id,
+            owner_token,
+            output_text,
+            logical_unit_id,
+            output_kind,
+            content_classification,
+            coalesce_key,
+            reply: reply_tx,
+        })
+        .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
+
+        return match reply_rx.await {
+            Ok(Ok(batch)) => {
+                // No eligible turn is represented by an omitted field rather
+                // than an empty object. This preserves the exact compact
+                // acknowledgement wire shape for a question that races ahead
+                // of viewer input, while a non-empty or back-pressured batch
+                // remains explicit to the caller.
+                let pending_input = if batch.items.is_empty() && batch.remaining_count == 0 {
+                    None
+                } else {
+                    Some(PortalProjectionPublishPendingInput {
+                        items: batch.items,
+                        remaining_count: batch.remaining_count,
+                    })
+                };
+                Ok(PortalProjectionPublishResult {
+                    accepted: true,
+                    status_summary: "output queued for portal rendering".to_string(),
+                    pending_input,
+                })
+            }
+            Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
+                error_code: rejection.error_code,
+                operation: "portal_projection_publish",
+            }),
+            Err(_) => Err(McpError::Internal(
+                "portal authority did not respond (channel dropped)".to_string(),
+            )),
+        };
+    }
+
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     tx.send(crate::portal_op::PortalOp::PublishOutput {
-        projection_id: p.projection_id,
-        owner_token: p.owner_token,
-        output_text: p.output_text,
-        logical_unit_id: p.logical_unit_id,
-        output_kind: p.output_kind,
-        content_classification: p.content_classification,
-        coalesce_key: p.coalesce_key,
-        expects_reply: p.expects_reply,
+        projection_id,
+        owner_token,
+        output_text,
+        logical_unit_id,
+        output_kind,
+        content_classification,
+        coalesce_key,
+        expects_reply,
         reply: reply_tx,
     })
     .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
@@ -2467,6 +2543,7 @@ pub async fn handle_portal_projection_publish(
         Ok(Ok(())) => Ok(PortalProjectionPublishResult {
             accepted: true,
             status_summary: "output queued for portal rendering".to_string(),
+            pending_input: None,
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
             error_code: rejection.error_code,
@@ -6354,6 +6431,139 @@ mod tests {
         }))
         .expect("publish params with expects_reply must parse");
         assert_eq!(p.expects_reply, Some(true));
+    }
+
+    /// hud-vconx: a question publish carries the next bounded viewer turn in
+    /// the same MCP response, eliminating the otherwise separate poll. The
+    /// input still comes from the driver/authority delivery path; this test
+    /// only pins the MCP transport result and its compact back-pressure count.
+    #[tokio::test]
+    async fn portal_publish_expects_reply_piggybacks_bounded_pending_input() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        let responder = tokio::spawn(async move {
+            match rx.recv().await.expect("publish op must be sent") {
+                crate::portal_op::PortalOp::PublishOutputWithPendingInput { reply, .. } => {
+                    reply
+                        .send(Ok(crate::portal_op::PendingInputBatch {
+                            items: vec![crate::portal_op::PendingInputEntry {
+                                input_id: "input-1".to_string(),
+                                projection_id: "p1".to_string(),
+                                submission_text: "Ship it".to_string(),
+                                submitted_at_wall_us: 10,
+                                expires_at_wall_us: 20,
+                                delivery_state: "delivered".to_string(),
+                                content_classification: "private".to_string(),
+                            }],
+                            remaining_count: 2,
+                            remaining_bytes: 17,
+                        }))
+                        .expect("publish reply must send");
+                }
+                other => panic!("unexpected portal op: {other:?}"),
+            }
+        });
+
+        let result = handle_portal_projection_publish(
+            json!({
+                "projection_id": "p1",
+                "owner_token": "t1",
+                "output_text": "Which release should I ship?",
+                "expects_reply": true
+            }),
+            Some(&tx),
+        )
+        .await
+        .expect("publish must succeed");
+        responder.await.expect("responder must finish");
+
+        let pending = result
+            .pending_input
+            .expect("question publishes must return the piggybacked inbox batch");
+        assert_eq!(pending.items.len(), 1);
+        assert_eq!(pending.items[0].input_id, "input-1");
+        assert_eq!(pending.remaining_count, 2);
+    }
+
+    /// An opted-in question with no eligible viewer turn keeps the publish
+    /// response byte-identical to the compact legacy acknowledgement. This
+    /// makes the empty piggyback overhead zero while preserving the ordinary
+    /// poll as the next action when input arrives later.
+    #[tokio::test]
+    async fn portal_publish_expects_reply_omits_empty_piggyback_payload() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        let responder = tokio::spawn(async move {
+            match rx.recv().await.expect("publish op must be sent") {
+                crate::portal_op::PortalOp::PublishOutputWithPendingInput { reply, .. } => {
+                    reply
+                        .send(Ok(crate::portal_op::PendingInputBatch {
+                            items: Vec::new(),
+                            remaining_count: 0,
+                            remaining_bytes: 0,
+                        }))
+                        .expect("publish reply must send");
+                }
+                other => panic!("unexpected portal op: {other:?}"),
+            }
+        });
+
+        let result = handle_portal_projection_publish(
+            json!({
+                "projection_id": "p1",
+                "owner_token": "t1",
+                "output_text": "Which release should I ship?",
+                "expects_reply": true
+            }),
+            Some(&tx),
+        )
+        .await
+        .expect("publish must succeed");
+        responder.await.expect("responder must finish");
+
+        assert!(result.pending_input.is_none());
+        let wire = serde_json::to_value(result).expect("publish result must serialize");
+        assert!(
+            wire.get("pending_input").is_none(),
+            "an empty question-publish piggyback must add no response field"
+        );
+    }
+
+    /// Non-question publishes retain the compact legacy response exactly: no
+    /// empty nested inbox object is serialized into every output update.
+    #[tokio::test]
+    async fn portal_publish_without_expects_reply_omits_pending_input() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        let responder = tokio::spawn(async move {
+            match rx.recv().await.expect("publish op must be sent") {
+                crate::portal_op::PortalOp::PublishOutput {
+                    expects_reply,
+                    reply,
+                    ..
+                } => {
+                    assert_eq!(expects_reply, None);
+                    reply.send(Ok(())).expect("publish reply must send");
+                }
+                other => panic!("unexpected portal op: {other:?}"),
+            }
+        });
+
+        let result = handle_portal_projection_publish(
+            json!({
+                "projection_id": "p1",
+                "owner_token": "t1",
+                "output_text": "Ambient progress update"
+            }),
+            Some(&tx),
+        )
+        .await
+        .expect("publish must succeed");
+        responder.await.expect("responder must finish");
+
+        assert!(result.pending_input.is_none());
+        let wire = serde_json::to_value(result).expect("publish result must serialize");
+        assert!(
+            wire.get("pending_input").is_none(),
+            "non-opt-in publishes must not pay empty response overhead"
+        );
     }
 
     #[tokio::test]
