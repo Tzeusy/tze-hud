@@ -89,22 +89,9 @@ SUBTITLE = "portal §6b.7 · hud-egn13"
 FOOTER = "resident-gRPC first-class surface"
 
 
-# The interactive scheduled task launches a visible powershell.exe console that
-# becomes the foreground/topmost window and INTERCEPTS all synthetic pointer +
-# keyboard input before it can reach the transparent HUD overlay (verified: with
-# the console visible, WindowFromPoint over every portal coordinate returns the
-# injector's own console, and no gesture reaches the runtime). Hiding the console
-# first (ShowWindow SW_HIDE) lets OS input reach the HUD end to end. This is the
-# key fix over the exemplar's diagnostic-input path, whose `ok:true` only ever
-# meant "SendInput returned", never "the portal reacted" (hud-ofe76).
-HIDE_CONSOLE_PS = (
-    "Add-Type -Name Win -Namespace Native -MemberDefinition "
-    "'[DllImport(\"kernel32.dll\")] public static extern IntPtr GetConsoleWindow(); "
-    "[DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr h, int n);'\n"
-    "$hudConsole = [Native.Win]::GetConsoleWindow(); "
-    "[void][Native.Win]::ShowWindow($hudConsole, 0)\n"
-    "Start-Sleep -Milliseconds 400\n"
-)
+# The canonical diagnostic-input generator hides the interactive task console
+# before SendInput. Keep this driver to that single prelude so Native.Win is
+# defined exactly once under ErrorActionPreference=Stop.
 
 
 def _now_us() -> int:
@@ -285,22 +272,21 @@ async def inject_focus_then_chord(args, click_actions: list[dict], vks: list[int
                                   scene_w: float, scene_h: float, timeout_s: float = 50.0) -> dict:
     """Focus clicks + a virtual-key chord in ONE process so the overlay's OS
     keyboard focus (acquired by the composer click via focus_window_for_text_input)
-    is still held when the chord is injected. Concatenates the exemplar mouse
-    script and the keychord script under one hidden-console scheduled task."""
+    is still held when the chord is injected. Concatenates the canonical
+    hidden-console mouse script and the keychord script in one scheduled task."""
     mouse = ex.windows_diagnostic_input_script(click_actions, scene_width=scene_w, scene_height=scene_h)
     keys = keychord_input_script(vks, repeat=repeat)
-    body = HIDE_CONSOLE_PS + mouse + "\nStart-Sleep -Milliseconds 700\n" + keys
+    body = mouse + "\nStart-Sleep -Milliseconds 700\n" + keys
     run_id = uuid.uuid4().hex[:8]
     task = ex.windows_diagnostic_task_script(body, user=args.admin_user, timeout_s=timeout_s, run_id=run_id)
     return await run_ssh_task(args.win_host, args.admin_user, args.ssh_key, task, timeout_s + 10.0)
 
 
 async def inject_pointer(args, actions: list[dict], scene_w: float, scene_h: float, timeout_s: float = 50.0) -> dict:
-    # Reuse the exemplar's mouse-injection logic, but prepend the console-hide so
-    # the events land on the HUD overlay instead of the injector's own console,
-    # and wrap in the interactive scheduled-task launcher.
+    # The canonical mouse-input generator owns the console-hide prelude; wrap
+    # its single-prelude script in the interactive scheduled-task launcher.
     ptr = ex.windows_diagnostic_input_script(actions, scene_width=scene_w, scene_height=scene_h)
-    body = HIDE_CONSOLE_PS + ptr
+    body = ptr
     run_id = uuid.uuid4().hex[:8]
     task = ex.windows_diagnostic_task_script(body, user=args.admin_user, timeout_s=timeout_s, run_id=run_id)
     return await run_ssh_task(args.win_host, args.admin_user, args.ssh_key, task, timeout_s + 10.0)

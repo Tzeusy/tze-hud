@@ -1235,6 +1235,15 @@ def windows_diagnostic_input_script(
     scene_height_value = float(scene_height or 0.0)
     lines = [
         "$ErrorActionPreference = 'Stop'",
+        # The interactive scheduled task owns a visible PowerShell console. Hide
+        # it before injecting input so it cannot become the foreground recipient
+        # instead of the transparent HUD overlay.
+        "Add-Type -Name Win -Namespace Native -MemberDefinition "
+        "'[DllImport(\"kernel32.dll\")] public static extern IntPtr GetConsoleWindow(); "
+        "[DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr h, int n);'",
+        "$hudConsole = [Native.Win]::GetConsoleWindow()",
+        "[void][Native.Win]::ShowWindow($hudConsole, 0)",
+        "Start-Sleep -Milliseconds 400",
         "Add-Type -AssemblyName System.Windows.Forms",
         "Add-Type -TypeDefinition @\"",
         "using System;",
