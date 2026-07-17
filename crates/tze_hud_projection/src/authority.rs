@@ -15,6 +15,8 @@ use crate::{
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
+const LIST_PROJECTIONS_AUDIT_SCOPE_ID: &str = "caller-scope";
+
 impl ProjectionResponse {
     fn with_portal_update_state(mut self, session: &ProjectionSession) -> Self {
         self.portal_update_ready = session.last_publish_portal_update_ready;
@@ -26,6 +28,10 @@ impl ProjectionResponse {
 #[derive(Clone, Debug)]
 struct ProjectionSession {
     projection_id: String,
+    /// Non-secret authenticated principal identity that created the projection.
+    /// Enumeration uses this to preserve cross-principal isolation without
+    /// exposing it in any caller-facing projection summary.
+    caller_identity: String,
     provider_kind: ProviderKind,
     display_name: String,
     workspace_hint: Option<String>,
@@ -196,6 +202,75 @@ impl ProjectionAuthority {
         })
     }
 
+    /// Return the caller's active projections as bounded, content-free
+    /// summaries. This is a read-only reconciliation primitive; it does not
+    /// rotate ownership, recover a lease, or change portal lifecycle state.
+    pub fn handle_list_projections(
+        &mut self,
+        request: ListProjectionsRequest,
+        caller_identity: &str,
+        server_timestamp_wall_us: u64,
+    ) -> ProjectionResponse {
+        if let Err(error) = request.validate() {
+            return self.list_validation_denial(
+                &request,
+                caller_identity,
+                server_timestamp_wall_us,
+                error,
+                ProjectionAuditCategory::BoundsDenied,
+            );
+        }
+        if let Err(error) = validate_non_empty_bounded(
+            "caller_identity",
+            caller_identity,
+            MAX_CALLER_IDENTITY_BYTES,
+        ) {
+            return self.list_validation_denial(
+                &request,
+                "invalid-caller",
+                server_timestamp_wall_us,
+                error,
+                ProjectionAuditCategory::AuthDenied,
+            );
+        }
+
+        let mut projections: Vec<ProjectionListEntry> = self
+            .sessions
+            .values()
+            .filter(|session| session.caller_identity == caller_identity)
+            .filter(|session| server_timestamp_wall_us < session.owner_token_expires_at_wall_us)
+            .map(|session| ProjectionListEntry {
+                projection_id: session.projection_id.clone(),
+                display_name: session.display_name.clone(),
+                lifecycle_state: session.lifecycle_state,
+                unread_output_count: session.unread_output_count,
+                pending_input_count: session
+                    .pending_input
+                    .iter()
+                    .filter(|item| !item.delivery_state.is_terminal())
+                    .count(),
+            })
+            .collect();
+        projections.sort_unstable_by(|left, right| left.projection_id.cmp(&right.projection_id));
+        projections.truncate(self.bounds.max_list_items);
+
+        let mut response = ProjectionResponse::accepted(
+            &request.request_id,
+            LIST_PROJECTIONS_AUDIT_SCOPE_ID,
+            server_timestamp_wall_us,
+            "caller-scoped projection summaries",
+        );
+        response.projections = projections;
+        self.audit_list_response(
+            &request,
+            caller_identity,
+            server_timestamp_wall_us,
+            &response,
+            ProjectionAuditCategory::CallerList,
+        );
+        response
+    }
+
     pub fn visible_transcript_window(&self, projection_id: &str) -> Option<Vec<TranscriptUnit>> {
         self.sessions.get(projection_id).map(|session| {
             visible_transcript_window(session, self.bounds.max_visible_transcript_bytes)
@@ -331,15 +406,17 @@ impl ProjectionAuthority {
             .reconnect
             .last_reconnect_wall_us
             .is_some_and(|last| last < metadata.last_reconnect_wall_us);
-        let connection_changed = session.hud_connection.as_ref().is_some_and(|connection| {
-            connection.connection_id != metadata.connection_id
-                || connection.authenticated_session_id != metadata.authenticated_session_id
+        // A transport connection can rotate when the same authenticated session
+        // reconnects. Only a different authenticated session is a takeover that
+        // must not inherit the prior advisory lease.
+        let session_takeover = session.hud_connection.as_ref().is_some_and(|connection| {
+            connection.authenticated_session_id != metadata.authenticated_session_id
         });
         if is_reconnect {
             session.reconnect.reconnect_count += 1;
         }
         session.reconnect.last_reconnect_wall_us = Some(metadata.last_reconnect_wall_us);
-        if is_reconnect || connection_changed {
+        if session_takeover {
             session.advisory_lease = None;
         }
         session.hud_connection = Some(metadata);
@@ -929,6 +1006,10 @@ impl ProjectionAuthority {
             request.envelope.projection_id.clone(),
             ProjectionSession {
                 projection_id: request.envelope.projection_id.clone(),
+                caller_identity: bounded_copy(
+                    caller_identity.to_string(),
+                    MAX_CALLER_IDENTITY_BYTES,
+                ),
                 provider_kind: request.provider_kind,
                 display_name: request.display_name,
                 workspace_hint: request.workspace_hint,
@@ -1748,6 +1829,31 @@ impl ProjectionAuthority {
         response
     }
 
+    fn list_validation_denial(
+        &mut self,
+        request: &ListProjectionsRequest,
+        caller_identity: &str,
+        server_timestamp_wall_us: u64,
+        error: ProjectionContractError,
+        category: ProjectionAuditCategory,
+    ) -> ProjectionResponse {
+        let response = ProjectionResponse::denied(
+            &request.request_id,
+            LIST_PROJECTIONS_AUDIT_SCOPE_ID,
+            server_timestamp_wall_us,
+            error.code(),
+            error.to_string(),
+        );
+        self.audit_list_response(
+            request,
+            caller_identity,
+            server_timestamp_wall_us,
+            &response,
+            category,
+        );
+        response
+    }
+
     fn audit_from_response(
         &mut self,
         envelope: &OperationEnvelope,
@@ -1758,6 +1864,31 @@ impl ProjectionAuthority {
     ) {
         self.audit(ProjectionAuditEvent {
             envelope,
+            caller_identity,
+            server_timestamp_wall_us,
+            accepted: response.accepted,
+            error_code: response.error_code,
+            reason: &response.status_summary,
+            category,
+        });
+    }
+
+    fn audit_list_response(
+        &mut self,
+        request: &ListProjectionsRequest,
+        caller_identity: &str,
+        server_timestamp_wall_us: u64,
+        response: &ProjectionResponse,
+        category: ProjectionAuditCategory,
+    ) {
+        let envelope = OperationEnvelope {
+            operation: ProjectionOperation::List,
+            projection_id: LIST_PROJECTIONS_AUDIT_SCOPE_ID.to_string(),
+            request_id: request.request_id.clone(),
+            client_timestamp_wall_us: request.client_timestamp_wall_us,
+        };
+        self.audit(ProjectionAuditEvent {
+            envelope: &envelope,
             caller_identity,
             server_timestamp_wall_us,
             accepted: response.accepted,

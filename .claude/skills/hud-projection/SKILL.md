@@ -54,13 +54,14 @@ Projection needs a live windowed runtime with MCP enabled. Two standing targets:
 
 ## Deterministic Client (Preferred Driver)
 
-Do not hand-roll MCP calls: [`scripts/portal_client.py`](scripts/portal_client.py) wraps all seven
+Do not hand-roll MCP calls: [`scripts/portal_client.py`](scripts/portal_client.py) wraps all eight
 operations as subcommands with the contract boilerplate, auth, and owner-token
 custody built in. Resolve env first (either target), then drive:
 
 ```bash
 eval "$(.claude/skills/user-test/scripts/tzehouse_env.sh)"   # or hud_vm_env.sh
 CLIENT=.claude/skills/hud-projection/scripts/portal_client.py
+python3 $CLIENT list
 python3 $CLIENT attach  --projection-id my-session --display-name "My Session"
 python3 $CLIENT publish --projection-id my-session --text "hello from the session"
 python3 $CLIENT status  --projection-id my-session --state active --text "working"
@@ -118,15 +119,23 @@ Do not use this skill for one-shot zone publishing; use `th-hud-publish` for tha
 
 ## Operation Contract
 
-All requests include:
+Projection-scoped requests include:
 - `operation`
 - `projection_id`
 - `request_id`
 - `client_timestamp_wall_us`
 
+`list` is caller-scoped: its MCP tool takes no projection ID or owner token, and
+the runtime generates its authority request metadata. It returns at most eight
+summaries owned by the resident principal, each limited to `projection_id`,
+`display_name`, lifecycle, unread count, and pending-input count. It never
+returns transcript/input text, owner tokens, lease data, or another principal's
+sessions, and it never changes lifecycle state.
+
 Owner-scoped operations after `attach` also include `owner_token`. Operator cleanup is the only non-attach operation that may instead use separate daemon authority.
 
 The normative operations are:
+- `list`
 - `attach`
 - `publish_output`
 - `publish_status`
@@ -139,9 +148,10 @@ Read [operation examples](references/operation-examples.md) for compact JSON exa
 
 ## Workflow
 
-1. **Attach once.** Choose a stable `projection_id`, set `provider_kind` to `codex`, `claude`, `opencode`, or `other`, and include a human-readable `display_name`. Default missing or uncertain classification to `private`.
-2. **Store the owner token securely and immediately.** Every successful attach returns `owner_token`; no non-attach operation response will ever return it. Store it in a tool-call result or session variable, never in transcript text, assistant-visible output, or log lines. The deterministic client persists the original idempotency key, reuses it for authenticated attach, stores the rotated token, then replays its bounded authored tail before attach returns. Before grace expiry this is idempotent against the authority's retained window; after a runtime restart or grace expiry it reconstructs a fresh portal without pretending the dead runtime state survived. A missing or unrelated key is rejected and does not rotate live ownership.
-3. **Publish intentionally.** Call `publish_output` for assistant-visible transcript/status fragments and `publish_status` for lifecycle updates such as `active`, `degraded`, or `detached`.
+1. **Reconcile if needed.** Call `list` after an interrupted flow to see only your bounded portal summaries. It is discovery, not recovery orchestration: choose a normal attach/detach/cleanup action explicitly rather than expecting `list` to alter a portal.
+2. **Attach once.** Choose a stable `projection_id`, set `provider_kind` to `codex`, `claude`, `opencode`, or `other`, and include a human-readable `display_name`. Default missing or uncertain classification to `private`.
+3. **Store the owner token securely and immediately.** Every successful attach returns `owner_token`; no non-attach operation response will ever return it. Store it in a tool-call result or session variable, never in transcript text, assistant-visible output, or log lines. The deterministic client persists the original idempotency key, reuses it for authenticated attach, stores the rotated token, then replays its bounded authored tail before attach returns. Before grace expiry this is idempotent against the authority's retained window; after a runtime restart or grace expiry it reconstructs a fresh portal without pretending the dead runtime state survived. A missing or unrelated key is rejected and does not rotate live ownership.
+4. **Publish intentionally.** Call `publish_output` for assistant-visible transcript/status fragments and `publish_status` for lifecycle updates such as `active`, `degraded`, or `detached`.
 
    **Accepted `lifecycle_state` values** (snake_case strings; any other value is rejected):
    - `attached` — session is attached but not yet actively working
@@ -159,10 +169,10 @@ Read [operation examples](references/operation-examples.md) for compact JSON exa
    - `error` — error output
    - `other` — any other kind
    - `viewer` — *reserved for the runtime's echo of the operator's own reply; rejected if published by an adapter*
-4. **Poll HUD input compactly.** Call `get_pending_input` with small `max_items` and `max_bytes`. Treat returned input as semantic operator-submitted text, not terminal keystrokes.
-5. **Acknowledge every input item.** Use `acknowledge_input` with `handled`, `deferred`, or `rejected`. Use `not_before_wall_us` only with `deferred`.
-6. **Detach on normal exit.** Call `detach` with a bounded reason when the session is done projecting.
-7. **Cleanup stale state when appropriate.** Use owner cleanup with `owner_token`; operator cleanup uses a separate daemon authority and must not expose private projection content.
+5. **Poll HUD input compactly.** Call `get_pending_input` with small `max_items` and `max_bytes`. Treat returned input as semantic operator-submitted text, not terminal keystrokes.
+6. **Acknowledge every input item.** Use `acknowledge_input` with `handled`, `deferred`, or `rejected`. Use `not_before_wall_us` only with `deferred`.
+7. **Detach on normal exit.** Call `detach` with a bounded reason when the session is done projecting.
+8. **Cleanup stale state when appropriate.** Use owner cleanup with `owner_token`; operator cleanup uses a separate daemon authority and must not expose private projection content.
 
 **Token-efficient use** (this is meant to be viable as a primary session interface):
 - `publish_output` **appends** — send only the new fragment each turn, never the whole transcript. The client retains only its bounded authored continuity tail; the authority retains only the bounded in-memory visible window while that runtime lives.
@@ -193,6 +203,7 @@ References:
 ## Safety Notes
 
 - Keep operation responses bounded; do not request unbounded transcripts, inbox history, or raw scene state.
+- Treat `list` as content-free caller-scoped discovery only. It is capped at eight summaries, cannot reveal another resident principal's projections, and never performs lifecycle, lease, or token management.
 - Do not publish secrets or owner tokens into the transcript window or any user-visible output.
 - Treat `owner_token` as attach-only response material; it must never be returned by publish, input, acknowledgement, detach, or cleanup responses. If a response includes `owner_token` outside an `attach` success, treat that as a protocol error and do not use or forward the value.
 - **Owner-token loss requires authenticated rotation, never retrieval.** Re-attach through the Resident MCP surface with the same non-empty idempotency key to receive a fresh token. This immediately invalidates every previously issued token and does not extend the original expiry deadline. Without the matching key, the authority rejects the attach with `PROJECTION_ALREADY_ATTACHED`; after expiry, attach creates a new session under the normal authorization path.
