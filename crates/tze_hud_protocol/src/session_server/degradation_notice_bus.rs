@@ -241,8 +241,8 @@ mod tests {
         assert!(sender.should_emit_state_stream(2));
     }
 
-    #[test]
-    fn dropped_receiver_unregisters_without_waiting_for_a_transition() {
+    #[tokio::test]
+    async fn dropped_receiver_unregisters_only_its_own_lane_without_a_transition() {
         let sender = DegradationNoticeSender::new(1);
         let baseline = sender
             .inner
@@ -252,6 +252,7 @@ mod tests {
             .len();
 
         let (receiver, _) = sender.subscribe_with_current();
+        let (mut remaining_receiver, _) = sender.subscribe_with_current();
         assert_eq!(
             sender
                 .inner
@@ -259,8 +260,8 @@ mod tests {
                 .expect("degradation notice registry poisoned")
                 .subscribers
                 .len(),
-            baseline + 1,
-            "a live receiver must be registered"
+            baseline + 2,
+            "each live receiver must have its own registered lane"
         );
 
         drop(receiver);
@@ -272,8 +273,20 @@ mod tests {
                 .expect("degradation notice registry poisoned")
                 .subscribers
                 .len(),
-            baseline,
-            "a dropped receiver must unregister without waiting for an unrelated transition"
+            baseline + 1,
+            "dropping one receiver must unregister only its own lane without waiting for an unrelated transition"
+        );
+
+        assert_eq!(
+            sender
+                .publish(notice(DegradationLevel::CoalescingMore))
+                .await,
+            1,
+            "the remaining live receiver must still receive future transitions"
+        );
+        assert_eq!(
+            remaining_receiver.recv().await.unwrap().level,
+            DegradationLevel::CoalescingMore as i32
         );
     }
 }
