@@ -1,8 +1,9 @@
 # Token-footprint candidate v1 — approval packet
 
-Status: **candidate, unapproved**. This document is paste-ready evidence for an
-owner decision. The implementation mandate did not approve these measured
-values, and CI intentionally fails closed until approval is recorded.
+Status: **owner-approved**. Owner decision `hud-ht1k7` approved this revised
+candidate v1 packet on 2026-07-17, making it the initial token-footprint
+comparison authority. The checker remains fail-closed for a missing approval,
+decision reference, or any compatibility drift.
 
 This revision supersedes the original packet values. Independent audit found
 that the original zone/widget fixture measured the legacy bare-method dialect
@@ -11,14 +12,14 @@ instead of MCP-standard `tools/call`, omitted the production portal client's
 compatibility gates. The earlier counts and fingerprints therefore do not
 apply to this revised candidate.
 
-## Decision requested
+## Approved decision
 
-Approve or reject candidate v1 as the initial token-footprint comparison
-authority for `hud-pngbn`. Approval applies to every integer below, the three
-flow fingerprints, the fixture fingerprint, and the pinned tokenizer identity.
-If approved, change the candidate's `approval.status` from
-`candidate_unapproved` to `owner_approved` and add the non-empty
-`approval.decision_reference`. The checker requires both fields.
+Owner decision `hud-ht1k7` approved candidate v1 as the initial
+token-footprint comparison authority for `hud-pngbn`. Decision reference:
+`hud-ht1k7`. Approval applies to every integer below, the three flow
+fingerprints, the fixture fingerprint, and the pinned tokenizer identity. The
+candidate records `approval.status = owner_approved` and
+`approval.decision_reference = hud-ht1k7`; the checker requires both fields.
 
 ## Exact measured values
 

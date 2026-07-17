@@ -170,6 +170,22 @@ class CandidatePacketTests(unittest.TestCase):
             self.root / "docs/reports/token_footprint_candidate_v1_20260716.md"
         ).read_text(encoding="utf-8")
 
+    def test_candidate_records_revised_owner_approval(self):
+        self.assertEqual(self.candidate["approval"]["status"], "owner_approved")
+        self.assertEqual(
+            self.candidate["approval"]["decision_reference"],
+            "hud-ht1k7",
+        )
+        self.assertRegex(
+            self.packet,
+            r"Decision reference:\s+`hud-ht1k7`\.",
+        )
+
+    def test_approved_candidate_is_accepted_by_fail_closed_gate(self):
+        report = checker.compare(copy.deepcopy(self.candidate), self.candidate)
+        self.assertEqual(report["status"], "passed")
+        self.assertFalse(report["incompatibilities"])
+
     def test_markdown_operation_table_matches_candidate_json(self):
         rows = re.findall(
             r"^\| `([^`]+)` \| `([^`]+)` \| (\d+) \| (\d+) \| (\d+) \| "

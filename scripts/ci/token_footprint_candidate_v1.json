@@ -63,7 +63,8 @@
     }
   },
   "approval": {
-    "status": "candidate_unapproved",
-    "basis": "deterministic initial measurement candidate; not comparison authority until every value receives explicit owner approval"
+    "status": "owner_approved",
+    "decision_reference": "hud-ht1k7",
+    "basis": "owner decision hud-ht1k7 approved the revised audited candidate v1 packet; every measured integer, flow and fixture fingerprint, and tokenizer identity is comparison authority"
   }
 }
