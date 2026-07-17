@@ -44,7 +44,7 @@ pub const DEFAULT_MAX_PENDING_INPUT_BYTES_PER_ITEM: usize = 4_096;
 /// Default maximum aggregate pending HUD input bytes.
 pub const DEFAULT_MAX_PENDING_INPUT_TOTAL_BYTES: usize = 32_768;
 /// Default maximum pending items returned by one poll.
-pub const DEFAULT_MAX_POLL_ITEMS: usize = 8;
+pub const DEFAULT_MAX_POLL_ITEMS: usize = 32;
 /// Default maximum bytes returned by one pending-input poll.
 pub const DEFAULT_MAX_POLL_RESPONSE_BYTES: usize = 16_384;
 /// Default maximum projection summaries returned by one caller-scoped list.

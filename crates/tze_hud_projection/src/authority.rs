@@ -1380,6 +1380,7 @@ impl ProjectionAuthority {
                 let mut remaining_count = 0usize;
                 let mut remaining_bytes = 0usize;
                 let mut delivery_transitioned = false;
+                let mut delivery_blocked = false;
                 for item in session.pending_input.iter_mut() {
                     if !matches!(
                         item.delivery_state,
@@ -1395,13 +1396,17 @@ impl ProjectionAuthority {
                         continue;
                     }
                     let item_bytes = item.submission_text.len();
-                    if returned.len() < max_items && used_bytes + item_bytes <= max_bytes {
+                    if !delivery_blocked
+                        && returned.len() < max_items
+                        && used_bytes + item_bytes <= max_bytes
+                    {
                         item.delivery_state = InputDeliveryState::Delivered;
                         item.delivered_at_wall_us = Some(server_timestamp_wall_us);
                         delivery_transitioned = true;
                         used_bytes += item_bytes;
                         returned.push(item.clone());
                     } else {
+                        delivery_blocked = true;
                         remaining_count += 1;
                         remaining_bytes += item_bytes;
                     }
