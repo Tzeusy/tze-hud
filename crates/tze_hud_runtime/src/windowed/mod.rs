@@ -341,15 +341,19 @@ struct WindowedRuntimeState {
     /// the compositor thread is spawned and takes it).
     frame_ready_tx: Option<FrameReadyTx>,
     /// Present-ack broadcast sender (hud-4va6q). Cloned from the gRPC session
-    /// service during network start; the compositor thread takes it when spawned
-    /// and emits `FramePresented` after each presented frame. `None` in
+    /// service during network start; each compositor generation receives its own
+    /// clone and emits `FramePresented` after each presented frame. `None` in
     /// compositor-only mode (grpc_port == 0), where there is no session to
     /// subscribe — the compositor still drains the present-ack queue.
     frame_presented_tx:
         Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::FramePresented>>,
+    /// Runtime-owned degradation-notice lane. Each compositor generation gets
+    /// a clone so a runtime mode switch does not sever connected sessions from
+    /// later degradation transitions.
     degradation_notices: Option<tze_hud_protocol::session_server::DegradationNoticeSender>,
     /// Durable runtime-to-session lane for terminal `SceneGraph::expire_leases`
-    /// results. The compositor takes this sender when it starts.
+    /// results. Each compositor generation receives a clone while the runtime
+    /// retains ownership across window/surface recreation.
     lease_expirations: Option<tze_hud_protocol::session_server::LeaseExpirySender>,
     /// Compositor and surface (Some until compositor thread is spawned and takes the compositor).
     compositor: Option<Compositor>,
@@ -620,6 +624,28 @@ struct WindowedRuntimeState {
     /// Incremented via interior mutability at the `spin_acquire` miss sites; the
     /// borrow of this field ends before any `&mut self` work in the same tick.
     interaction_feedback_lock_misses: std::sync::atomic::AtomicU64,
+}
+
+impl WindowedRuntimeState {
+    /// Clone runtime-owned session notifiers for one compositor generation.
+    ///
+    /// These senders outlive a compositor: a runtime mode switch joins the old
+    /// thread and starts a replacement against the same network session. Taking
+    /// them here would make the replacement silently lose frame, degradation,
+    /// and terminal-lease delivery.
+    fn compositor_runtime_senders(
+        &self,
+    ) -> (
+        Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::FramePresented>>,
+        Option<tze_hud_protocol::session_server::DegradationNoticeSender>,
+        Option<tze_hud_protocol::session_server::LeaseExpirySender>,
+    ) {
+        (
+            self.frame_presented_tx.clone(),
+            self.degradation_notices.clone(),
+            self.lease_expirations.clone(),
+        )
+    }
 }
 
 // ─── WinitApp ────────────────────────────────────────────────────────────────
@@ -1332,12 +1358,11 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
             .frame_ready_tx
             .take()
             .expect("frame_ready_tx already taken");
-        // Present-ack sender (hud-4va6q): moved into the compositor closure so the
-        // production render loop can broadcast `FramePresented`, mirroring the
-        // headless producer. `None` in compositor-only mode (no gRPC session).
-        let frame_presented_tx = self.state.frame_presented_tx.take();
-        let degradation_notices = self.state.degradation_notices.take();
-        let lease_expirations = self.state.lease_expirations.take();
+        // These runtime-owned senders are cloned into each compositor generation.
+        // A mode switch joins this thread and calls `resumed()` again against the
+        // same connected gRPC session, so taking them would drop later delivery.
+        let (frame_presented_tx, degradation_notices, lease_expirations) =
+            self.state.compositor_runtime_senders();
         let degradation_shared_state = Arc::clone(&self.state.shared_state);
         let shutdown = self.state.shutdown.clone();
         let benchmark_failed = self.state.benchmark_failed.clone();
@@ -3142,6 +3167,229 @@ mod wake_accounting_tests {
             }),
             "one SceneGraph expiry result must produce exactly one bridge notice"
         );
+    }
+
+    #[tokio::test]
+    async fn restarted_compositor_delivers_one_terminal_lease_pair_to_connected_owner() {
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+        use tokio_stream::StreamExt;
+        use tze_hud_protocol::proto::session::client_message::Payload as ClientPayload;
+        use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
+        use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
+        use tze_hud_protocol::proto::session::server_message::Payload as ServerPayload;
+        use tze_hud_protocol::proto::session::{
+            ClientMessage, LeaseRequest, LeaseResponse, LeaseResult, LeaseStateChange,
+            ServerMessage, SessionInit,
+        };
+        use tze_hud_protocol::session_server::HudSessionImpl;
+        use tze_hud_scene::types::{LeaseExpiry, LeaseState};
+
+        fn now_wall_us() -> u64 {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_micros() as u64
+        }
+
+        let service = HudSessionImpl::new(SceneGraph::new(800.0, 600.0), "test-key");
+        let lease_expirations = service.lease_expirations.clone();
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+            tonic::transport::Server::builder()
+                .add_service(HudSessionServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+
+        let endpoint = format!("http://[::1]:{}", addr.port());
+        let mut client = None;
+        for _ in 0..25 {
+            match HudSessionClient::connect(endpoint.clone()).await {
+                Ok(connected) => {
+                    client = Some(connected);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+        let mut client = client.expect("test session server must accept connections");
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(16);
+        tx.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionInit(SessionInit {
+                agent_id: "restart-expiry-agent".to_string(),
+                agent_display_name: "restart-expiry-agent".to_string(),
+                pre_shared_key: "test-key".to_string(),
+                requested_capabilities: vec!["create_tiles".to_string()],
+                initial_subscriptions: Vec::new(),
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: now_wall_us(),
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: None,
+            })),
+        })
+        .await
+        .unwrap();
+        let mut stream = client
+            .session(tokio_stream::wrappers::ReceiverStream::new(rx))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // SessionEstablished, SceneSnapshot, and initial DegradationNotice.
+        for _ in 0..3 {
+            tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .expect("session handshake must complete promptly")
+                .expect("session stream must remain open")
+                .expect("session handshake message must be valid");
+        }
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["create_tiles".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut granted_lease_id = None;
+        let mut active_transition_seen = false;
+        while granted_lease_id.is_none() || !active_transition_seen {
+            let message = tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .expect("lease grant must arrive promptly")
+                .expect("connected stream must remain open")
+                .expect("lease grant message must be valid");
+            match message.payload {
+                Some(ServerPayload::LeaseResponse(LeaseResponse {
+                    granted,
+                    lease_id,
+                    result,
+                    ..
+                })) => {
+                    assert!(granted, "test lease must be granted");
+                    assert_eq!(result, LeaseResult::Granted as i32);
+                    granted_lease_id = uuid::Uuid::from_slice(&lease_id)
+                        .ok()
+                        .map(tze_hud_scene::SceneId::from_uuid);
+                }
+                Some(ServerPayload::LeaseStateChange(LeaseStateChange {
+                    previous_state,
+                    new_state,
+                    ..
+                })) => {
+                    assert_eq!(previous_state, "REQUESTED");
+                    assert_eq!(new_state, "ACTIVE");
+                    active_transition_seen = true;
+                }
+                other => panic!("expected lease grant traffic, got {other:?}"),
+            }
+        }
+        let lease_id = granted_lease_id.expect("granted lease must carry a SceneId");
+
+        // A mode switch tears down the first compositor generation. The runtime
+        // must keep each sender so the replacement compositor receives a fresh
+        // clone instead of silently dropping connected-session notifications.
+        let mut runtime_state = WindowedRuntimeState::new_headless();
+        let (frame_presented_tx, _frame_presented_rx) = tokio::sync::broadcast::channel(1);
+        runtime_state.frame_presented_tx = Some(frame_presented_tx);
+        runtime_state.degradation_notices = Some(Default::default());
+        runtime_state.lease_expirations = Some(lease_expirations);
+        let mut app = WinitApp {
+            state: runtime_state,
+        };
+
+        let first_generation = app.state.compositor_runtime_senders();
+        assert!(first_generation.0.is_some());
+        assert!(first_generation.1.is_some());
+        assert!(first_generation.2.is_some());
+        drop(first_generation);
+
+        app.state.pending_mode_switch = Some(WindowMode::Overlay);
+        app.apply_pending_mode_switch();
+
+        let restarted_generation = app.state.compositor_runtime_senders();
+        assert!(app.state.frame_presented_tx.is_some());
+        assert!(app.state.degradation_notices.is_some());
+        assert!(app.state.lease_expirations.is_some());
+
+        let expiry = LeaseExpiry {
+            lease_id,
+            previous_state: LeaseState::Active,
+            terminal_state: LeaseState::Expired,
+            removed_tiles: Vec::new(),
+        };
+        publish_lease_expiries(restarted_generation.2.as_ref(), vec![expiry.clone()]);
+        publish_lease_expiries(restarted_generation.2.as_ref(), vec![expiry]);
+
+        let mut terminal_response_seen = false;
+        let mut terminal_transition_seen = false;
+        for _ in 0..2 {
+            let message: ServerMessage =
+                tokio::time::timeout(Duration::from_secs(1), stream.next())
+                    .await
+                    .expect("terminal lease traffic must arrive promptly")
+                    .expect("connected stream must remain open")
+                    .expect("terminal lease message must be valid");
+            match message.payload {
+                Some(ServerPayload::LeaseResponse(LeaseResponse {
+                    granted,
+                    lease_id: response_lease_id,
+                    result,
+                    deny_code,
+                    ..
+                })) => {
+                    assert!(!granted);
+                    assert_eq!(response_lease_id, lease_id.as_uuid().as_bytes().to_vec());
+                    assert_eq!(result, LeaseResult::Expired as i32);
+                    assert_eq!(deny_code, "LEASE_EXPIRED");
+                    assert!(
+                        !terminal_response_seen,
+                        "only one terminal response is allowed"
+                    );
+                    terminal_response_seen = true;
+                }
+                Some(ServerPayload::LeaseStateChange(LeaseStateChange {
+                    lease_id: state_lease_id,
+                    previous_state,
+                    new_state,
+                    ..
+                })) => {
+                    assert_eq!(state_lease_id, lease_id.as_uuid().as_bytes().to_vec());
+                    assert_eq!(previous_state, "ACTIVE");
+                    assert_eq!(new_state, "EXPIRED");
+                    assert!(
+                        !terminal_transition_seen,
+                        "only one terminal state transition is allowed"
+                    );
+                    terminal_transition_seen = true;
+                }
+                other => panic!("expected terminal lease traffic, got {other:?}"),
+            }
+        }
+        assert!(terminal_response_seen);
+        assert!(terminal_transition_seen);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), stream.next())
+                .await
+                .is_err(),
+            "duplicate runtime notices must not emit a second terminal pair"
+        );
+
+        drop(tx);
+        server.abort();
     }
 
     #[test]
