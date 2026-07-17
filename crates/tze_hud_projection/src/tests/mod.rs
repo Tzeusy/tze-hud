@@ -1863,6 +1863,68 @@ fn default_and_oversized_byte_poll_requests_keep_byte_backpressure() {
 }
 
 #[test]
+fn byte_bounded_polling_keeps_the_fifo_prefix_after_the_first_overflow() {
+    for (case, max_bytes) in [
+        ("default", None),
+        ("oversized", Some(DEFAULT_MAX_POLL_RESPONSE_BYTES + 1)),
+    ] {
+        let mut authority = ProjectionAuthority::default();
+        let owner_token = attach(&mut authority, "projection-a");
+        for (index, payload_bytes) in [4_096, 4_096, 4_096, 4_095, 2, 1].into_iter().enumerate() {
+            authority
+                .enqueue_input(
+                    "projection-a",
+                    &format!("input-{index}"),
+                    "x".repeat(payload_bytes),
+                    20 + index as u64,
+                    10_000,
+                    None,
+                )
+                .expect("input fits the default queue and per-item bounds");
+        }
+
+        let poll = authority.handle_get_pending_input(
+            GetPendingInputRequest {
+                envelope: envelope(
+                    ProjectionOperation::GetPendingInput,
+                    "projection-a",
+                    &format!("req-poll-fifo-{case}"),
+                ),
+                owner_token,
+                // Exercise caller-side item-limit normalization without letting the
+                // item cap bind; this isolates FIFO behavior under the byte cap.
+                max_items: Some(DEFAULT_MAX_POLL_ITEMS + 1),
+                max_bytes,
+            },
+            "caller-a",
+            100,
+        );
+
+        assert!(poll.accepted, "{case} request must be accepted");
+        assert_eq!(
+            poll.pending_input
+                .iter()
+                .map(|item| item.input_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["input-0", "input-1", "input-2", "input-3"],
+            "{case} request must stop at the first non-fitting eligible input"
+        );
+        assert_eq!(
+            poll.pending_input
+                .iter()
+                .map(|item| item.submission_text.len())
+                .sum::<usize>(),
+            DEFAULT_MAX_POLL_RESPONSE_BYTES - 1
+        );
+        for item in &poll.pending_input {
+            assert_eq!(item.delivery_state, InputDeliveryState::Delivered);
+        }
+        assert_eq!(poll.pending_remaining_count, 2);
+        assert_eq!(poll.pending_remaining_bytes, 3);
+    }
+}
+
+#[test]
 fn collapsed_redacted_projection_preserves_geometry_and_suppresses_private_affordances() {
     let mut authority = ProjectionAuthority::default();
     let owner_token = attach(&mut authority, "projection-a");
