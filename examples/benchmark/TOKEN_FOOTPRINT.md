@@ -48,11 +48,11 @@ python3 scripts/ci/check_token_footprint.py \
   --output test_results/token-footprint/gate-report.json
 ```
 
-The checked-in v1 values are an explicitly unapproved candidate, so the gate
-fails closed with `baseline_incompatible`. Promotion to comparison authority
-requires explicit owner approval of every value in the candidate plus a
-non-empty decision reference. Baseline changes then require explicit owner
-review. Changing a tokenizer identity, fixture fingerprint, flow version,
-flow fingerprint, operation set, approval state, decision reference, or count
+The checked-in v1 values are the owner-approved comparison authority. The gate
+fails closed with `baseline_incompatible` if approval or its decision reference
+is missing, or if the compatibility identity changes. An intentional baseline
+change requires a newly versioned candidate and explicit owner approval.
+Changing a tokenizer identity, fixture fingerprint, flow version, flow
+fingerprint, operation set, approval state, decision reference, or count
 arithmetic is not a performance comparison; the gate reports
 `baseline_incompatible`.
