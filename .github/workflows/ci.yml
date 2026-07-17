@@ -637,6 +637,10 @@ jobs:
     needs: [release-artifact-provenance-build]
     steps:
       - uses: actions/checkout@v5
+      - name: Install PE inspector
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends binutils-mingw-w64-x86-64
       - name: Run release provenance verifier unit tests
         run: python3 scripts/ci/test_release_artifact_provenance_smoke.py
       - name: Download published release artifact + checksum
