@@ -837,7 +837,7 @@ impl Compositor {
         width: u32,
         height: u32,
     ) -> Result<(Self, crate::surface::WindowSurface), CompositorError> {
-        Self::new_windowed_inner(window, width, height, false).await
+        Self::new_windowed_inner(window, width, height, false, false).await
     }
 
     /// Create a windowed compositor, optionally forcing Vulkan for overlay
@@ -847,7 +847,21 @@ impl Compositor {
         width: u32,
         height: u32,
     ) -> Result<(Self, crate::surface::WindowSurface), CompositorError> {
-        Self::new_windowed_inner(window, width, height, true).await
+        Self::new_windowed_inner(window, width, height, true, false).await
+    }
+
+    /// Create a windowed compositor for the bounded quiescent-efficiency lane.
+    ///
+    /// This is deliberately separate from normal windowed startup: CI needs a
+    /// real WARP/llvmpipe surface, while an operator's overlay must retain the
+    /// platform-preferred hardware adapter and transparent-swapchain policy.
+    pub async fn new_windowed_constrained(
+        window: std::sync::Arc<winit::window::Window>,
+        width: u32,
+        height: u32,
+        overlay: bool,
+    ) -> Result<(Self, crate::surface::WindowSurface), CompositorError> {
+        Self::new_windowed_inner(window, width, height, overlay, true).await
     }
 
     async fn new_windowed_inner(
@@ -855,6 +869,7 @@ impl Compositor {
         width: u32,
         height: u32,
         overlay: bool,
+        force_fallback_adapter: bool,
     ) -> Result<(Self, crate::surface::WindowSurface), CompositorError> {
         use crate::surface::WindowSurface;
 
@@ -864,7 +879,12 @@ impl Compositor {
         // surface, then select the adapter with that surface constraint.
         // On Windows in overlay mode, force Vulkan — DX12 only supports Opaque
         // swapchain alpha mode, which prevents per-pixel transparency.
-        let backends = if overlay && cfg!(target_os = "windows") {
+        let backends = if force_fallback_adapter {
+            // The quiescent CI lane proves the software renderer actually used
+            // by WARP/llvmpipe, so it must not inherit the production overlay's
+            // Vulkan-only transparency workaround.
+            wgpu::Backends::all()
+        } else if overlay && cfg!(target_os = "windows") {
             tracing::info!("overlay mode: forcing Vulkan backend for transparent swapchain");
             wgpu::Backends::VULKAN
         } else {
@@ -885,9 +905,13 @@ impl Compositor {
         // ── Step 3: Select adapter compatible with the surface ────────────────
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
+                power_preference: if force_fallback_adapter {
+                    wgpu::PowerPreference::LowPower
+                } else {
+                    wgpu::PowerPreference::HighPerformance
+                },
                 compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
+                force_fallback_adapter,
             })
             .await
             .ok_or(CompositorError::NoAdapter)?;

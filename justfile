@@ -61,9 +61,11 @@ test:
             --all-targets \
             --exclude integration
 
-# Pure-Python contract tests for the versioned, fail-closed idle artifact gate.
+# Pure-Python contract tests for the versioned idle artifact gate and its
+# startup-atomic Windows launcher.
 idle-efficiency-checker:
     python3 scripts/ci/test_check_idle_efficiency.py
+    python3 scripts/ci/test_run_quiescent_efficiency_script.py
 
 # Integration headless suites (mirror CI test-integration job)
 # Excludes: trace_regression, v1_thesis (own jobs), soak (wall-clock, opt-in via TZE_HUD_SOAK_SECS).

@@ -54,7 +54,10 @@ def _budget(actual: int | None, ceiling: int) -> dict[str, Any]:
 
 
 def validate_artifact(
-    artifact: dict[str, Any], *, require_constrained: bool
+    artifact: dict[str, Any],
+    *,
+    require_constrained: bool,
+    required_window_mode: str | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     failures: list[str] = []
 
@@ -70,6 +73,11 @@ def validate_artifact(
     window_mode = _nonempty_string(runtime, "runtime", "window_mode", failures)
     if window_mode not in {None, "headless", "overlay", "fullscreen"}:
         failures.append(f"runtime.window_mode: unsupported value {window_mode!r}")
+    if required_window_mode is not None and window_mode != required_window_mode:
+        failures.append(
+            "runtime.window_mode: "
+            f"required {required_window_mode!r}, got {window_mode!r}"
+        )
 
     pacing = _object(artifact, "pacing", failures)
     if pacing.get("mode") != "event_driven" or pacing.get("requested_cadence_hz") is not None:
@@ -152,7 +160,7 @@ def validate_artifact(
                 constrained, "constrained_profile", "operating_system", failures
             )
             _nonempty_string(constrained, "constrained_profile", "cpu_model", failures)
-            _nonempty_string(
+            enforcement = _nonempty_string(
                 constrained, "constrained_profile", "cpu_limit_enforcement", failures
             )
             logical_cpu_limit = _integer(
@@ -167,6 +175,12 @@ def validate_artifact(
             adapter_lower = adapter.lower() if adapter else ""
             backend_lower = backend.lower() if backend else ""
             if operating_system == "linux":
+                if enforcement is not None and not enforcement.startswith(
+                    "sched_getaffinity:"
+                ):
+                    failures.append(
+                        "constrained_profile.cpu_limit_enforcement: Linux lane must prove observed sched_getaffinity"
+                    )
                 if "llvmpipe" not in adapter_lower and "lavapipe" not in adapter_lower:
                     failures.append(
                         "renderer.adapter: Linux constrained lane must prove llvmpipe or lavapipe"
@@ -176,6 +190,12 @@ def validate_artifact(
                         "renderer.backend: Linux constrained lane must identify Vulkan"
                     )
             elif operating_system == "windows":
+                if enforcement is not None and not enforcement.startswith(
+                    "GetProcessAffinityMask:"
+                ):
+                    failures.append(
+                        "constrained_profile.cpu_limit_enforcement: Windows lane must prove observed GetProcessAffinityMask"
+                    )
                 if "warp" not in adapter_lower:
                     failures.append(
                         "renderer.adapter: Windows constrained lane must prove WARP"
@@ -221,11 +241,18 @@ def main() -> int:
     parser.add_argument("artifact", type=Path)
     parser.add_argument("--report", type=Path)
     parser.add_argument("--require-constrained", action="store_true")
+    parser.add_argument(
+        "--require-window-mode",
+        choices=("headless", "overlay", "fullscreen"),
+        help="reject artifacts from any other effective runtime window mode",
+    )
     args = parser.parse_args()
 
     artifact = load_artifact(args.artifact)
     report, failures = validate_artifact(
-        artifact, require_constrained=args.require_constrained
+        artifact,
+        require_constrained=args.require_constrained,
+        required_window_mode=args.require_window_mode,
     )
     rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.report:

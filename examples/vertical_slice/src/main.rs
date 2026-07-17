@@ -162,6 +162,7 @@ fn run_windowed() -> Result<(), Box<dyn std::error::Error>> {
         debug_zones: false,     // Render zone boundaries — disabled for the demo.
         monitor_index: None,    // Use primary monitor.
         benchmark: None,        // Demo mode is unbounded until the window closes.
+        quiescent_efficiency: None, // Demo mode never self-terminates for CI evidence.
         bind_all_interfaces: false, // Demo binds loopback only (ports are 0 anyway).
         resident_grpc_portal: None, // Resident gRPC portal bridge OFF for the demo (hud-x2e2v).
     };

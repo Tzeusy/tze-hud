@@ -40,11 +40,12 @@ that event is not relabeled as idle work.
 
 ## Fail-closed checker
 
-Validate a constrained Linux artifact with:
+Validate a constrained Windows WARP overlay artifact with:
 
 ```bash
 python3 scripts/ci/check_idle_efficiency.py \
   --require-constrained \
+  --require-window-mode overlay \
   --report test_results/idle-efficiency/gate.json \
   test_results/idle-efficiency/measurement.json
 ```
@@ -67,11 +68,21 @@ python3 scripts/ci/test_check_idle_efficiency.py
 
 ## Runner policy
 
-The gating headless lane uses `HEADLESS_FORCE_SOFTWARE=1` and an enforced
-two-logical-CPU affinity. The artifact must record the adapter returned by wgpu
-and the affinity observed by the measurement process; requested environment
-variables alone are not proof. Sampler wakeups are recorded separately and do
-not count as runtime-driven event-loop wakeups.
+The required `windows-performance-budget` CI job builds the canonical
+`tze_hud.exe` and runs `scripts/ci/windows/run-quiescent-efficiency.ps1`. That
+harness requests an overlay, forces the windowed compositor's fallback adapter,
+and applies the two-logical-CPU affinity while creating `tze_hud.exe` (before
+its first presentation can begin). It then waits for the **runtime itself** to
+write `test_results/windows-performance-budget/quiescent-efficiency/`
+`quiescent-efficiency.json`. The measurement starts only after an actual surface
+presentation, then holds the static scene through the five-second settle and
+sixty-second observation period.
+
+The checker runs on that emitted artifact with both `--require-constrained` and
+`--require-window-mode overlay`. The artifact must record the adapter returned
+by wgpu and the affinity observed by the measurement process; requested flags
+or environment variables alone are not proof. Sampler wakeups are recorded
+separately and do not count as runtime-driven event-loop wakeups.
 
 Windows WARP uses the identical identity and count contract. It is not a
 substitute for the live overlay reference-host resource gate. If an exclusive

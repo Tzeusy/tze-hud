@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 use winit::event_loop::ActiveEventLoop;
@@ -12,7 +12,14 @@ use tze_hud_input::{
 use tze_hud_scene::HitResult;
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::ZoneInteractionKind;
-use tze_hud_telemetry::SessionSummary;
+use tze_hud_telemetry::{
+    ConstrainedProfileIdentity, EfficiencyGpuCounters, EfficiencyPacingIdentity,
+    EfficiencyPacingMode, EfficiencyRendererIdentity, EfficiencyRuntimeIdentity,
+    EfficiencyScenarioIdentity, EfficiencyViewport, EfficiencyWakeupCounters, EfficiencyWindowMode,
+    QUIESCENT_EFFICIENCY_SCHEMA_VERSION, QUIESCENT_INTERVAL_MIN_MS, QUIESCENT_SCENARIO_NAME,
+    QUIESCENT_SCENARIO_VERSION, QUIESCENT_SETTLING_MIN_MS, QuiescentEfficiencyArtifact,
+    QuiescentEfficiencyValidation, QuiescentMeasurementStatus, SessionSummary,
+};
 
 use crate::channels::{InputEvent, InputEventKind, frame_ready_channel};
 use crate::threads::ShutdownToken;
@@ -29,7 +36,7 @@ use super::portal::{
     DragReleasedData, PortalResizePointerOutcome, apply_drag_handle_pointer_event,
     apply_portal_resize_pointer_event,
 };
-use super::{WindowedBenchmarkConfig, WinitApp};
+use super::{WindowedBenchmarkConfig, WindowedQuiescentEfficiencyConfig, WinitApp};
 
 #[cfg(target_os = "windows")]
 fn hwnd_for_window(window: &Window) -> Option<windows::Win32::Foundation::HWND> {
@@ -809,6 +816,356 @@ impl WindowedBenchmarkRunState {
                 .expect("windowed benchmark watchdog JSON serialization must succeed"),
         )
     }
+}
+
+/// Maximum time to wait for the first real surface presentation before the
+/// bounded measurement emits a fail-closed diagnostic artifact.
+pub(super) const QUIESCENT_FIRST_PRESENT_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Debug)]
+enum QuiescentMeasurementPhase {
+    AwaitingFirstPresent {
+        deadline: Instant,
+    },
+    Settling {
+        first_present_at: Instant,
+        deadline: Instant,
+    },
+    Measuring {
+        first_present_at: Instant,
+        settled_at: Instant,
+        baseline: crate::idle_efficiency::IdleEfficiencySnapshot,
+        deadline: Instant,
+    },
+    Complete,
+}
+
+/// Completion information kept separate from the file write so deterministic
+/// unit tests can prove the artifact is derived from a counter delta rather
+/// than a fabricated JSON fixture.
+#[derive(Clone, Debug)]
+pub(super) struct QuiescentMeasurementCompletion {
+    pub(super) artifact: QuiescentEfficiencyArtifact,
+    pub(super) validation: QuiescentEfficiencyValidation,
+}
+
+/// Bounded event-driven measurement state for a real windowed compositor.
+///
+/// The state starts only after `maybe_present_frame` has confirmed a main-thread
+/// `SurfaceTexture::present()`. Its two `WaitUntil` sampling wakes are explicitly
+/// excluded from runtime work accounting; no sampling path requests a redraw or
+/// wakes the compositor.
+pub(super) struct WindowedQuiescentEfficiencyRunState {
+    config: WindowedQuiescentEfficiencyConfig,
+    effective_mode: WindowMode,
+    width: u32,
+    height: u32,
+    adapter: tze_hud_compositor::CompositorAdapterInfo,
+    phase: QuiescentMeasurementPhase,
+}
+
+impl WindowedQuiescentEfficiencyRunState {
+    pub(super) fn new(
+        config: WindowedQuiescentEfficiencyConfig,
+        effective_mode: WindowMode,
+        width: u32,
+        height: u32,
+        adapter: tze_hud_compositor::CompositorAdapterInfo,
+        started_at: Instant,
+    ) -> Self {
+        Self {
+            config,
+            effective_mode,
+            width,
+            height,
+            adapter,
+            phase: QuiescentMeasurementPhase::AwaitingFirstPresent {
+                deadline: started_at + QUIESCENT_FIRST_PRESENT_TIMEOUT,
+            },
+        }
+    }
+
+    /// Start settling only after an actual main-thread presentation succeeded.
+    pub(super) fn record_first_present(&mut self, presented_at: Instant) {
+        if matches!(
+            self.phase,
+            QuiescentMeasurementPhase::AwaitingFirstPresent { .. }
+        ) {
+            self.phase = QuiescentMeasurementPhase::Settling {
+                first_present_at: presented_at,
+                deadline: presented_at + Duration::from_millis(QUIESCENT_SETTLING_MIN_MS),
+            };
+        }
+    }
+
+    pub(super) fn next_deadline(&self) -> Option<Instant> {
+        match self.phase {
+            QuiescentMeasurementPhase::AwaitingFirstPresent { deadline }
+            | QuiescentMeasurementPhase::Settling { deadline, .. }
+            | QuiescentMeasurementPhase::Measuring { deadline, .. } => Some(deadline),
+            QuiescentMeasurementPhase::Complete => None,
+        }
+    }
+
+    pub(super) fn emit_path(&self) -> &std::path::Path {
+        &self.config.emit_path
+    }
+
+    /// Advance a due sampler deadline. Returns only after a final artifact can
+    /// be written. Early or unrelated event-loop turns are intentionally inert.
+    pub(super) fn advance(
+        &mut self,
+        now: Instant,
+        counters: &crate::idle_efficiency::IdleEfficiencyCounters,
+    ) -> Option<QuiescentMeasurementCompletion> {
+        match self.phase.clone() {
+            QuiescentMeasurementPhase::AwaitingFirstPresent { deadline } if now >= deadline => {
+                counters.record_excluded_sampler_wakeup();
+                self.phase = QuiescentMeasurementPhase::Complete;
+                Some(self.complete(
+                    counters.snapshot(),
+                    0,
+                    0,
+                    QuiescentMeasurementStatus::Invalid,
+                ))
+            }
+            QuiescentMeasurementPhase::Settling {
+                first_present_at,
+                deadline,
+            } if now >= deadline => {
+                counters.record_excluded_sampler_wakeup();
+                let baseline = counters.snapshot();
+                self.phase = QuiescentMeasurementPhase::Measuring {
+                    first_present_at,
+                    settled_at: now,
+                    baseline,
+                    deadline: now + Duration::from_millis(QUIESCENT_INTERVAL_MIN_MS),
+                };
+                None
+            }
+            QuiescentMeasurementPhase::Measuring {
+                first_present_at,
+                settled_at,
+                baseline,
+                deadline,
+            } if now >= deadline => {
+                counters.record_excluded_sampler_wakeup();
+                let current = counters.snapshot();
+                self.phase = QuiescentMeasurementPhase::Complete;
+                match current.delta_since(&baseline) {
+                    Ok(delta) => Some(self.complete(
+                        delta,
+                        millis_since(first_present_at, settled_at),
+                        millis_since(settled_at, now),
+                        QuiescentMeasurementStatus::Complete,
+                    )),
+                    Err(error) => {
+                        tracing::error!(%error, "quiescent measurement counters were not monotonic");
+                        Some(self.complete(
+                            current,
+                            millis_since(first_present_at, settled_at),
+                            millis_since(settled_at, now),
+                            QuiescentMeasurementStatus::Invalid,
+                        ))
+                    }
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn write(&self, completion: &QuiescentMeasurementCompletion) -> std::io::Result<()> {
+        if let Some(parent) = self.config.emit_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(
+            &self.config.emit_path,
+            serde_json::to_vec_pretty(&completion.artifact)
+                .expect("quiescent efficiency artifact serialization must succeed"),
+        )
+    }
+
+    fn complete(
+        &self,
+        delta: crate::idle_efficiency::IdleEfficiencySnapshot,
+        settling_duration_ms: u64,
+        interval_duration_ms: u64,
+        status: QuiescentMeasurementStatus,
+    ) -> QuiescentMeasurementCompletion {
+        let artifact = QuiescentEfficiencyArtifact {
+            schema_version: QUIESCENT_EFFICIENCY_SCHEMA_VERSION,
+            scenario: EfficiencyScenarioIdentity {
+                name: QUIESCENT_SCENARIO_NAME.to_string(),
+                version: QUIESCENT_SCENARIO_VERSION,
+            },
+            runtime: EfficiencyRuntimeIdentity {
+                build: self.config.build.clone(),
+                window_mode: efficiency_window_mode(self.effective_mode),
+            },
+            pacing: EfficiencyPacingIdentity {
+                mode: EfficiencyPacingMode::EventDriven,
+                requested_cadence_hz: None,
+            },
+            renderer: EfficiencyRendererIdentity {
+                backend: self.adapter.backend.clone(),
+                adapter: self.adapter.name.clone(),
+                software: self.adapter.device_type.eq_ignore_ascii_case("cpu"),
+            },
+            viewport: EfficiencyViewport {
+                width: self.width,
+                height: self.height,
+            },
+            constrained_profile: Some(observed_constrained_profile()),
+            settling_duration_ms,
+            interval_duration_ms,
+            status,
+            wakeups: EfficiencyWakeupCounters {
+                combined_runtime_driven: delta.combined_runtime_wakeups(),
+                main_loop: delta.main_loop_wakeups,
+                compositor_loop: delta.compositor_loop_wakeups,
+                sources: delta.sources,
+                excluded_sampler: delta.excluded_sampler_wakeups,
+                excluded_operating_system: delta.excluded_operating_system_wakeups,
+            },
+            gpu: EfficiencyGpuCounters {
+                queue_submissions: delta.gpu_queue_submissions,
+                surface_acquisitions: delta.surface_acquisitions,
+                presents: delta.presents,
+            },
+        };
+        let validation = artifact.validate(true);
+        QuiescentMeasurementCompletion {
+            artifact,
+            validation,
+        }
+    }
+}
+
+fn millis_since(start: Instant, end: Instant) -> u64 {
+    end.saturating_duration_since(start)
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn efficiency_window_mode(mode: WindowMode) -> EfficiencyWindowMode {
+    match mode {
+        WindowMode::Overlay => EfficiencyWindowMode::Overlay,
+        WindowMode::Fullscreen => EfficiencyWindowMode::Fullscreen,
+    }
+}
+
+fn observed_constrained_profile() -> ConstrainedProfileIdentity {
+    let (logical_cpu_limit, cpu_limit_enforcement) = observed_cpu_affinity();
+    ConstrainedProfileIdentity {
+        operating_system: std::env::consts::OS.to_string(),
+        cpu_model: observed_cpu_model(),
+        logical_cpu_limit,
+        cpu_limit_enforcement,
+        memory_limit_bytes: observed_memory_limit_bytes(),
+    }
+}
+
+fn observed_cpu_model() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(model) = std::fs::read_to_string("/proc/cpuinfo")
+            .ok()
+            .and_then(|contents| {
+                contents.lines().find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    (key.trim() == "model name").then(|| value.trim().to_string())
+                })
+            })
+        {
+            return model;
+        }
+    }
+    std::env::var("PROCESSOR_IDENTIFIER")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| std::env::consts::ARCH.to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn observed_memory_limit_bytes() -> Option<u64> {
+    std::fs::read_to_string("/sys/fs/cgroup/memory.max")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn observed_memory_limit_bytes() -> Option<u64> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn observed_cpu_affinity() -> (u32, String) {
+    let mut affinity: libc::cpu_set_t = unsafe {
+        // SAFETY: `cpu_set_t` is a plain C output buffer. Zero is the required
+        // initial state before `sched_getaffinity` fills it.
+        std::mem::zeroed()
+    };
+    let result = unsafe {
+        // SAFETY: `affinity` points to a valid writable `cpu_set_t` of the exact
+        // size advertised to libc; pid 0 asks for the current process only.
+        libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut affinity)
+    };
+    if result != 0 {
+        return (0, "sched_getaffinity:error".to_string());
+    }
+
+    let bytes = unsafe {
+        // SAFETY: `affinity` is initialized by the successful syscall above and
+        // remains live for this immutable byte-level inspection.
+        std::slice::from_raw_parts(
+            (&affinity as *const libc::cpu_set_t).cast::<u8>(),
+            std::mem::size_of::<libc::cpu_set_t>(),
+        )
+    };
+    let cpus: Vec<usize> = bytes
+        .iter()
+        .enumerate()
+        .flat_map(|(byte_index, byte)| {
+            (0..8).filter_map(move |bit| ((byte & (1 << bit)) != 0).then_some(byte_index * 8 + bit))
+        })
+        .collect();
+    let rendered = cpus
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    (
+        cpus.len().try_into().unwrap_or(u32::MAX),
+        format!("sched_getaffinity:{rendered}"),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn observed_cpu_affinity() -> (u32, String) {
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessAffinityMask};
+
+    let mut process_mask = 0usize;
+    let mut system_mask = 0usize;
+    let result = unsafe {
+        // SAFETY: both masks are valid writable pointers and `GetCurrentProcess`
+        // returns the pseudo-handle for this process, whose affinity we own.
+        GetProcessAffinityMask(GetCurrentProcess(), &mut process_mask, &mut system_mask)
+    };
+    match result {
+        Ok(()) => (
+            process_mask.count_ones(),
+            format!("GetProcessAffinityMask:0x{process_mask:x}"),
+        ),
+        Err(_) => (0, "GetProcessAffinityMask:error".to_string()),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn observed_cpu_affinity() -> (u32, String) {
+    (0, "unsupported".to_string())
 }
 
 impl WinitApp {
@@ -1821,6 +2178,9 @@ impl WinitApp {
                 // double-acquire validation error on some backends.
                 if surface.present_pending_texture() {
                     self.state.wake.counters().record_present();
+                    if let Some(measurement) = self.state.quiescent_efficiency.as_mut() {
+                        measurement.record_first_present(Instant::now());
+                    }
                 } else {
                     // FrameReady signal fired but no texture is pending —
                     // this can happen if acquire_frame() failed on the
@@ -2067,6 +2427,67 @@ mod tests {
             1080,
             60,
         )
+    }
+
+    #[test]
+    fn quiescent_measurement_uses_only_the_post_settle_runtime_counter_delta() {
+        let now = Instant::now();
+        let config = WindowedQuiescentEfficiencyConfig {
+            emit_path: std::env::temp_dir().join("quiescent-efficiency-test.json"),
+            build: "test-build".to_string(),
+        };
+        let adapter = tze_hud_compositor::CompositorAdapterInfo {
+            name: "Microsoft Basic Render Driver (WARP)".to_string(),
+            backend: "Dx12".to_string(),
+            device_type: "Cpu".to_string(),
+            driver: "test-driver".to_string(),
+            driver_info: "test-driver-info".to_string(),
+            vendor: 0,
+            device: 0,
+        };
+        let mut measurement = WindowedQuiescentEfficiencyRunState::new(
+            config,
+            WindowMode::Overlay,
+            640,
+            360,
+            adapter,
+            now,
+        );
+        let counters = crate::idle_efficiency::IdleEfficiencyCounters::default();
+
+        measurement.record_first_present(now);
+        assert_eq!(
+            measurement.next_deadline(),
+            Some(now + Duration::from_secs(5)),
+            "the mandatory five-second settle must begin after an actual present"
+        );
+        assert!(
+            measurement
+                .advance(now + Duration::from_millis(4_999), &counters)
+                .is_none()
+        );
+
+        let settled_at = now + Duration::from_secs(5);
+        assert!(measurement.advance(settled_at, &counters).is_none());
+        counters.record_main_wakeup(crate::idle_efficiency::RuntimeWakeupSource::SceneChange);
+        counters.record_gpu_submission();
+
+        let completed = measurement
+            .advance(settled_at + Duration::from_secs(60), &counters)
+            .expect("the mandatory sixty-second interval must emit a result");
+        assert_eq!(
+            completed.artifact.runtime.window_mode,
+            EfficiencyWindowMode::Overlay
+        );
+        assert_eq!(completed.artifact.settling_duration_ms, 5_000);
+        assert_eq!(completed.artifact.interval_duration_ms, 60_000);
+        assert_eq!(completed.artifact.wakeups.main_loop, 1);
+        assert_eq!(completed.artifact.gpu.queue_submissions, 1);
+        assert_eq!(completed.artifact.wakeups.excluded_sampler, 1);
+        assert!(
+            !completed.validation.passed,
+            "a real post-settle GPU submission must make the runtime artifact fail"
+        );
     }
 
     #[test]
