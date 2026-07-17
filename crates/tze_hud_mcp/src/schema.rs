@@ -19,9 +19,9 @@ use crate::tools::{
     ListElementsParams, ListSceneParams, ListWidgetsParams, ListZonesParams,
     PortalProjectionAcknowledgeInputParams, PortalProjectionAttachParams,
     PortalProjectionCleanupParams, PortalProjectionDetachParams,
-    PortalProjectionGetPendingInputParams, PortalProjectionPublishParams,
-    PortalProjectionPublishStatusParams, PublishToElementParams, PublishToWidgetParams,
-    PublishToZoneParams, RegisterWidgetAssetParams, SetContentParams,
+    PortalProjectionGetPendingInputParams, PortalProjectionListParams,
+    PortalProjectionPublishParams, PortalProjectionPublishStatusParams, PublishToElementParams,
+    PublishToWidgetParams, PublishToZoneParams, RegisterWidgetAssetParams, SetContentParams,
 };
 use schemars::JsonSchema;
 use schemars::r#gen::SchemaSettings;
@@ -143,6 +143,10 @@ fn tool_descriptors() -> Vec<Value> {
             "Inject text into the active composer draft buffer.",
         ),
         // ── Portal projection tools (cooperative HUD self-projection) ─────────
+        tool::<PortalProjectionListParams>(
+            "portal_projection_list",
+            "List bounded, content-free summaries of the resident caller's projections.",
+        ),
         tool::<PortalProjectionAttachParams>(
             "portal_projection_attach",
             "Attach a new cooperative projection session to the in-process authority.",
@@ -253,7 +257,7 @@ mod tests {
     fn every_tool_has_object_input_schema() {
         let list = tools_list_result();
         let tools = list["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 21, "expected 21 MCP tools");
+        assert_eq!(tools.len(), 22, "expected 22 MCP tools");
         for t in tools {
             assert!(t["name"].is_string(), "tool missing name: {t:?}");
             assert!(
@@ -312,6 +316,19 @@ mod tests {
         assert!(
             prop_names(&schema).contains(&"wait_ms".to_string()),
             "wait_ms must be derived into the inputSchema automatically"
+        );
+    }
+
+    #[test]
+    fn portal_list_schema_has_no_caller_supplied_scope_or_credentials() {
+        let schema = input_schema("portal_projection_list");
+        assert!(
+            prop_names(&schema).is_empty(),
+            "list scope is derived from the authenticated resident caller"
+        );
+        assert!(
+            required(&schema).is_empty(),
+            "list must not require a projection ID or owner token"
         );
     }
 

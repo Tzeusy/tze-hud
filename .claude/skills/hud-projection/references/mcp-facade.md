@@ -2,13 +2,20 @@
 
 The production projection ingress routes cooperative projection operations into the runtime's in-process `ProjectionAuthority`. It is **not** a standalone external daemon and **not** the runtime v1 MCP zone/widget publishing bridge.
 
-**Current status:** The ingress is **fully wired**. All seven operations are served by the runtime MCP server's per-operation `portal_projection_<op>` tools (`crates/tze_hud_mcp/src/server.rs` ~643-683), which forward to the in-process authority over `portal_op_tx`. The tools are classified Resident and require `resident_mcp` (`crates/tze_hud_mcp/src/server.rs` ~218-232); an external session obtains that capability as the **resident principal** — the runtime mints `resident_mcp` only when the MCP bearer matches BOTH the configured `TZE_HUD_MCP_RESIDENT_PRINCIPAL` AND the PSK, each compared constant-time (`caller_context`, ~321-352; `with_resident_principal`, ~187). Wire it by setting `TZE_HUD_MCP_RESIDENT_PRINCIPAL` equal to the PSK (`crates/tze_hud_runtime/src/mcp.rs` ~111, env at ~71-73) and sending the PSK as the bearer. Published output renders on screen for both portal adapter families (exemplar gRPC and the in-process cooperative driver; cooperative render landed in PR #959). hud-bq0gl.1 (production ingress), hud-bq0gl.3 (operator input-return loop), and hud-nu65o (PSK-gated resident principal) are all closed. The boundary requirements below describe the contract this ingress satisfies.
+**Current status:** The ingress is **fully wired**. All eight operations are served by the runtime MCP server's per-operation tools (`portal_projection_list`, `portal_projection_attach`, `portal_projection_publish` for `publish_output`, `portal_projection_publish_status`, `portal_projection_get_pending_input`, `portal_projection_acknowledge_input`, `portal_projection_detach`, and `portal_projection_cleanup`), which forward to the in-process authority over `portal_op_tx`. The tools are classified Resident and require `resident_mcp`; an external session obtains that capability as the **resident principal** — the runtime mints `resident_mcp` only when the MCP bearer matches BOTH the configured `TZE_HUD_MCP_RESIDENT_PRINCIPAL` AND the PSK, each compared constant-time. Wire it by setting `TZE_HUD_MCP_RESIDENT_PRINCIPAL` equal to the PSK and sending the PSK as the bearer. Published output renders on screen for both portal adapter families (exemplar gRPC and the in-process cooperative driver). The boundary requirements below describe the contract this ingress satisfies.
+
+Implementation sources: `crates/tze_hud_mcp/src/server.rs` classifies and
+routes the Resident tool; `crates/tze_hud_mcp/src/tools.rs` defines its empty
+input and content-free result; `crates/tze_hud_runtime/src/portal_projection_driver.rs`
+bridges it to `crates/tze_hud_projection/src/authority.rs`, which filters,
+sorts, and caps caller-owned summaries.
 
 ## Required Boundary
 
 The production ingress must:
 - Accept only the cooperative operation contract from `operation-examples.md`.
 - Authenticate callers through an MCP bearer token, OS-protected IPC, or another unguessable credential.
+- Serve `portal_projection_list` only to the resident principal; return at most the configured count of that principal's content-free summaries and do not use it to manage lifecycle, leases, or tokens.
 - Bind owner-scoped non-attach operations to `projection_id` plus `owner_token`; bind operator cleanup to separate explicit operator authority.
 - Treat a matching-key attach replay as authenticated token rotation: return a fresh token, atomically replace the sole verifier, invalidate every prior token, and preserve the original expiry deadline. The idempotency key never substitutes for Resident MCP authorization.
 - Return bounded operation responses only: no unbounded transcript, unbounded inbox history, `owner_token` outside a successful `attach` response, owner-token verifier, or raw runtime scene graph.
@@ -48,7 +55,7 @@ runtime state, and the client explicitly republishes its bounded tail.
 
 ## Tool Shape
 
-The facade shipped as **seven per-operation tools** — `portal_projection_attach`, `portal_projection_publish` (for `publish_output`), `portal_projection_publish_status`, `portal_projection_get_pending_input`, `portal_projection_acknowledge_input`, `portal_projection_detach`, and `portal_projection_cleanup` — not a single dispatcher tool. The skill examples use operation JSON payloads that map directly onto these tools' params.
+The facade ships as **eight per-operation tools** — `portal_projection_list`, `portal_projection_attach`, `portal_projection_publish` (for `publish_output`), `portal_projection_publish_status`, `portal_projection_get_pending_input`, `portal_projection_acknowledge_input`, `portal_projection_detach`, and `portal_projection_cleanup` — not a single dispatcher tool. `portal_projection_list` accepts an empty arguments object and generates its authority request metadata internally; the other examples map directly onto their tool params.
 
 ## Claude-Style MCP Configuration
 

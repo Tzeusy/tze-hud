@@ -52,16 +52,17 @@ use std::collections::HashMap;
 use tze_hud_config::{resolve_portal_tokens, tokens::DesignTokenMap};
 use tze_hud_input::{DraftNotificationBatch, InputProcessor};
 pub use tze_hud_mcp::portal_op::{
-    PendingInputBatch, PendingInputEntry, PortalOp, PortalOpRejection,
+    PendingInputBatch, PendingInputEntry, PortalOp, PortalOpRejection, ProjectionListBatch,
+    ProjectionListEntry,
 };
 use tze_hud_projection::{
     AcknowledgeInputRequest, AdapterDraftBatch, AdapterDraftCancel, AdapterDraftNotification,
     AdapterDraftSubmission, AdapterGeometrySnapshot, AdapterPortalRect, AttachRequest,
     CleanupAuthority, CleanupRequest, ContentClassification, DetachRequest, GetPendingInputRequest,
-    HudConnectionMetadata, InputAckState, OperationEnvelope, OutputKind, PendingInputItem,
-    PortalInputFeedback, ProjectedPortalPolicy, ProjectionAuthority, ProjectionBounds,
-    ProjectionErrorCode, ProjectionLifecycleState, ProjectionOperation, ProviderKind,
-    PublishOutputRequest, PublishStatusRequest,
+    HudConnectionMetadata, InputAckState, ListProjectionsRequest, OperationEnvelope, OutputKind,
+    PendingInputItem, PortalInputFeedback, ProjectedPortalPolicy, ProjectionAuthority,
+    ProjectionBounds, ProjectionErrorCode, ProjectionLifecycleState, ProjectionOperation,
+    ProviderKind, PublishOutputRequest, PublishStatusRequest,
     resident_grpc::{
         ResidentGrpcPortalAdapter, ResidentGrpcPortalCommandKind, ResidentGrpcPortalConfig,
         portal_visual_tokens_from_part_tokens,
@@ -115,6 +116,15 @@ const PORTAL_LINE_HEIGHT_MULTIPLIER: f32 = 1.4;
 /// This namespace is used when creating portal tiles and publishing content.
 /// It is distinct from any agent-facing namespace.
 pub const PORTAL_DRIVER_NAMESPACE: &str = "tze_hud_portal_driver";
+
+/// Current authenticated resident-principal identity at the projection seam.
+///
+/// The MCP configuration supports one resident principal today, so all
+/// resident projection operations share this stable non-secret identity. The
+/// authority still enforces its caller-scoped filter, allowing a future
+/// authenticated multi-principal transport to pass distinct identities without
+/// broadening this list operation's visibility.
+const MCP_PORTAL_CALLER_IDENTITY: &str = "mcp-portal";
 
 /// Default z-order for portal tiles created by the in-process driver.
 const PORTAL_Z_ORDER: u32 = 160;
@@ -1078,6 +1088,50 @@ impl InProcessPortalDriver {
     pub fn dispatch_portal_op(&mut self, op: PortalOp) {
         let now_us = now_wall_us();
         match op {
+            PortalOp::List { reply } => {
+                let request = ListProjectionsRequest {
+                    request_id: uuid::Uuid::now_v7().to_string(),
+                    client_timestamp_wall_us: now_us.max(1),
+                };
+                let response = self.authority.handle_list_projections(
+                    request,
+                    MCP_PORTAL_CALLER_IDENTITY,
+                    now_us,
+                );
+                if response.accepted {
+                    let batch = ProjectionListBatch {
+                        projections: response
+                            .projections
+                            .into_iter()
+                            .map(|projection| ProjectionListEntry {
+                                projection_id: projection.projection_id,
+                                display_name: projection.display_name,
+                                lifecycle_state: lifecycle_state_wire(projection.lifecycle_state),
+                                unread_output_count: projection.unread_output_count,
+                                pending_input_count: projection.pending_input_count,
+                            })
+                            .collect(),
+                    };
+                    tracing::debug!(
+                        projection_count = batch.projections.len(),
+                        "portal_op: List accepted"
+                    );
+                    let _ = reply.send(Ok(batch));
+                } else {
+                    let error_code = response
+                        .error_code
+                        .unwrap_or(ProjectionErrorCode::ProjectionInternalError);
+                    tracing::warn!(
+                        error_code = %error_code,
+                        "portal_op: List denied"
+                    );
+                    let _ = reply.send(Err(PortalOpRejection::new(
+                        error_code,
+                        response.status_summary,
+                    )));
+                }
+            }
+
             PortalOp::Attach {
                 projection_id,
                 display_name,
@@ -1128,7 +1182,9 @@ impl InProcessPortalDriver {
                     hud_target,
                     idempotency_key,
                 };
-                let resp = self.authority.handle_attach(req, "mcp-portal", now_us);
+                let resp = self
+                    .authority
+                    .handle_attach(req, MCP_PORTAL_CALLER_IDENTITY, now_us);
                 if resp.accepted {
                     // Wire the drive state so the drain loop can materialise tiles.
                     //
@@ -1242,9 +1298,9 @@ impl InProcessPortalDriver {
                     coalesce_key,
                     expects_reply: expects_reply.unwrap_or(false),
                 };
-                let resp = self
-                    .authority
-                    .handle_publish_output(req, "mcp-portal", now_us);
+                let resp =
+                    self.authority
+                        .handle_publish_output(req, MCP_PORTAL_CALLER_IDENTITY, now_us);
                 if resp.accepted {
                     // A successful owner publish after an ungraceful drop is the
                     // reconnect signal: restore the connection so the degraded
@@ -1305,9 +1361,9 @@ impl InProcessPortalDriver {
                     lifecycle_state,
                     status_text,
                 };
-                let resp = self
-                    .authority
-                    .handle_publish_status(req, "mcp-portal", now_us);
+                let resp =
+                    self.authority
+                        .handle_publish_status(req, MCP_PORTAL_CALLER_IDENTITY, now_us);
                 if resp.accepted {
                     // Echo the authority's applied lifecycle state back so the MCP
                     // caller can observe the round-trip. Fall back to the request
@@ -1352,9 +1408,11 @@ impl InProcessPortalDriver {
                     max_items,
                     max_bytes,
                 };
-                let resp = self
-                    .authority
-                    .handle_get_pending_input(req, "mcp-portal", now_us);
+                let resp = self.authority.handle_get_pending_input(
+                    req,
+                    MCP_PORTAL_CALLER_IDENTITY,
+                    now_us,
+                );
                 if resp.accepted {
                     let items = resp
                         .pending_input
@@ -1420,9 +1478,11 @@ impl InProcessPortalDriver {
                     ack_message,
                     not_before_wall_us,
                 };
-                let resp = self
-                    .authority
-                    .handle_acknowledge_input(req, "mcp-portal", now_us);
+                let resp = self.authority.handle_acknowledge_input(
+                    req,
+                    MCP_PORTAL_CALLER_IDENTITY,
+                    now_us,
+                );
                 if resp.accepted {
                     tracing::debug!(
                         proj_id = %projection_id,
@@ -1460,7 +1520,9 @@ impl InProcessPortalDriver {
                     owner_token,
                     reason,
                 };
-                let resp = self.authority.handle_detach(req, "mcp-portal", now_us);
+                let resp = self
+                    .authority
+                    .handle_detach(req, MCP_PORTAL_CALLER_IDENTITY, now_us);
                 if resp.accepted {
                     // The authority purged its session + coalescer entry. Drop
                     // the driver-side drive entry / tile mapping so the next
@@ -1517,7 +1579,9 @@ impl InProcessPortalDriver {
                     operator_authority,
                     reason,
                 };
-                let resp = self.authority.handle_cleanup(req, "mcp-portal", now_us);
+                let resp = self
+                    .authority
+                    .handle_cleanup(req, MCP_PORTAL_CALLER_IDENTITY, now_us);
                 if resp.accepted {
                     // Cleanup purges authority state through either owner-token or
                     // operator-authority paths. Drop driver-side state as well so
@@ -4164,6 +4228,75 @@ mod tests {
             "hud-bq0gl.2 regression: portal content published via dispatch_portal_op \
              must flow through drain_inner and set tile_follow_tail_at_tail (spec §3.2); \
              removing the dispatch_portal_op → authority wiring causes this to fail"
+        );
+    }
+
+    #[test]
+    fn dispatch_portal_op_list_maps_only_content_free_summaries() {
+        let mut driver = InProcessPortalDriver::new();
+        let (attach_tx, attach_rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::Attach {
+            projection_id: "listed-projection".to_string(),
+            display_name: "Listed projection".to_string(),
+            idempotency_key: None,
+            provider_kind: None,
+            content_classification: None,
+            workspace_hint: None,
+            repository_hint: None,
+            icon_profile_hint: None,
+            hud_target: None,
+            reply: attach_tx,
+        });
+        let owner_token = attach_rx
+            .blocking_recv()
+            .expect("attach reply must arrive")
+            .expect("attach must be accepted");
+
+        let (publish_tx, publish_rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::PublishOutput {
+            projection_id: "listed-projection".to_string(),
+            owner_token,
+            output_text: "private transcript must not be listed".to_string(),
+            logical_unit_id: Some("listed-output".to_string()),
+            output_kind: None,
+            content_classification: None,
+            coalesce_key: None,
+            expects_reply: None,
+            reply: publish_tx,
+        });
+        publish_rx
+            .blocking_recv()
+            .expect("publish reply must arrive")
+            .expect("publish must be accepted");
+        driver
+            .authority_mut()
+            .enqueue_input(
+                "listed-projection",
+                "listed-input",
+                "private input must not be listed".to_string(),
+                1,
+                1_000,
+                None,
+            )
+            .expect("test input must be accepted");
+
+        let (list_tx, list_rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::List { reply: list_tx });
+        let batch = list_rx
+            .blocking_recv()
+            .expect("list reply must arrive")
+            .expect("list must be accepted");
+
+        assert_eq!(batch.projections.len(), 1);
+        assert_eq!(batch.projections[0].projection_id, "listed-projection");
+        assert_eq!(batch.projections[0].unread_output_count, 1);
+        assert_eq!(batch.projections[0].pending_input_count, 1);
+        let payload = serde_json::to_string(&batch).expect("list batch must serialize");
+        assert!(
+            !payload.contains("private transcript must not be listed")
+                && !payload.contains("private input must not be listed")
+                && !payload.contains("owner_token"),
+            "driver list mapping must never forward portal content or owner credentials: {payload}"
         );
     }
 

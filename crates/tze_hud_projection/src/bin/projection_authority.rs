@@ -67,10 +67,11 @@ use tze_hud_projection::resident_grpc::{
 use tze_hud_projection::{
     AcknowledgeInputRequest, AdvisoryLeaseIdentity, AttachRequest, CleanupRequest,
     ContentClassification, DetachRequest, ExternalAgentProjectionAuthority, GetPendingInputRequest,
-    HudConnectionMetadata, HudCredentialSource, ManagedSessionOrigin, ManagedSessionRequest,
-    PresenceSurfaceRoute, ProjectionAttentionIntent, ProjectionAuditRecord, ProjectionAuthority,
-    ProjectionBounds, ProjectionErrorCode, ProjectionOperation, ProjectionResponse, ProviderKind,
-    PublishOutputRequest, PublishStatusRequest, WidgetParameterValue, WindowsHudTarget,
+    HudConnectionMetadata, HudCredentialSource, ListProjectionsRequest, ManagedSessionOrigin,
+    ManagedSessionRequest, PresenceSurfaceRoute, ProjectionAttentionIntent, ProjectionAuditRecord,
+    ProjectionAuthority, ProjectionBounds, ProjectionErrorCode, ProjectionOperation,
+    ProjectionResponse, ProviderKind, PublishOutputRequest, PublishStatusRequest,
+    WidgetParameterValue, WindowsHudTarget,
 };
 
 const DEFAULT_CALLER_IDENTITY: &str = "projection-authority-stdio";
@@ -1205,6 +1206,23 @@ fn dispatch_line(
             }
             result
         }),
+        ProjectionOperation::List => deserialize_then(value, |request: ListProjectionsRequest| {
+            let result = authority.handle_list_projections(
+                request,
+                caller_identity,
+                server_timestamp_wall_us,
+            );
+            if result.accepted {
+                debug!(projection_count = result.projections.len(), "list accepted");
+            } else {
+                warn!(
+                    error_code = ?result.error_code,
+                    status_summary = %result.status_summary,
+                    "list rejected"
+                );
+            }
+            result
+        }),
         ProjectionOperation::PublishOutput => {
             deserialize_then(value, |request: PublishOutputRequest| {
                 let proj_id = request.envelope.projection_id.clone();
@@ -1400,6 +1418,7 @@ fn dispatch_set_token_map(
             status_summary: format!("token map applied; {adapter_count} adapter(s) updated"),
             owner_token: None,
             lifecycle_state: None,
+            projections: Vec::new(),
             pending_input: Vec::new(),
             pending_remaining_count: 0,
             pending_remaining_bytes: 0,
@@ -1799,6 +1818,7 @@ fn invalid_argument_response(
         status_summary: bounded_copy(reason.into(), MAX_CLI_STATUS_SUMMARY_BYTES),
         owner_token: None,
         lifecycle_state: None,
+        projections: Vec::new(),
         pending_input: Vec::new(),
         pending_remaining_count: 0,
         pending_remaining_bytes: 0,
