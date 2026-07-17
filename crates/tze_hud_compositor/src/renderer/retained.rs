@@ -237,6 +237,8 @@ impl RetainedRenderState {
         self.latest_diagnostic.take()
     }
 
+    /// Test-only planner seam. Production device-loss/recovery handling has not
+    /// yet been wired to this canonical retained-validation lane.
     #[cfg(test)]
     fn note_device_recovery(&mut self) {
         self.device_recovery_pending = true;
@@ -254,6 +256,19 @@ impl Compositor {
         surface: &HeadlessSurface,
     ) -> Option<tze_hud_telemetry::FrameTelemetry> {
         self.retained_render_state.begin_observation_frame();
+        if !self.retained_headless_policy_is_supported() {
+            // A full-frame degradation policy can alter visibility or raster
+            // semantics. Its submitted pixels are not a retained baseline, so
+            // invalidate the private snapshot and surface a non-certifying
+            // fallback rather than repainting against divergent content.
+            self.retained_render_state.forget_snapshot();
+            self.retained_render_state
+                .set_pending_full_surface_diagnostic(Some(full_surface_invalidation(
+                    FullSurfaceInvalidationReason::UnsupportedRetainedSceneChange,
+                    PartialPresentCapability::Supported,
+                )));
+            return None;
+        }
         let (width, height) = surface.size();
         let plan = self
             .retained_render_state
@@ -292,8 +307,8 @@ impl Compositor {
 
     /// Record the result of an ordinary headless frame.  This seeds (or
     /// refreshes) the private retained snapshot only after the real full frame
-    /// was submitted, and preserves structured diagnostics for resize/device
-    /// recovery rather than certifying them.
+    /// was submitted, and preserves structured diagnostics for resize and the
+    /// modeled device-recovery planner path rather than certifying them.
     pub(super) fn observe_full_headless_frame(
         &mut self,
         scene: &SceneGraph,
@@ -307,8 +322,12 @@ impl Compositor {
         let diagnostic = self
             .retained_render_state
             .take_pending_full_surface_diagnostic();
-        self.retained_render_state
-            .remember_full_headless_scene(scene, width, height);
+        if self.retained_headless_policy_is_supported() {
+            self.retained_render_state
+                .remember_full_headless_scene(scene, width, height);
+        } else {
+            self.retained_render_state.forget_snapshot();
+        }
         if let Some(diagnostic) = diagnostic {
             self.retained_render_state
                 .set_latest_diagnostic(full_surface_artifact(
@@ -551,6 +570,11 @@ impl Compositor {
             software: self.adapter_info.device_type.eq_ignore_ascii_case("cpu"),
         }
     }
+
+    fn retained_headless_policy_is_supported(&self) -> bool {
+        self.degradation_policy.level == tze_hud_scene::DegradationLevel::Nominal
+            && self.degradation_policy.suppressed_tiles.is_empty()
+    }
 }
 
 fn canonical_snapshot(
@@ -595,8 +619,7 @@ fn canonical_snapshot(
         let NodeData::TextMarkdown(text) = &node.data else {
             return None;
         };
-        if text.content.is_empty()
-            || !text.content.is_ascii()
+        if !is_canonical_plain_ascii_content(&text.content)
             || text.background.is_some()
             || !text.color_runs.is_empty()
             || !matches!(text.overflow, tze_hud_scene::types::TextOverflow::Clip)
@@ -623,6 +646,17 @@ fn canonical_snapshot(
         viewport: EfficiencyViewport { width, height },
         tiles,
     })
+}
+
+/// The canonical proof deliberately accepts only text that the Markdown parser
+/// cannot reinterpret into additional glyphs or styles. Broader Markdown
+/// retained rendering needs parsed-style inventory accounting rather than the
+/// raw-byte glyph check below.
+fn is_canonical_plain_ascii_content(content: &str) -> bool {
+    !content.is_empty()
+        && content
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b' ')
 }
 
 fn changed_canonical_tile(
@@ -812,6 +846,7 @@ fn nonempty_identity(value: &str, fallback: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tze_hud_scene::types::{FontFamily, Node, Rgba, TextAlign, TextOverflow};
 
     fn renderer() -> EfficiencyRendererIdentity {
         EfficiencyRendererIdentity {
@@ -819,6 +854,65 @@ mod tests {
             adapter: "test-adapter".into(),
             software: true,
         }
+    }
+
+    fn canonical_scene_with_first_content(first_content: &str) -> SceneGraph {
+        let mut scene = SceneGraph::new(1_000.0, 500.0);
+        let tab_id = scene.create_tab("canonical", 0).expect("canonical tab");
+        let lease_id = scene.grant_lease("canonical-agent", 60_000, vec![]);
+
+        for index in 0..CANONICAL_TILE_COUNT {
+            let column = index % 10;
+            let row = index / 10;
+            let tile_id = scene
+                .create_tile(
+                    tab_id,
+                    "canonical-agent",
+                    lease_id,
+                    Rect::new((column * 100) as f32, (row * 100) as f32, 100.0, 100.0),
+                    index as u32,
+                )
+                .expect("canonical tile");
+            let content = if index == 0 { first_content } else { "AB" };
+            scene
+                .set_tile_root(
+                    tile_id,
+                    Node {
+                        id: SceneId::new(),
+                        children: vec![],
+                        layout: Default::default(),
+                        data: NodeData::TextMarkdown(TextMarkdownNode {
+                            content: content.into(),
+                            bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                            font_size_px: 18.0,
+                            font_family: FontFamily::SystemSansSerif,
+                            color: Rgba::WHITE,
+                            background: None,
+                            alignment: TextAlign::Start,
+                            overflow: TextOverflow::Clip,
+                            color_runs: Box::default(),
+                        }),
+                    },
+                )
+                .expect("canonical text root");
+        }
+
+        scene
+    }
+
+    #[test]
+    fn markdown_bearing_text_fails_closed_before_retained_planning() {
+        let markdown_scene = canonical_scene_with_first_content("*AB*");
+        let plain_scene = canonical_scene_with_first_content("AB");
+
+        assert!(
+            canonical_snapshot(&markdown_scene, 1_000, 500).is_none(),
+            "raw Markdown markers must not be admitted to a glyph-inventory-only retained proof"
+        );
+        assert!(
+            canonical_snapshot(&plain_scene, 1_000, 500).is_some(),
+            "the plain-text canonical control scene must remain eligible"
+        );
     }
 
     #[test]
@@ -900,7 +994,7 @@ mod tests {
     }
 
     #[test]
-    fn device_recovery_invalidates_the_private_snapshot() {
+    fn modeled_device_recovery_invalidates_the_private_snapshot() {
         let mut state = RetainedRenderState {
             snapshot: Some(CanonicalSceneSnapshot {
                 viewport: EfficiencyViewport {

@@ -1236,6 +1236,78 @@ mod tests {
             "retained update did not visibly change its declared damage region"
         );
 
+        // A full-frame baseline rendered under degradation can suppress tiles.
+        // The retained path must decline and invalidate its snapshot rather than
+        // paint a suppressed tile back onto that baseline.
+        for _ in 0..40 {
+            runtime.degradation_controller.record_frame(20_000);
+        }
+        assert_eq!(
+            runtime.degradation_controller.level(),
+            crate::degradation::DegradationLevel::ShedTiles,
+            "the real runtime controller must produce the suppression policy"
+        );
+        {
+            let mut scene = scene_arc.lock().await;
+            let suppressed_update = MutationBatch {
+                batch_id: SceneId::new(),
+                agent_namespace: "change-efficiency-agent".into(),
+                mutations: vec![SceneMutation::UpdateNodeContent {
+                    tile_id: changed_tile_id,
+                    node_id: changed_node_id,
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "AB".into(),
+                        bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                        font_size_px: 18.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::WHITE,
+                        background: None,
+                        alignment: TextAlign::Start,
+                        overflow: TextOverflow::Clip,
+                        color_runs: Box::default(),
+                    }),
+                }],
+                timing_hints: None,
+                lease_id: Some(lease_id),
+            };
+            assert!(
+                scene.apply_batch(&suppressed_update).applied,
+                "suppressed canonical update still applies to the scene"
+            );
+        }
+        runtime.render_frame().await;
+        assert!(
+            runtime
+                .compositor
+                .take_change_efficiency_capture()
+                .is_none(),
+            "suppressed tiles must never certify a retained update"
+        );
+        let suppressed_diagnostic = runtime
+            .compositor
+            .take_change_efficiency_diagnostic()
+            .expect("suppressed retained change emits a structured diagnostic");
+        assert_eq!(
+            suppressed_diagnostic
+                .full_surface_invalidation
+                .expect("full diagnostic metadata")
+                .reason,
+            tze_hud_telemetry::FullSurfaceInvalidationReason::UnsupportedRetainedSceneChange
+        );
+        runtime.degradation_controller = DegradationController::with_defaults();
+        runtime.render_frame().await;
+        let rebaseline_diagnostic = runtime
+            .compositor
+            .take_change_efficiency_diagnostic()
+            .expect("returning to the canonical policy requires a fresh baseline");
+        assert_eq!(
+            rebaseline_diagnostic
+                .full_surface_invalidation
+                .expect("full diagnostic metadata")
+                .reason,
+            tze_hud_telemetry::FullSurfaceInvalidationReason::SurfaceCreation
+        );
+
         // A canonical scene change that leaves the deliberately narrow proof
         // envelope (new glyph inventory) must be a structured, non-passing
         // full-frame diagnostic instead of a silent proportionality claim.

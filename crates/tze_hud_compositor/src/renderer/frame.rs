@@ -967,7 +967,8 @@ impl Compositor {
 
         // Seed the private retained snapshot only after this real full frame
         // completed its submit/readback tail. Structured fallback diagnostics
-        // (resize/device recovery) are captured here as non-passing evidence.
+        // (resize and modeled device recovery) are captured here as non-passing
+        // evidence.
         self.observe_full_headless_frame(scene, surface);
 
         telemetry
