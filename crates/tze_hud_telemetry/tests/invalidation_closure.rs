@@ -1,7 +1,8 @@
 use tze_hud_telemetry::{
     ActualWorkItem, ChangeEfficiencyArtifact, ChangeEfficiencyValidationStatus,
-    ChangeMeasurementStatus, ClosureWorkItem, ConstrainedProfileIdentity, DamageCategory,
-    DamageWorkItemId, EfficiencyPacingIdentity, EfficiencyPacingMode, EfficiencyRendererIdentity,
+    ChangeMeasurementProvenance, ChangeMeasurementStatus, ChangeRenderWorkObservation,
+    ClosureWorkItem, ConstrainedProfileIdentity, DamageCategory, DamageWorkItemId,
+    EfficiencyPacingIdentity, EfficiencyPacingMode, EfficiencyRendererIdentity,
     EfficiencyRuntimeIdentity, EfficiencyScenarioIdentity, EfficiencyViewport,
     FullSurfaceInvalidation, FullSurfaceInvalidationReason, InvalidationCategory,
     InvalidationClosure, InvalidationDependencyReason, NodeWorkItemId, PartialPresentCapability,
@@ -38,7 +39,7 @@ fn valid_one_node_artifact() -> ChangeEfficiencyArtifact {
     );
 
     ChangeEfficiencyArtifact {
-        schema_version: 1,
+        schema_version: 2,
         scenario: EfficiencyScenarioIdentity {
             name: "one_node_change_50_tiles".into(),
             version: 1,
@@ -70,6 +71,7 @@ fn valid_one_node_artifact() -> ChangeEfficiencyArtifact {
         settling_duration_ms: 0,
         interval_duration_ms: 1,
         status: ChangeMeasurementStatus::Complete,
+        measurement_provenance: ChangeMeasurementProvenance::Fixture,
         scene_tile_count: 50,
         closure: InvalidationClosure {
             layout: InvalidationCategory {
@@ -123,6 +125,11 @@ fn valid_one_node_artifact() -> ChangeEfficiencyArtifact {
                 }],
             },
         },
+        render_observation: ChangeRenderWorkObservation {
+            full_surface_clear_operations: 0,
+            full_frame_encode_operations: 0,
+            scoped_render_encode_operations: 1,
+        },
         encoded_draw_calls: 1,
         full_surface_invalidation: None,
     }
@@ -145,6 +152,49 @@ fn canonical_one_node_change_in_fifty_tiles_is_non_certifying_without_runtime_ac
     assert_eq!(report.texture_upload.uploaded_byte_count, 0);
     assert_eq!(report.render_encoding.actual_operation_count, 1);
     assert_eq!(report.composition_damage.damaged_pixel_area, 8_000);
+}
+
+#[test]
+fn full_frame_encoder_work_cannot_hide_inside_a_scoped_capture() {
+    let mut artifact = valid_one_node_artifact();
+    artifact.measurement_provenance = ChangeMeasurementProvenance::ObservedRetainedRuntime;
+    artifact.render_observation.full_surface_clear_operations = 1;
+    artifact.render_observation.full_frame_encode_operations = 1;
+
+    let report = artifact.validate();
+
+    assert!(!report.passed, "{report:#?}");
+    assert_eq!(
+        report.status,
+        ChangeEfficiencyValidationStatus::InvalidArtifact,
+        "{report:#?}"
+    );
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|violation| violation.contains("full-surface clear")),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn observed_retained_runtime_provenance_round_trips_as_required_schema_metadata() {
+    let mut value = serde_json::to_value(valid_one_node_artifact()).unwrap();
+    value["measurement_provenance"] = serde_json::json!("observed_retained_runtime");
+    let artifact: ChangeEfficiencyArtifact = serde_json::from_value(value).unwrap();
+
+    assert_eq!(
+        artifact.measurement_provenance,
+        ChangeMeasurementProvenance::ObservedRetainedRuntime
+    );
+    let report = artifact.validate();
+    assert!(!report.passed, "{report:#?}");
+    assert_eq!(
+        report.status,
+        ChangeEfficiencyValidationStatus::PendingRuntimeInstrumentation,
+        "raw artifact metadata must not impersonate an opaque compositor capture: {report:#?}"
+    );
 }
 
 #[test]
@@ -512,6 +562,18 @@ fn missing_measurement_interval_fails_deserialization_instead_of_defaulting_to_z
         error.to_string().contains("interval_duration_ms"),
         "{error}"
     );
+}
+
+#[test]
+fn observed_provenance_and_encoder_observation_are_required_schema_fields() {
+    for field in ["measurement_provenance", "render_observation"] {
+        let mut value = serde_json::to_value(valid_one_node_artifact()).unwrap();
+        value.as_object_mut().unwrap().remove(field);
+
+        let error = serde_json::from_value::<ChangeEfficiencyArtifact>(value).unwrap_err();
+
+        assert!(error.to_string().contains(field), "{field}: {error}");
+    }
 }
 
 #[test]

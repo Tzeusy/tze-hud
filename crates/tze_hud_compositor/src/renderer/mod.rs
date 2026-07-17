@@ -72,6 +72,7 @@ pub mod frame;
 pub mod hit_regions;
 pub mod icon;
 pub mod image_cache;
+mod retained;
 pub mod text;
 pub mod tile_render;
 pub mod token_colors;
@@ -79,6 +80,8 @@ pub mod video;
 pub mod viewer_echo;
 pub mod widget_geometry;
 pub mod zone_render;
+
+pub use retained::RetainedChangeEfficiencyCapture;
 
 // Re-export submodule items into this module's namespace so all existing code
 // in mod.rs can reference them without path changes (move-only, zero refactor).
@@ -179,6 +182,9 @@ pub struct Compositor {
     pub width: u32,
     pub height: u32,
     frame_number: u64,
+    /// Retained snapshot and evidence slot for the narrowly-scoped canonical
+    /// headless change-efficiency validation path.
+    retained_render_state: retained::RetainedRenderState,
     /// When true, the clear color uses alpha=0 for transparent overlay mode.
     pub overlay_mode: bool,
     /// When true, render all zone boundaries with colored tints even when
@@ -758,6 +764,7 @@ impl Compositor {
             width,
             height,
             frame_number: 0,
+            retained_render_state: retained::RetainedRenderState::default(),
             overlay_mode: false,
             debug_zone_tints: std::env::var("TZE_HUD_DEBUG_ZONES").is_ok_and(|v| v == "1"),
             degradation_level: DegradationLevel::Nominal,
@@ -1080,6 +1087,7 @@ impl Compositor {
             width: clamped_width,
             height: clamped_height,
             frame_number: 0,
+            retained_render_state: retained::RetainedRenderState::default(),
             overlay_mode: false,
             debug_zone_tints: std::env::var("TZE_HUD_DEBUG_ZONES").is_ok_and(|v| v == "1"),
             degradation_level: DegradationLevel::Nominal,
