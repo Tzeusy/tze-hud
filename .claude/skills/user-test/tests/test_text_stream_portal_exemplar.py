@@ -274,13 +274,12 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
         self.assertEqual(tuple(plan), ("baseline", "grow", "shrink"))
         self.assertEqual(
             [action["label"] for action in plan["baseline"]],
-            ["focus-composer", "focus-output-pane"],
+            ["focus-composer"],
         )
         self.assertEqual(
             [action["label"] for action in plan["grow"]],
             [
                 "focus-composer",
-                "focus-output-pane",
                 "settle-portal-keyboard-focus",
                 "resize-grow-ctrl-equal",
             ],
@@ -289,7 +288,6 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
             [action["label"] for action in plan["shrink"]],
             [
                 "focus-composer",
-                "focus-output-pane",
                 "settle-portal-keyboard-focus",
                 "resize-shrink-ctrl-minus",
             ],
@@ -325,7 +323,7 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
                     script.index("diagnostic:"),
                 )
                 if stage != "baseline":
-                    focus = script.index("diagnostic:focus-output-pane")
+                    focus = script.index("diagnostic:focus-composer")
                     settle = script.index("diagnostic:settle-portal-keyboard-focus")
                     chord = script.index("diagnostic:resize-")
                     self.assertIn("Start-Sleep -Milliseconds 700", script)

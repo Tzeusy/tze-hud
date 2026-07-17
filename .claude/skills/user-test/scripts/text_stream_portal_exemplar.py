@@ -1200,22 +1200,20 @@ def build_resize_hotkey_snapshot_plan(
 ) -> dict[str, list[dict[str, Any]]]:
     """Build staged OS input for authoritative Ctrl +/- resize validation.
 
-    Every stage focuses the composer first to acquire Windows keyboard focus,
-    then moves scene focus to the scrollable OUTPUT pane, which is the runtime's
-    focus-scoped resize gate. The caller takes an ephemeral SceneSnapshot after
-    each stage; no stage contains a GDI capture action or persists a screenshot.
+    Every stage focuses the scrollable composer surface, which acquires both
+    Windows keyboard focus and the runtime focus-owner required by the resize
+    gate. The caller takes an ephemeral SceneSnapshot after each stage; no stage
+    contains a GDI capture action or persists a screenshot.
 
     Refocusing before each chord keeps the proof valid even when Windows assigns
     foreground ownership to a newly launched interactive diagnostic task.
     """
-    input_rect, output_rect = portal_pane_rects()
+    input_rect, _ = portal_pane_rects()
     composer_x = portal_x + input_rect.x + input_rect.w / 2.0
     composer_y = portal_y + input_rect.y + min(input_rect.h - 10.0, 72.0)
-    output_x = portal_x + output_rect.x + output_rect.w / 2.0
-    output_y = portal_y + output_rect.y + output_rect.h / 2.0
     focus_settle_ms = max(0, int(focus_settle_ms))
 
-    def focused_output_actions() -> list[dict[str, Any]]:
+    def focused_composer_actions() -> list[dict[str, Any]]:
         return [
             {
                 "kind": "click",
@@ -1223,18 +1221,12 @@ def build_resize_hotkey_snapshot_plan(
                 "x": composer_x,
                 "y": composer_y,
             },
-            {
-                "kind": "click",
-                "label": "focus-output-pane",
-                "x": output_x,
-                "y": output_y,
-            },
         ]
 
     return {
-        "baseline": focused_output_actions(),
+        "baseline": focused_composer_actions(),
         "grow": [
-            *focused_output_actions(),
+            *focused_composer_actions(),
             {
                 "kind": "wait",
                 "label": "settle-portal-keyboard-focus",
@@ -1249,7 +1241,7 @@ def build_resize_hotkey_snapshot_plan(
             },
         ],
         "shrink": [
-            *focused_output_actions(),
+            *focused_composer_actions(),
             {
                 "kind": "wait",
                 "label": "settle-portal-keyboard-focus",
