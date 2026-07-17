@@ -54,8 +54,8 @@ struct ForegroundLockTimeoutAttempt {
 
 #[cfg(any(target_os = "windows", test))]
 impl ForegroundLockTimeoutAttempt {
-    fn has_failure(self) -> bool {
-        self.previous_timeout.is_none() || !self.lock_cleared || self.lock_restored != Some(true)
+    fn setting_may_be_left_altered(self) -> bool {
+        self.lock_cleared && self.lock_restored != Some(true)
     }
 }
 
@@ -71,9 +71,17 @@ fn with_temporary_foreground_lock_timeout<T>(
     focus: impl FnOnce() -> T,
 ) -> (T, ForegroundLockTimeoutAttempt) {
     let previous_timeout = read_timeout();
-    let lock_cleared = previous_timeout.is_some_and(|_| set_timeout(0));
+    let lock_cleared = match previous_timeout {
+        Some(0) => true,
+        Some(_) => set_timeout(0),
+        None => false,
+    };
     let focus_result = focus();
-    let lock_restored = previous_timeout.map(&mut set_timeout);
+    let lock_restored = match previous_timeout {
+        Some(0) => Some(true),
+        Some(timeout) => Some(set_timeout(timeout)),
+        None => None,
+    };
 
     (
         focus_result,
@@ -200,13 +208,15 @@ pub(super) fn focus_window_for_text_input(window: &Window) {
                 // The scheduled-task overlay has no stdout/stderr capture, so
                 // durable diagnostics are useful when this fragile Windows path
                 // fails. Success remains silent to avoid per-click log noise.
-                if !sfw || (attach_required && !attached) || timeout_attempt.has_failure() {
+                let timeout_may_be_left_altered = timeout_attempt.setting_may_be_left_altered();
+                if !sfw || (attach_required && !attached) || timeout_may_be_left_altered {
                     let fg_after = GetForegroundWindow();
                     crate::diag::diag_write(&format!(
-                        "FOCUS-WARN(hud-ktwsz): foreground acquisition incomplete for overlay \
+                        "FOCUS-WARN(hud-ktwsz): foreground focus repair incomplete for overlay \
                          hwnd={:?} fg_before={:?} attached={} attach_required={} \
                          prev_lock_timeout={:?} lock_cleared={} lock_restored={:?} \
-                         set_foreground_window={} fg_after={:?} fg_after_is_ours={}",
+                         timeout_may_be_left_altered={} set_foreground_window={} \
+                         fg_after={:?} fg_after_is_ours={}",
                         hwnd.0,
                         fg.0,
                         attached,
@@ -214,6 +224,7 @@ pub(super) fn focus_window_for_text_input(window: &Window) {
                         timeout_attempt.previous_timeout,
                         timeout_attempt.lock_cleared,
                         timeout_attempt.lock_restored,
+                        timeout_may_be_left_altered,
                         sfw,
                         fg_after.0,
                         fg_after.0 == hwnd.0,
@@ -2112,8 +2123,46 @@ mod tests {
             }
         );
         assert!(
-            !attempt.has_failure(),
+            !attempt.setting_may_be_left_altered(),
             "a complete SPI bracket must remain silent in the failure-only diagnostic path"
+        );
+    }
+
+    #[test]
+    fn foreground_lock_timeout_zero_is_not_rewritten() {
+        let calls = RefCell::new(Vec::new());
+        let (focused, attempt) = with_temporary_foreground_lock_timeout(
+            || {
+                calls.borrow_mut().push("read".to_string());
+                Some(0)
+            },
+            |timeout| {
+                calls.borrow_mut().push(format!("set:{timeout}"));
+                true
+            },
+            || {
+                calls.borrow_mut().push("focus".to_string());
+                true
+            },
+        );
+
+        assert!(focused, "the existing focus sequence must still run");
+        assert_eq!(
+            calls.into_inner(),
+            vec!["read".to_string(), "focus".to_string()],
+            "an already-clear lock must not incur redundant global SPI writes"
+        );
+        assert_eq!(
+            attempt,
+            ForegroundLockTimeoutAttempt {
+                previous_timeout: Some(0),
+                lock_cleared: true,
+                lock_restored: Some(true),
+            }
+        );
+        assert!(
+            !attempt.setting_may_be_left_altered(),
+            "an already-clear lock must not enter the failure-only diagnostic path"
         );
     }
 
@@ -2145,8 +2194,8 @@ mod tests {
             "without the previous timeout, the helper must not make an un-restorable change"
         );
         assert!(
-            attempt.has_failure(),
-            "the Windows path must leave a failure-only diagnostic when the SPI bracket is incomplete"
+            !attempt.setting_may_be_left_altered(),
+            "a failed read cannot leave the setting altered and must not produce a false foreground-acquisition warning"
         );
         assert_eq!(
             attempt,
@@ -2204,8 +2253,56 @@ mod tests {
             }
         );
         assert!(
-            attempt.has_failure(),
-            "the failed clear still requires a failure-only diagnostic"
+            !attempt.setting_may_be_left_altered(),
+            "a failed clear followed by a successful restore cannot leave the setting altered"
+        );
+    }
+
+    #[test]
+    fn foreground_lock_timeout_restore_failure_is_reported() {
+        let saved_timeout = 2_147_483_647;
+        let calls = RefCell::new(Vec::new());
+        let set_results = RefCell::new(VecDeque::from([true, false]));
+        let (focused, attempt) = with_temporary_foreground_lock_timeout(
+            || {
+                calls.borrow_mut().push("read".to_string());
+                Some(saved_timeout)
+            },
+            |timeout| {
+                calls.borrow_mut().push(format!("set:{timeout}"));
+                set_results
+                    .borrow_mut()
+                    .pop_front()
+                    .expect("clear and restore calls must be paired")
+            },
+            || {
+                calls.borrow_mut().push("focus".to_string());
+                true
+            },
+        );
+
+        assert!(focused, "the existing focus sequence must still run");
+        assert_eq!(
+            calls.into_inner(),
+            vec![
+                "read".to_string(),
+                "set:0".to_string(),
+                "focus".to_string(),
+                format!("set:{saved_timeout}"),
+            ],
+            "a successful clear must still be followed by restoration after focus"
+        );
+        assert_eq!(
+            attempt,
+            ForegroundLockTimeoutAttempt {
+                previous_timeout: Some(saved_timeout),
+                lock_cleared: true,
+                lock_restored: Some(false),
+            }
+        );
+        assert!(
+            attempt.setting_may_be_left_altered(),
+            "only a successful clear followed by a failed restore warrants a foreground-repair warning"
         );
     }
 
