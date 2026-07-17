@@ -349,6 +349,7 @@ const fn projection_recovery_operation(
 
 fn bounded_projection_operation(operation: &str) -> &'static str {
     match operation {
+        "portal_projection_list" => "portal_projection_list",
         "portal_projection_attach" => "portal_projection_attach",
         "portal_projection_publish" => "portal_projection_publish",
         "portal_projection_publish_status" => "portal_projection_publish_status",

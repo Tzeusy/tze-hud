@@ -740,6 +740,107 @@ fn stable_error_code_set_is_append_only_wire_shape() {
 }
 
 #[test]
+fn list_projections_is_caller_scoped_bounded_and_content_free() {
+    let mut authority = ProjectionAuthority::new(ProjectionBounds {
+        max_list_items: 2,
+        ..ProjectionBounds::default()
+    })
+    .expect("bounded authority must be valid");
+
+    let mut alpha = attach_request("alpha", "attach-alpha");
+    alpha.display_name = "Alpha session".to_string();
+    let alpha_token = authority
+        .handle_attach(alpha, "resident-a", 10)
+        .owner_token
+        .expect("alpha attach must issue owner token");
+
+    let mut beta = attach_request("beta", "attach-beta");
+    beta.display_name = "Beta session".to_string();
+    assert!(authority.handle_attach(beta, "resident-a", 11).accepted);
+
+    let mut gamma = attach_request("gamma", "attach-gamma");
+    gamma.display_name = "Gamma session".to_string();
+    assert!(authority.handle_attach(gamma, "resident-a", 12).accepted);
+
+    let mut foreign = attach_request("foreign", "attach-foreign");
+    foreign.display_name = "Foreign session".to_string();
+    assert!(authority.handle_attach(foreign, "resident-b", 13).accepted);
+
+    let mut output = output_request("alpha", &alpha_token, "publish-alpha");
+    output.output_text = "private transcript must never leak".to_string();
+    assert!(
+        authority
+            .handle_publish_output(output, "resident-a", 14)
+            .accepted
+    );
+    authority
+        .enqueue_input(
+            "alpha",
+            "input-alpha",
+            "private input must never leak".to_string(),
+            15,
+            1_000,
+            None,
+        )
+        .expect("pending input must be accepted");
+
+    let response = authority.handle_list_projections(
+        ListProjectionsRequest {
+            request_id: "list-resident-a".to_string(),
+            client_timestamp_wall_us: 16,
+        },
+        "resident-a",
+        16,
+    );
+
+    assert!(response.accepted);
+    assert_eq!(response.projections.len(), 2, "hard list cap must apply");
+    assert_eq!(
+        response
+            .projections
+            .iter()
+            .map(|projection| projection.projection_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "beta"],
+        "entries must be deterministic and exclude both capped and foreign sessions"
+    );
+
+    let alpha = &response.projections[0];
+    assert_eq!(alpha.display_name, "Alpha session");
+    assert_eq!(alpha.lifecycle_state, ProjectionLifecycleState::Active);
+    assert_eq!(alpha.unread_output_count, 1);
+    assert_eq!(alpha.pending_input_count, 1);
+
+    let payload = serde_json::to_string(&response).expect("list response must serialize");
+    for forbidden in [
+        "private transcript must never leak",
+        "private input must never leak",
+        "output_text",
+        "submission_text",
+        "owner_token",
+        "resident-b",
+    ] {
+        assert!(
+            !payload.contains(forbidden),
+            "list payload must not expose {forbidden:?}: {payload}"
+        );
+    }
+}
+
+#[test]
+fn list_bound_must_be_non_zero() {
+    let error = ProjectionAuthority::new(ProjectionBounds {
+        max_list_items: 0,
+        ..ProjectionBounds::default()
+    })
+    .expect_err("a zero list cap would make the low-token contract unusable");
+    assert!(
+        matches!(error, ProjectionContractError::InvalidArgument(ref message) if message.contains("non-zero")),
+        "list cap validation must fail closed"
+    );
+}
+
+#[test]
 fn attach_materializes_content_layer_projected_portal_and_reuses_idempotently() {
     let mut authority = ProjectionAuthority::default();
     let first = authority.handle_attach(attach_request("projection-a", "req-a"), "caller-a", 10);
@@ -1632,6 +1733,7 @@ fn default_bounds_match_projection_spec_values() {
         bounds.max_poll_response_bytes,
         DEFAULT_MAX_POLL_RESPONSE_BYTES
     );
+    assert_eq!(bounds.max_list_items, DEFAULT_MAX_LIST_ITEMS);
     assert_eq!(
         bounds.max_portal_updates_per_second,
         DEFAULT_MAX_PORTAL_UPDATES_PER_SECOND

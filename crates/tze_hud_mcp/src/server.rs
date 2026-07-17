@@ -266,6 +266,7 @@ fn classify_tool(method: &str) -> ToolClass {
         | "inject_composer_paste"
         // Portal projection tools (hud-bq0gl.2): resident-only to limit access
         // to trusted callers that already hold the resident_mcp capability.
+        | "portal_projection_list"
         | "portal_projection_attach"
         | "portal_projection_publish"
         | "portal_projection_publish_status"
@@ -779,6 +780,11 @@ impl McpServer {
             }
             // Portal projection tools (hud-bq0gl.2): wire authority/published-content
             // through the coalescer + InProcessPortalDriver drain path onto the live scene.
+            "portal_projection_list" => {
+                let r = tools::handle_portal_projection_list(params, self.portal_op_tx.as_ref())
+                    .await?;
+                serde_json::to_value(r).map_err(|e| crate::McpError::Internal(e.to_string()))
+            }
             "portal_projection_attach" => {
                 let r = tools::handle_portal_projection_attach(params, self.portal_op_tx.as_ref())
                     .await?;
@@ -1371,6 +1377,51 @@ mod tests {
         let resp = parse_response(&raw);
         assert!(resp["error"].is_null(), "{resp:#}");
         assert_eq!(resp["result"]["accepted"], true);
+    }
+
+    #[tokio::test]
+    async fn test_resident_portal_projection_list_dispatches_content_free_summaries() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        let server = test_server(SceneGraph::new(1920.0, 1080.0)).with_portal_op_tx(tx);
+        let responder = tokio::spawn(async move {
+            match rx.recv().await.expect("list op must be forwarded") {
+                crate::portal_op::PortalOp::List { reply } => reply
+                    .send(Ok(crate::portal_op::ProjectionListBatch {
+                        projections: vec![crate::portal_op::ProjectionListEntry {
+                            projection_id: "p1".to_string(),
+                            display_name: "Projection".to_string(),
+                            lifecycle_state: "active".to_string(),
+                            unread_output_count: 2,
+                            pending_input_count: 1,
+                        }],
+                    }))
+                    .expect("list reply must send"),
+                other => panic!("unexpected portal op: {other:?}"),
+            }
+        });
+
+        let raw = server
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"portal_projection_list","params":{},"id":16}"#,
+                &resident(),
+            )
+            .await;
+        responder.await.expect("responder must complete");
+        let resp = parse_response(&raw);
+        assert!(resp["error"].is_null(), "{resp:#}");
+        assert_eq!(
+            resp["result"],
+            serde_json::json!({
+                "projections": [{
+                    "projection_id": "p1",
+                    "display_name": "Projection",
+                    "lifecycle_state": "active",
+                    "unread_output_count": 2,
+                    "pending_input_count": 1,
+                }]
+            }),
+            "MCP list must not add content or credential fields"
+        );
     }
 
     #[tokio::test]
@@ -2582,6 +2633,7 @@ mod tests {
 
         // AC(1): every portal_projection_* tool is present with a valid schema.
         for name in [
+            "portal_projection_list",
             "portal_projection_attach",
             "portal_projection_publish",
             "portal_projection_publish_status",

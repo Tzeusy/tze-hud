@@ -86,6 +86,14 @@ impl PortalOpRejection {
 /// rejects invalid or expired tokens before storing any content.
 #[derive(Debug)]
 pub enum PortalOp {
+    /// List bounded summaries for projections owned by the resident caller.
+    ///
+    /// This is read-only recovery/reconciliation: it never changes a
+    /// projection's owner, lease, or lifecycle state.
+    List {
+        /// One-shot response channel carrying only content-free summaries.
+        reply: tokio::sync::oneshot::Sender<Result<ProjectionListBatch, PortalOpRejection>>,
+    },
     /// Attach a new projection session to the in-process authority.
     Attach {
         /// Caller-assigned identifier (max 128 bytes, must be unique).
@@ -271,6 +279,28 @@ pub enum PortalOp {
         /// validation / auth failure.
         reply: tokio::sync::oneshot::Sender<Result<(), PortalOpRejection>>,
     },
+}
+
+/// Content-free metadata for one projection returned by [`PortalOp::List`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProjectionListEntry {
+    /// Stable projection identifier.
+    pub projection_id: String,
+    /// Human-readable projection name.
+    pub display_name: String,
+    /// Lifecycle state in snake_case wire form.
+    pub lifecycle_state: String,
+    /// Unread output unit count.
+    pub unread_output_count: usize,
+    /// Nonterminal pending input count.
+    pub pending_input_count: usize,
+}
+
+/// Bounded caller-scoped result of [`PortalOp::List`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProjectionListBatch {
+    /// Content-free summaries belonging to the calling resident principal.
+    pub projections: Vec<ProjectionListEntry>,
 }
 
 /// A single HUD-originated input item returned by [`PortalOp::GetPendingInput`].
