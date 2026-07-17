@@ -271,6 +271,10 @@ pub struct SharedState {
     /// runtime installs this so gRPC InputCaptureRequest/InputCaptureRelease
     /// mutates the same InputProcessor used for OS pointer routing.
     pub input_capture_tx: Option<mpsc::UnboundedSender<InputCaptureCommand>>,
+    /// Main-loop-only wake paired with `input_capture_tx`. Successful command
+    /// enqueue uses this to wake the sole windowed consumer without creating a
+    /// speculative compositor generation.
+    pub input_capture_wake: tze_hud_scene::render_wake::RenderWakeNotifier,
     /// Runtime-resolved portal design tokens delivered on the session handshake
     /// (RFC 0005 `SessionEstablished.portal_part_tokens`, hud-16um0).
     ///

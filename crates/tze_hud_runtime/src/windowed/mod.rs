@@ -84,7 +84,7 @@ use std::time::Instant;
 
 use tokio::sync::Mutex;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel};
 
@@ -110,7 +110,7 @@ use crate::channels::{
     frame_ready_channel,
 };
 use crate::element_store::bootstrap_scene_element_store;
-use crate::mcp::{McpServerConfig, start_mcp_http_server};
+use crate::mcp::{McpServerConfig, start_mcp_http_server_with_render_wake};
 use crate::pipeline::FramePipeline;
 use crate::runtime_context::SharedRuntimeContext;
 use crate::threads::{CompositorReady, NetworkRuntime, ShutdownToken, spawn_compositor_thread};
@@ -183,6 +183,7 @@ mod keyboard;
 mod lifecycle;
 mod network;
 mod portal;
+mod wake;
 mod widgets;
 
 #[cfg(test)]
@@ -194,7 +195,7 @@ mod event_loop_harness;
 pub use self::config::{
     DEFAULT_RESIDENT_GRPC_AGENT_ID, DEFAULT_RESIDENT_GRPC_LEASE_TTL_MS,
     ResidentGrpcCredentialSource, ResidentGrpcPortalSettings, WindowedBenchmarkConfig,
-    WindowedConfig,
+    WindowedConfig, WindowedQuiescentEfficiencyConfig,
 };
 use self::hittest::{refresh_interaction_hit_regions_after_render, sync_scene_display_area};
 use self::input_dispatch::{
@@ -204,13 +205,19 @@ use self::input_dispatch::{
 use self::keyboard::{ComposerDeliveryContext, PendingKeyboardEvent};
 use self::lifecycle::{
     BENCHMARK_NO_PROGRESS_TIMEOUT, PendingInputLatencySamples, WindowedBenchmarkRunState,
-    begin_os_mouse_capture, detect_monitor_size, drain_pending_input_latency, end_os_mouse_capture,
-    focus_window_for_text_input, read_windows_clipboard_text, seed_windowed_benchmark_scene,
-    windowed_frame_needs_render,
+    WindowedQuiescentEfficiencyRunState, begin_os_mouse_capture, detect_monitor_size,
+    drain_pending_input_latency, end_os_mouse_capture, focus_window_for_text_input,
+    read_windows_clipboard_text, seed_windowed_benchmark_scene, windowed_frame_needs_render,
 };
 pub use self::network::render_attach_info;
-use self::network::{build_runtime_context, render_startup_banner, start_network_services};
-use self::portal::build_portal_projection_driver;
+use self::network::{
+    build_runtime_context, render_startup_banner, start_network_services_with_render_wake,
+};
+use self::portal::{PortalProjectionDrain, build_portal_projection_driver};
+use self::wake::{
+    Deadline, RuntimeWakeEvent, WindowedWake, control_flow_for_deadlines, deadline_from_wall_us,
+};
+use crate::portal_projection_driver::PortalWakeDeadline;
 
 fn publish_degradation_transition(
     controller: &crate::degradation::DegradationController,
@@ -242,6 +249,23 @@ fn publish_degradation_transition(
     }
 }
 
+/// Forward terminal scene-lease results after releasing the scene lock.
+///
+/// `SceneGraph::expire_leases()` performs the authoritative transition and
+/// cleanup. This bridge only hands its immutable results to session handlers,
+/// which own the transactional wire responses for connected agents.
+fn publish_lease_expiries(
+    lease_expirations: Option<&tze_hud_protocol::session_server::LeaseExpirySender>,
+    expiries: Vec<tze_hud_scene::types::LeaseExpiry>,
+) {
+    let Some(lease_expirations) = lease_expirations else {
+        return;
+    };
+    for expiry in expiries {
+        let _ = lease_expirations.publish(expiry.into());
+    }
+}
+
 // ─── WindowedRuntime ─────────────────────────────────────────────────────────
 
 /// Shared state passed from the windowed runtime builder to the winit app.
@@ -251,6 +275,8 @@ fn publish_degradation_transition(
 #[allow(dead_code)] // several fields are read by the compositor/shutdown path; not all are used yet
 struct WindowedRuntimeState {
     config: WindowedConfig,
+    wake: WindowedWake,
+    scheduled_main_deadline: Option<Deadline>,
     /// Compositor thread handle (stored so it can be joined on shutdown).
     compositor_handle: Option<std::thread::JoinHandle<()>>,
     /// Network runtime for gRPC / MCP.
@@ -315,13 +341,20 @@ struct WindowedRuntimeState {
     /// the compositor thread is spawned and takes it).
     frame_ready_tx: Option<FrameReadyTx>,
     /// Present-ack broadcast sender (hud-4va6q). Cloned from the gRPC session
-    /// service during network start; the compositor thread takes it when spawned
-    /// and emits `FramePresented` after each presented frame. `None` in
+    /// service during network start; each compositor generation receives its own
+    /// clone and emits `FramePresented` after each presented frame. `None` in
     /// compositor-only mode (grpc_port == 0), where there is no session to
     /// subscribe — the compositor still drains the present-ack queue.
     frame_presented_tx:
         Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::FramePresented>>,
+    /// Runtime-owned degradation-notice lane. Each compositor generation gets
+    /// a clone so a runtime mode switch does not sever connected sessions from
+    /// later degradation transitions.
     degradation_notices: Option<tze_hud_protocol::session_server::DegradationNoticeSender>,
+    /// Durable runtime-to-session lane for terminal `SceneGraph::expire_leases`
+    /// results. Each compositor generation receives a clone while the runtime
+    /// retains ownership across window/surface recreation.
+    lease_expirations: Option<tze_hud_protocol::session_server::LeaseExpirySender>,
     /// Compositor and surface (Some until compositor thread is spawned and takes the compositor).
     compositor: Option<Compositor>,
     /// The window surface (main thread owns this for the lifetime of the window).
@@ -357,6 +390,9 @@ struct WindowedRuntimeState {
     shutdown: ShutdownToken,
     /// Set when benchmark output failed after the event loop was already running.
     benchmark_failed: Arc<std::sync::atomic::AtomicBool>,
+    /// Optional event-driven quiescent-efficiency measurement, initialized only
+    /// after a real compositor and window surface exist.
+    quiescent_efficiency: Option<WindowedQuiescentEfficiencyRunState>,
     /// Current cursor position (updated by CursorMoved events).
     cursor_x: f32,
     cursor_y: f32,
@@ -590,6 +626,28 @@ struct WindowedRuntimeState {
     interaction_feedback_lock_misses: std::sync::atomic::AtomicU64,
 }
 
+impl WindowedRuntimeState {
+    /// Clone runtime-owned session notifiers for one compositor generation.
+    ///
+    /// These senders outlive a compositor: a runtime mode switch joins the old
+    /// thread and starts a replacement against the same network session. Taking
+    /// them here would make the replacement silently lose frame, degradation,
+    /// and terminal-lease delivery.
+    fn compositor_runtime_senders(
+        &self,
+    ) -> (
+        Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::FramePresented>>,
+        Option<tze_hud_protocol::session_server::DegradationNoticeSender>,
+        Option<tze_hud_protocol::session_server::LeaseExpirySender>,
+    ) {
+        (
+            self.frame_presented_tx.clone(),
+            self.degradation_notices.clone(),
+            self.lease_expirations.clone(),
+        )
+    }
+}
+
 // ─── WinitApp ────────────────────────────────────────────────────────────────
 
 /// `ApplicationHandler` implementation for winit 0.30 event loop.
@@ -601,7 +659,127 @@ struct WinitApp {
     state: WindowedRuntimeState,
 }
 
-impl ApplicationHandler for WinitApp {
+/// Block a dedicated availability waiter until both locks needed by main-loop
+/// scene work have become obtainable, then return immediately. This function is
+/// only called off the winit event thread by [`WindowedWake`]'s coalesced
+/// completion waiter; the event loop itself always uses `try_lock`.
+fn wait_for_shared_scene_availability(shared_state: Arc<Mutex<SharedState>>) {
+    let shared = shared_state.blocking_lock();
+    let scene = Arc::clone(&shared.scene);
+    drop(shared);
+    drop(scene.blocking_lock());
+}
+
+/// Translate a portal authority deadline into an event-loop wait.
+///
+/// A past deadline normally gets one immediate turn after a successful drain.
+/// When that drain could not acquire the scene, however, retrying the same
+/// past deadline would be correctness polling; the caller installs a
+/// completion-driven availability wake instead.
+fn portal_deadline_after_drain(
+    portal_deadline: PortalWakeDeadline,
+    now: Instant,
+    now_wall_us: u64,
+    portal_drain: PortalProjectionDrain,
+) -> Option<Deadline> {
+    let remaining_us = portal_deadline.wall_us.saturating_sub(now_wall_us);
+    if remaining_us == 0 {
+        (!portal_drain.is_deferred())
+            .then_some(Deadline::new(now, portal_deadline.family.wakeup_source()))
+    } else {
+        // Keep the wall-clock observation paired with `now`. Calling
+        // `deadline_from_wall_us` here would take a second wall-clock sample;
+        // a deadline crossing between the two reads could become an accidental
+        // immediate retry while the portal drain is still deferred.
+        Some(Deadline::new(
+            now + std::time::Duration::from_micros(remaining_us),
+            portal_deadline.family.wakeup_source(),
+        ))
+    }
+}
+
+impl WinitApp {
+    /// Arrange one completion-driven retry for main-thread work that could not
+    /// inspect or mutate the shared scene because either async mutex was held.
+    ///
+    /// This deliberately runs the blocking waits on the dedicated availability
+    /// worker, never on winit's event thread.  Coalescing lives in
+    /// [`WindowedWake`], so multiple busy observations while the same holder is
+    /// active still create only one release-driven retry.
+    fn schedule_shared_scene_availability_wake(&self) {
+        let shared_state = Arc::clone(&self.state.shared_state);
+        self.state.wake.schedule_main_after_availability(move || {
+            wait_for_shared_scene_availability(shared_state);
+        });
+    }
+
+    /// Claim a scheduled deadline that became due before or during this event
+    /// loop turn. `WaitCancelled` may arrive just before the deadline and the
+    /// settle work may cross it, so `ResumeTimeReached` cannot be the only claim
+    /// point.
+    fn claim_due_scheduled_main_deadline(
+        &mut self,
+        now: Instant,
+    ) -> Option<wake::MainWorkCheckpoint> {
+        let deadline = self
+            .state
+            .scheduled_main_deadline
+            .filter(|deadline| deadline.at <= now)?;
+        self.state.scheduled_main_deadline = None;
+        // This deadline piggybacks on the already-counted proxy/OS event that
+        // cancelled the wait. Only `ResumeTimeReached` records a timer-caused
+        // main-loop wakeup.
+        Some(self.state.wake.mark_main_work_pending(deadline.source))
+    }
+}
+
+impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
+        match cause {
+            StartCause::ResumeTimeReached { .. } => {
+                if self
+                    .state
+                    .scheduled_main_deadline
+                    .is_some_and(|deadline| deadline.at <= Instant::now())
+                {
+                    let deadline = self
+                        .state
+                        .scheduled_main_deadline
+                        .take()
+                        .expect("a due main deadline was checked above");
+                    self.state
+                        .wake
+                        .counters()
+                        .record_main_wakeup(deadline.source);
+                    // Main-owned deadlines (portal liveness/cadence, hover, and
+                    // chrome expiry) mutate the scene later in `about_to_wait`.
+                    // Mark a post-mutation compositor notification as owed; a
+                    // pre-mutation wake can otherwise be consumed against the
+                    // old scene and strand the newly-created work.
+                    self.state.wake.mark_main_work_pending(deadline.source);
+                }
+            }
+            StartCause::WaitCancelled { .. } => {
+                // EventLoopProxy delivery also cancels a parked wait, but that
+                // wake is runtime-requested and is counted by `user_event`.
+                // Only an unattributed cancellation belongs in the separate
+                // operating-system bucket.
+                if !self.state.wake.has_pending_proxy_event() {
+                    self.state
+                        .wake
+                        .counters()
+                        .record_excluded_operating_system_wakeup();
+                }
+            }
+            StartCause::Init | StartCause::Poll => {}
+        }
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: RuntimeWakeEvent) {
+        let source = self.state.wake.take_main_source();
+        self.state.wake.counters().record_main_wakeup(source);
+    }
+
     /// Called by winit when the event loop has processed all pending events for
     /// the current iteration.  We use this to apply any pending mode switch:
     /// tearing down the current window/compositor and re-initialising with the
@@ -612,6 +790,14 @@ impl ApplicationHandler for WinitApp {
     /// Pending mode switches must therefore be handled here in `about_to_wait`
     /// rather than in `resumed()`.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // A proxy/OS event can cancel WaitUntil immediately before its instant,
+        // then settle work can cross the deadline. Claim it before the work
+        // checkpoint so its typed post-settle compositor wake cannot be lost.
+        let _ = self.claim_due_scheduled_main_deadline(Instant::now());
+        // Acknowledge only producer work that was visible before this drain.
+        // Notifications racing after this checkpoint retain a later generation
+        // for the next event-loop turn and cannot be erased at settle time.
+        let main_work_checkpoint = self.state.wake.main_work_checkpoint();
         if self.state.shutdown.is_triggered() {
             event_loop.exit();
             return;
@@ -624,7 +810,7 @@ impl ApplicationHandler for WinitApp {
         }
         self.refresh_cursor_position_from_os();
         self.drain_input_capture_commands();
-        self.drain_paste_inject();
+        let paste_scene_changed = self.drain_paste_inject();
         self.synthesize_left_release_if_physically_up();
         self.refresh_widget_hover_tracking();
         self.update_overlay_cursor_hittest();
@@ -671,7 +857,9 @@ impl ApplicationHandler for WinitApp {
         // Must run AFTER composer flush so draft state is settled before portal
         // content is refreshed.  Uses try_lock on the scene to avoid blocking
         // the main thread (deferred to next about_to_wait if busy).
-        self.drain_portal_projection();
+        let portal_drain = self.drain_portal_projection();
+        let portal_scene_changed = portal_drain.scene_changed();
+        let settled_scene_changed = paste_scene_changed || portal_scene_changed;
         // Prune stale portal_resize_states entries for tiles removed from the
         // scene (hud-kgu8u). Uses try_lock; silently deferred if lock is busy.
         self.prune_portal_resize_states();
@@ -679,9 +867,8 @@ impl ApplicationHandler for WinitApp {
         // ── Per-frame ticks + present poll (hud-ilivg) ────────────────────
         // Moved here from the `RedrawRequested` handler so the main loop no
         // longer self-perpetuates a `request_redraw` every frame purely to drive
-        // these.  `about_to_wait` already fires every event-loop iteration under
-        // `ControlFlow::Poll` (it hosts the per-iteration portal/input draining
-        // above), so these continue at the same cadence.  `maybe_present_frame`
+        // these. `about_to_wait` fires after each explicit event or scheduled
+        // deadline (and hosts portal/input draining above). `maybe_present_frame`
         // is a cheap watch-channel poll that presents only when the compositor
         // signalled a new frame — with the compositor render gate that now
         // happens only when the scene changed or an animation is in flight.
@@ -690,6 +877,134 @@ impl ApplicationHandler for WinitApp {
         // Auto-dismiss the drag-handle context menu after 3 seconds.
         self.tick_context_menu_auto_dismiss();
         self.maybe_present_frame();
+
+        let now = Instant::now();
+        let counters = Arc::clone(self.state.wake.counters());
+        let quiescent_completion = self
+            .state
+            .quiescent_efficiency
+            .as_mut()
+            .and_then(|measurement| measurement.advance(now, counters.as_ref()));
+        if let Some(completion) = quiescent_completion {
+            let measurement = self
+                .state
+                .quiescent_efficiency
+                .as_ref()
+                .expect("measurement must remain available until its artifact is written");
+            let artifact_path = measurement.emit_path().to_path_buf();
+            let write_result = measurement.write(&completion);
+            if let Err(error) = write_result {
+                tracing::error!(
+                    %error,
+                    path = %artifact_path.display(),
+                    "failed to write quiescent-efficiency runtime artifact"
+                );
+                self.state
+                    .benchmark_failed
+                    .store(true, std::sync::atomic::Ordering::Release);
+            } else if completion.validation.passed {
+                tracing::info!(
+                    path = %artifact_path.display(),
+                    wakeups = completion.artifact.wakeups.combined_runtime_driven,
+                    "quiescent-efficiency runtime artifact written"
+                );
+            } else {
+                tracing::error!(
+                    path = %artifact_path.display(),
+                    violations = ?completion.validation.violations,
+                    "quiescent-efficiency runtime artifact failed validation"
+                );
+                self.state
+                    .benchmark_failed
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+            self.state
+                .shutdown
+                .trigger(crate::threads::ShutdownReason::Clean);
+            event_loop.exit();
+            return;
+        }
+
+        let deadline_crossed_during_settle = self.claim_due_scheduled_main_deadline(now);
+        let mut deadlines = Vec::new();
+        if let Some(at) =
+            crate::widget_hover::next_hover_deadline(&self.state.widget_hover_trackers)
+        {
+            deadlines.push(Deadline::new(
+                at,
+                crate::idle_efficiency::RuntimeWakeupSource::AnimationDeadline,
+            ));
+        }
+        let mut inspected_scene_deadlines = false;
+        if let Ok(state) = self.state.shared_state.try_lock()
+            && let Ok(scene) = state.scene.try_lock()
+        {
+            inspected_scene_deadlines = true;
+            if let Some(portal_deadline) = self
+                .state
+                .portal_projection_driver
+                .next_wake_deadline(&scene)
+            {
+                let now_wall_us = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_micros() as u64)
+                    .unwrap_or(0);
+                if let Some(deadline) =
+                    portal_deadline_after_drain(portal_deadline, now, now_wall_us, portal_drain)
+                {
+                    deadlines.push(deadline);
+                }
+            }
+            if let Some(menu) = &scene.overlay.drag_handle_context_menu {
+                const AUTO_DISMISS_NS: u64 = 3_000_000_000;
+                let remaining_ns = menu
+                    .shown_at_ns
+                    .saturating_add(AUTO_DISMISS_NS)
+                    .saturating_sub(nanoseconds_since_start());
+                deadlines.push(Deadline::new(
+                    now + std::time::Duration::from_nanos(remaining_ns),
+                    crate::idle_efficiency::RuntimeWakeupSource::TtlDeadline,
+                ));
+            }
+        }
+        let has_deferred_scene_work = portal_drain.is_deferred()
+            || !self.state.pending_input_capture_commands.is_empty()
+            || !self.state.pending_keyboard_events.is_empty();
+        if !inspected_scene_deadlines || has_deferred_scene_work {
+            // Lock contention is not a deadline. Install one coalesced waiter
+            // that wakes the main loop only after the shared scene is actually
+            // available, rather than correctness-polling every millisecond.
+            self.schedule_shared_scene_availability_wake();
+        }
+        let next = deadlines.iter().copied().min_by_key(|deadline| deadline.at);
+        self.state.scheduled_main_deadline = next;
+        let quiescent_deadline = self
+            .state
+            .quiescent_efficiency
+            .as_ref()
+            .and_then(WindowedQuiescentEfficiencyRunState::next_deadline);
+        let control_flow = match (
+            control_flow_for_deadlines(now, deadlines),
+            quiescent_deadline,
+        ) {
+            (ControlFlow::Wait, Some(deadline)) => ControlFlow::WaitUntil(deadline),
+            (ControlFlow::WaitUntil(main_deadline), Some(deadline)) => {
+                ControlFlow::WaitUntil(main_deadline.min(deadline))
+            }
+            (ControlFlow::Poll, Some(_)) => ControlFlow::Poll,
+            (control_flow, None) => control_flow,
+        };
+        event_loop.set_control_flow(control_flow);
+        if let Some(deadline_checkpoint) = deadline_crossed_during_settle {
+            self.state.wake.finish_main_work(main_work_checkpoint);
+            self.state
+                .wake
+                .finish_main_work_after_settle(deadline_checkpoint, settled_scene_changed);
+        } else {
+            self.state
+                .wake
+                .finish_main_work_after_settle(main_work_checkpoint, settled_scene_changed);
+        }
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -911,8 +1226,17 @@ impl ApplicationHandler for WinitApp {
             .expect("failed to build startup tokio runtime");
 
         let is_overlay = self.state.effective_mode == WindowMode::Overlay;
+        let constrained_measurement = cfg.quiescent_efficiency.is_some();
         let (mut compositor, window_surface) = rt.block_on(async {
-            let mut c = if is_overlay {
+            let mut c = if constrained_measurement {
+                Compositor::new_windowed_constrained(
+                    window_clone,
+                    surface_width,
+                    surface_height,
+                    is_overlay,
+                )
+                .await
+            } else if is_overlay {
                 Compositor::new_windowed_overlay(window_clone, surface_width, surface_height).await
             } else {
                 Compositor::new_windowed(window_clone, surface_width, surface_height).await
@@ -998,6 +1322,22 @@ impl ApplicationHandler for WinitApp {
         // soft-wrap vertical caret movement (hud-21o6x).
         self.state.composer_visual_layout = Arc::clone(&compositor.composer_visual_layout);
 
+        if let Some(config) = cfg.quiescent_efficiency.clone() {
+            self.state.quiescent_efficiency = Some(WindowedQuiescentEfficiencyRunState::new(
+                config,
+                self.state.effective_mode,
+                surface_width,
+                surface_height,
+                compositor.adapter_info().clone(),
+                Instant::now(),
+            ));
+            tracing::info!(
+                settling_ms = tze_hud_telemetry::QUIESCENT_SETTLING_MIN_MS,
+                interval_ms = tze_hud_telemetry::QUIESCENT_INTERVAL_MIN_MS,
+                "quiescent efficiency measurement armed; waiting for first actual present"
+            );
+        }
+
         // ── Wire compositor thread ─────────────────────────────────────────
         // Pre-clone the scene Arc so the compositor thread can lock the scene
         // directly without ever needing to acquire the SharedState lock.
@@ -1018,14 +1358,15 @@ impl ApplicationHandler for WinitApp {
             .frame_ready_tx
             .take()
             .expect("frame_ready_tx already taken");
-        // Present-ack sender (hud-4va6q): moved into the compositor closure so the
-        // production render loop can broadcast `FramePresented`, mirroring the
-        // headless producer. `None` in compositor-only mode (no gRPC session).
-        let frame_presented_tx = self.state.frame_presented_tx.take();
-        let degradation_notices = self.state.degradation_notices.take();
+        // These runtime-owned senders are cloned into each compositor generation.
+        // A mode switch joins this thread and calls `resumed()` again against the
+        // same connected gRPC session, so taking them would drop later delivery.
+        let (frame_presented_tx, degradation_notices, lease_expirations) =
+            self.state.compositor_runtime_senders();
         let degradation_shared_state = Arc::clone(&self.state.shared_state);
         let shutdown = self.state.shutdown.clone();
         let benchmark_failed = self.state.benchmark_failed.clone();
+        let compositor_wake = self.state.wake.clone();
         let telemetry_collector = TelemetryCollector::new();
         let surface_for_compositor = window_surface.clone();
         let mut benchmark_state = cfg.benchmark.clone().map(|benchmark| {
@@ -1078,12 +1419,6 @@ impl ApplicationHandler for WinitApp {
                 // telemetry.  Plain u64 — accessed only on this thread; no atomics
                 // needed on the success path.
                 let mut scene_lock_miss_count: u64 = 0;
-                // hud-pi5wx present-stall watchdog: surfaces sustained Stage-4
-                // scene try_lock starvation (a handler holding the scene lock) vs a
-                // healthy present path. Reset on every successful commit+present below.
-                let mut consecutive_misses: u64 = 0;
-                let mut last_present_at = std::time::Instant::now();
-                let mut watchdog_logged = false;
                 // hud-ilivg idle render gate: scene.version of the last frame we
                 // actually built+presented. The loop skips the build/encode/present
                 // pass when scene.version is unchanged AND no animation is in
@@ -1111,6 +1446,13 @@ impl ApplicationHandler for WinitApp {
                 );
 
                 loop {
+                    // Checkpoint before inspecting any source of render work.
+                    // A producer notification that races with this iteration
+                    // advances the generation and prevents the final wait from
+                    // parking on stale observations.
+                    let wake_checkpoint = compositor_wake.compositor().checkpoint();
+                    let mut continue_at_cadence = benchmark_state.is_some();
+                    let mut timed_deadline: Option<Deadline> = None;
                     // Check for shutdown.
                     match shutdown_rx.try_recv() {
                         Ok(_) => {
@@ -1145,6 +1487,9 @@ impl ApplicationHandler for WinitApp {
                                         "windowed benchmark artifact written; shutting down"
                                     );
                                     shutdown_tok.trigger(crate::threads::ShutdownReason::Clean);
+                                    compositor_wake.notify_main(
+                                        crate::idle_efficiency::RuntimeWakeupSource::Shutdown,
+                                    );
                                     break;
                                 }
                                 Err(err) => {
@@ -1156,6 +1501,9 @@ impl ApplicationHandler for WinitApp {
                                     benchmark_failed
                                         .store(true, std::sync::atomic::Ordering::Release);
                                     shutdown_tok.trigger(crate::threads::ShutdownReason::Clean);
+                                    compositor_wake.notify_main(
+                                        crate::idle_efficiency::RuntimeWakeupSource::Shutdown,
+                                    );
                                     break;
                                 }
                             }
@@ -1224,6 +1572,7 @@ impl ApplicationHandler for WinitApp {
                         // publications MUST be cleared before the next frame.
                         scene.drain_expired_zone_publications();
                         scene.drain_expired_widget_publications();
+                        let terminal_lease_expiries = scene.expire_leases();
 
                         // Snapshot identity, priority, z-order, and selected
                         // policy atomically under this frame's scene lock.
@@ -1310,24 +1659,28 @@ impl ApplicationHandler for WinitApp {
                             composer_needs_render,
                             benchmark_state.is_some(),
                         );
-
-                        // A successful try_lock means we are NOT lock-starved,
-                        // whether or not we present this frame — reset the
-                        // hud-pi5wx stall watchdog here so an idle (skipped) frame
-                        // is never mistaken for present starvation.
-                        if watchdog_logged {
-                            crate::diag::diag_write(&format!(
-                                "PRESENT-WATCHDOG: RECOVERED after {consecutive_misses} consecutive misses"
-                            ));
-                        }
-                        consecutive_misses = 0;
-                        watchdog_logged = false;
+                        continue_at_cadence |= needs_render;
 
                         if !needs_render {
                             // Idle: scene unchanged and nothing animating. Release
                             // the lock without building vertices, encoding, or
                             // signalling the main thread to present.
+                            let scene_deadline_wall_us = scene
+                                .next_publication_expiry_wall_us()
+                                .into_iter()
+                                .chain(
+                                    scene
+                                        .next_lease_deadline_ms(
+                                            tze_hud_scene::graph::SceneGraph::DEFAULT_MAX_SUSPENSION_MS,
+                                        )
+                                        .map(|ms| ms.saturating_mul(1_000)),
+                                )
+                                .min();
                             drop(scene);
+                            publish_lease_expiries(
+                                lease_expirations.as_ref(),
+                                terminal_lease_expiries,
+                            );
                             let now_us = degradation_clock_start.elapsed().as_micros() as u64;
                             if let Some(event) = degradation_controller.record_quiescent_at(now_us)
                             {
@@ -1337,6 +1690,25 @@ impl ApplicationHandler for WinitApp {
                                     degradation_notices.as_ref(),
                                     &degradation_shared_state,
                                 );
+                            }
+                            if let Some(recover_at_us) =
+                                degradation_controller.next_quiescent_recovery_at_us()
+                            {
+                                timed_deadline = Some(Deadline::new(
+                                    degradation_clock_start
+                                        + std::time::Duration::from_micros(recover_at_us),
+                                    crate::idle_efficiency::RuntimeWakeupSource::AnimationDeadline,
+                                ));
+                            }
+                            if let Some(wall_us) = scene_deadline_wall_us {
+                                let deadline = deadline_from_wall_us(
+                                    wall_us,
+                                    crate::idle_efficiency::RuntimeWakeupSource::TtlDeadline,
+                                );
+                                timed_deadline = timed_deadline
+                                    .into_iter()
+                                    .chain(Some(deadline))
+                                    .min_by_key(|candidate| candidate.at);
                             }
                         } else {
                             // ── Stage 5: Build under the scene lock (hud-uyhpn) ─
@@ -1380,10 +1752,23 @@ impl ApplicationHandler for WinitApp {
                             // interaction path's `spin_acquire` (12ms budget) no
                             // longer times out and drops drag-move samples.
                             drop(scene);
+                            publish_lease_expiries(
+                                lease_expirations.as_ref(),
+                                terminal_lease_expiries,
+                            );
 
                             // ── Stage 6–7: Present lock-free ──────────────────
-                            let compositor_telemetry = compositor
-                                .present_windowed_frame(build, surface_for_compositor.as_ref());
+                            let present_outcome = compositor.present_windowed_frame_with_outcome(
+                                build,
+                                surface_for_compositor.as_ref(),
+                            );
+                            if present_outcome.surface_acquired {
+                                compositor_wake.counters().record_surface_acquisition();
+                            }
+                            if present_outcome.gpu_submitted {
+                                compositor_wake.counters().record_gpu_submission();
+                            }
+                            let compositor_telemetry = present_outcome.telemetry;
                             let frame_submitted = compositor_telemetry.stage7_gpu_submit_us > 0;
                             let degradation_work_time_us =
                                 degradation_work_start.elapsed().as_micros() as u64;
@@ -1395,7 +1780,9 @@ impl ApplicationHandler for WinitApp {
                             // surface.present()."
                             if frame_submitted {
                                 let _ = frame_ready_tx.send(true);
-                                last_present_at = std::time::Instant::now();
+                                compositor_wake.notify_main(
+                                    crate::idle_efficiency::RuntimeWakeupSource::FrameReady,
+                                );
                                 // Advance the idle gate only after a completed
                                 // submit. A failed acquire must retry instead of
                                 // stranding an unpresented scene as "rendered".
@@ -1495,20 +1882,13 @@ impl ApplicationHandler for WinitApp {
                         // (hud-3qpgv.2).  This branch has zero cost on the
                         // success path.
                         scene_lock_miss_count = scene_lock_miss_count.saturating_add(1);
-                        // hud-pi5wx: sustained Stage-4 misses => a handler is holding
-                        // the scene lock and never releasing it (HB-1 lock starvation).
-                        consecutive_misses = consecutive_misses.saturating_add(1);
-                        if consecutive_misses >= 120
-                            && (!watchdog_logged || consecutive_misses % 600 == 0)
-                        {
-                            let stalled_ms = last_present_at.elapsed().as_millis();
-                            crate::diag::diag_write(&format!(
-                                "PRESENT-WATCHDOG: scene try_lock missed {consecutive_misses} \
-                                 consecutive frames, {stalled_ms}ms since last present — \
-                                 HB-1 lock-starvation candidate (a gRPC/MCP handler holds the scene lock)"
-                            ));
-                            watchdog_logged = true;
-                        }
+                        // Do not turn a temporary lock miss into a fixed frame
+                        // cadence. One coalesced waiter wakes the compositor
+                        // exactly when the held scene becomes available again.
+                        let availability_scene = Arc::clone(&compositor_scene);
+                        compositor_wake.schedule_compositor_after_availability(move || {
+                            drop(availability_scene.blocking_lock());
+                        });
                     }
 
                     // Benchmark no-progress watchdog (hud-gcn01): if the benchmark
@@ -1540,17 +1920,27 @@ impl ApplicationHandler for WinitApp {
                         }
                         benchmark_failed.store(true, std::sync::atomic::Ordering::Release);
                         shutdown_tok.trigger(crate::threads::ShutdownReason::Clean);
+                        compositor_wake
+                            .notify_main(crate::idle_efficiency::RuntimeWakeupSource::Shutdown);
                         break;
                     }
 
-                    // Frame rate control. Granularity is bounded to ~1 ms by the
-                    // `_frame_timer_guard` (timeBeginPeriod(1)) held above, so
-                    // this sleep lands within the present budget on Windows
-                    // instead of overshooting on the default ~15.6 ms timer.
-                    let elapsed = frame_start.elapsed();
-                    if elapsed < frame_interval {
-                        std::thread::sleep(frame_interval - elapsed);
-                    }
+                    let cadence_deadline = continue_at_cadence.then(|| {
+                        Deadline::new(
+                            frame_start + frame_interval,
+                            crate::idle_efficiency::RuntimeWakeupSource::AnimationDeadline,
+                        )
+                    });
+                    let next_deadline = cadence_deadline
+                        .into_iter()
+                        .chain(timed_deadline)
+                        .min_by_key(|candidate| candidate.at);
+                    let observed = compositor_wake
+                        .compositor()
+                        .wait(wake_checkpoint, next_deadline);
+                    compositor_wake
+                        .counters()
+                        .record_compositor_wakeup(observed.source);
                 }
 
                 tracing::info!("compositor thread: frame loop exited");
@@ -1593,6 +1983,7 @@ impl ApplicationHandler for WinitApp {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        let wake_source = main_work_source_for_window_event(&event);
         match event {
             // ── Close ──────────────────────────────────────────────────────
             WindowEvent::CloseRequested => {
@@ -1605,6 +1996,9 @@ impl ApplicationHandler for WinitApp {
 
             // ── Resize ─────────────────────────────────────────────────────
             WindowEvent::Resized(physical_size) => {
+                if let Some(source) = wake_source {
+                    self.state.wake.mark_main_work_pending(source);
+                }
                 if physical_size.width > 0 && physical_size.height > 0 {
                     self.state.config.window.width = physical_size.width;
                     self.state.config.window.height = physical_size.height;
@@ -1648,6 +2042,9 @@ impl ApplicationHandler for WinitApp {
             // Stage 1: Drain OS input event → InputEvent ring buffer.
             // Stage 2: Apply local feedback.
             WindowEvent::CursorMoved { position, .. } => {
+                if let Some(source) = wake_source {
+                    self.state.wake.mark_main_work_pending(source);
+                }
                 self.state.cursor_x = position.x as f32;
                 self.state.cursor_y = position.y as f32;
 
@@ -1659,6 +2056,9 @@ impl ApplicationHandler for WinitApp {
 
             // ── Pointer: button press/release ──────────────────────────────
             WindowEvent::MouseInput { state, button, .. } => {
+                if let Some(source) = wake_source {
+                    self.state.wake.mark_main_work_pending(source);
+                }
                 if button == MouseButton::Left {
                     let kind = match state {
                         ElementState::Pressed => PointerEventKind::Down,
@@ -1696,6 +2096,9 @@ impl ApplicationHandler for WinitApp {
 
             // ── Pointer: wheel scroll ────────────────────────────────────────
             WindowEvent::MouseWheel { delta, .. } => {
+                if let Some(source) = wake_source {
+                    self.state.wake.mark_main_work_pending(source);
+                }
                 let (delta_x, delta_y) = normalize_mouse_wheel_delta(&delta);
                 self.enqueue_scroll_event(delta_x, delta_y);
             }
@@ -1761,6 +2164,17 @@ impl ApplicationHandler for WinitApp {
                             }
                             _ => {}
                         }
+                    }
+                }
+
+                let matching_shell_release_is_consumed = event.state == ElementState::Released
+                    && self
+                        .state
+                        .consumed_shell_shortcut_keydowns
+                        .contains(&physical_key_to_key_code_str(&event.physical_key));
+                if !matching_shell_release_is_consumed {
+                    if let Some(source) = wake_source {
+                        self.state.wake.mark_main_work_pending(source);
                     }
                 }
 
@@ -1848,6 +2262,9 @@ impl ApplicationHandler for WinitApp {
             //
             // Preedit events (Ime::Preedit) are v1-reserved and not forwarded.
             WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+                if let Some(source) = wake_source {
+                    self.state.wake.mark_main_work_pending(source);
+                }
                 let timestamp_mono_us = tze_hud_scene::MonoUs(nanoseconds_since_start() / 1_000);
                 let raw_char = RawCharacterEvent {
                     character: text.clone(),
@@ -1871,6 +2288,61 @@ impl ApplicationHandler for WinitApp {
 
             _ => {}
         }
+    }
+}
+
+/// Only OS events that can produce compositor-visible main-thread work own a
+/// post-settle wake generation. Present polling, modifier bookkeeping, and
+/// shutdown are not scene mutations and must not manufacture another frame.
+fn main_work_source_for_window_event(
+    event: &WindowEvent,
+) -> Option<crate::idle_efficiency::RuntimeWakeupSource> {
+    use crate::idle_efficiency::RuntimeWakeupSource;
+
+    match event {
+        WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
+            Some(RuntimeWakeupSource::Resize)
+        }
+        WindowEvent::CursorMoved { .. }
+        | WindowEvent::MouseInput {
+            button: MouseButton::Left,
+            ..
+        }
+        | WindowEvent::MouseInput {
+            button: MouseButton::Right,
+            state: ElementState::Released,
+            ..
+        }
+        | WindowEvent::MouseWheel { .. }
+        | WindowEvent::KeyboardInput { .. }
+        | WindowEvent::Ime(winit::event::Ime::Commit(_)) => Some(RuntimeWakeupSource::SceneChange),
+        _ => None,
+    }
+}
+
+/// Move resident-bridge input onto the main-owned authority queue, then wake
+/// that owner to drain it. Queue ingress is deliberately not compositor work:
+/// the authority decides whether the drained input changes the scene.
+async fn forward_resident_bridge_input_to_main(
+    input: crate::resident_grpc_bridge::ResidentBridgeInput,
+    main_input_tx: &tokio::sync::mpsc::Sender<crate::resident_grpc_bridge::ResidentBridgeInput>,
+    portal_ingress_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
+) -> bool {
+    if main_input_tx.send(input).await.is_err() {
+        return false;
+    }
+    portal_ingress_wake.notify();
+    true
+}
+
+/// Schedule compositor work only when safe mode actually left its active state.
+/// Repeated Ctrl+Shift+Escape signals while inactive are side-effect-free.
+fn notify_after_safe_mode_exit(
+    result: &crate::shell::SafeModeExitResult,
+    render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
+) {
+    if result.exited {
+        render_wake.notify();
     }
 }
 
@@ -1905,6 +2377,12 @@ impl WindowedRuntime {
         let cfg = self.config;
         let (runtime_context, fallback_unrestricted): (SharedRuntimeContext, bool) =
             build_runtime_context(&cfg);
+
+        let event_loop = EventLoop::<RuntimeWakeEvent>::with_user_event().build()?;
+        event_loop.set_control_flow(ControlFlow::Wait);
+        let wake = WindowedWake::new(event_loop.create_proxy());
+        let render_wake = wake.render_notifier();
+        let portal_ingress_wake = wake.main_work_notifier();
 
         // Resolve the effective window mode, applying platform fallback checks.
         // Spec §Unsupported overlay fallback (line 185): if overlay is requested
@@ -2050,6 +2528,7 @@ impl WindowedRuntime {
             degradation_level: tze_hud_protocol::session::RuntimeDegradationLevel::Normal,
             media_ingress_active: None,
             input_capture_tx: Some(input_capture_tx),
+            input_capture_wake: wake.main_work_notifier(),
             // Expose the runtime's ACTIVE-profile resolved portal tokens over the
             // session handshake so clients (the text-stream portal exemplar)
             // render the runtime's live look rather than a client-side mirror
@@ -2102,14 +2581,16 @@ impl WindowedRuntime {
             input_event_tx,
             frame_presented_tx,
             degradation_notices,
+            lease_expirations,
             grpc_bound_addr,
-        ) = start_network_services(
+        ) = start_network_services_with_render_wake(
             cfg.grpc_port,
             &cfg.psk,
             shared_state.clone(),
             Arc::clone(&runtime_context),
             fallback_unrestricted,
             bind_all,
+            render_wake.clone(),
         )?;
 
         // ── MCP HTTP server ────────────────────────────────────────────────────
@@ -2197,12 +2678,14 @@ impl WindowedRuntime {
                     resident_principal,
                 };
                 let mcp_shutdown = shutdown.clone();
-                match rt.rt.block_on(start_mcp_http_server(
+                match rt.rt.block_on(start_mcp_http_server_with_render_wake(
                     Arc::clone(&shared_scene),
                     mcp_config,
                     mcp_shutdown,
                     Some(paste_inject_tx),
                     portal_op_tx_opt.take(),
+                    render_wake.clone(),
+                    portal_ingress_wake.clone(),
                 )) {
                     Ok((handle, local_addr)) => {
                         network_handles.push(handle);
@@ -2250,6 +2733,7 @@ impl WindowedRuntime {
             let shared_for_exit = Arc::clone(&shared_state);
             let chrome_for_exit = Arc::clone(&chrome_state);
             let shutdown_for_exit = shutdown.clone();
+            let render_wake_for_exit = render_wake.clone();
             let mut rx = safe_mode_exit_rx;
             rt.rt.spawn(async move {
                 let mut shutdown_rx = shutdown_for_exit.subscribe();
@@ -2267,7 +2751,9 @@ impl WindowedRuntime {
                                         Arc::clone(&chrome_for_exit),
                                     );
                                     let result = ctrl.exit_safe_mode().await;
+                                    notify_after_safe_mode_exit(&result, &render_wake_for_exit);
                                     tracing::info!(
+                                        exited = result.exited,
                                         leases_resumed = result.leases_resumed,
                                         sessions_notified = result.sessions_notified,
                                         suspension_duration_us = result.suspension_duration_us,
@@ -2399,8 +2885,23 @@ impl WindowedRuntime {
                         // Wire the bridged-composer-input return path (hud-omfqi):
                         // the bridge requests the input capability + INPUT_EVENTS
                         // subscription and forwards inbound composer input here.
-                        let (input_tx, input_rx) = tokio::sync::mpsc::channel(64);
-                        resident_grpc_input_rx = Some(input_rx);
+                        let (input_tx, mut bridge_input_rx) = tokio::sync::mpsc::channel(64);
+                        let (main_input_tx, main_input_rx) = tokio::sync::mpsc::channel(64);
+                        resident_grpc_input_rx = Some(main_input_rx);
+                        let bridge_input_wake = portal_ingress_wake.clone();
+                        network_handles.push(rt.rt.spawn(async move {
+                            while let Some(input) = bridge_input_rx.recv().await {
+                                if !forward_resident_bridge_input_to_main(
+                                    input,
+                                    &main_input_tx,
+                                    &bridge_input_wake,
+                                )
+                                .await
+                                {
+                                    break;
+                                }
+                            }
+                        }));
                         let handle = crate::resident_grpc_bridge::spawn_resident_grpc_bridge(
                             rt.rt.handle(),
                             bridge_cfg,
@@ -2425,6 +2926,8 @@ impl WindowedRuntime {
 
         let app_state = WindowedRuntimeState {
             config: cfg,
+            wake,
+            scheduled_main_deadline: None,
             compositor_handle: None,
             network_rt,
             network_handles,
@@ -2442,6 +2945,7 @@ impl WindowedRuntime {
             frame_ready_tx: Some(frame_ready_tx),
             frame_presented_tx,
             degradation_notices,
+            lease_expirations,
             compositor: None,
             window_surface: None,
             input_processor: InputProcessor::new(),
@@ -2454,6 +2958,7 @@ impl WindowedRuntime {
             pipeline: FramePipeline::new(),
             shutdown,
             benchmark_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            quiescent_efficiency: None,
             cursor_x: 0.0,
             cursor_y: 0.0,
             left_button_down: false,
@@ -2498,8 +3003,6 @@ impl WindowedRuntime {
 
         // Create winit event loop and run.
         // Per spec §Main Thread Responsibilities: winit event loop MUST run on main thread.
-        let event_loop = EventLoop::new()?;
-        event_loop.set_control_flow(ControlFlow::Poll);
         event_loop.run_app(&mut app)?;
 
         // ── Post-event-loop cleanup ───────────────────────────────────────────
@@ -2512,6 +3015,9 @@ impl WindowedRuntime {
                 .shutdown
                 .trigger(crate::threads::ShutdownReason::Clean);
         }
+        app.state
+            .wake
+            .notify_compositor(crate::idle_efficiency::RuntimeWakeupSource::Shutdown);
 
         // Abort all spawned network task handles (gRPC, MCP) so they do not
         // linger past process exit.  The shutdown token already signals tasks
@@ -2567,5 +3073,378 @@ impl WindowedRuntime {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod wake_accounting_tests {
+    use super::*;
+
+    #[test]
+    fn deferred_past_portal_deadline_waits_for_availability_not_immediate_retry() {
+        let now = Instant::now();
+        let past_deadline = PortalWakeDeadline {
+            wall_us: 99,
+            family: crate::portal_projection_driver::PortalDeadlineFamily::ImmediateWork,
+        };
+
+        assert_eq!(
+            portal_deadline_after_drain(past_deadline, now, 100, PortalProjectionDrain::Deferred,),
+            None,
+            "a busy portal drain must not rearm its past deadline as a retry timer"
+        );
+        assert_eq!(
+            portal_deadline_after_drain(
+                past_deadline,
+                now,
+                100,
+                PortalProjectionDrain::Completed {
+                    scene_changed: false,
+                },
+            ),
+            Some(Deadline::new(
+                now,
+                crate::idle_efficiency::RuntimeWakeupSource::SceneChange,
+            )),
+            "a successfully inspected past deadline still gets its one owning turn"
+        );
+
+        assert_eq!(
+            portal_deadline_after_drain(
+                PortalWakeDeadline {
+                    wall_us: 101,
+                    family: crate::portal_projection_driver::PortalDeadlineFamily::Cadence,
+                },
+                now,
+                100,
+                PortalProjectionDrain::Deferred,
+            ),
+            Some(Deadline::new(
+                now + std::time::Duration::from_micros(1),
+                crate::idle_efficiency::RuntimeWakeupSource::AnimationDeadline,
+            )),
+            "a genuinely future portal deadline remains a one-shot timed wake"
+        );
+    }
+
+    #[test]
+    fn terminal_lease_expiry_bridge_forwards_each_scene_result_once() {
+        let sender = tze_hud_protocol::session_server::LeaseExpirySender::default();
+        let mut receiver = sender.subscribe();
+        let lease_id = tze_hud_scene::SceneId::new();
+        let tile_id = tze_hud_scene::SceneId::new();
+
+        publish_lease_expiries(
+            Some(&sender),
+            vec![tze_hud_scene::types::LeaseExpiry {
+                lease_id,
+                previous_state: tze_hud_scene::types::LeaseState::Active,
+                terminal_state: tze_hud_scene::types::LeaseState::Expired,
+                removed_tiles: vec![tile_id],
+            }],
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let notice = runtime.block_on(receiver.recv()).unwrap();
+        assert_eq!(notice.lease_id, lease_id);
+        assert_eq!(
+            notice.previous_state,
+            tze_hud_scene::types::LeaseState::Active
+        );
+        assert_eq!(
+            notice.terminal_state,
+            tze_hud_scene::types::LeaseState::Expired
+        );
+        assert_eq!(notice.removed_tiles, vec![tile_id]);
+        assert!(
+            runtime.block_on(async {
+                tokio::time::timeout(std::time::Duration::from_millis(10), receiver.recv())
+                    .await
+                    .is_err()
+            }),
+            "one SceneGraph expiry result must produce exactly one bridge notice"
+        );
+    }
+
+    #[tokio::test]
+    async fn restarted_compositor_delivers_one_terminal_lease_pair_to_connected_owner() {
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+        use tokio_stream::StreamExt;
+        use tze_hud_protocol::proto::session::client_message::Payload as ClientPayload;
+        use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
+        use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
+        use tze_hud_protocol::proto::session::server_message::Payload as ServerPayload;
+        use tze_hud_protocol::proto::session::{
+            ClientMessage, LeaseRequest, LeaseResponse, LeaseResult, LeaseStateChange,
+            ServerMessage, SessionInit,
+        };
+        use tze_hud_protocol::session_server::HudSessionImpl;
+        use tze_hud_scene::types::{LeaseExpiry, LeaseState};
+
+        fn now_wall_us() -> u64 {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_micros() as u64
+        }
+
+        let service = HudSessionImpl::new(SceneGraph::new(800.0, 600.0), "test-key");
+        let lease_expirations = service.lease_expirations.clone();
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+            tonic::transport::Server::builder()
+                .add_service(HudSessionServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+
+        let endpoint = format!("http://[::1]:{}", addr.port());
+        let mut client = None;
+        for _ in 0..25 {
+            match HudSessionClient::connect(endpoint.clone()).await {
+                Ok(connected) => {
+                    client = Some(connected);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+        let mut client = client.expect("test session server must accept connections");
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(16);
+        tx.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionInit(SessionInit {
+                agent_id: "restart-expiry-agent".to_string(),
+                agent_display_name: "restart-expiry-agent".to_string(),
+                pre_shared_key: "test-key".to_string(),
+                requested_capabilities: vec!["create_tiles".to_string()],
+                initial_subscriptions: Vec::new(),
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: now_wall_us(),
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: None,
+            })),
+        })
+        .await
+        .unwrap();
+        let mut stream = client
+            .session(tokio_stream::wrappers::ReceiverStream::new(rx))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // SessionEstablished, SceneSnapshot, and initial DegradationNotice.
+        for _ in 0..3 {
+            tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .expect("session handshake must complete promptly")
+                .expect("session stream must remain open")
+                .expect("session handshake message must be valid");
+        }
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["create_tiles".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut granted_lease_id = None;
+        let mut active_transition_seen = false;
+        while granted_lease_id.is_none() || !active_transition_seen {
+            let message = tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .expect("lease grant must arrive promptly")
+                .expect("connected stream must remain open")
+                .expect("lease grant message must be valid");
+            match message.payload {
+                Some(ServerPayload::LeaseResponse(LeaseResponse {
+                    granted,
+                    lease_id,
+                    result,
+                    ..
+                })) => {
+                    assert!(granted, "test lease must be granted");
+                    assert_eq!(result, LeaseResult::Granted as i32);
+                    granted_lease_id = uuid::Uuid::from_slice(&lease_id)
+                        .ok()
+                        .map(tze_hud_scene::SceneId::from_uuid);
+                }
+                Some(ServerPayload::LeaseStateChange(LeaseStateChange {
+                    previous_state,
+                    new_state,
+                    ..
+                })) => {
+                    assert_eq!(previous_state, "REQUESTED");
+                    assert_eq!(new_state, "ACTIVE");
+                    active_transition_seen = true;
+                }
+                other => panic!("expected lease grant traffic, got {other:?}"),
+            }
+        }
+        let lease_id = granted_lease_id.expect("granted lease must carry a SceneId");
+
+        // A mode switch tears down the first compositor generation. The runtime
+        // must keep each sender so the replacement compositor receives a fresh
+        // clone instead of silently dropping connected-session notifications.
+        let mut runtime_state = WindowedRuntimeState::new_headless();
+        let (frame_presented_tx, _frame_presented_rx) = tokio::sync::broadcast::channel(1);
+        runtime_state.frame_presented_tx = Some(frame_presented_tx);
+        runtime_state.degradation_notices = Some(Default::default());
+        runtime_state.lease_expirations = Some(lease_expirations);
+        let mut app = WinitApp {
+            state: runtime_state,
+        };
+
+        let first_generation = app.state.compositor_runtime_senders();
+        assert!(first_generation.0.is_some());
+        assert!(first_generation.1.is_some());
+        assert!(first_generation.2.is_some());
+        drop(first_generation);
+
+        app.state.pending_mode_switch = Some(WindowMode::Overlay);
+        app.apply_pending_mode_switch();
+
+        let restarted_generation = app.state.compositor_runtime_senders();
+        assert!(app.state.frame_presented_tx.is_some());
+        assert!(app.state.degradation_notices.is_some());
+        assert!(app.state.lease_expirations.is_some());
+
+        let expiry = LeaseExpiry {
+            lease_id,
+            previous_state: LeaseState::Active,
+            terminal_state: LeaseState::Expired,
+            removed_tiles: Vec::new(),
+        };
+        publish_lease_expiries(restarted_generation.2.as_ref(), vec![expiry.clone()]);
+        publish_lease_expiries(restarted_generation.2.as_ref(), vec![expiry]);
+
+        let mut terminal_response_seen = false;
+        let mut terminal_transition_seen = false;
+        for _ in 0..2 {
+            let message: ServerMessage =
+                tokio::time::timeout(Duration::from_secs(1), stream.next())
+                    .await
+                    .expect("terminal lease traffic must arrive promptly")
+                    .expect("connected stream must remain open")
+                    .expect("terminal lease message must be valid");
+            match message.payload {
+                Some(ServerPayload::LeaseResponse(LeaseResponse {
+                    granted,
+                    lease_id: response_lease_id,
+                    result,
+                    deny_code,
+                    ..
+                })) => {
+                    assert!(!granted);
+                    assert_eq!(response_lease_id, lease_id.as_uuid().as_bytes().to_vec());
+                    assert_eq!(result, LeaseResult::Expired as i32);
+                    assert_eq!(deny_code, "LEASE_EXPIRED");
+                    assert!(
+                        !terminal_response_seen,
+                        "only one terminal response is allowed"
+                    );
+                    terminal_response_seen = true;
+                }
+                Some(ServerPayload::LeaseStateChange(LeaseStateChange {
+                    lease_id: state_lease_id,
+                    previous_state,
+                    new_state,
+                    ..
+                })) => {
+                    assert_eq!(state_lease_id, lease_id.as_uuid().as_bytes().to_vec());
+                    assert_eq!(previous_state, "ACTIVE");
+                    assert_eq!(new_state, "EXPIRED");
+                    assert!(
+                        !terminal_transition_seen,
+                        "only one terminal state transition is allowed"
+                    );
+                    terminal_transition_seen = true;
+                }
+                other => panic!("expected terminal lease traffic, got {other:?}"),
+            }
+        }
+        assert!(terminal_response_seen);
+        assert!(terminal_transition_seen);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), stream.next())
+                .await
+                .is_err(),
+            "duplicate runtime notices must not emit a second terminal pair"
+        );
+
+        drop(tx);
+        server.abort();
+    }
+
+    #[test]
+    fn passive_window_events_do_not_create_main_work_debt() {
+        assert_eq!(
+            main_work_source_for_window_event(&WindowEvent::RedrawRequested),
+            None,
+            "present polling must not schedule another compositor frame"
+        );
+        assert_eq!(
+            main_work_source_for_window_event(&WindowEvent::CloseRequested),
+            None,
+            "shutdown owns its lifecycle without a post-settle render wake"
+        );
+        assert_eq!(
+            main_work_source_for_window_event(&WindowEvent::Resized(
+                winit::dpi::PhysicalSize::new(0, 0)
+            )),
+            None,
+            "a zero-sized suspended surface has no renderable resize work"
+        );
+    }
+
+    #[test]
+    fn safe_mode_exit_wakes_only_after_an_actual_transition() {
+        let wake = WindowedWake::disconnected();
+        let render_wake = wake.render_notifier();
+        let compositor_before = wake.compositor().checkpoint();
+        let no_op = crate::shell::SafeModeExitResult {
+            exited: false,
+            leases_resumed: 0,
+            lease_resumes: Vec::new(),
+            sessions_notified: 0,
+            suspension_duration_us: 0,
+        };
+
+        notify_after_safe_mode_exit(&no_op, &render_wake);
+        assert_eq!(
+            wake.compositor().checkpoint(),
+            compositor_before,
+            "an idempotent safe-mode exit must not create compositor work"
+        );
+
+        let transition = crate::shell::SafeModeExitResult {
+            exited: true,
+            leases_resumed: 0,
+            lease_resumes: Vec::new(),
+            sessions_notified: 0,
+            suspension_duration_us: 0,
+        };
+        notify_after_safe_mode_exit(&transition, &render_wake);
+        assert_eq!(
+            wake.compositor().checkpoint(),
+            compositor_before.wrapping_add(1),
+            "a real safe-mode exit must wake the compositor exactly once"
+        );
     }
 }

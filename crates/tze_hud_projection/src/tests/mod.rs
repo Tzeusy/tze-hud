@@ -2976,6 +2976,29 @@ fn agent_liveness_gap_degrades_portal_without_escalating_attention() {
 }
 
 #[test]
+fn agent_liveness_deadline_exposes_the_first_required_idle_sweep() {
+    let mut authority = ProjectionAuthority::new(ProjectionBounds {
+        agent_liveness_degraded_after_wall_us: 1_000_000,
+        ..ProjectionBounds::default()
+    })
+    .unwrap();
+    attach(&mut authority, "projection-a");
+
+    assert_eq!(
+        authority.next_agent_liveness_deadline_wall_us(),
+        Some(1_000_010),
+        "the event loop must wake exactly when the attached projection becomes stale"
+    );
+
+    authority.sweep_agent_liveness_degradation(1_000_010);
+    assert_eq!(
+        authority.next_agent_liveness_deadline_wall_us(),
+        None,
+        "an already-degraded session must not leave a periodic liveness wake behind"
+    );
+}
+
+#[test]
 fn agent_liveness_authenticated_projection_operations_refresh_and_recover() {
     let mut authority = ProjectionAuthority::new(ProjectionBounds {
         agent_liveness_degraded_after_wall_us: 1_000_000,
@@ -3783,6 +3806,34 @@ fn pending_input_bounds_and_acknowledgement_state_conflicts_are_enforced() {
         conflict.error_code,
         Some(ProjectionErrorCode::ProjectionStateConflict)
     );
+}
+
+#[test]
+fn pending_input_expiry_sweep_schedules_idle_portal_state_update() {
+    let mut authority = ProjectionAuthority::new(ProjectionBounds::default()).unwrap();
+    attach(&mut authority, "projection-expiry");
+    authority
+        .enqueue_input(
+            "projection-expiry",
+            "input-expiry",
+            "expires while parked".to_string(),
+            20,
+            100,
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(authority.next_pending_input_expiry_wall_us(), Some(100));
+    assert!(authority.sweep_pending_input_expiry(99).is_empty());
+    assert_eq!(
+        authority.sweep_pending_input_expiry(100),
+        vec!["projection-expiry".to_string()]
+    );
+    assert_eq!(authority.next_pending_input_expiry_wall_us(), None);
+    let summary = authority.state_summary("projection-expiry").unwrap();
+    assert_eq!(summary.pending_input_count, 0);
+    assert_eq!(summary.pending_input_bytes, 0);
+    assert_eq!(authority.coalescer_pending_portal_count(), 1);
 }
 
 #[test]

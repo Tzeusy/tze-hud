@@ -131,6 +131,7 @@ pub(super) async fn run_upload_worker(
     mut command_rx: tokio::sync::mpsc::Receiver<UploadWorkerCommand>,
     event_tx: tokio::sync::mpsc::Sender<UploadWorkerEvent>,
     upload_rate_limit_bytes_per_sec: usize,
+    render_wake: tze_hud_scene::render_wake::RenderWakeNotifier,
 ) {
     let store = {
         let st = state.lock().await;
@@ -260,7 +261,8 @@ pub(super) async fn run_upload_worker(
 
                 match store.handle_upload_start(request).await {
                     Ok(Some(stored)) => {
-                        register_uploaded_scene_resource(&state, &stored.resource_id).await;
+                        register_uploaded_scene_resource(&state, &stored.resource_id, &render_wake)
+                            .await;
                         if event_tx
                             .send(UploadWorkerEvent::Stored {
                                 request_sequence,
@@ -441,7 +443,8 @@ pub(super) async fn run_upload_worker(
                 {
                     Ok(stored) => {
                         in_flight_uploads.remove(&upload_id_bytes);
-                        register_uploaded_scene_resource(&state, &stored.resource_id).await;
+                        register_uploaded_scene_resource(&state, &stored.resource_id, &render_wake)
+                            .await;
                         if event_tx
                             .send(UploadWorkerEvent::Stored {
                                 request_sequence: tracked.request_sequence,
@@ -521,9 +524,16 @@ pub(super) async fn apply_upload_transport_backpressure(
 pub(super) async fn register_uploaded_scene_resource(
     state: &Arc<Mutex<SharedState>>,
     resource_id: &tze_hud_resource::ResourceId,
+    render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
 ) {
     let scene_resource_id = ResourceId::from_bytes(*resource_id.as_bytes());
     let st = state.lock().await;
     let mut scene = st.scene.lock().await;
+    let inserted = !scene.is_resource_registered(&scene_resource_id);
     scene.register_resource(scene_resource_id);
+    drop(scene);
+    drop(st);
+    if inserted {
+        render_wake.notify();
+    }
 }

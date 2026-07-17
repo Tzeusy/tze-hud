@@ -130,7 +130,19 @@ pub(super) fn build_runtime_context(cfg: &WindowedConfig) -> (SharedRuntimeConte
 /// Returns `Err` if the `NetworkRuntime` Tokio runtime cannot be created, if
 /// the gRPC server address fails to parse, or if the gRPC listener fails to
 /// bind (e.g. the port is already in use).
+type NetworkServices = (
+    Option<NetworkRuntime>,
+    Vec<tokio::task::JoinHandle<()>>,
+    Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::ElementRepositionedEvent>>,
+    Option<tze_hud_protocol::session_server::InputEventSender>,
+    Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::FramePresented>>,
+    Option<tze_hud_protocol::session_server::DegradationNoticeSender>,
+    Option<tze_hud_protocol::session_server::LeaseExpirySender>,
+    Option<std::net::SocketAddr>,
+);
+
 #[allow(clippy::type_complexity)] // return type is self-documenting in this internal helper
+#[cfg(test)]
 pub(super) fn start_network_services(
     grpc_port: u16,
     psk: &str,
@@ -138,18 +150,28 @@ pub(super) fn start_network_services(
     runtime_context: SharedRuntimeContext,
     fallback_unrestricted: bool,
     bind_all_interfaces: bool,
-) -> Result<
-    (
-        Option<NetworkRuntime>,
-        Vec<tokio::task::JoinHandle<()>>,
-        Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::ElementRepositionedEvent>>,
-        Option<tze_hud_protocol::session_server::InputEventSender>,
-        Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::FramePresented>>,
-        Option<tze_hud_protocol::session_server::DegradationNoticeSender>,
-        Option<std::net::SocketAddr>,
-    ),
-    Box<dyn std::error::Error>,
-> {
+) -> Result<NetworkServices, Box<dyn std::error::Error>> {
+    start_network_services_with_render_wake(
+        grpc_port,
+        psk,
+        shared_state,
+        runtime_context,
+        fallback_unrestricted,
+        bind_all_interfaces,
+        tze_hud_scene::render_wake::RenderWakeNotifier::default(),
+    )
+}
+
+#[allow(clippy::type_complexity)]
+pub(super) fn start_network_services_with_render_wake(
+    grpc_port: u16,
+    psk: &str,
+    shared_state: Arc<Mutex<SharedState>>,
+    runtime_context: SharedRuntimeContext,
+    fallback_unrestricted: bool,
+    bind_all_interfaces: bool,
+    render_wake: tze_hud_scene::render_wake::RenderWakeNotifier,
+) -> Result<NetworkServices, Box<dyn std::error::Error>> {
     if grpc_port == 0 {
         tracing::info!(
             "windowed runtime: gRPC server disabled (grpc_port = 0); running compositor-only"
@@ -157,7 +179,7 @@ pub(super) fn start_network_services(
         // Compositor-only mode: no session, so no present-ack subscriber. The
         // compositor thread still drains the present-ack queue (bounded memory)
         // but has no sender to broadcast on (hud-4va6q).
-        return Ok((None, Vec::new(), None, None, None, None, None));
+        return Ok((None, Vec::new(), None, None, None, None, None, None));
     }
 
     // Build the multi-thread Tokio runtime for network tasks.
@@ -194,7 +216,8 @@ pub(super) fn start_network_services(
                     .max_agent_leased_texture_bytes,
             ),
         )),
-    );
+    )
+    .with_render_wake_notifier(render_wake);
 
     // Clone the broadcast senders before moving the service into the gRPC task.
     // The windowed runtime holds these senders to:
@@ -209,6 +232,7 @@ pub(super) fn start_network_services(
     // gRPC task; subscribers attach via HudSession::subscribe_frame_presented.
     let frame_presented_tx = service.frame_presented_tx.clone();
     let degradation_notices = service.degradation_notices.clone();
+    let lease_expirations = service.lease_expirations.clone();
 
     // Wire RuntimeService (ReloadConfig RPC) alongside HudSession.
     let runtime_svc = RuntimeServiceImpl::new(Arc::clone(&runtime_context));
@@ -260,6 +284,7 @@ pub(super) fn start_network_services(
         Some(input_event_tx),
         Some(frame_presented_tx),
         Some(degradation_notices),
+        Some(lease_expirations),
         Some(grpc_bound_addr),
     ))
 }
@@ -583,9 +608,17 @@ mod tests {
     fn start_network_services_grpc_port_zero_returns_no_runtime() {
         let shared_state = make_shared_state();
         let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
-        let (rt, handles, _tx, _scroll_tx, present_tx, _degradation_notices, grpc_addr) =
-            start_network_services(0, "test-psk", shared_state, ctx, true, false)
-                .expect("start_network_services should not fail for port 0");
+        let (
+            rt,
+            handles,
+            _tx,
+            _scroll_tx,
+            present_tx,
+            _degradation_notices,
+            lease_expirations,
+            grpc_addr,
+        ) = start_network_services(0, "test-psk", shared_state, ctx, true, false)
+            .expect("start_network_services should not fail for port 0");
         assert!(
             rt.is_none(),
             "grpc_port=0 must not create a NetworkRuntime (compositor-only)"
@@ -597,6 +630,10 @@ mod tests {
         assert!(
             present_tx.is_none(),
             "grpc_port=0 has no session, so no present-ack sender (hud-4va6q)"
+        );
+        assert!(
+            lease_expirations.is_none(),
+            "grpc_port=0 has no session, so no terminal lease-expiry sender"
         );
         assert!(
             grpc_addr.is_none(),
@@ -617,9 +654,17 @@ mod tests {
             .and_then(|l| l.local_addr())
             .map(|a| a.port())
             .expect("failed to allocate ephemeral port");
-        let (rt, handles, _tx, _scroll_tx, present_tx, _degradation_notices, grpc_addr) =
-            start_network_services(port, "test-psk", shared_state, ctx, true, true)
-                .expect("start_network_services should not error for a valid port");
+        let (
+            rt,
+            handles,
+            _tx,
+            _scroll_tx,
+            present_tx,
+            _degradation_notices,
+            lease_expirations,
+            grpc_addr,
+        ) = start_network_services(port, "test-psk", shared_state, ctx, true, true)
+            .expect("start_network_services should not error for a valid port");
         assert!(
             rt.is_some(),
             "non-zero grpc_port must create a NetworkRuntime"
@@ -632,6 +677,11 @@ mod tests {
             present_tx.is_some(),
             "non-zero grpc_port must expose the session present-ack sender so the \
              compositor thread can broadcast FramePresented (hud-4va6q)"
+        );
+        assert!(
+            lease_expirations.is_some(),
+            "non-zero grpc_port must expose the terminal lease-expiry sender so the \
+             compositor can notify connected lease owners"
         );
         assert_eq!(
             grpc_addr.map(|a| a.port()),
@@ -651,9 +701,17 @@ mod tests {
         for _ in 0..2 {
             let shared_state = make_shared_state();
             let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
-            let (rt, handles, _tx, _scroll_tx, _present_tx, _degradation_notices, _grpc_addr) =
-                start_network_services(0, "psk", shared_state, ctx, false, false)
-                    .expect("port-0 must not error");
+            let (
+                rt,
+                handles,
+                _tx,
+                _scroll_tx,
+                _present_tx,
+                _degradation_notices,
+                _lease_expirations,
+                _grpc_addr,
+            ) = start_network_services(0, "psk", shared_state, ctx, false, false)
+                .expect("port-0 must not error");
             assert!(rt.is_none());
             assert!(handles.is_empty());
         }
@@ -679,7 +737,7 @@ mod tests {
             .expect("failed to allocate ephemeral port for loopback bind test");
         let shared_state = make_shared_state();
         let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
-        let (rt, handles, _, _, _, _, _) =
+        let (rt, handles, _, _, _, _, _, _) =
             start_network_services(port, "psk", shared_state, ctx, false, false)
                 .expect("loopback bind must succeed on a freshly allocated ephemeral port");
         assert!(rt.is_some(), "loopback bind must create a NetworkRuntime");
@@ -699,7 +757,7 @@ mod tests {
             .expect("failed to allocate ephemeral port for all-interfaces bind test");
         let shared_state = make_shared_state();
         let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
-        let (rt, handles, _, _, _, _, _) =
+        let (rt, handles, _, _, _, _, _, _) =
             start_network_services(port, "psk", shared_state, ctx, false, true)
                 .expect("all-interfaces bind must succeed on a freshly allocated ephemeral port");
         assert!(

@@ -95,6 +95,7 @@ pub mod gpu_lock;
 #[cfg(feature = "gstreamer")]
 pub mod gst_decode_pipeline;
 pub mod headless;
+pub mod idle_efficiency;
 pub mod mcp;
 pub mod media_admission;
 pub mod media_ingress;
@@ -181,6 +182,9 @@ pub use event_bus::{
     SubscriberQueue,
 };
 pub use headless::HeadlessRuntime;
+pub use idle_efficiency::{
+    IdleEfficiencyCounters, IdleEfficiencyDeltaError, IdleEfficiencySnapshot, RuntimeWakeupSource,
+};
 pub use mcp::{McpServerConfig, start_mcp_http_server};
 pub use media_admission::{
     ActivationGateError, ActivationGateOutcome, ActivationGateRequest, C13_CAPABILITIES,

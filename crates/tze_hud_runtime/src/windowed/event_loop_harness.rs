@@ -86,6 +86,8 @@ impl WindowedRuntimeState {
         let (_paste_inject_tx, paste_inject_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
         WindowedRuntimeState {
+            wake: super::wake::WindowedWake::disconnected(),
+            scheduled_main_deadline: None,
             config: super::WindowedConfig::default(),
             compositor_handle: None,
             network_rt: None,
@@ -104,6 +106,7 @@ impl WindowedRuntimeState {
             frame_ready_tx: Some(frame_ready_tx),
             frame_presented_tx: None,
             degradation_notices: None,
+            lease_expirations: None,
             compositor: None,
             window_surface: None,
             input_processor: InputProcessor::new(),
@@ -116,6 +119,7 @@ impl WindowedRuntimeState {
             pipeline: crate::pipeline::FramePipeline::new(),
             shutdown: crate::threads::ShutdownToken::new(),
             benchmark_failed: Arc::new(AtomicBool::new(false)),
+            quiescent_efficiency: None,
             cursor_x: 0.0,
             cursor_y: 0.0,
             left_button_down: false,
@@ -183,6 +187,7 @@ impl SharedStateBuilder {
             degradation_level: tze_hud_protocol::session::RuntimeDegradationLevel::Normal,
             media_ingress_active: None,
             input_capture_tx: None,
+            input_capture_wake: tze_hud_scene::render_wake::RenderWakeNotifier::default(),
             resolved_portal_tokens: std::collections::HashMap::new(),
         }
     }
@@ -308,6 +313,12 @@ impl HeadlessEventLoopHarness {
     /// Run the genuine production drain over the pending queue.
     pub(super) fn drain(&mut self) {
         self.app.drain_pending_keyboard_events();
+    }
+
+    /// Exercise the exact production completion-wake path that
+    /// `about_to_wait` uses after a busy shared-scene observation.
+    pub(super) fn schedule_shared_scene_availability_wake(&self) {
+        self.app.schedule_shared_scene_availability_wake();
     }
 
     /// Current composer draft text, if a composer is active.
@@ -1153,5 +1164,79 @@ mod tests {
             Some(""),
             "a busy-deferred keystroke must not mutate the draft"
         );
+    }
+
+    /// A held shared-scene lock must not make the real keyboard drain retry on
+    /// a fixed timer.  The deferred event stays parked until the one
+    /// availability waiter completes; then the same production drain makes
+    /// forward progress and owns exactly one compositor notification.
+    #[test]
+    fn held_scene_lock_retries_real_keyboard_drain_only_after_availability() {
+        use std::time::{Duration, Instant};
+
+        let mut harness = HeadlessEventLoopHarness::new();
+        harness.focus_composer();
+        harness.enqueue(character("x", 1_000));
+
+        let shared = harness.shared_state();
+        let guard = shared
+            .try_lock()
+            .expect("shared_state must be free before inducing contention");
+        let compositor_before = harness.app.state.wake.compositor().checkpoint();
+        let main_work_before = harness.app.state.wake.main_work_generation();
+
+        // This is the genuine dispatch path: it preserves the event at the
+        // front because the delivery context cannot acquire shared_state.
+        harness.drain();
+        assert_eq!(
+            harness.pending_len(),
+            1,
+            "busy drain must preserve the event"
+        );
+
+        // This calls the same helper used by about_to_wait.  While the lock is
+        // held the waiter cannot complete, and no frame-cadence retry may be
+        // emitted in its place.
+        harness.schedule_shared_scene_availability_wake();
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            harness.app.state.wake.compositor().checkpoint(),
+            compositor_before,
+            "held scene lock must cause zero periodic compositor retry wakes"
+        );
+        assert_eq!(
+            harness.app.state.wake.main_work_generation(),
+            main_work_before,
+            "held scene lock must cause zero periodic main-thread retry wakes"
+        );
+
+        drop(guard);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while harness.app.state.wake.main_work_generation() == main_work_before {
+            assert!(
+                Instant::now() < deadline,
+                "availability release must schedule forward progress"
+            );
+            std::thread::yield_now();
+        }
+
+        // In a real winit turn the queued wake enters about_to_wait, retries
+        // the drain, and only then acknowledges the producer generation.
+        harness.drain();
+        let checkpoint = harness.app.state.wake.main_work_checkpoint();
+        assert!(harness.app.state.wake.finish_main_work(checkpoint));
+        assert_eq!(
+            harness.app.state.wake.compositor().checkpoint(),
+            compositor_before + 1,
+            "availability completion owns one post-drain compositor generation"
+        );
+
+        assert_eq!(
+            harness.pending_len(),
+            0,
+            "released scene lock must drain FIFO work"
+        );
+        assert_eq!(harness.composer_draft().as_deref(), Some("x"));
     }
 }

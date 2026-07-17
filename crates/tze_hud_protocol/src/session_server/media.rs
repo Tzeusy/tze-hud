@@ -247,7 +247,8 @@ pub(super) async fn handle_media_ingress_open(
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     media_config: &tze_hud_scene::config::MediaIngressConfig,
     open: MediaIngressOpen,
-) {
+    render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
+) -> bool {
     if let Some((code, reason)) = media_open_rejection(&open, media_config, session) {
         tracing::warn!(
             subsystem = "media_ingress",
@@ -262,7 +263,7 @@ pub(super) async fn handle_media_ingress_open(
             media_open_rejected(open.client_stream_id, code, reason),
         )
         .await;
-        return;
+        return false;
     }
 
     let zone_name = media_config
@@ -313,7 +314,7 @@ pub(super) async fn handle_media_ingress_open(
         }
     };
     match publish_result {
-        MediaPublishAdmission::Published => {}
+        MediaPublishAdmission::Published => render_wake.notify(),
         MediaPublishAdmission::GlobalLimit => {
             let reason = "one active media ingress stream is already admitted globally".to_string();
             tracing::warn!(
@@ -329,7 +330,7 @@ pub(super) async fn handle_media_ingress_open(
                 media_open_rejected(open.client_stream_id, "SESSION_STREAM_LIMIT", reason),
             )
             .await;
-            return;
+            return false;
         }
         MediaPublishAdmission::PublishFailed(err) => {
             let reason = format!("approved media surface could not be published: {err}");
@@ -346,7 +347,7 @@ pub(super) async fn handle_media_ingress_open(
                 media_open_rejected(open.client_stream_id, "SURFACE_NOT_FOUND", reason),
             )
             .await;
-            return;
+            return false;
         }
     }
 
@@ -384,21 +385,34 @@ pub(super) async fn handle_media_ingress_open(
         MediaSessionState::Admitted as i32,
     )
     .await;
+    true
+}
+
+/// Terminal state and wire metadata for closing an admitted media stream.
+pub(super) struct MediaIngressCloseDisposition {
+    pub(super) reason: i32,
+    pub(super) detail: String,
+    pub(super) final_state: i32,
+    pub(super) retry_after_us: Option<u64>,
 }
 
 pub(super) async fn close_active_media_ingress(
     state: &Arc<Mutex<SharedState>>,
     session: &mut StreamSession,
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
-    reason: i32,
-    detail: impl Into<String>,
-    final_state: i32,
-    retry_after_us: Option<u64>,
+    disposition: MediaIngressCloseDisposition,
+    render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
 ) -> bool {
     let Some(active) = session.media_ingress.take() else {
         return false;
     };
-    let detail = detail.into();
+    let MediaIngressCloseDisposition {
+        reason,
+        detail,
+        final_state,
+        retry_after_us,
+    } = disposition;
+    let mut cleared_render_work = false;
     {
         let mut st = state.lock().await;
         if st
@@ -412,12 +426,14 @@ pub(super) async fn close_active_media_ingress(
             .unwrap_or(false)
         {
             st.media_ingress_active = None;
-            let _ = st
-                .scene
-                .lock()
-                .await
-                .clear_zone_for_publisher(&active.zone_name, &session.namespace);
+            let mut scene = st.scene.lock().await;
+            let scene_version_before = scene.version;
+            let _ = scene.clear_zone_for_publisher(&active.zone_name, &session.namespace);
+            cleared_render_work = scene.version != scene_version_before;
         }
+    }
+    if cleared_render_work {
+        render_wake.notify();
     }
     tracing::info!(
         subsystem = "media_ingress",
@@ -446,6 +462,7 @@ pub(super) async fn handle_media_ingress_close(
     session: &mut StreamSession,
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     close: MediaIngressClose,
+    render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
 ) {
     match session.media_ingress.as_ref() {
         Some(active) if active.stream_epoch == close.stream_epoch => {
@@ -458,10 +475,13 @@ pub(super) async fn handle_media_ingress_close(
                 state,
                 session,
                 tx,
-                MediaCloseReason::AgentClosed as i32,
-                detail,
-                MediaSessionState::Closed as i32,
-                None,
+                MediaIngressCloseDisposition {
+                    reason: MediaCloseReason::AgentClosed as i32,
+                    detail,
+                    final_state: MediaSessionState::Closed as i32,
+                    retry_after_us: None,
+                },
+                render_wake,
             )
             .await;
         }

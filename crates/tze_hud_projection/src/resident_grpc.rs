@@ -3288,20 +3288,27 @@ fn input_history_markdown(units: &[TranscriptUnit], timestamps: TimestampGranula
 }
 
 /// Render the native INPUT pane without duplicating draft glyphs. Viewer history
-/// stays left of the divider and the final status line preserves the established
-/// composer availability contract for both pixels and headless verification.
+/// stays left of the divider; compact pending/feedback state and the final status
+/// line preserve the established composer availability contract for both pixels
+/// and headless verification.
 fn portal_input_markdown(
     state: &ProjectedPortalState,
     composer_display: Option<&ComposerDisplayState>,
     timestamps: TimestampGranularity,
 ) -> String {
     let status = composer_line(composer_display, state.interaction_enabled);
-    // Reserve the final line before bounding history so the status affordance
-    // cannot be truncated away by a full retained viewer-echo window.
-    let max_history_bytes = MAX_PORTAL_MARKDOWN_BYTES.saturating_sub(status.len() + 1);
+    let mut tail = String::new();
+    // Keep the native two-pane surface aligned with the compact pending-input
+    // state shown by the collapsed/raw portal path. In particular, expiry changes
+    // this count from N to zero, making its scheduled repaint real scene work.
+    push_input_status_lines(&mut tail, state);
+    push_line(&mut tail, &status);
+    // Reserve the compact state + final composer line before bounding history so
+    // neither affordance can be truncated away by a full viewer-echo window.
+    let max_history_bytes = MAX_PORTAL_MARKDOWN_BYTES.saturating_sub(tail.len() + 1);
     let history = input_history_markdown(&state.input_history, timestamps);
     let mut result = clamp_utf8(&history, max_history_bytes).to_string();
-    push_line(&mut result, &status);
+    push_line(&mut result, &tail);
     result
 }
 

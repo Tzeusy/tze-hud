@@ -651,6 +651,27 @@ impl ProjectionAuthority {
         }
     }
 
+    /// Earliest time at which any pending coalesced portal can be serviced.
+    /// Immediately serviceable work returns `server_timestamp_wall_us`.
+    pub fn next_pending_due_at_us(&self, server_timestamp_wall_us: u64) -> Option<u64> {
+        self.cadence_coalescer
+            .pending_keys()
+            .filter_map(|projection_id| {
+                let session = self.sessions.get(projection_id)?;
+                let window_start = session.portal_rate_window_started_at_wall_us;
+                if window_start == 0 {
+                    Some(server_timestamp_wall_us)
+                } else {
+                    Some(
+                        window_start
+                            .saturating_add(PORTAL_UPDATE_RATE_WINDOW_WALL_US)
+                            .max(server_timestamp_wall_us),
+                    )
+                }
+            })
+            .min()
+    }
+
     /// Peek the submission timestamp (µs) of the pending coalescer entry for
     /// `projection_id`. Returns `None` if no pending entry exists.
     ///
@@ -731,6 +752,69 @@ impl ProjectionAuthority {
         }
         degraded.sort_unstable();
         degraded
+    }
+
+    /// Earliest wall-clock instant at which an attached session requires the
+    /// agent-liveness sweep, even when no producer submits more work.
+    pub fn next_agent_liveness_deadline_wall_us(&self) -> Option<u64> {
+        let threshold = self.bounds.agent_liveness_degraded_after_wall_us;
+        self.sessions
+            .values()
+            .filter(|session| {
+                session.agent_liveness_degraded_since_wall_us.is_none()
+                    && matches!(
+                        session.lifecycle_state,
+                        ProjectionLifecycleState::Attached | ProjectionLifecycleState::Active
+                    )
+            })
+            .filter_map(|session| session.reconnect.last_heartbeat_wall_us)
+            .map(|last_liveness_wall_us| last_liveness_wall_us.saturating_add(threshold))
+            .min()
+    }
+
+    /// Earliest expiry of any non-terminal viewer input item.
+    ///
+    /// The runtime scheduler uses this to transition an otherwise-idle portal
+    /// exactly when its pending-input TTL elapses, without relying on a future
+    /// owner poll or acknowledgement.
+    pub fn next_pending_input_expiry_wall_us(&self) -> Option<u64> {
+        self.sessions
+            .values()
+            .flat_map(|session| session.pending_input.iter())
+            .filter(|item| !item.delivery_state.is_terminal())
+            .map(|item| item.expires_at_wall_us)
+            .min()
+    }
+
+    /// Expire due viewer input and schedule one portal-state materialisation per
+    /// affected session. Returns the transitioned projection IDs.
+    pub fn sweep_pending_input_expiry(&mut self, server_timestamp_wall_us: u64) -> Vec<String> {
+        let mut scheduled = Vec::new();
+        for (projection_id, session) in &mut self.sessions {
+            let has_due_input = session.pending_input.iter().any(|item| {
+                !item.delivery_state.is_terminal()
+                    && server_timestamp_wall_us >= item.expires_at_wall_us
+            });
+            if !has_due_input {
+                continue;
+            }
+            expire_pending(session, server_timestamp_wall_us);
+            scheduled.push((projection_id.clone(), schedule_portal_state_update(session)));
+        }
+        for (projection_id, sequence) in &scheduled {
+            self.cadence_coalescer.record_append(
+                projection_id,
+                Vec::new(),
+                *sequence,
+                server_timestamp_wall_us,
+            );
+        }
+        let mut transitioned: Vec<String> = scheduled
+            .into_iter()
+            .map(|(projection_id, _)| projection_id)
+            .collect();
+        transitioned.sort_unstable();
+        transitioned
     }
 
     /// Whether this projection's stale state was opened by the liveness sweep.

@@ -284,6 +284,8 @@ fn classify_tool(method: &str) -> ToolClass {
 /// concurrent requests serialize scene mutations safely.
 pub struct McpServer {
     scene: Arc<Mutex<SceneGraph>>,
+    render_wake: tze_hud_scene::render_wake::RenderWakeNotifier,
+    portal_ingress_wake: tze_hud_scene::render_wake::RenderWakeNotifier,
     widget_asset_registry: Arc<Mutex<tools::WidgetAssetRegistry>>,
     config: McpConfig,
     paste_inject_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
@@ -307,6 +309,8 @@ impl McpServer {
     pub fn new(scene: SceneGraph) -> Self {
         Self {
             scene: Arc::new(Mutex::new(scene)),
+            render_wake: tze_hud_scene::render_wake::RenderWakeNotifier::default(),
+            portal_ingress_wake: tze_hud_scene::render_wake::RenderWakeNotifier::default(),
             widget_asset_registry: Arc::new(Mutex::new(tools::WidgetAssetRegistry::default())),
             config: McpConfig::default(),
             paste_inject_tx: None,
@@ -322,6 +326,8 @@ impl McpServer {
     pub fn with_shared_scene(scene: Arc<Mutex<SceneGraph>>) -> Self {
         Self {
             scene,
+            render_wake: tze_hud_scene::render_wake::RenderWakeNotifier::default(),
+            portal_ingress_wake: tze_hud_scene::render_wake::RenderWakeNotifier::default(),
             widget_asset_registry: Arc::new(Mutex::new(tools::WidgetAssetRegistry::default())),
             config: McpConfig::default(),
             paste_inject_tx: None,
@@ -332,6 +338,24 @@ impl McpServer {
     /// Attach server configuration (auth settings, etc.).
     pub fn with_config(mut self, config: McpConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    /// Bind the runtime's platform-neutral render-work wake callback.
+    pub fn with_render_wake_notifier(
+        mut self,
+        notifier: tze_hud_scene::render_wake::RenderWakeNotifier,
+    ) -> Self {
+        self.render_wake = notifier;
+        self
+    }
+
+    /// Bind the main-thread portal ingress wake separately from render work.
+    pub fn with_portal_ingress_wake_notifier(
+        mut self,
+        notifier: tze_hud_scene::render_wake::RenderWakeNotifier,
+    ) -> Self {
+        self.portal_ingress_wake = notifier;
         self
     }
 
@@ -609,6 +633,18 @@ impl McpServer {
         let result = self
             .invoke_tool(&request.method, request.params, &capabilities)
             .await;
+        if let Ok(value) = &result {
+            if request.method == "inject_composer_paste"
+                && value.get("injected").and_then(serde_json::Value::as_bool) == Some(true)
+            {
+                // Paste is queued for a main-thread-owned composer.  Do not
+                // wake the compositor before that drain has established that
+                // the focused composer actually changed.
+                self.portal_ingress_wake.notify();
+            } else if tool_creates_render_work(&request.method, value) {
+                self.render_wake.notify();
+            }
+        }
 
         let response = match result {
             Ok(value) => {
@@ -786,47 +822,66 @@ impl McpServer {
                 serde_json::to_value(r).map_err(|e| crate::McpError::Internal(e.to_string()))
             }
             "portal_projection_attach" => {
-                let r = tools::handle_portal_projection_attach(params, self.portal_op_tx.as_ref())
-                    .await?;
+                let r = tools::handle_portal_projection_attach_with_render_wake(
+                    params,
+                    self.portal_op_tx.as_ref(),
+                    &self.portal_ingress_wake,
+                )
+                .await?;
                 serde_json::to_value(r).map_err(|e| crate::McpError::Internal(e.to_string()))
             }
             "portal_projection_publish" => {
-                let r = tools::handle_portal_projection_publish(params, self.portal_op_tx.as_ref())
-                    .await?;
+                let r = tools::handle_portal_projection_publish_with_render_wake(
+                    params,
+                    self.portal_op_tx.as_ref(),
+                    &self.portal_ingress_wake,
+                )
+                .await?;
                 serde_json::to_value(r).map_err(|e| crate::McpError::Internal(e.to_string()))
             }
             "portal_projection_publish_status" => {
-                let r = tools::handle_portal_projection_publish_status(
+                let r = tools::handle_portal_projection_publish_status_with_render_wake(
                     params,
                     self.portal_op_tx.as_ref(),
+                    &self.portal_ingress_wake,
                 )
                 .await?;
                 serde_json::to_value(r).map_err(|e| crate::McpError::Internal(e.to_string()))
             }
             "portal_projection_get_pending_input" => {
-                let r = tools::handle_portal_projection_get_pending_input(
+                let r = tools::handle_portal_projection_get_pending_input_with_render_wake(
                     params,
                     self.portal_op_tx.as_ref(),
+                    &self.portal_ingress_wake,
                 )
                 .await?;
                 serde_json::to_value(r).map_err(|e| crate::McpError::Internal(e.to_string()))
             }
             "portal_projection_acknowledge_input" => {
-                let r = tools::handle_portal_projection_acknowledge_input(
+                let r = tools::handle_portal_projection_acknowledge_input_with_render_wake(
                     params,
                     self.portal_op_tx.as_ref(),
+                    &self.portal_ingress_wake,
                 )
                 .await?;
                 serde_json::to_value(r).map_err(|e| crate::McpError::Internal(e.to_string()))
             }
             "portal_projection_detach" => {
-                let r = tools::handle_portal_projection_detach(params, self.portal_op_tx.as_ref())
-                    .await?;
+                let r = tools::handle_portal_projection_detach_with_render_wake(
+                    params,
+                    self.portal_op_tx.as_ref(),
+                    &self.portal_ingress_wake,
+                )
+                .await?;
                 serde_json::to_value(r).map_err(|e| crate::McpError::Internal(e.to_string()))
             }
             "portal_projection_cleanup" => {
-                let r = tools::handle_portal_projection_cleanup(params, self.portal_op_tx.as_ref())
-                    .await?;
+                let r = tools::handle_portal_projection_cleanup_with_render_wake(
+                    params,
+                    self.portal_op_tx.as_ref(),
+                    &self.portal_ingress_wake,
+                )
+                .await?;
                 serde_json::to_value(r).map_err(|e| crate::McpError::Internal(e.to_string()))
             }
             unknown => Err(crate::McpError::MethodNotFound(unknown.to_string())),
@@ -912,6 +967,36 @@ impl McpServer {
                 }
             });
         }
+    }
+}
+
+impl Drop for McpServer {
+    fn drop(&mut self) {
+        // Channel closure is presentation-relevant: the winit owner marks all
+        // still-attached projections disconnected when it observes this sender
+        // disappear. Close the channel before notifying so the awakened drain
+        // cannot race ahead and observe an empty-but-still-connected receiver.
+        if self.portal_op_tx.take().is_some() {
+            self.portal_ingress_wake.notify();
+        }
+    }
+}
+
+fn tool_creates_render_work(method: &str, result: &serde_json::Value) -> bool {
+    match method {
+        // ClearWidget is intentionally successful when the caller has no
+        // publication to remove. Only a changed scene needs compositor work.
+        "clear_widget" => result.get("changed").and_then(serde_json::Value::as_bool) == Some(true),
+        _ => matches!(
+            method,
+            "create_tab"
+                | "create_tile"
+                | "set_content"
+                | "dismiss"
+                | "publish_to_zone"
+                | "publish_to_widget"
+                | "publish_to_element"
+        ),
     }
 }
 
@@ -2881,5 +2966,293 @@ mod tests {
             json!(-32602),
             "bare publish_to_widget with missing args stays Invalid Params: {bare_resp}"
         );
+    }
+
+    #[tokio::test]
+    async fn successful_mutation_notifies_render_work_but_read_only_call_does_not() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let calls = Arc::new(AtomicU64::new(0));
+        let callback_calls = Arc::clone(&calls);
+        let notifier = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+            callback_calls.fetch_add(1, Ordering::Relaxed);
+        });
+        let server =
+            test_server(SceneGraph::new(1920.0, 1080.0)).with_render_wake_notifier(notifier);
+
+        let list = server
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"list_scene","params":{},"id":90}"#,
+                &guest(),
+            )
+            .await;
+        assert!(parse_response(&list)["error"].is_null());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+        let create = server
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"create_tab","params":{"name":"Wake"},"id":91}"#,
+                &resident(),
+            )
+            .await;
+        assert!(parse_response(&create)["error"].is_null());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn successful_composer_paste_wakes_main_ingress_but_not_render_work() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let ingress_calls = Arc::new(AtomicU64::new(0));
+        let callback_calls = Arc::clone(&ingress_calls);
+        let ingress_notifier = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+            callback_calls.fetch_add(1, Ordering::Relaxed);
+        });
+        let render_calls = Arc::new(AtomicU64::new(0));
+        let callback_calls = Arc::clone(&render_calls);
+        let render_notifier = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+            callback_calls.fetch_add(1, Ordering::Relaxed);
+        });
+        let (paste_tx, mut paste_rx) = tokio::sync::mpsc::unbounded_channel();
+        let server = test_server(SceneGraph::new(1920.0, 1080.0))
+            .with_paste_inject_tx(paste_tx)
+            .with_render_wake_notifier(render_notifier)
+            .with_portal_ingress_wake_notifier(ingress_notifier);
+
+        let response = server
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"inject_composer_paste","params":{"text":"queued paste"},"id":92}"#,
+                &resident(),
+            )
+            .await;
+        let response = parse_response(&response);
+        assert!(response["error"].is_null());
+        assert_eq!(response["result"]["injected"], true);
+        assert_eq!(paste_rx.recv().await.as_deref(), Some("queued paste"));
+        assert_eq!(
+            ingress_calls.load(Ordering::Relaxed),
+            1,
+            "only a successful enqueue wakes the main-thread paste drain"
+        );
+        assert_eq!(
+            render_calls.load(Ordering::Relaxed),
+            0,
+            "queued paste is not compositor work until the main-thread drain changes the composer"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_widget_wakes_only_when_it_removes_a_publication() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let wakes = Arc::new(AtomicU64::new(0));
+        let callback_wakes = Arc::clone(&wakes);
+        let render_wake = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+            callback_wakes.fetch_add(1, Ordering::AcqRel);
+        });
+        let server = server_with_gauge()
+            .await
+            .with_render_wake_notifier(render_wake);
+
+        let no_op = server
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"clear_widget","params":{"widget_name":"gauge","namespace":"agent.nobody"},"id":94}"#,
+                &guest(),
+            )
+            .await;
+        let no_op = parse_response(&no_op);
+        assert!(no_op["error"].is_null());
+        assert_eq!(no_op["result"]["changed"], false);
+        assert_eq!(
+            wakes.load(Ordering::Acquire),
+            0,
+            "a successful no-op clear has no compositor-visible state to render"
+        );
+
+        let publish = server
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"publish_to_widget","params":{"widget_name":"gauge","namespace":"agent.owner","params":{"level":0.8}},"id":95}"#,
+                &guest(),
+            )
+            .await;
+        assert!(parse_response(&publish)["error"].is_null());
+        let wakes_before_clear = wakes.load(Ordering::Acquire);
+
+        let clear = server
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"clear_widget","params":{"widget_name":"gauge","namespace":"agent.owner"},"id":96}"#,
+                &guest(),
+            )
+            .await;
+        let clear = parse_response(&clear);
+        assert!(clear["error"].is_null());
+        assert_eq!(clear["result"]["changed"], true);
+        assert_eq!(
+            wakes.load(Ordering::Acquire),
+            wakes_before_clear + 1,
+            "removing an active widget publication produces exactly one render wake"
+        );
+    }
+
+    #[tokio::test]
+    async fn unwired_composer_paste_wakes_neither_main_ingress_nor_render_work() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let ingress_calls = Arc::new(AtomicU64::new(0));
+        let callback_calls = Arc::clone(&ingress_calls);
+        let ingress_notifier = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+            callback_calls.fetch_add(1, Ordering::Relaxed);
+        });
+        let render_calls = Arc::new(AtomicU64::new(0));
+        let callback_calls = Arc::clone(&render_calls);
+        let render_notifier = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+            callback_calls.fetch_add(1, Ordering::Relaxed);
+        });
+        let server = test_server(SceneGraph::new(1920.0, 1080.0))
+            .with_render_wake_notifier(render_notifier)
+            .with_portal_ingress_wake_notifier(ingress_notifier);
+
+        let response = server
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"inject_composer_paste","params":{"text":"nowhere to queue"},"id":93}"#,
+                &resident(),
+            )
+            .await;
+        let response = parse_response(&response);
+        assert!(response["error"].is_null());
+        assert_eq!(response["result"]["injected"], false);
+        assert_eq!(ingress_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(render_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn portal_enqueue_wakes_before_the_tool_awaits_its_reply() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let ingress_calls = Arc::new(AtomicU64::new(0));
+        let callback_calls = Arc::clone(&ingress_calls);
+        let ingress_notifier = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+            callback_calls.fetch_add(1, Ordering::Relaxed);
+        });
+        let render_calls = Arc::new(AtomicU64::new(0));
+        let callback_calls = Arc::clone(&render_calls);
+        let render_notifier = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+            callback_calls.fetch_add(1, Ordering::Relaxed);
+        });
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let server = test_server(SceneGraph::new(1920.0, 1080.0))
+            .with_portal_op_tx(tx)
+            .with_render_wake_notifier(render_notifier)
+            .with_portal_ingress_wake_notifier(ingress_notifier);
+
+        let caller = resident();
+        let dispatch = server.dispatch(
+            r#"{"jsonrpc":"2.0","method":"portal_projection_attach","params":{"projection_id":"wake-before-await","display_name":"Wake"},"id":92}"#,
+            &caller,
+        );
+        tokio::pin!(dispatch);
+        let op = tokio::select! {
+            op = rx.recv() => op.expect("portal op must be enqueued"),
+            response = &mut dispatch => panic!("tool returned before authority reply: {response}"),
+        };
+        assert_eq!(
+            ingress_calls.load(Ordering::Relaxed),
+            1,
+            "the enqueue must wake the main-thread authority owner"
+        );
+        assert_eq!(render_calls.load(Ordering::Relaxed), 0);
+        match op {
+            crate::portal_op::PortalOp::Attach { reply, .. } => reply
+                .send(Ok("owner-token".to_string()))
+                .expect("attach reply must send"),
+            other => panic!("unexpected portal op: {other:?}"),
+        }
+        let response = dispatch.await;
+        assert!(parse_response(&response)["error"].is_null());
+        assert_eq!(
+            render_calls.load(Ordering::Relaxed),
+            0,
+            "server dispatch must not add a pre-drain compositor wake"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_long_poll_wakes_only_main_ingress_and_never_render_work() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let ingress_calls = Arc::new(AtomicU64::new(0));
+        let callback_calls = Arc::clone(&ingress_calls);
+        let ingress_notifier = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+            callback_calls.fetch_add(1, Ordering::Relaxed);
+        });
+        let render_calls = Arc::new(AtomicU64::new(0));
+        let callback_calls = Arc::clone(&render_calls);
+        let render_notifier = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+            callback_calls.fetch_add(1, Ordering::Relaxed);
+        });
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let server = test_server(SceneGraph::new(1920.0, 1080.0))
+            .with_portal_op_tx(tx)
+            .with_render_wake_notifier(render_notifier)
+            .with_portal_ingress_wake_notifier(ingress_notifier);
+        let responder = tokio::spawn(async move {
+            while let Some(op) = rx.recv().await {
+                match op {
+                    crate::portal_op::PortalOp::GetPendingInput { reply, .. } => {
+                        reply
+                            .send(Ok(crate::portal_op::PendingInputBatch {
+                                items: Vec::new(),
+                                remaining_count: 0,
+                                remaining_bytes: 0,
+                            }))
+                            .expect("empty poll reply must send");
+                    }
+                    other => panic!("unexpected portal op: {other:?}"),
+                }
+            }
+        });
+
+        let response = server
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"portal_projection_get_pending_input","params":{"projection_id":"idle-poll","owner_token":"owner","wait_ms":320},"id":93}"#,
+                &resident(),
+            )
+            .await;
+        assert!(parse_response(&response)["error"].is_null());
+        assert_eq!(
+            render_calls.load(Ordering::Relaxed),
+            0,
+            "side-effect-free empty polls must never be classified as render work"
+        );
+        let main_wakes = ingress_calls.load(Ordering::Relaxed);
+        assert!(
+            (2..=4).contains(&main_wakes),
+            "the bounded 320ms poll should issue only its expected ingress attempts, got {main_wakes}"
+        );
+        drop(server);
+        responder.await.expect("responder task");
+    }
+
+    #[test]
+    fn dropping_portal_ingress_closes_then_wakes_the_owner() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let calls = Arc::new(AtomicU64::new(0));
+        let callback_calls = Arc::clone(&calls);
+        let notifier = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+            callback_calls.fetch_add(1, Ordering::Relaxed);
+        });
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let server = test_server(SceneGraph::new(1920.0, 1080.0))
+            .with_portal_op_tx(tx)
+            .with_portal_ingress_wake_notifier(notifier);
+
+        drop(server);
+
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 }

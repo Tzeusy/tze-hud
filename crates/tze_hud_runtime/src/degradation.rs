@@ -480,6 +480,18 @@ impl DegradationController {
         })
     }
 
+    /// Next monotonic instant at which quiescent recovery can advance one
+    /// level. `None` means either normal operation or quiescence has not yet
+    /// been observed by the scheduler.
+    pub fn next_quiescent_recovery_at_us(&self) -> Option<u64> {
+        (self.level != DegradationLevel::Normal)
+            .then(|| {
+                self.quiescent_since_us
+                    .map(|since| since.saturating_add(self.envelope.recovery_duration_us))
+            })
+            .flatten()
+    }
+
     /// Determine which tiles to suppress in the render pass at Level 4+ shedding.
     ///
     /// Returns the tile descriptors for tiles that should be excluded from the
@@ -782,6 +794,11 @@ mod tests {
         }
         assert_eq!(ctrl.level(), DegradationLevel::Coalesce);
         assert!(ctrl.record_quiescent_at(now).is_none());
+        assert_eq!(
+            ctrl.next_quiescent_recovery_at_us(),
+            Some(now + envelope.recovery_duration_us),
+            "quiescent recovery must expose its monotonic wake deadline"
+        );
         assert!(
             ctrl.record_quiescent_at(now + envelope.recovery_duration_us - 1)
                 .is_none()
@@ -790,6 +807,7 @@ mod tests {
             .record_quiescent_at(now + envelope.recovery_duration_us)
             .expect("one quiescent recovery step");
         assert_eq!(recovered.new_level, DegradationLevel::Normal.as_u8());
+        assert_eq!(ctrl.next_quiescent_recovery_at_us(), None);
     }
 
     #[test]

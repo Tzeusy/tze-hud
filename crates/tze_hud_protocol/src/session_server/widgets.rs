@@ -114,6 +114,7 @@ pub(super) async fn handle_widget_asset_register(
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     request_sequence: u64,
     register: WidgetAssetRegister,
+    render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
 ) {
     let required_cap = "register_widget_asset".to_string();
     if !session.capabilities.contains(&required_cap) {
@@ -210,6 +211,7 @@ pub(super) async fn handle_widget_asset_register(
 
         let asset_handle = existing.asset_handle;
         drop(st);
+        render_wake.notify();
         send_widget_asset_register_result(
             session,
             tx,
@@ -376,6 +378,7 @@ pub(super) async fn handle_widget_asset_register(
             error_message: String::new(),
         };
         drop(st);
+        render_wake.notify();
         send_widget_asset_register_result(session, tx, dedup_result).await;
         return;
     }
@@ -453,6 +456,7 @@ pub(super) async fn handle_widget_asset_register(
 
         let was_deduplicated = matches!(put_outcome, DurablePutOutcome::Deduplicated { .. });
         drop(st);
+        render_wake.notify();
         send_widget_asset_register_result(
             session,
             tx,
@@ -569,6 +573,7 @@ pub(super) async fn handle_widget_asset_register(
             "duplicate hash insertion race while updating store".to_string(),
         );
         drop(st);
+        render_wake.notify();
         send_widget_asset_register_result(session, tx, duplicate_error).await;
         return;
     }
@@ -583,6 +588,7 @@ pub(super) async fn handle_widget_asset_register(
         .or_insert(0);
     *entry = entry.saturating_add(payload_len);
     drop(st);
+    render_wake.notify();
 
     send_widget_asset_register_result(
         session,
@@ -638,7 +644,8 @@ pub(super) async fn handle_widget_publish(
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     request_sequence: u64,
     publish: WidgetPublish,
-) {
+    render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
+) -> bool {
     let (resolved_widget_name, resolved_element_id) = if !publish.element_id.is_empty() {
         let st = state.lock().await;
         match bytes_to_scene_id(&publish.element_id) {
@@ -664,7 +671,7 @@ pub(super) async fn handle_widget_publish(
                             )),
                         }))
                         .await;
-                    return;
+                    return false;
                 }
             },
             Err(_) => {
@@ -682,7 +689,7 @@ pub(super) async fn handle_widget_publish(
                         })),
                     }))
                     .await;
-                return;
+                return false;
             }
         }
     } else if !publish.instance_id.is_empty() {
@@ -716,7 +723,7 @@ pub(super) async fn handle_widget_publish(
                 }))
                 .await;
         }
-        return;
+        return false;
     }
 
     // ── Step 2: Convert proto params to scene WidgetParameterValue map ─────────
@@ -763,6 +770,9 @@ pub(super) async fn handle_widget_publish(
         };
         (publish_result, persist_request)
     };
+    if result.is_ok() {
+        render_wake.notify();
+    }
     persist_element_store(persist_request).await;
 
     // ── Step 5: Send result or fire-and-forget ────────────────────────────────
@@ -787,6 +797,7 @@ pub(super) async fn handle_widget_publish(
                     .await;
             }
             // Ephemeral: no result sent (fire-and-forget per spec)
+            true
         }
         Err(err) => {
             // Map validation errors to wire error codes
@@ -839,6 +850,7 @@ pub(super) async fn handle_widget_publish(
                     }))
                     .await;
             }
+            false
         }
     }
 }

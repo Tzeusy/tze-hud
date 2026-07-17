@@ -27,6 +27,7 @@
 //! | `--benchmark-emit <path>` | `TZE_HUD_BENCHMARK_EMIT` | — | Emit bounded windowed benchmark JSON and exit. |
 //! | `--benchmark-frames <n>` | `TZE_HUD_BENCHMARK_FRAMES` | `600` | Measured frames for benchmark mode. |
 //! | `--benchmark-warmup-frames <n>` | `TZE_HUD_BENCHMARK_WARMUP_FRAMES` | `120` | Warmup frames skipped before measurement. |
+//! | `--quiescent-efficiency-emit <path>` | `TZE_HUD_QUIESCENT_EFFICIENCY_EMIT` | — | Emit a real event-driven static-overlay efficiency artifact after 5s settle + 60s observation. |
 //! | `--resident-grpc-portal` | `TZE_HUD_RESIDENT_GRPC_PORTAL=1` | — | Enable resident gRPC portal bridge with loopback defaults. |
 //! | `--resident-grpc-endpoint <url>` | `TZE_HUD_RESIDENT_GRPC_ENDPOINT` | — | Target endpoint for the resident bridge (e.g. `http://10.0.0.4:50051`). Implies `--resident-grpc-portal`. |
 //! | `--resident-grpc-agent-id <id>` | `TZE_HUD_RESIDENT_GRPC_AGENT_ID` | `resident-grpc-portal` | Agent identity for the resident session. Implies `--resident-grpc-portal`. |
@@ -83,7 +84,7 @@ use tze_hud_runtime::gpu_lock::GpuLock;
 use tze_hud_runtime::window::{WindowConfig, WindowMode};
 use tze_hud_runtime::windowed::{
     ResidentGrpcCredentialSource, ResidentGrpcPortalSettings, WindowedBenchmarkConfig,
-    WindowedConfig, WindowedRuntime,
+    WindowedConfig, WindowedQuiescentEfficiencyConfig, WindowedRuntime,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -131,6 +132,11 @@ OPTIONS:
     --benchmark-warmup-frames <n>
                            Warmup frames skipped before measurement  [default: 120]
                            (env: TZE_HUD_BENCHMARK_WARMUP_FRAMES)
+    --quiescent-efficiency-emit <path>
+                           Measure a static event-driven windowed runtime for a
+                           mandatory 5s settle plus 60s interval, emit JSON, and exit.
+                           Requires a constrained software-renderer CI invocation.
+                           (env: TZE_HUD_QUIESCENT_EFFICIENCY_EMIT)
     --resident-grpc-portal Enable the resident gRPC portal bridge with loopback defaults
                            (env: TZE_HUD_RESIDENT_GRPC_PORTAL=1)
     --resident-grpc-endpoint <url>
@@ -221,6 +227,8 @@ struct StartupOptions {
     benchmark_frames: u64,
     /// Number of warmup frames skipped before benchmark measurement.
     benchmark_warmup_frames: u64,
+    /// Path for a bounded real-runtime quiescent-efficiency artifact.
+    quiescent_efficiency_emit: Option<String>,
     /// Enable the resident gRPC portal bridge (hud-ev2lr).
     ///
     /// Set by `--resident-grpc-portal`, any `--resident-grpc-*` sub-flag, or any
@@ -261,6 +269,7 @@ impl Default for StartupOptions {
             benchmark_emit: None,
             benchmark_frames: 600,
             benchmark_warmup_frames: 120,
+            quiescent_efficiency_emit: None,
             resident_grpc_portal_enabled: false,
             resident_grpc_endpoint: None,
             resident_grpc_agent_id: tze_hud_runtime::windowed::DEFAULT_RESIDENT_GRPC_AGENT_ID
@@ -396,6 +405,12 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
         opts.benchmark_warmup_frames = v
             .parse::<u64>()
             .map_err(|_| format!("TZE_HUD_BENCHMARK_WARMUP_FRAMES: invalid integer: {v:?}"))?;
+    }
+    if let Ok(v) = std::env::var("TZE_HUD_QUIESCENT_EFFICIENCY_EMIT") {
+        opts.quiescent_efficiency_emit = Some(parse_benchmark_emit_path(
+            v,
+            "TZE_HUD_QUIESCENT_EFFICIENCY_EMIT",
+        )?);
     }
     if let Ok(v) = std::env::var("TZE_HUD_RESIDENT_GRPC_PORTAL") {
         if v == "1" || v.eq_ignore_ascii_case("true") {
@@ -560,6 +575,16 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
                 opts.benchmark_warmup_frames = val
                     .parse::<u64>()
                     .map_err(|_| format!("--benchmark-warmup-frames: invalid integer: {val:?}"))?;
+            }
+            "--quiescent-efficiency-emit" => {
+                i += 1;
+                let path = args.get(i).cloned().ok_or_else(|| {
+                    "--quiescent-efficiency-emit requires a path argument".to_string()
+                })?;
+                opts.quiescent_efficiency_emit = Some(parse_benchmark_emit_path(
+                    path,
+                    "--quiescent-efficiency-emit",
+                )?);
             }
             "--resident-grpc-portal" => {
                 opts.resident_grpc_portal_enabled = true;
@@ -1011,6 +1036,12 @@ set {DEV_ALLOW_INSECURE_STARTUP_ENV}=1 only in debug/dev runs if you need fallba
         eprintln!("error: --benchmark-frames must be greater than zero");
         std::process::exit(1);
     }
+    if opts.benchmark_emit.is_some() && opts.quiescent_efficiency_emit.is_some() {
+        eprintln!(
+            "error: --benchmark-emit and --quiescent-efficiency-emit cannot be used together"
+        );
+        std::process::exit(1);
+    }
     let benchmark = opts
         .benchmark_emit
         .as_ref()
@@ -1019,6 +1050,13 @@ set {DEV_ALLOW_INSECURE_STARTUP_ENV}=1 only in debug/dev runs if you need fallba
             frames: opts.benchmark_frames,
             emit_path: std::path::PathBuf::from(path),
         });
+    let quiescent_efficiency =
+        opts.quiescent_efficiency_emit
+            .as_ref()
+            .map(|path| WindowedQuiescentEfficiencyConfig {
+                emit_path: std::path::PathBuf::from(path),
+                build: format!("{VERSION}+{GIT_SHA}"),
+            });
 
     tracing::info!(
         version = VERSION,
@@ -1031,6 +1069,7 @@ set {DEV_ALLOW_INSECURE_STARTUP_ENV}=1 only in debug/dev runs if you need fallba
         mcp_port = opts.mcp_port,
         fps = opts.fps,
         benchmark = benchmark.is_some(),
+        quiescent_efficiency = quiescent_efficiency.is_some(),
         "tze_hud runtime starting"
     );
 
@@ -1053,6 +1092,7 @@ set {DEV_ALLOW_INSECURE_STARTUP_ENV}=1 only in debug/dev runs if you need fallba
         debug_zones: opts.debug_zones,
         monitor_index: opts.monitor_index,
         benchmark,
+        quiescent_efficiency,
         bind_all_interfaces: opts.bind_all_interfaces,
         resident_grpc_portal,
     };
@@ -1105,6 +1145,7 @@ mod tests {
                 "TZE_HUD_BENCHMARK_EMIT",
                 "TZE_HUD_BENCHMARK_FRAMES",
                 "TZE_HUD_BENCHMARK_WARMUP_FRAMES",
+                "TZE_HUD_QUIESCENT_EFFICIENCY_EMIT",
                 "TZE_HUD_RESIDENT_GRPC_PORTAL",
                 "TZE_HUD_RESIDENT_GRPC_ENDPOINT",
                 "TZE_HUD_RESIDENT_GRPC_AGENT_ID",
@@ -1172,6 +1213,7 @@ mod tests {
         assert!(opts.benchmark_emit.is_none());
         assert_eq!(opts.benchmark_frames, 600);
         assert_eq!(opts.benchmark_warmup_frames, 120);
+        assert!(opts.quiescent_efficiency_emit.is_none());
     }
 
     // ── parse_options: CLI flags ─────────────────────────────────────────────
@@ -1294,6 +1336,23 @@ mod tests {
             err.contains("--benchmark-emit") && err.contains("non-empty path"),
             "error should identify the empty benchmark emit path, got: {err}"
         );
+    }
+
+    #[test]
+    fn parse_options_quiescent_efficiency_emit_flag() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        clear_parse_options_env();
+        let args: Vec<String> = vec![
+            "--quiescent-efficiency-emit".to_string(),
+            "artifacts/idle-efficiency.json".to_string(),
+        ];
+
+        let opts = parse_options(&args).unwrap();
+        assert_eq!(
+            opts.quiescent_efficiency_emit.as_deref(),
+            Some("artifacts/idle-efficiency.json")
+        );
+        assert!(opts.benchmark_emit.is_none());
     }
 
     #[test]

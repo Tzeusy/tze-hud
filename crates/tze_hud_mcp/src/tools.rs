@@ -1958,6 +1958,8 @@ pub struct ClearWidgetResult {
     pub widget_name: String,
     /// True — the operation always succeeds or returns an error.
     pub cleared: bool,
+    /// Whether the caller owned an active publication that was removed.
+    pub changed: bool,
 }
 
 /// Clear all publications by the calling agent on the specified widget instance.
@@ -2006,6 +2008,7 @@ pub fn handle_clear_widget(
     }
 
     // ── Delegate to scene graph ───────────────────────────────────────────────
+    let scene_version_before = scene.version;
     scene
         .clear_widget_for_publisher(resolved_name, &p.namespace)
         .map_err(|e| {
@@ -2021,6 +2024,7 @@ pub fn handle_clear_widget(
     Ok(ClearWidgetResult {
         widget_name: resolved_name.to_string(),
         cleared: true,
+        changed: scene.version != scene_version_before,
     })
 }
 
@@ -2302,6 +2306,15 @@ pub async fn handle_portal_projection_attach(
     params: Value,
     portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
 ) -> McpResult<PortalProjectionAttachResult> {
+    let render_wake = tze_hud_scene::render_wake::RenderWakeNotifier::default();
+    handle_portal_projection_attach_with_render_wake(params, portal_op_tx, &render_wake).await
+}
+
+pub(crate) async fn handle_portal_projection_attach_with_render_wake(
+    params: Value,
+    portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
+    render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
+) -> McpResult<PortalProjectionAttachResult> {
     let p: PortalProjectionAttachParams = parse_params(params)?;
 
     if p.projection_id.trim().is_empty() {
@@ -2335,6 +2348,7 @@ pub async fn handle_portal_projection_attach(
         reply: reply_tx,
     })
     .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
+    render_wake.notify();
 
     match reply_rx.await {
         Ok(Ok(token)) => Ok(PortalProjectionAttachResult {
@@ -2425,6 +2439,15 @@ pub async fn handle_portal_projection_publish(
     params: Value,
     portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
 ) -> McpResult<PortalProjectionPublishResult> {
+    let render_wake = tze_hud_scene::render_wake::RenderWakeNotifier::default();
+    handle_portal_projection_publish_with_render_wake(params, portal_op_tx, &render_wake).await
+}
+
+pub(crate) async fn handle_portal_projection_publish_with_render_wake(
+    params: Value,
+    portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
+    render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
+) -> McpResult<PortalProjectionPublishResult> {
     let p: PortalProjectionPublishParams = parse_params(params)?;
 
     if p.projection_id.trim().is_empty() {
@@ -2462,6 +2485,7 @@ pub async fn handle_portal_projection_publish(
         reply: reply_tx,
     })
     .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
+    render_wake.notify();
 
     match reply_rx.await {
         Ok(Ok(())) => Ok(PortalProjectionPublishResult {
@@ -2536,6 +2560,16 @@ pub async fn handle_portal_projection_publish_status(
     params: Value,
     portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
 ) -> McpResult<PortalProjectionPublishStatusResult> {
+    let render_wake = tze_hud_scene::render_wake::RenderWakeNotifier::default();
+    handle_portal_projection_publish_status_with_render_wake(params, portal_op_tx, &render_wake)
+        .await
+}
+
+pub(crate) async fn handle_portal_projection_publish_status_with_render_wake(
+    params: Value,
+    portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
+    render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
+) -> McpResult<PortalProjectionPublishStatusResult> {
     let p: PortalProjectionPublishStatusParams = parse_params(params)?;
 
     if p.projection_id.trim().is_empty() {
@@ -2569,6 +2603,7 @@ pub async fn handle_portal_projection_publish_status(
         reply: reply_tx,
     })
     .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
+    render_wake.notify();
 
     match reply_rx.await {
         Ok(Ok(lifecycle_state)) => Ok(PortalProjectionPublishStatusResult {
@@ -2637,6 +2672,16 @@ pub async fn handle_portal_projection_get_pending_input(
     params: Value,
     portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
 ) -> McpResult<PortalProjectionGetPendingInputResult> {
+    let render_wake = tze_hud_scene::render_wake::RenderWakeNotifier::default();
+    handle_portal_projection_get_pending_input_with_render_wake(params, portal_op_tx, &render_wake)
+        .await
+}
+
+pub(crate) async fn handle_portal_projection_get_pending_input_with_render_wake(
+    params: Value,
+    portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
+    render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
+) -> McpResult<PortalProjectionGetPendingInputResult> {
     let p: PortalProjectionGetPendingInputParams = parse_params(params)?;
 
     if p.projection_id.trim().is_empty() {
@@ -2676,6 +2721,7 @@ pub async fn handle_portal_projection_get_pending_input(
             reply: reply_tx,
         })
         .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
+        render_wake.notify();
 
         let batch = match reply_rx.await {
             Ok(Ok(batch)) => batch,
@@ -2764,6 +2810,16 @@ pub async fn handle_portal_projection_acknowledge_input(
     params: Value,
     portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
 ) -> McpResult<PortalProjectionAcknowledgeInputResult> {
+    let render_wake = tze_hud_scene::render_wake::RenderWakeNotifier::default();
+    handle_portal_projection_acknowledge_input_with_render_wake(params, portal_op_tx, &render_wake)
+        .await
+}
+
+pub(crate) async fn handle_portal_projection_acknowledge_input_with_render_wake(
+    params: Value,
+    portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
+    render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
+) -> McpResult<PortalProjectionAcknowledgeInputResult> {
     let p: PortalProjectionAcknowledgeInputParams = parse_params(params)?;
 
     if p.projection_id.trim().is_empty() {
@@ -2804,6 +2860,7 @@ pub async fn handle_portal_projection_acknowledge_input(
         reply: reply_tx,
     })
     .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
+    render_wake.notify();
 
     match reply_rx.await {
         Ok(Ok(())) => Ok(PortalProjectionAcknowledgeInputResult {
@@ -2858,6 +2915,15 @@ pub async fn handle_portal_projection_detach(
     params: Value,
     portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
 ) -> McpResult<PortalProjectionDetachResult> {
+    let render_wake = tze_hud_scene::render_wake::RenderWakeNotifier::default();
+    handle_portal_projection_detach_with_render_wake(params, portal_op_tx, &render_wake).await
+}
+
+pub(crate) async fn handle_portal_projection_detach_with_render_wake(
+    params: Value,
+    portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
+    render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
+) -> McpResult<PortalProjectionDetachResult> {
     let p: PortalProjectionDetachParams = parse_params(params)?;
 
     if p.projection_id.trim().is_empty() {
@@ -2890,6 +2956,7 @@ pub async fn handle_portal_projection_detach(
         reply: reply_tx,
     })
     .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
+    render_wake.notify();
 
     match reply_rx.await {
         Ok(Ok(())) => Ok(PortalProjectionDetachResult {
@@ -2951,6 +3018,15 @@ pub struct PortalProjectionCleanupResult {
 pub async fn handle_portal_projection_cleanup(
     params: Value,
     portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
+) -> McpResult<PortalProjectionCleanupResult> {
+    let render_wake = tze_hud_scene::render_wake::RenderWakeNotifier::default();
+    handle_portal_projection_cleanup_with_render_wake(params, portal_op_tx, &render_wake).await
+}
+
+pub(crate) async fn handle_portal_projection_cleanup_with_render_wake(
+    params: Value,
+    portal_op_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::portal_op::PortalOp>>,
+    render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
 ) -> McpResult<PortalProjectionCleanupResult> {
     let p: PortalProjectionCleanupParams = parse_params(params)?;
 
@@ -3017,6 +3093,7 @@ pub async fn handle_portal_projection_cleanup(
         reply: reply_tx,
     })
     .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
+    render_wake.notify();
 
     match reply_rx.await {
         Ok(Ok(())) => Ok(PortalProjectionCleanupResult {
@@ -4595,6 +4672,7 @@ mod tests {
         .unwrap();
         assert_eq!(result.widget_name, "gauge");
         assert!(result.cleared);
+        assert!(result.changed);
         assert_eq!(
             scene.widget_registry.active_for_widget("gauge").len(),
             0,
@@ -4658,6 +4736,7 @@ mod tests {
         )
         .unwrap();
         assert!(result.cleared);
+        assert!(!result.changed);
     }
 
     // ── register_widget_asset ────────────────────────────────────────────────

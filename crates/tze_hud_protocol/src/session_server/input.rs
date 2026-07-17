@@ -95,9 +95,13 @@ pub(super) async fn handle_input_capture_request(
     let mut granted = true;
     let mut reason = String::new();
 
-    let (input_capture_tx, scene) = {
+    let (input_capture_tx, input_capture_wake, scene) = {
         let st = state.lock().await;
-        (st.input_capture_tx.clone(), st.scene.clone())
+        (
+            st.input_capture_tx.clone(),
+            st.input_capture_wake.clone(),
+            st.scene.clone(),
+        )
     };
 
     if let Some(input_capture_tx) = input_capture_tx {
@@ -145,6 +149,8 @@ pub(super) async fn handle_input_capture_request(
                     {
                         granted = false;
                         reason = "runtime input capture bridge is unavailable".to_string();
+                    } else {
+                        input_capture_wake.notify();
                     }
                 }
                 (Err(e), _, _) | (_, Err(e), _) => {
@@ -190,9 +196,9 @@ pub(super) async fn handle_input_capture_release(
     use crate::proto::input_envelope::Event as InputEvent;
     use crate::proto::{CaptureReleasedEvent, EventBatch, InputEnvelope};
 
-    let input_capture_tx = {
+    let (input_capture_tx, input_capture_wake) = {
         let st = state.lock().await;
-        st.input_capture_tx.clone()
+        (st.input_capture_tx.clone(), st.input_capture_wake.clone())
     };
 
     if let Some(input_capture_tx) = input_capture_tx {
@@ -209,7 +215,12 @@ pub(super) async fn handle_input_capture_release(
                 return;
             }
         };
-        let _ = input_capture_tx.send(crate::session::InputCaptureCommand::Release { device_id });
+        if input_capture_tx
+            .send(crate::session::InputCaptureCommand::Release { device_id })
+            .is_ok()
+        {
+            input_capture_wake.notify();
+        }
         return;
     }
 

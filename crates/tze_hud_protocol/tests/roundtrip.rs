@@ -35,6 +35,7 @@ use tze_hud_protocol::proto::session::{
     Heartbeat,
     LeaseRequest,
     LeaseResponse,
+    LeaseResult,
     LeaseStateChange,
     LocalSocketCredential,
     MutationBatch,
@@ -1298,15 +1299,18 @@ fn roundtrip_lease_request_response() {
         granted_capabilities: vec!["resident_mcp".to_string()],
         deny_reason: String::new(),
         deny_code: String::new(),
+        result: LeaseResult::Granted as i32,
     };
     let d_resp = round_trip(&resp);
     assert!(d_resp.granted);
     assert_eq!(d_resp.granted_ttl_ms, 30_000);
+    assert_eq!(d_resp.result, LeaseResult::Granted as i32);
 
     let denied = LeaseResponse {
         granted: false,
         deny_reason: "budget exceeded".to_string(),
         deny_code: "BUDGET_EXCEEDED".to_string(),
+        result: LeaseResult::Denied as i32,
         ..Default::default()
     };
     let d_denied = round_trip(&denied);

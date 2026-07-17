@@ -39,6 +39,9 @@ use tze_hud_scene::types::{GeometryPolicy, ResourceBudget, SceneId};
 /// capabilities; unlisted agents are treated as guests (no capabilities).
 pub struct HudSessionImpl {
     pub state: Arc<Mutex<SharedState>>,
+    /// Runtime-owned callback that wakes the windowed event/compositor loops
+    /// after render-relevant session work is accepted or enqueued.
+    pub(super) render_wake: tze_hud_scene::render_wake::RenderWakeNotifier,
     pub(super) psk: String,
     /// Per-agent capability grants from `[agents.registered]` config.
     ///
@@ -62,6 +65,12 @@ pub struct HudSessionImpl {
     pub(super) fallback_unrestricted: bool,
     /// Bounded never-drop sender for transactional degradation notices.
     pub degradation_notices: super::DegradationNoticeSender,
+    /// Runtime-to-session durable bridge for terminal lease transitions.
+    ///
+    /// The compositor publishes each `SceneGraph::expire_leases()` result here
+    /// after releasing the scene lock. The handler that owns the lease emits
+    /// the wire `LeaseResponse` and `LeaseStateChange` transactionally.
+    pub lease_expirations: super::LeaseExpirySender,
     /// Broadcast sender for live capability revocation commands (RFC 0001 §3.3, GAP-G3-4).
     ///
     /// When the runtime calls `revoke_capability_on_lease`, it broadcasts a
@@ -119,6 +128,7 @@ impl HudSessionImpl {
     #[cfg(any(test, feature = "dev-mode"))]
     pub fn new(scene: SceneGraph, psk: &str) -> Self {
         let degradation_notices = super::DegradationNoticeSender::default();
+        let lease_expirations = super::LeaseExpirySender::default();
         let (capability_revocation_tx, _) =
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
         let input_event_tx = super::InputEventSender::new(super::BROADCAST_CHANNEL_CAPACITY);
@@ -142,8 +152,10 @@ impl HudSessionImpl {
                 degradation_level: crate::session::RuntimeDegradationLevel::Normal,
                 media_ingress_active: None,
                 input_capture_tx: None,
+                input_capture_wake: tze_hud_scene::render_wake::RenderWakeNotifier::default(),
                 resolved_portal_tokens: std::collections::HashMap::new(),
             })),
+            render_wake: tze_hud_scene::render_wake::RenderWakeNotifier::default(),
             psk: psk.to_string(),
             agent_capabilities: Arc::new(HashMap::new()),
             agent_resource_budgets: Arc::new(HashMap::new()),
@@ -151,6 +163,7 @@ impl HudSessionImpl {
             budget_enforcer: None,
             fallback_unrestricted: true,
             degradation_notices,
+            lease_expirations,
             capability_revocation_tx,
             input_event_tx,
             element_repositioned_tx,
@@ -260,6 +273,7 @@ impl HudSessionImpl {
     ) -> Self {
         let (capability_revocation_tx, _) =
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
+        let lease_expirations = super::LeaseExpirySender::default();
         let input_event_tx = super::InputEventSender::new(super::BROADCAST_CHANNEL_CAPACITY);
         let (element_repositioned_tx, _) =
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
@@ -267,6 +281,7 @@ impl HudSessionImpl {
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
         Self {
             state,
+            render_wake: tze_hud_scene::render_wake::RenderWakeNotifier::default(),
             psk: psk.to_string(),
             agent_capabilities: Arc::new(agent_capabilities),
             agent_resource_budgets: Arc::new(agent_resource_budgets),
@@ -274,12 +289,23 @@ impl HudSessionImpl {
             budget_enforcer,
             fallback_unrestricted,
             degradation_notices,
+            lease_expirations,
             capability_revocation_tx,
             input_event_tx,
             element_repositioned_tx,
             frame_presented_tx,
             media_ingress_config: Arc::new(media_ingress_config),
         }
+    }
+
+    /// Bind the production render-work wake seam without exposing a platform
+    /// event-loop type to the protocol crate.
+    pub fn with_render_wake_notifier(
+        mut self,
+        notifier: tze_hud_scene::render_wake::RenderWakeNotifier,
+    ) -> Self {
+        self.render_wake = notifier;
+        self
     }
 
     /// Broadcast a `DegradationNotice` to all currently-active sessions.

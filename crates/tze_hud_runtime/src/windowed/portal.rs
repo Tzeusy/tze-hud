@@ -11,6 +11,31 @@ use super::keyboard::ComposerDeliveryContext;
 use super::lifecycle::{INTERACTION_LOCK_BUDGET, spin_acquire};
 use super::{WindowedConfig, WinitApp};
 
+/// Result of one best-effort portal projection drain.
+///
+/// A busy scene is distinct from a completed no-op: the windowed scheduler
+/// must install its coalesced availability wake only for the former. Treating
+/// both as `false` loses the information needed to avoid retrying a past
+/// portal deadline on a frame cadence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PortalProjectionDrain {
+    Deferred,
+    Completed { scene_changed: bool },
+}
+
+impl PortalProjectionDrain {
+    pub(super) const fn scene_changed(self) -> bool {
+        match self {
+            Self::Deferred => false,
+            Self::Completed { scene_changed } => scene_changed,
+        }
+    }
+
+    pub(super) const fn is_deferred(self) -> bool {
+        matches!(self, Self::Deferred)
+    }
+}
+
 /// Approximate line height (physical px) used ONLY for the input-pane
 /// history's scroll-content-height bookkeeping (hud-qbcp8).
 ///
@@ -1619,30 +1644,34 @@ impl WinitApp {
     /// drain record that carries append geometry (spec §3.2 / §3.3).
     ///
     /// Uses `try_lock` on the shared scene to avoid blocking the main thread.
-    /// If the scene lock is busy, the drain is silently deferred to the next
-    /// `about_to_wait` call (NOT silent fail-open — the pending work is picked
-    /// up on the very next iteration).
-    pub(super) fn drain_portal_projection(&mut self) {
+    /// If the scene lock is busy, returns [`PortalProjectionDrain::Deferred`]
+    /// so `about_to_wait` can arrange one release-driven availability wake.
+    pub(super) fn drain_portal_projection(&mut self) -> PortalProjectionDrain {
         let Ok(state) = self.state.shared_state.try_lock() else {
             tracing::trace!("portal drain deferred: shared_state lock busy");
-            return;
+            return PortalProjectionDrain::Deferred;
         };
         let Ok(mut scene) = state.scene.try_lock() else {
             tracing::trace!("portal drain deferred: scene lock busy");
-            return;
+            return PortalProjectionDrain::Deferred;
         };
         let tab_id = scene.active_tab;
+        let scene_version_before = scene.version;
+        let geometry_epoch_before = scene.geometry_epoch;
         self.state.portal_projection_driver.drain(
             &mut scene,
             &mut self.state.input_processor,
             tab_id,
         );
+        let scene_changed =
+            scene.version != scene_version_before || scene.geometry_epoch != geometry_epoch_before;
         // The driver activates a tab when a cooperative portal needs to render
         // and none was active (hud-obw3q). Keep the lock-free keyboard-dispatch
         // mirror in sync so keyboard routing targets the newly active tab.
         if scene.active_tab != tab_id {
             state.refresh_active_tab_mirror(&scene);
         }
+        PortalProjectionDrain::Completed { scene_changed }
     }
 
     /// Remove stale entries from `portal_resize_states` for tiles that no
@@ -1934,7 +1963,10 @@ mod tests {
         make_shared_state, portal_scene_with_focus, scene_with_capture_tile,
         scene_with_drag_handle_tile,
     };
-    use super::super::{WindowedConfig, WindowedRuntimeState, WinitApp};
+    use super::super::{
+        WindowedConfig, WindowedRuntimeState, WindowedWake, WinitApp,
+        forward_resident_bridge_input_to_main,
+    };
     use super::*;
     use crate::channels::{INPUT_EVENT_CAPACITY, frame_ready_channel};
     use crate::pipeline::FramePipeline;
@@ -1977,6 +2009,8 @@ mod tests {
         };
 
         let state = WindowedRuntimeState {
+            wake: crate::windowed::wake::WindowedWake::disconnected(),
+            scheduled_main_deadline: None,
             config: cfg,
             compositor_handle: None,
             network_rt: None,
@@ -1997,6 +2031,7 @@ mod tests {
             frame_ready_tx: Some(frame_ready_tx),
             frame_presented_tx: None,
             degradation_notices: None,
+            lease_expirations: None,
             compositor: None,
             window_surface: None,
             input_processor,
@@ -2009,6 +2044,7 @@ mod tests {
             pipeline: FramePipeline::new(),
             shutdown: ShutdownToken::new(),
             benchmark_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            quiescent_efficiency: None,
             cursor_x: 0.0,
             cursor_y: 0.0,
             left_button_down: false,
@@ -2048,6 +2084,275 @@ mod tests {
         drop(input_capture_tx);
 
         (WinitApp { state }, input_event_rx)
+    }
+
+    fn make_windowed_app_with_pending_portal_publish(projection_id: &str) -> WinitApp {
+        use tze_hud_projection::{
+            AttachRequest, ContentClassification, OperationEnvelope, OutputKind,
+            ProjectionOperation, ProviderKind, PublishOutputRequest,
+        };
+
+        let mut driver = crate::portal_projection_driver::InProcessPortalDriver::new();
+        let envelope = |operation, request_id: &str| OperationEnvelope {
+            operation,
+            projection_id: projection_id.to_string(),
+            request_id: request_id.to_string(),
+            client_timestamp_wall_us: 1,
+        };
+        let attach = driver.authority_mut().handle_attach(
+            AttachRequest {
+                envelope: envelope(ProjectionOperation::Attach, "attach-wake"),
+                provider_kind: ProviderKind::Claude,
+                display_name: "Wake test".to_string(),
+                workspace_hint: None,
+                repository_hint: None,
+                icon_profile_hint: None,
+                content_classification: ContentClassification::Private,
+                hud_target: None,
+                idempotency_key: None,
+            },
+            "wake-test-caller",
+            1_000,
+        );
+        assert!(attach.accepted);
+        let owner_token = attach.owner_token.expect("owner token after attach");
+        driver.attach_projection(projection_id, Vec::new());
+        let published = driver.authority_mut().handle_publish_output(
+            PublishOutputRequest {
+                envelope: envelope(ProjectionOperation::PublishOutput, "publish-wake"),
+                owner_token,
+                output_text: "actual portal mutation".to_string(),
+                output_kind: OutputKind::Assistant,
+                content_classification: ContentClassification::Private,
+                logical_unit_id: Some("wake-unit".to_string()),
+                coalesce_key: None,
+                expects_reply: false,
+            },
+            "wake-test-caller",
+            1_001,
+        );
+        assert!(published.accepted);
+
+        let mut scene = tze_hud_scene::SceneGraph::new(1920.0, 1080.0);
+        scene.create_tab("Main", 0).unwrap();
+        let (mut app, _rx) =
+            make_windowed_keyboard_test_app(scene, FocusManager::new(), InputProcessor::new());
+        app.state.portal_projection_driver = driver;
+        app
+    }
+
+    #[test]
+    fn empty_portal_ingress_drain_does_not_create_a_compositor_generation() {
+        let mut scene = tze_hud_scene::SceneGraph::new(1920.0, 1080.0);
+        scene.create_tab("Main", 0).unwrap();
+        let (mut app, _rx) =
+            make_windowed_keyboard_test_app(scene, FocusManager::new(), InputProcessor::new());
+        app.state.wake.main_work_notifier().notify();
+        let checkpoint = app.state.wake.main_work_checkpoint();
+        let compositor_generation = app.state.wake.compositor().checkpoint();
+
+        let drain = app.drain_portal_projection();
+        let scene_changed = drain.scene_changed();
+
+        assert!(!scene_changed);
+        assert!(!drain.is_deferred());
+        assert!(
+            !app.state
+                .wake
+                .finish_main_work_after_settle(checkpoint, scene_changed)
+        );
+        assert_eq!(
+            app.state.wake.compositor().checkpoint(),
+            compositor_generation
+        );
+    }
+
+    /// Portal work deferred by a held scene lock must wait for the one
+    /// availability completion, not manufacture periodic retry wakes from its
+    /// already-due portal deadline.
+    #[test]
+    fn held_scene_lock_retries_portal_drain_only_after_availability() {
+        use std::time::{Duration, Instant};
+
+        let mut app = make_windowed_app_with_pending_portal_publish("proj-availability-wake");
+        let shared_state = Arc::clone(&app.state.shared_state);
+        let guard = shared_state
+            .try_lock()
+            .expect("shared scene must be free before inducing contention");
+        let compositor_before = app.state.wake.compositor().checkpoint();
+        let main_work_before = app.state.wake.main_work_generation();
+
+        let drain = app.drain_portal_projection();
+        assert_eq!(drain, PortalProjectionDrain::Deferred);
+        app.schedule_shared_scene_availability_wake();
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            app.state.wake.main_work_generation(),
+            main_work_before,
+            "held scene lock must cause zero periodic portal retry wakes"
+        );
+        assert_eq!(
+            app.state.wake.compositor().checkpoint(),
+            compositor_before,
+            "held scene lock must not create compositor retry work"
+        );
+
+        drop(guard);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while app.state.wake.main_work_generation() == main_work_before {
+            assert!(
+                Instant::now() < deadline,
+                "availability release must schedule the deferred portal drain"
+            );
+            std::thread::yield_now();
+        }
+
+        let drain = app.drain_portal_projection();
+        assert_eq!(
+            drain,
+            PortalProjectionDrain::Completed {
+                scene_changed: true
+            }
+        );
+        let checkpoint = app.state.wake.main_work_checkpoint();
+        assert!(app.state.wake.finish_main_work(checkpoint));
+        assert_eq!(
+            app.state.wake.compositor().checkpoint(),
+            compositor_before + 1,
+            "the release-driven portal drain owns exactly one compositor wake"
+        );
+    }
+
+    #[test]
+    fn main_only_portal_publish_drains_to_one_post_mutation_scene_wake() {
+        let mut app = make_windowed_app_with_pending_portal_publish("proj-scene-wake");
+        app.state.wake.main_work_notifier().notify();
+        let checkpoint = app.state.wake.main_work_checkpoint();
+        let compositor_generation = app.state.wake.compositor().checkpoint();
+        let (scene_version_before, tile_count_before) = {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let scene = shared.scene.try_lock().unwrap();
+            (scene.version, scene.tiles.len())
+        };
+
+        let drain = app.drain_portal_projection();
+        let scene_changed = drain.scene_changed();
+
+        assert!(scene_changed);
+        assert!(!drain.is_deferred());
+        {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let scene = shared.scene.try_lock().unwrap();
+            assert!(scene.version > scene_version_before);
+            assert!(scene.tiles.len() > tile_count_before);
+        }
+        assert!(
+            app.state
+                .wake
+                .finish_main_work_after_settle(checkpoint, scene_changed)
+        );
+        assert_eq!(
+            app.state.wake.compositor().checkpoint(),
+            compositor_generation + 1
+        );
+        let observed = app
+            .state
+            .wake
+            .compositor()
+            .wait(compositor_generation, None);
+        assert_eq!(
+            observed.source,
+            crate::idle_efficiency::RuntimeWakeupSource::SceneChange
+        );
+    }
+
+    #[test]
+    fn typed_portal_deadline_owns_the_single_post_mutation_wake() {
+        let mut app = make_windowed_app_with_pending_portal_publish("proj-typed-wake");
+        app.state
+            .wake
+            .mark_main_work_pending(crate::idle_efficiency::RuntimeWakeupSource::TtlDeadline);
+        let checkpoint = app.state.wake.main_work_checkpoint();
+        let compositor_generation = app.state.wake.compositor().checkpoint();
+
+        let drain = app.drain_portal_projection();
+        let scene_changed = drain.scene_changed();
+
+        assert!(scene_changed);
+        assert!(!drain.is_deferred());
+        assert!(
+            app.state
+                .wake
+                .finish_main_work_after_settle(checkpoint, scene_changed)
+        );
+        assert_eq!(
+            app.state.wake.compositor().checkpoint(),
+            compositor_generation + 1
+        );
+        let observed = app
+            .state
+            .wake
+            .compositor()
+            .wait(compositor_generation, None);
+        assert_eq!(
+            observed.source,
+            crate::idle_efficiency::RuntimeWakeupSource::TtlDeadline
+        );
+    }
+
+    #[test]
+    fn cancelled_wait_claims_a_deadline_crossed_before_settle_checkpoint() {
+        let mut scene = tze_hud_scene::SceneGraph::new(1920.0, 1080.0);
+        scene.create_tab("Main", 0).unwrap();
+        let (mut app, _rx) =
+            make_windowed_keyboard_test_app(scene, FocusManager::new(), InputProcessor::new());
+        let deadline_at = std::time::Instant::now() + std::time::Duration::from_millis(10);
+        app.state.scheduled_main_deadline = Some(crate::windowed::wake::Deadline::new(
+            deadline_at,
+            crate::idle_efficiency::RuntimeWakeupSource::TtlDeadline,
+        ));
+        let counters_before = app.state.wake.counters().snapshot();
+
+        assert!(
+            app.claim_due_scheduled_main_deadline(
+                deadline_at - std::time::Duration::from_millis(1)
+            )
+            .is_none(),
+            "a WaitCancelled turn just before T must leave the deadline scheduled"
+        );
+        assert!(
+            app.claim_due_scheduled_main_deadline(
+                deadline_at + std::time::Duration::from_millis(1)
+            )
+            .is_some()
+        );
+        assert_eq!(
+            app.state.wake.counters().snapshot().main_loop_wakeups,
+            counters_before.main_loop_wakeups,
+            "a deadline piggybacked on a cancelled wait must not count a second main wake"
+        );
+        let checkpoint = app.state.wake.main_work_checkpoint();
+        let compositor_generation = app.state.wake.compositor().checkpoint();
+        assert!(
+            app.state
+                .wake
+                .finish_main_work_after_settle(checkpoint, false)
+        );
+        assert_eq!(
+            app.state.wake.compositor().checkpoint(),
+            compositor_generation + 1
+        );
+        let observed = app
+            .state
+            .wake
+            .compositor()
+            .wait(compositor_generation, None);
+        assert_eq!(
+            observed.source,
+            crate::idle_efficiency::RuntimeWakeupSource::TtlDeadline
+        );
+        assert!(app.state.scheduled_main_deadline.is_none());
     }
 
     // ── Drag-to-move: long-press drag moves a text stream portal tile [hud-9yfce] ──
@@ -3525,7 +3830,10 @@ mod tests {
         app.state.paste_inject_rx = paste_inject_rx;
         paste_inject_tx.send("pasted text".to_string()).unwrap();
 
-        app.drain_paste_inject();
+        assert!(
+            app.drain_paste_inject(),
+            "a focused composer changed by pasted text must request render work after the drain"
+        );
 
         let shared = app.state.shared_state.try_lock().unwrap();
         let scene = shared.scene.try_lock().unwrap();
@@ -3533,6 +3841,58 @@ mod tests {
             scene.tile_follow_tail_at_tail(tile_id),
             "paste-injecting composer text must snap the input-pane history \
              back to the tail, matching the typing reset-to-tail path"
+        );
+    }
+
+    #[test]
+    fn paste_inject_without_a_focused_composer_does_not_request_render_work() {
+        let (mut app, _input_event_rx) = make_windowed_keyboard_test_app(
+            tze_hud_scene::graph::SceneGraph::new(1920.0, 1080.0),
+            FocusManager::new(),
+            InputProcessor::new(),
+        );
+        let (paste_inject_tx, paste_inject_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        app.state.paste_inject_rx = paste_inject_rx;
+        paste_inject_tx
+            .send("no focused composer".to_string())
+            .expect("test sender remains connected");
+
+        assert!(
+            !app.drain_paste_inject(),
+            "a queued paste that leaves the composer unchanged must not wake the compositor"
+        );
+    }
+
+    #[tokio::test]
+    async fn resident_bridge_ingress_wakes_main_without_speculative_render_work() {
+        use crate::resident_grpc_bridge::{ResidentBridgeInput, ResidentBridgeInputKind};
+
+        let wake = WindowedWake::disconnected();
+        let ingress_wake = wake.main_work_notifier();
+        let (main_input_tx, mut main_input_rx) = tokio::sync::mpsc::channel(1);
+        let input = ResidentBridgeInput {
+            projection_id: "bridged-projection".to_string(),
+            kind: ResidentBridgeInputKind::Submit {
+                text: "submit from resident bridge".to_string(),
+                sequence: 7,
+            },
+        };
+        let compositor_before = wake.compositor().checkpoint();
+
+        assert!(
+            forward_resident_bridge_input_to_main(input.clone(), &main_input_tx, &ingress_wake)
+                .await,
+            "a live main-thread receiver must accept bridged input"
+        );
+        assert_eq!(
+            main_input_rx.recv().await,
+            Some(input),
+            "the bridge ingress must reach the main-thread authority queue"
+        );
+        assert_eq!(
+            wake.compositor().checkpoint(),
+            compositor_before,
+            "queueing bridge ingress is not render work before the authority drain mutates scene state"
         );
     }
 

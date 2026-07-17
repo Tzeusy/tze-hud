@@ -152,6 +152,15 @@ pub fn tick_hover_trackers(
     out
 }
 
+/// Earliest delayed-hover transition that still needs to become visible.
+pub fn next_hover_deadline(trackers: &HashMap<String, WidgetHoverTracker>) -> Option<Instant> {
+    trackers
+        .values()
+        .filter(|tracker| !tracker.currently_visible)
+        .filter_map(|tracker| tracker.hover_started_at.map(|at| at + tracker.delay))
+        .min()
+}
+
 fn resolve_widget_geometry(
     instance: &WidgetInstance,
     definition: &WidgetDefinition,
@@ -292,11 +301,17 @@ mod tests {
         let t0 = Instant::now();
         let first = tick_hover_trackers(&mut trackers, 15.0, 15.0, t0);
         assert!(first.is_empty(), "no mutation before dwell delay");
+        assert_eq!(
+            next_hover_deadline(&trackers),
+            Some(t0 + Duration::from_millis(3000)),
+            "the scheduler must wake exactly at the delayed-hover boundary"
+        );
 
         let second =
             tick_hover_trackers(&mut trackers, 15.0, 15.0, t0 + Duration::from_millis(3001));
         assert_eq!(second.len(), 1, "must reveal after dwell threshold");
         assert_eq!(second[0].value, 1.0);
+        assert_eq!(next_hover_deadline(&trackers), None);
 
         let third = tick_hover_trackers(
             &mut trackers,

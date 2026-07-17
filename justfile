@@ -14,6 +14,7 @@
 #   just canonical-app-boot # canonical app production config boot
 #   just vocabulary-lint    # canonical vocabulary check
 #   just dev-mode-guard     # verify dev-mode is not in release default features
+#   just idle-efficiency-checker # fail-closed idle artifact contract tests
 #   just ci        # full CI gate (all jobs in dependency order, excluding GPU/Windows-only)
 #
 # GPU / pixel-readback tests (test-gpu-pixel-readback in CI) are intentionally
@@ -59,6 +60,12 @@ test:
             --workspace \
             --all-targets \
             --exclude integration
+
+# Pure-Python contract tests for the versioned idle artifact gate and its
+# startup-atomic Windows launcher.
+idle-efficiency-checker:
+    python3 scripts/ci/test_check_idle_efficiency.py
+    python3 scripts/ci/test_run_quiescent_efficiency_script.py
 
 # Integration headless suites (mirror CI test-integration job)
 # Excludes: trace_regression, v1_thesis (own jobs), soak (wall-clock, opt-in via TZE_HUD_SOAK_SECS).
@@ -132,4 +139,4 @@ dev-mode-guard:
 # Run all CI gates that are feasible locally (excludes Windows perf budget and
 # GPU pixel-readback, which need specific hardware or Mesa llvmpipe + GPU).
 # Runs in the same logical order as CI: fast-fail gates first, then tests.
-ci: check fmt clippy vocabulary-lint dev-mode-guard test test-integration test-trace test-v1-thesis production-boot canonical-app-boot
+ci: check fmt clippy vocabulary-lint dev-mode-guard idle-efficiency-checker test test-integration test-trace test-v1-thesis production-boot canonical-app-boot

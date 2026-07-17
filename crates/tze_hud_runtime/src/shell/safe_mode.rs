@@ -119,6 +119,11 @@ pub struct SafeModeEntryResult {
 /// Result of a safe mode exit operation.
 #[derive(Debug)]
 pub struct SafeModeExitResult {
+    /// Whether this call transitioned safe mode from active to inactive.
+    ///
+    /// An idempotent exit has no compositor-visible effect, so callers use
+    /// this to avoid scheduling render work for a no-op keyboard signal.
+    pub exited: bool,
     /// Number of leases that were resumed.
     pub leases_resumed: usize,
     /// TTL adjustments for each resumed lease (for `LeaseResume` messages).
@@ -456,6 +461,7 @@ impl SafeModeController {
         };
         if !shared_active {
             return SafeModeExitResult {
+                exited: false,
                 leases_resumed: 0,
                 lease_resumes: Vec::new(),
                 sessions_notified: 0,
@@ -590,6 +596,7 @@ impl SafeModeController {
         });
 
         SafeModeExitResult {
+            exited: true,
             leases_resumed,
             lease_resumes,
             sessions_notified,
@@ -712,6 +719,7 @@ mod tests {
             degradation_level: RuntimeDegradationLevel::Normal,
             media_ingress_active: None,
             input_capture_tx: None,
+            input_capture_wake: tze_hud_scene::render_wake::RenderWakeNotifier::default(),
             resolved_portal_tokens: std::collections::HashMap::new(),
         }))
     }
@@ -925,6 +933,10 @@ mod tests {
         let result = ctrl.exit_safe_mode().await;
 
         assert!(
+            result.exited,
+            "an active safe-mode exit must transition state"
+        );
+        assert!(
             !ctrl.is_safe_mode_active(),
             "safe mode must be inactive after exit"
         );
@@ -1124,6 +1136,7 @@ mod tests {
         let mut ctrl = make_controller();
 
         let result = ctrl.exit_safe_mode().await;
+        assert!(!result.exited, "an inactive safe-mode exit must be a no-op");
         assert_eq!(result.leases_resumed, 0, "exit when not active is a no-op");
         assert!(!ctrl.is_safe_mode_active());
     }

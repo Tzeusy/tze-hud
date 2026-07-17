@@ -106,6 +106,27 @@ pub async fn start_mcp_http_server(
     paste_inject_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     portal_op_tx: Option<tokio::sync::mpsc::UnboundedSender<tze_hud_mcp::portal_op::PortalOp>>,
 ) -> std::io::Result<(tokio::task::JoinHandle<()>, SocketAddr)> {
+    start_mcp_http_server_with_render_wake(
+        scene,
+        config,
+        shutdown,
+        paste_inject_tx,
+        portal_op_tx,
+        tze_hud_scene::render_wake::RenderWakeNotifier::default(),
+        tze_hud_scene::render_wake::RenderWakeNotifier::default(),
+    )
+    .await
+}
+
+pub async fn start_mcp_http_server_with_render_wake(
+    scene: Arc<Mutex<SceneGraph>>,
+    config: McpServerConfig,
+    shutdown: ShutdownToken,
+    paste_inject_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    portal_op_tx: Option<tokio::sync::mpsc::UnboundedSender<tze_hud_mcp::portal_op::PortalOp>>,
+    render_wake: tze_hud_scene::render_wake::RenderWakeNotifier,
+    portal_ingress_wake: tze_hud_scene::render_wake::RenderWakeNotifier,
+) -> std::io::Result<(tokio::task::JoinHandle<()>, SocketAddr)> {
     let listener = TcpListener::bind(config.bind_addr).await?;
     let local_addr = listener.local_addr()?;
 
@@ -114,9 +135,13 @@ pub async fn start_mcp_http_server(
         "MCP HTTP listener bound"
     );
 
-    let mut server_builder = McpServer::with_shared_scene(scene).with_config(
-        McpConfig::with_psk(&config.psk).with_resident_principal(config.resident_principal.clone()),
-    );
+    let mut server_builder = McpServer::with_shared_scene(scene)
+        .with_config(
+            McpConfig::with_psk(&config.psk)
+                .with_resident_principal(config.resident_principal.clone()),
+        )
+        .with_render_wake_notifier(render_wake)
+        .with_portal_ingress_wake_notifier(portal_ingress_wake);
     if let Some(tx) = paste_inject_tx {
         server_builder = server_builder.with_paste_inject_tx(tx);
     }

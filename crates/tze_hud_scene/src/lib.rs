@@ -14,6 +14,7 @@ pub mod element_store;
 pub mod graph;
 pub mod invariants;
 pub mod mutation;
+pub mod render_wake;
 pub mod replay;
 pub mod svg_tokens;
 pub mod test_scenes;

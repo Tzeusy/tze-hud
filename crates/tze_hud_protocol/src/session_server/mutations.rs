@@ -567,6 +567,7 @@ pub(super) async fn handle_mutation_batch(
     session: &mut StreamSession,
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     batch: MutationBatch,
+    render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
 ) {
     // ── Step 1: Safe mode check (RFC 0005 §3.7) ─────────────────────────────
     // Reject MutationBatch when safe mode is active.
@@ -1172,6 +1173,7 @@ pub(super) async fn handle_mutation_batch(
 
         // Drop lock before awaiting send to avoid holding mutex across await point.
         drop(st);
+        render_wake.notify();
         persist_element_store(persist_request).await;
         let _ = tx
             .send(Ok(ServerMessage {
@@ -1238,12 +1240,12 @@ pub(super) async fn apply_queued_batch_to_scene(
     state: &Arc<Mutex<SharedState>>,
     session: &mut StreamSession,
     batch: MutationBatch,
-) {
+) -> bool {
     let mut st = state.lock().await;
 
     let lease_id = match bytes_to_scene_id(&batch.lease_id) {
         Ok(id) => id,
-        Err(_) => return, // invalid lease_id — silently skip (already acked)
+        Err(_) => return false, // invalid lease_id — silently skip (already acked)
     };
 
     // Read both active_tab and display_area from the scene in a single lock
@@ -1254,7 +1256,7 @@ pub(super) async fn apply_queued_batch_to_scene(
     };
     let tab_id = match active_tab_opt {
         Some(id) => id,
-        None => return, // no active tab — skip silently
+        None => return false, // no active tab — skip silently
     };
 
     // Convert proto mutations to scene mutations (single canonical path shared
@@ -1275,7 +1277,7 @@ pub(super) async fn apply_queued_batch_to_scene(
                 error_message,
                 "queued mutation batch skipped due to conversion error after enqueue"
             );
-            return;
+            return false;
         }
     };
     let ConvertedBatch {
@@ -1310,7 +1312,7 @@ pub(super) async fn apply_queued_batch_to_scene(
                 namespace = session.namespace,
                 "queued mutation batch skipped by runtime budget admission"
             );
-            return;
+            return false;
         }
     }
 
@@ -1368,6 +1370,9 @@ pub(super) async fn apply_queued_batch_to_scene(
         }
         drop(st);
         persist_element_store(persist_request).await;
+        true
+    } else {
+        false
     }
 }
 

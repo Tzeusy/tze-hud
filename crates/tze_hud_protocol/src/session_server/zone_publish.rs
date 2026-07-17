@@ -36,7 +36,8 @@ pub(super) async fn handle_zone_publish(
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     request_sequence: u64,
     publish: ZonePublish,
-) {
+    render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
+) -> bool {
     // Apply the zone publish through the scene graph mutation path.
     // Also determine zone durability (ephemeral vs durable) for ack decision.
     let (accepted, error_code, error_message, is_ephemeral_zone, persist_request) = {
@@ -204,6 +205,9 @@ pub(super) async fn handle_zone_publish(
         }
     };
 
+    if accepted {
+        render_wake.notify();
+    }
     persist_element_store(persist_request).await;
 
     // Durable zones: send ZonePublishResult (transactional ack).
@@ -225,4 +229,5 @@ pub(super) async fn handle_zone_publish(
             .await;
     }
     // Ephemeral zone: no ack sent (fire-and-forget per RFC 0005 §8.6), success or failure
+    accepted
 }

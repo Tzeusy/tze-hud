@@ -43,6 +43,20 @@ pub struct WindowedFrameBuild {
     frame_start: std::time::Instant,
 }
 
+/// Exact GPU-operation outcome for one windowed present attempt.
+///
+/// These booleans are independent of the aggregate stage-success sentinel in
+/// [`FrameTelemetry`]: an acquisition or queue submission remains an actual
+/// operation even when a later operation in the stage fails.
+pub struct WindowedPresentOutcome {
+    pub telemetry: FrameTelemetry,
+    /// True only when this build acquired a new surface texture. Reusing a
+    /// pending texture before main-thread presentation is render work, not a
+    /// second surface acquisition.
+    pub surface_acquired: bool,
+    pub gpu_submitted: bool,
+}
+
 #[cfg(test)]
 impl WindowedFrameBuild {
     /// Total flat-rect vertices built this frame (test / diagnostic accessor).
@@ -608,6 +622,17 @@ impl Compositor {
         build: WindowedFrameBuild,
         surface: &dyn CompositorSurface,
     ) -> FrameTelemetry {
+        self.present_windowed_frame_with_outcome(build, surface)
+            .telemetry
+    }
+
+    /// Present a frame and report each completed GPU-facing operation
+    /// independently for runtime efficiency accounting.
+    pub fn present_windowed_frame_with_outcome(
+        &mut self,
+        build: WindowedFrameBuild,
+        surface: &dyn CompositorSurface,
+    ) -> WindowedPresentOutcome {
         let WindowedFrameBuild {
             mut telemetry,
             surf_w,
@@ -638,9 +663,14 @@ impl Compositor {
                 // Surface unavailable: skip render pass, return zeroed telemetry.
                 // The runtime will retry on the next frame cycle.
                 telemetry.frame_time_us = frame_start.elapsed().as_micros() as u64;
-                return telemetry;
+                return WindowedPresentOutcome {
+                    telemetry,
+                    surface_acquired: false,
+                    gpu_submitted: false,
+                };
             }
         };
+        let surface_acquired = frame.acquisition.is_fresh();
 
         let (mut encoder, encode_us) = self.encode_from_inputs(
             &vertices,
@@ -691,13 +721,18 @@ impl Compositor {
         // (FrameReadySignal never fires again). Contain it here so the thread survives;
         // the next acquire_frame() reacquires/reconfigures the surface. The underlying
         // acquire->submit-vs-reconfigure race is the separate Layer-2 fix.
-        let present_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let submit_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.queue.submit(std::iter::once(cmd));
-            // present(): no-op for headless, swap-chain flip for windowed. `frame`
-            // (the surface-texture guard) is still alive here; dropped just below.
-            surface.present();
-            self.device.poll(wgpu::Maintain::Wait);
         }));
+        let gpu_submitted = submit_result.is_ok();
+        let present_result = submit_result.and_then(|_| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // present(): no-op for headless, swap-chain flip for windowed. `frame`
+                // (the surface-texture guard) is still alive here; dropped just below.
+                surface.present();
+                self.device.poll(wgpu::Maintain::Wait);
+            }))
+        });
         drop(frame);
         telemetry.stage7_gpu_submit_us = submit_start.elapsed().as_micros().max(1) as u64;
 
@@ -711,14 +746,22 @@ impl Compositor {
             // runtime must not signal or benchmark-count a failed submission.
             telemetry.stage7_gpu_submit_us = 0;
             telemetry.frame_time_us = frame_start.elapsed().as_micros() as u64;
-            return telemetry;
+            return WindowedPresentOutcome {
+                telemetry,
+                surface_acquired,
+                gpu_submitted,
+            };
         }
 
         // Evict terminal video surface entries periodically to prevent unbounded growth.
         self.maybe_prune_terminal_video_surfaces();
 
         telemetry.frame_time_us = frame_start.elapsed().as_micros() as u64;
-        telemetry
+        WindowedPresentOutcome {
+            telemetry,
+            surface_acquired,
+            gpu_submitted,
+        }
     }
 
     /// Render one frame of the scene to the surface (single-lock convenience).

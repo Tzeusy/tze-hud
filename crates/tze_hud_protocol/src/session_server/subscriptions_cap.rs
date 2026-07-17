@@ -192,6 +192,7 @@ pub(super) async fn handle_capability_revocation(
     session: &mut StreamSession,
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     event: CapabilityRevocationEvent,
+    render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
 ) {
     if event.capability_name == "media_ingress" {
         session.capabilities.retain(|c| c != &event.capability_name);
@@ -232,10 +233,13 @@ pub(super) async fn handle_capability_revocation(
             state,
             session,
             tx,
-            MediaCloseReason::CapabilityRevoked as i32,
-            "media_ingress capability revoked",
-            MediaSessionState::Revoked as i32,
-            None,
+            MediaIngressCloseDisposition {
+                reason: MediaCloseReason::CapabilityRevoked as i32,
+                detail: "media_ingress capability revoked".to_string(),
+                final_state: MediaSessionState::Revoked as i32,
+                retry_after_us: None,
+            },
+            render_wake,
         )
         .await;
         return;
