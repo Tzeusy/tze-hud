@@ -39,26 +39,55 @@ impl From<LeaseExpiry> for LeaseExpiryNotice {
 /// Each subscriber has a dedicated unbounded queue. Terminal lease transitions
 /// are rare and cannot be dropped or coalesced; a slow session queues events
 /// on its own lane rather than stalling the compositor while it holds a
-/// scene-derived result.
+/// scene-derived result. Dropping the receiver unregisters that lane promptly,
+/// so failed handshakes and disconnected sessions do not remain in fan-out.
 #[derive(Clone, Default)]
 pub struct LeaseExpirySender {
-    subscribers: Arc<Mutex<Vec<tokio::sync::mpsc::UnboundedSender<LeaseExpiryNotice>>>>,
+    subscribers: Arc<Mutex<LeaseExpirySubscribers>>,
 }
 
 pub struct LeaseExpiryReceiver {
     rx: tokio::sync::mpsc::UnboundedReceiver<LeaseExpiryNotice>,
+    subscriber_id: u64,
+    subscribers: Arc<Mutex<LeaseExpirySubscribers>>,
+}
+
+#[derive(Default)]
+struct LeaseExpirySubscribers {
+    next_id: u64,
+    senders: Vec<LeaseExpirySubscriber>,
+}
+
+struct LeaseExpirySubscriber {
+    id: u64,
+    tx: tokio::sync::mpsc::UnboundedSender<LeaseExpiryNotice>,
 }
 
 impl LeaseExpirySender {
     /// Subscribe before or during a connected session. The session handler
     /// filters notices by its owned lease ids before emitting them on the wire.
+    /// Dropping the returned receiver unregisters it without requiring a later
+    /// terminal transition.
     pub fn subscribe(&self) -> LeaseExpiryReceiver {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        self.subscribers
+        let mut subscribers = self
+            .subscribers
             .lock()
-            .expect("lease-expiry subscriber registry poisoned")
-            .push(tx);
-        LeaseExpiryReceiver { rx }
+            .expect("lease-expiry subscriber registry poisoned");
+        let subscriber_id = subscribers.next_id;
+        subscribers.next_id = subscribers
+            .next_id
+            .checked_add(1)
+            .expect("lease-expiry subscriber id space exhausted");
+        subscribers.senders.push(LeaseExpirySubscriber {
+            id: subscriber_id,
+            tx,
+        });
+        LeaseExpiryReceiver {
+            rx,
+            subscriber_id,
+            subscribers: Arc::clone(&self.subscribers),
+        }
     }
 
     /// Publish one terminal transition and return the number of live handlers
@@ -70,8 +99,8 @@ impl LeaseExpirySender {
             .lock()
             .expect("lease-expiry subscriber registry poisoned");
         let mut delivered = 0;
-        subscribers.retain(|tx| {
-            if tx.send(notice.clone()).is_ok() {
+        subscribers.senders.retain(|subscriber| {
+            if subscriber.tx.send(notice.clone()).is_ok() {
                 delivered += 1;
                 true
             } else {
@@ -85,6 +114,16 @@ impl LeaseExpirySender {
 impl LeaseExpiryReceiver {
     pub async fn recv(&mut self) -> Option<LeaseExpiryNotice> {
         self.rx.recv().await
+    }
+}
+
+impl Drop for LeaseExpiryReceiver {
+    fn drop(&mut self) {
+        if let Ok(mut subscribers) = self.subscribers.lock() {
+            subscribers
+                .senders
+                .retain(|subscriber| subscriber.id != self.subscriber_id);
+        }
     }
 }
 
@@ -112,5 +151,41 @@ mod tests {
         assert_eq!(sender.publish(second.clone()), 1);
         assert_eq!(receiver.recv().await, Some(first));
         assert_eq!(receiver.recv().await, Some(second));
+    }
+
+    #[test]
+    fn dropped_receiver_unregisters_without_waiting_for_an_expiry() {
+        let sender = LeaseExpirySender::default();
+        let baseline = sender
+            .subscribers
+            .lock()
+            .expect("lease-expiry subscriber registry poisoned")
+            .senders
+            .len();
+
+        let receiver = sender.subscribe();
+        assert_eq!(
+            sender
+                .subscribers
+                .lock()
+                .expect("lease-expiry subscriber registry poisoned")
+                .senders
+                .len(),
+            baseline + 1,
+            "a live receiver must be registered"
+        );
+
+        drop(receiver);
+
+        assert_eq!(
+            sender
+                .subscribers
+                .lock()
+                .expect("lease-expiry subscriber registry poisoned")
+                .senders
+                .len(),
+            baseline,
+            "a dropped receiver must unregister without waiting for an unrelated expiry"
+        );
     }
 }
