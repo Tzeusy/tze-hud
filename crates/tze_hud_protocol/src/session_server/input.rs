@@ -226,12 +226,13 @@ pub(super) async fn handle_input_capture_release(
     }
 
     let now_us = now_wall_us();
+    let timestamp_mono_us = now_mono_us().max(1);
     let seq = session.next_server_seq();
 
     let capture_released = CaptureReleasedEvent {
         tile_id: rel.tile_id.clone(),
         node_id: Vec::new(),
-        timestamp_mono_us: 0, // no monotonic clock available; leave unset (v1)
+        timestamp_mono_us,
         device_id: rel.device_kind.clone(),
         reason: CaptureReleasedReason::AgentReleased as i32,
     };
