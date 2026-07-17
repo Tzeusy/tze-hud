@@ -1958,6 +1958,8 @@ pub struct ClearWidgetResult {
     pub widget_name: String,
     /// True — the operation always succeeds or returns an error.
     pub cleared: bool,
+    /// Whether the caller owned an active publication that was removed.
+    pub changed: bool,
 }
 
 /// Clear all publications by the calling agent on the specified widget instance.
@@ -2006,6 +2008,7 @@ pub fn handle_clear_widget(
     }
 
     // ── Delegate to scene graph ───────────────────────────────────────────────
+    let scene_version_before = scene.version;
     scene
         .clear_widget_for_publisher(resolved_name, &p.namespace)
         .map_err(|e| {
@@ -2021,6 +2024,7 @@ pub fn handle_clear_widget(
     Ok(ClearWidgetResult {
         widget_name: resolved_name.to_string(),
         cleared: true,
+        changed: scene.version != scene_version_before,
     })
 }
 
@@ -4613,6 +4617,7 @@ mod tests {
         .unwrap();
         assert_eq!(result.widget_name, "gauge");
         assert!(result.cleared);
+        assert!(result.changed);
         assert_eq!(
             scene.widget_registry.active_for_widget("gauge").len(),
             0,
@@ -4676,6 +4681,7 @@ mod tests {
         )
         .unwrap();
         assert!(result.cleared);
+        assert!(!result.changed);
     }
 
     // ── register_widget_asset ────────────────────────────────────────────────

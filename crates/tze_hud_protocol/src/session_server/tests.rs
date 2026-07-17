@@ -131,6 +131,213 @@ async fn setup_test() -> (
     (client, handle)
 }
 
+fn direct_handler_test_session(namespace: &str, capabilities: Vec<String>) -> StreamSession {
+    StreamSession {
+        session_id: format!("{namespace}-direct-handler"),
+        namespace: namespace.to_string(),
+        agent_name: namespace.to_string(),
+        policy_capabilities: capabilities.clone(),
+        capabilities,
+        lease_ids: Vec::new(),
+        scene_session_id: SceneId::new(),
+        resource_budget: ResourceBudget::default(),
+        budget_enforcer: None,
+        subscriptions: Vec::new(),
+        subscription_filters: std::collections::HashMap::new(),
+        server_sequence: 0,
+        resume_token: Vec::new(),
+        last_heartbeat_ms: 0,
+        state: SessionState::Active,
+        last_client_sequence: 1,
+        safe_mode_active: false,
+        expect_resume: false,
+        agent_event_rate_limiter: AgentEventRateLimiter::new(),
+        freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
+        session_open_at_wall_us: now_wall_us(),
+        dedup_window: DedupWindow::new(1000, 60),
+        lease_correlation_cache: LeaseCorrelationCache::new(
+            DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
+        ),
+        resource_upload_rate_limiter: UploadByteRateLimiter::with_limit(
+            tze_hud_resource::DEFAULT_UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
+        ),
+        media_ingress: None,
+        next_media_stream_epoch: 1,
+    }
+}
+
+#[tokio::test]
+async fn successful_lease_grant_wakes_before_capacity_one_response_send() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let service = HudSessionImpl::new(SceneGraph::new(800.0, 600.0), "test-key");
+    let state = Arc::clone(&service.state);
+    let mut session =
+        direct_handler_test_session("lease-wake-ordering", vec!["create_tiles".to_string()]);
+    let (outbound_tx, mut outbound_rx) =
+        tokio::sync::mpsc::channel::<Result<ServerMessage, Status>>(1);
+    outbound_tx
+        .send(Ok(ServerMessage::default()))
+        .await
+        .expect("fill the sole outbound response slot");
+
+    let wakes = Arc::new(AtomicU64::new(0));
+    let callback_wakes = Arc::clone(&wakes);
+    let render_wake = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+        callback_wakes.fetch_add(1, Ordering::AcqRel);
+    });
+    let grant = handle_lease_request(
+        &state,
+        &mut session,
+        &outbound_tx,
+        2,
+        LeaseRequest {
+            ttl_ms: 60_000,
+            capabilities: vec!["create_tiles".to_string()],
+            lease_priority: 2,
+        },
+        &render_wake,
+    );
+    tokio::pin!(grant);
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut grant)
+            .await
+            .is_err(),
+        "the full capacity-one response channel must block the successful LeaseResponse"
+    );
+    assert_eq!(
+        wakes.load(Ordering::Acquire),
+        1,
+        "the granted lease must publish its render wake before its blocked response send"
+    );
+
+    let _blocker = outbound_rx
+        .recv()
+        .await
+        .expect("the prefilled response slot remains readable");
+    let response = tokio::select! {
+        response = outbound_rx.recv() => {
+            let response = response
+                .expect("LeaseResponse sender remains connected")
+                .expect("LeaseResponse must be Ok");
+            assert!(
+                (&mut grant).await,
+                "handler should complete after its transactional state-change send"
+            );
+            response
+        }
+        completed = &mut grant => {
+            assert!(
+                completed,
+                "handler should report the successful lease state transition"
+            );
+            outbound_rx
+                .recv()
+                .await
+                .expect("LeaseResponse must be enqueued before handler completion")
+                .expect("LeaseResponse must be Ok")
+        }
+    };
+    assert!(matches!(
+        response.payload,
+        Some(ServerPayload::LeaseResponse(LeaseResponse {
+            granted: true,
+            ..
+        }))
+    ));
+}
+
+#[tokio::test]
+async fn successful_mutation_apply_wakes_before_capacity_one_response_send() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let namespace = "mutation-wake-ordering";
+    let mut scene = SceneGraph::new(800.0, 600.0);
+    let tab_id = scene.create_tab("Main", 0).expect("create active tab");
+    let lease_id = scene.grant_lease(
+        namespace,
+        60_000,
+        vec![tze_hud_scene::Capability::CreateTiles],
+    );
+    let service = HudSessionImpl::new(scene, "test-key");
+    let state = Arc::clone(&service.state);
+    let mut session = direct_handler_test_session(namespace, vec!["create_tiles".to_string()]);
+    session.lease_ids.push(lease_id);
+    let (outbound_tx, mut outbound_rx) =
+        tokio::sync::mpsc::channel::<Result<ServerMessage, Status>>(1);
+    outbound_tx
+        .send(Ok(ServerMessage::default()))
+        .await
+        .expect("fill the sole outbound response slot");
+
+    let wakes = Arc::new(AtomicU64::new(0));
+    let callback_wakes = Arc::clone(&wakes);
+    let render_wake = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+        callback_wakes.fetch_add(1, Ordering::AcqRel);
+    });
+    let batch = MutationBatch {
+        batch_id: uuid::Uuid::now_v7().as_bytes().to_vec(),
+        lease_id: scene_id_to_bytes(lease_id),
+        mutations: vec![crate::proto::MutationProto {
+            mutation: Some(crate::proto::mutation_proto::Mutation::CreateTile(
+                crate::proto::CreateTileMutation {
+                    tab_id: scene_id_to_bytes(tab_id),
+                    bounds: Some(crate::proto::Rect {
+                        x: 10.0,
+                        y: 20.0,
+                        width: 200.0,
+                        height: 150.0,
+                    }),
+                    z_order: 1,
+                },
+            )),
+        }],
+        timing: None,
+    };
+    let apply = handle_mutation_batch(&state, &mut session, &outbound_tx, batch, &render_wake);
+    tokio::pin!(apply);
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut apply)
+            .await
+            .is_err(),
+        "the full capacity-one response channel must block MutationResult after apply"
+    );
+    assert_eq!(
+        wakes.load(Ordering::Acquire),
+        1,
+        "the applied mutation must publish its render wake before its blocked result send"
+    );
+    {
+        let shared = state.lock().await;
+        let scene = shared.scene.lock().await;
+        assert_eq!(
+            scene.tiles.len(),
+            1,
+            "the scene mutation must already be visible while its result remains blocked"
+        );
+    }
+
+    let _blocker = outbound_rx
+        .recv()
+        .await
+        .expect("the prefilled response slot remains readable");
+    (&mut apply).await;
+    let response = outbound_rx
+        .recv()
+        .await
+        .expect("MutationResult must be sent")
+        .expect("MutationResult must be Ok");
+    assert!(matches!(
+        response.payload,
+        Some(ServerPayload::MutationResult(MutationResult {
+            accepted: true,
+            ..
+        }))
+    ));
+}
+
 /// Start a test server with explicit agent capability policy settings.
 async fn setup_test_with_policy(
     agent_capabilities: HashMap<String, Vec<String>>,
@@ -210,6 +417,23 @@ async fn setup_media_ingress_test(
     tokio::task::JoinHandle<()>,
     tokio::sync::broadcast::Sender<CapabilityRevocationEvent>,
 ) {
+    let (client, handle, revocation_tx, _state) = setup_media_ingress_test_with_render_wake(
+        media_config,
+        tze_hud_scene::render_wake::RenderWakeNotifier::default(),
+    )
+    .await;
+    (client, handle, revocation_tx)
+}
+
+async fn setup_media_ingress_test_with_render_wake(
+    media_config: tze_hud_scene::config::MediaIngressConfig,
+    render_wake: tze_hud_scene::render_wake::RenderWakeNotifier,
+) -> (
+    HudSessionClient<tonic::transport::Channel>,
+    tokio::task::JoinHandle<()>,
+    tokio::sync::broadcast::Sender<CapabilityRevocationEvent>,
+    Arc<Mutex<SharedState>>,
+) {
     let mut scene = SceneGraph::new(800.0, 600.0);
     register_media_pip_zone(&mut scene);
     let base = HudSessionImpl::new(scene, "test-key");
@@ -228,8 +452,10 @@ async fn setup_media_ingress_test(
         caps,
         false,
         media_config,
-    );
+    )
+    .with_render_wake_notifier(render_wake);
     let revocation_tx = service.capability_revocation_tx.clone();
+    let shared_state = Arc::clone(&service.state);
 
     let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -244,10 +470,12 @@ async fn setup_media_ingress_test(
     });
 
     let client = connect_test_client_with_retry(addr.port()).await;
-    (client, handle, revocation_tx)
+    (client, handle, revocation_tx, shared_state)
 }
 
-async fn setup_test_with_input_capture_channel() -> (
+async fn setup_test_with_input_capture_channel(
+    input_capture_wake: tze_hud_scene::render_wake::RenderWakeNotifier,
+) -> (
     HudSessionClient<tonic::transport::Channel>,
     tokio::task::JoinHandle<()>,
     tokio::sync::mpsc::UnboundedReceiver<crate::session::InputCaptureCommand>,
@@ -297,6 +525,7 @@ async fn setup_test_with_input_capture_channel() -> (
     {
         let mut st = service.state.lock().await;
         st.input_capture_tx = Some(capture_tx);
+        st.input_capture_wake = input_capture_wake;
     }
 
     let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
@@ -1091,6 +1320,145 @@ async fn media_ingress_close_and_capability_revoke_emit_state_and_notice() {
 }
 
 #[tokio::test]
+async fn media_ingress_close_wakes_once_on_success_and_never_on_rejection() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let generations = Arc::new(AtomicU64::new(0));
+    let callback_generations = Arc::clone(&generations);
+    let notifier = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+        callback_generations.fetch_add(1, Ordering::AcqRel);
+    });
+    let (mut client, _server, _revocation_tx, _shared_state) =
+        setup_media_ingress_test_with_render_wake(media_ingress_config(true), notifier).await;
+    let (tx, mut stream) = media_handshake(
+        &mut client,
+        "media-agent",
+        vec![
+            "media_ingress".to_string(),
+            "publish_zone:media-pip".to_string(),
+        ],
+    )
+    .await;
+    tx.send(ClientMessage {
+        sequence: 2,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(ClientPayload::MediaIngressOpen(valid_media_open(
+            "media-pip",
+        ))),
+    })
+    .await
+    .unwrap();
+    let stream_epoch = match next_non_state_change(&mut stream).await.payload {
+        Some(ServerPayload::MediaIngressOpenResult(result)) => result.stream_epoch,
+        other => panic!("expected open result, got {other:?}"),
+    };
+    let _admitted = next_non_state_change(&mut stream).await;
+    let before_close = generations.load(Ordering::Acquire);
+
+    tx.send(ClientMessage {
+        sequence: 3,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(ClientPayload::MediaIngressClose(MediaIngressClose {
+            stream_epoch,
+            reason: "done".to_string(),
+        })),
+    })
+    .await
+    .unwrap();
+    let _closed = next_non_state_change(&mut stream).await;
+    let _notice = next_non_state_change(&mut stream).await;
+    assert_eq!(
+        generations.load(Ordering::Acquire),
+        before_close + 1,
+        "successful close must publish exactly one post-clear wake"
+    );
+
+    let before_rejected_close = generations.load(Ordering::Acquire);
+    tx.send(ClientMessage {
+        sequence: 4,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(ClientPayload::MediaIngressClose(MediaIngressClose {
+            stream_epoch,
+            reason: "duplicate".to_string(),
+        })),
+    })
+    .await
+    .unwrap();
+    let rejected = next_non_state_change(&mut stream).await;
+    assert!(matches!(
+        rejected.payload,
+        Some(ServerPayload::RuntimeError(_))
+    ));
+    assert_eq!(
+        generations.load(Ordering::Acquire),
+        before_rejected_close,
+        "rejected/no-op close must not wake the compositor"
+    );
+}
+
+#[tokio::test]
+async fn media_ingress_close_without_a_remaining_publication_does_not_wake() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let generations = Arc::new(AtomicU64::new(0));
+    let callback_generations = Arc::clone(&generations);
+    let notifier = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+        callback_generations.fetch_add(1, Ordering::AcqRel);
+    });
+    let (mut client, _server, _revocation_tx, shared_state) =
+        setup_media_ingress_test_with_render_wake(media_ingress_config(true), notifier).await;
+    let (tx, mut stream) = media_handshake(
+        &mut client,
+        "media-agent",
+        vec![
+            "media_ingress".to_string(),
+            "publish_zone:media-pip".to_string(),
+        ],
+    )
+    .await;
+    tx.send(ClientMessage {
+        sequence: 2,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(ClientPayload::MediaIngressOpen(valid_media_open(
+            "media-pip",
+        ))),
+    })
+    .await
+    .unwrap();
+    let stream_epoch = match next_non_state_change(&mut stream).await.payload {
+        Some(ServerPayload::MediaIngressOpenResult(result)) => result.stream_epoch,
+        other => panic!("expected open result, got {other:?}"),
+    };
+    let _admitted = next_non_state_change(&mut stream).await;
+    {
+        let state = shared_state.lock().await;
+        let mut scene = state.scene.lock().await;
+        scene
+            .clear_zone_for_publisher("media-pip", "media-agent")
+            .unwrap();
+    }
+    let before_close = generations.load(Ordering::Acquire);
+
+    tx.send(ClientMessage {
+        sequence: 3,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(ClientPayload::MediaIngressClose(MediaIngressClose {
+            stream_epoch,
+            reason: "already cleared".to_string(),
+        })),
+    })
+    .await
+    .unwrap();
+    let _closed = next_non_state_change(&mut stream).await;
+    let _notice = next_non_state_change(&mut stream).await;
+    assert_eq!(
+        generations.load(Ordering::Acquire),
+        before_close,
+        "successful close of an already-cleared publication is not render work"
+    );
+}
+
+#[tokio::test]
 async fn media_ingress_limit_is_global_and_disconnect_releases_slot() {
     let (mut client, _server, _revocation_tx) =
         setup_media_ingress_test(media_ingress_config(true)).await;
@@ -1233,6 +1601,114 @@ async fn media_ingress_session_disconnect_yields_session_disconnected_reason() {
         close_notice.reason,
         MediaCloseReason::SessionDisconnected as i32,
         "session disconnect must yield SESSION_DISCONNECTED, not AGENT_CLOSED"
+    );
+}
+
+#[tokio::test]
+async fn media_disconnect_cleanup_wakes_after_the_parked_checkpoint() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let generations = Arc::new(AtomicU64::new(0));
+    let callback_generations = Arc::clone(&generations);
+    let notifier = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+        callback_generations.fetch_add(1, Ordering::AcqRel);
+    });
+    let (mut client, _server, _revocation_tx, _shared_state) =
+        setup_media_ingress_test_with_render_wake(media_ingress_config(true), notifier).await;
+    let (tx, mut stream) = media_handshake(
+        &mut client,
+        "media-agent",
+        vec![
+            "media_ingress".to_string(),
+            "publish_zone:media-pip".to_string(),
+        ],
+    )
+    .await;
+    tx.send(ClientMessage {
+        sequence: 2,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(ClientPayload::MediaIngressOpen(valid_media_open(
+            "media-pip",
+        ))),
+    })
+    .await
+    .unwrap();
+    let _open = next_non_state_change(&mut stream).await;
+    let _admitted = next_non_state_change(&mut stream).await;
+    while generations.load(Ordering::Acquire) == 0 {
+        tokio::task::yield_now().await;
+    }
+    let parked_checkpoint = generations.load(Ordering::Acquire);
+
+    drop(tx);
+    while let Some(Ok(message)) = stream.next().await {
+        if matches!(
+            message.payload,
+            Some(ServerPayload::MediaIngressCloseNotice(_))
+        ) {
+            break;
+        }
+    }
+    assert!(
+        generations.load(Ordering::Acquire) > parked_checkpoint,
+        "EOF teardown must wake after clearing the published media surface"
+    );
+}
+
+#[tokio::test]
+async fn media_capability_revoke_cleanup_wakes_after_the_parked_checkpoint() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let generations = Arc::new(AtomicU64::new(0));
+    let callback_generations = Arc::clone(&generations);
+    let notifier = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+        callback_generations.fetch_add(1, Ordering::AcqRel);
+    });
+    let (mut client, _server, revocation_tx, _shared_state) =
+        setup_media_ingress_test_with_render_wake(media_ingress_config(true), notifier).await;
+    let (tx, mut stream) = media_handshake(
+        &mut client,
+        "media-agent",
+        vec![
+            "media_ingress".to_string(),
+            "publish_zone:media-pip".to_string(),
+        ],
+    )
+    .await;
+    tx.send(ClientMessage {
+        sequence: 2,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(ClientPayload::MediaIngressOpen(valid_media_open(
+            "media-pip",
+        ))),
+    })
+    .await
+    .unwrap();
+    let _open = next_non_state_change(&mut stream).await;
+    let _admitted = next_non_state_change(&mut stream).await;
+    while generations.load(Ordering::Acquire) == 0 {
+        tokio::task::yield_now().await;
+    }
+    let parked_checkpoint = generations.load(Ordering::Acquire);
+
+    revocation_tx
+        .send(CapabilityRevocationEvent {
+            lease_id: SceneId::null(),
+            capability_name: "media_ingress".to_string(),
+        })
+        .unwrap();
+    for _ in 0..4 {
+        let message = next_non_state_change(&mut stream).await;
+        if matches!(
+            message.payload,
+            Some(ServerPayload::MediaIngressCloseNotice(_))
+        ) {
+            break;
+        }
+    }
+    assert!(
+        generations.load(Ordering::Acquire) > parked_checkpoint,
+        "capability teardown must wake after clearing the published media surface"
     );
 }
 
@@ -3204,7 +3680,14 @@ async fn test_safe_mode_rejects_mutations() {
 /// THEN mutations are queued (accepted = true), tile content does not update
 #[tokio::test]
 async fn test_freeze_queues_mutations_not_applied() {
-    let (mut client, _server, shared_state) = setup_test_with_state().await;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let generations = Arc::new(AtomicU64::new(0));
+    let callback_generations = Arc::clone(&generations);
+    let notifier = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+        callback_generations.fetch_add(1, Ordering::AcqRel);
+    });
+    let (mut client, _server, shared_state) = setup_test_with_state_and_render_wake(notifier).await;
     let (tx, _init_messages, mut stream) = handshake(&mut client, "freeze-agent", "test-key").await;
 
     // Request a lease
@@ -3224,6 +3707,13 @@ async fn test_freeze_queues_mutations_not_applied() {
         Some(ServerPayload::LeaseResponse(resp)) if resp.granted => resp.lease_id.clone(),
         other => panic!("Expected LeaseResponse (granted), got: {other:?}"),
     };
+    let (scene_version_before, tile_count_before) = {
+        let st = shared_state.lock().await;
+        let mut scene = st.scene.lock().await;
+        scene.create_tab("Main", 0).unwrap();
+        (scene.version, scene.tiles.len())
+    };
+    let parked_checkpoint = generations.load(Ordering::Acquire);
 
     // Activate freeze
     {
@@ -3239,8 +3729,21 @@ async fn test_freeze_queues_mutations_not_applied() {
         payload: Some(ClientPayload::MutationBatch(MutationBatch {
             batch_id: batch_id.clone(),
             lease_id: lease_id.clone(),
-            mutations: Vec::new(),
-            ..Default::default()
+            mutations: vec![crate::proto::MutationProto {
+                mutation: Some(crate::proto::mutation_proto::Mutation::CreateTile(
+                    crate::proto::CreateTileMutation {
+                        tab_id: vec![],
+                        bounds: Some(crate::proto::Rect {
+                            x: 10.0,
+                            y: 20.0,
+                            width: 200.0,
+                            height: 150.0,
+                        }),
+                        z_order: 1,
+                    },
+                )),
+            }],
+            timing: None,
         })),
     })
     .await
@@ -3262,6 +3765,17 @@ async fn test_freeze_queues_mutations_not_applied() {
             panic!("Mutation should be queued during freeze, not rejected with error: {err:?}");
         }
         other => panic!("Expected MutationResult during freeze, got: {other:?}"),
+    }
+    assert_eq!(
+        generations.load(Ordering::Acquire),
+        parked_checkpoint,
+        "freeze enqueue must not wake the compositor before any scene mutation"
+    );
+    {
+        let st = shared_state.lock().await;
+        let scene = st.scene.lock().await;
+        assert_eq!(scene.version, scene_version_before);
+        assert_eq!(scene.tiles.len(), tile_count_before);
     }
 
     // Deactivate freeze — queued mutation should be applied in next iteration
@@ -3304,6 +3818,23 @@ async fn test_freeze_queues_mutations_not_applied() {
         got_heartbeat,
         "Expected heartbeat echo after unfreeze drain"
     );
+    assert_eq!(
+        generations.load(Ordering::Acquire),
+        parked_checkpoint + 1,
+        "one applied queued batch must publish exactly one post-mutation wake"
+    );
+    {
+        let st = shared_state.lock().await;
+        let scene = st.scene.lock().await;
+        assert!(scene.version > scene_version_before);
+        assert_eq!(scene.tiles.len(), tile_count_before + 1);
+        assert!(scene.tiles.values().any(|tile| {
+            (tile.bounds.x - 10.0).abs() < 0.01
+                && (tile.bounds.y - 20.0).abs() < 0.01
+                && (tile.bounds.width - 200.0).abs() < 0.01
+                && (tile.bounds.height - 150.0).abs() < 0.01
+        }));
+    }
 }
 
 /// Regression: FIFO ordering preserved when a new mutation arrives after unfreeze
@@ -3345,6 +3876,7 @@ async fn test_fifo_preserved_when_mutation_arrives_during_drain_window() {
         degradation_level: crate::session::RuntimeDegradationLevel::Normal,
         media_ingress_active: None,
         input_capture_tx: None,
+        input_capture_wake: tze_hud_scene::render_wake::RenderWakeNotifier::default(),
         resolved_portal_tokens: std::collections::HashMap::new(),
     }));
 
@@ -3404,7 +3936,14 @@ async fn test_fifo_preserved_when_mutation_arrives_during_drain_window() {
         mutations: Vec::new(),
         ..Default::default()
     };
-    handle_mutation_batch(&state, &mut session, &outbound_tx, new_batch).await;
+    handle_mutation_batch(
+        &state,
+        &mut session,
+        &outbound_tx,
+        new_batch,
+        &tze_hud_scene::render_wake::RenderWakeNotifier::default(),
+    )
+    .await;
 
     // The queue must now hold 2 entries: the pre-queued one plus the new arrival.
     // If the fix is absent, the new batch bypasses the queue (queue depth stays 1)
@@ -3480,6 +4019,7 @@ async fn test_freeze_retransmit_deduped_applied_exactly_once() {
         degradation_level: crate::session::RuntimeDegradationLevel::Normal,
         media_ingress_active: None,
         input_capture_tx: None,
+        input_capture_wake: tze_hud_scene::render_wake::RenderWakeNotifier::default(),
         resolved_portal_tokens: std::collections::HashMap::new(),
     }));
 
@@ -3526,7 +4066,14 @@ async fn test_freeze_retransmit_deduped_applied_exactly_once() {
         mutations: Vec::new(),
         ..Default::default()
     };
-    handle_mutation_batch(&state, &mut session, &outbound_tx, original_batch).await;
+    handle_mutation_batch(
+        &state,
+        &mut session,
+        &outbound_tx,
+        original_batch,
+        &tze_hud_scene::render_wake::RenderWakeNotifier::default(),
+    )
+    .await;
 
     // Queue must hold exactly one entry.
     assert!(
@@ -3555,7 +4102,14 @@ async fn test_freeze_retransmit_deduped_applied_exactly_once() {
         mutations: Vec::new(),
         ..Default::default()
     };
-    handle_mutation_batch(&state, &mut session, &outbound_tx, retransmit_batch).await;
+    handle_mutation_batch(
+        &state,
+        &mut session,
+        &outbound_tx,
+        retransmit_batch,
+        &tze_hud_scene::render_wake::RenderWakeNotifier::default(),
+    )
+    .await;
 
     // Consume the dedup response — must be accepted=true (cached from first send).
     let dedup_ack = outbound_rx
@@ -5368,8 +5922,19 @@ async fn setup_test_with_state() -> (
     tokio::task::JoinHandle<()>,
     Arc<Mutex<SharedState>>,
 ) {
+    setup_test_with_state_and_render_wake(tze_hud_scene::render_wake::RenderWakeNotifier::default())
+        .await
+}
+
+async fn setup_test_with_state_and_render_wake(
+    render_wake: tze_hud_scene::render_wake::RenderWakeNotifier,
+) -> (
+    HudSessionClient<tonic::transport::Channel>,
+    tokio::task::JoinHandle<()>,
+    Arc<Mutex<SharedState>>,
+) {
     let scene = SceneGraph::new(800.0, 600.0);
-    let service = HudSessionImpl::new(scene, "test-key");
+    let service = HudSessionImpl::new(scene, "test-key").with_render_wake_notifier(render_wake);
     let shared_state = service.state.clone();
 
     let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
@@ -6414,7 +6979,10 @@ async fn test_input_capture_request_response() {
 #[tokio::test]
 async fn test_input_capture_request_sends_runtime_command() {
     let (mut client, _server, mut capture_rx, tile_id, node_id) =
-        setup_test_with_input_capture_channel().await;
+        setup_test_with_input_capture_channel(
+            tze_hud_scene::render_wake::RenderWakeNotifier::default(),
+        )
+        .await;
     let (tx, _init_messages, mut stream) =
         handshake(&mut client, "capture-agent", "test-key").await;
 
@@ -6459,11 +7027,115 @@ async fn test_input_capture_request_sends_runtime_command() {
     );
 }
 
+#[tokio::test]
+async fn input_capture_bridge_wakes_only_after_successful_command_enqueue() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let wakes = Arc::new(AtomicU64::new(0));
+    let callback_wakes = Arc::clone(&wakes);
+    let notifier = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+        callback_wakes.fetch_add(1, Ordering::AcqRel);
+    });
+    let (mut client, _server, mut capture_rx, tile_id, node_id) =
+        setup_test_with_input_capture_channel(notifier).await;
+    let (tx, _init_messages, mut stream) =
+        handshake(&mut client, "capture-agent", "test-key").await;
+
+    tx.send(ClientMessage {
+        sequence: 2,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(ClientPayload::InputCaptureRequest(InputCaptureRequest {
+            tile_id: scene_id_to_bytes(tile_id),
+            device_kind: "pointer".to_string(),
+            node_id: scene_id_to_bytes(node_id),
+            device_id: "7".to_string(),
+            release_on_up: true,
+        })),
+    })
+    .await
+    .unwrap();
+    let response = next_non_state_change(&mut stream).await;
+    assert!(matches!(
+        response.payload,
+        Some(ServerPayload::InputCaptureResponse(InputCaptureResponse {
+            granted: true,
+            ..
+        }))
+    ));
+    assert!(matches!(
+        capture_rx.recv().await,
+        Some(crate::session::InputCaptureCommand::Request { .. })
+    ));
+    assert_eq!(wakes.load(Ordering::Acquire), 1);
+
+    tx.send(ClientMessage {
+        sequence: 3,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(ClientPayload::InputCaptureRelease(InputCaptureRelease {
+            tile_id: scene_id_to_bytes(tile_id),
+            device_kind: "pointer".to_string(),
+            device_id: "7".to_string(),
+        })),
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        capture_rx.recv().await,
+        Some(crate::session::InputCaptureCommand::Release { device_id: 7 })
+    ));
+    assert_eq!(wakes.load(Ordering::Acquire), 2);
+
+    tx.send(ClientMessage {
+        sequence: 4,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(ClientPayload::InputCaptureRelease(InputCaptureRelease {
+            tile_id: scene_id_to_bytes(tile_id),
+            device_kind: "pointer".to_string(),
+            device_id: "invalid".to_string(),
+        })),
+    })
+    .await
+    .unwrap();
+    let rejected = next_non_state_change(&mut stream).await;
+    assert!(matches!(
+        rejected.payload,
+        Some(ServerPayload::RuntimeError(_))
+    ));
+    assert_eq!(wakes.load(Ordering::Acquire), 2);
+
+    drop(capture_rx);
+    tx.send(ClientMessage {
+        sequence: 5,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(ClientPayload::InputCaptureRequest(InputCaptureRequest {
+            tile_id: scene_id_to_bytes(tile_id),
+            device_kind: "pointer".to_string(),
+            node_id: scene_id_to_bytes(node_id),
+            device_id: "8".to_string(),
+            release_on_up: true,
+        })),
+    })
+    .await
+    .unwrap();
+    let unavailable = next_non_state_change(&mut stream).await;
+    assert!(matches!(
+        unavailable.payload,
+        Some(ServerPayload::InputCaptureResponse(InputCaptureResponse {
+            granted: false,
+            ..
+        }))
+    ));
+    assert_eq!(wakes.load(Ordering::Acquire), 2);
+}
+
 /// Scenario: malformed capture-release device ids are reported to the caller.
 #[tokio::test]
 async fn test_input_capture_release_rejects_invalid_device_id() {
     let (mut client, _server, mut capture_rx, tile_id, _node_id) =
-        setup_test_with_input_capture_channel().await;
+        setup_test_with_input_capture_channel(
+            tze_hud_scene::render_wake::RenderWakeNotifier::default(),
+        )
+        .await;
     let (tx, _init_messages, mut stream) =
         handshake(&mut client, "capture-agent", "test-key").await;
 
@@ -8531,7 +9203,16 @@ async fn test_widget_asset_register_budget_exceeded_rejected() {
 
 #[tokio::test]
 async fn test_widget_asset_register_updates_runtime_widget_lifecycle_for_publish_path() {
-    let service = setup_widget_service().await;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let wakes = Arc::new(AtomicU64::new(0));
+    let callback_wakes = Arc::clone(&wakes);
+    let notifier = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+        callback_wakes.fetch_add(1, Ordering::AcqRel);
+    });
+    let service = setup_widget_service()
+        .await
+        .with_render_wake_notifier(notifier);
     let shared_state = service.state.clone();
     let (mut client, handle) = setup_widget_test_with_service(service).await;
     let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
@@ -8569,9 +9250,37 @@ async fn test_widget_asset_register_updates_runtime_widget_lifecycle_for_publish
         }
         other => panic!("expected WidgetAssetRegisterResult, got: {other:?}"),
     };
+    assert_eq!(wakes.load(Ordering::Acquire), 1);
 
     tx.send(ClientMessage {
         sequence: 3,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(ClientPayload::WidgetAssetRegister(WidgetAssetRegister {
+            widget_type_id: "gauge".to_string(),
+            svg_filename: "fill.svg".to_string(),
+            content_hash_blake3: vec![0x77; 32],
+            transport_crc32c: 0,
+            total_size_bytes: 0,
+            inline_svg_bytes: Vec::new(),
+            metadata_only_preflight: true,
+        })),
+    })
+    .await
+    .unwrap();
+    let no_enqueue = next_non_state_change(&mut stream).await;
+    assert!(matches!(
+        no_enqueue.payload,
+        Some(ServerPayload::WidgetAssetRegisterResult(
+            WidgetAssetRegisterResult {
+                accepted: false,
+                ..
+            }
+        ))
+    ));
+    assert_eq!(wakes.load(Ordering::Acquire), 1);
+
+    tx.send(ClientMessage {
+        sequence: 4,
         timestamp_wall_us: now_wall_us(),
         payload: Some(ClientPayload::WidgetPublish(WidgetPublish {
             widget_name: "gauge".to_string(),
@@ -9859,6 +10568,40 @@ async fn test_resident_upload_then_static_image_references_uploaded_resource_id(
     drop(handle);
 }
 
+#[tokio::test]
+async fn uploaded_resource_notifies_after_the_parked_checkpoint() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let service = setup_widget_service().await;
+    let wake_generation = Arc::new(AtomicU64::new(0));
+    let callback_generation = Arc::clone(&wake_generation);
+    let render_wake = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+        callback_generation.fetch_add(1, Ordering::AcqRel);
+    });
+    let resource_id = tze_hud_resource::ResourceId::from_bytes([0x5a; 32]);
+    let parked_checkpoint = wake_generation.load(Ordering::Acquire);
+
+    upload::register_uploaded_scene_resource(&service.state, &resource_id, &render_wake).await;
+
+    let st = service.state.lock().await;
+    let scene = st.scene.lock().await;
+    assert!(scene.is_resource_registered(&ResourceId::from_bytes([0x5a; 32])));
+    assert_eq!(
+        wake_generation.load(Ordering::Acquire),
+        parked_checkpoint + 1,
+        "successful registration must publish a generation after the parked checkpoint"
+    );
+    drop(scene);
+    drop(st);
+
+    upload::register_uploaded_scene_resource(&service.state, &resource_id, &render_wake).await;
+    assert_eq!(
+        wake_generation.load(Ordering::Acquire),
+        parked_checkpoint + 1,
+        "duplicate resource registration is a no-op and must not wake"
+    );
+}
+
 /// Helper: handshake with specific capabilities in SessionInit.
 ///
 /// Widget capability checks use `session.capabilities` which is populated
@@ -10403,21 +11146,42 @@ fn test_reset_geometry_override_carries_correct_previous_and_new() {
     }
 }
 
-#[test]
-fn render_wake_classification_covers_mutations_but_excludes_read_only_traffic() {
-    assert!(client_payload_creates_render_work(
-        &ClientPayload::MutationBatch(MutationBatch::default())
+#[tokio::test]
+async fn rejected_zone_publish_does_not_wake_the_compositor() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let generations = Arc::new(AtomicU64::new(0));
+    let callback_generations = Arc::clone(&generations);
+    let notifier = tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+        callback_generations.fetch_add(1, Ordering::AcqRel);
+    });
+    let (mut client, _server, _state) = setup_test_with_state_and_render_wake(notifier).await;
+    let (tx, _init_messages, mut stream) =
+        handshake(&mut client, "zone-reject-agent", "test-key").await;
+    let before = generations.load(Ordering::Acquire);
+
+    tx.send(ClientMessage {
+        sequence: 2,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(ClientPayload::ZonePublish(ZonePublish {
+            zone_name: "missing-zone".to_string(),
+            content: None,
+            ..Default::default()
+        })),
+    })
+    .await
+    .unwrap();
+    let result = next_non_state_change(&mut stream).await;
+    assert!(matches!(
+        result.payload,
+        Some(ServerPayload::ZonePublishResult(ZonePublishResult {
+            accepted: false,
+            ..
+        }))
     ));
-    assert!(client_payload_creates_render_work(
-        &ClientPayload::ZonePublish(ZonePublish::default())
-    ));
-    assert!(client_payload_creates_render_work(
-        &ClientPayload::InputCaptureRequest(InputCaptureRequest::default())
-    ));
-    assert!(!client_payload_creates_render_work(
-        &ClientPayload::Heartbeat(Heartbeat::default())
-    ));
-    assert!(!client_payload_creates_render_work(
-        &ClientPayload::ListElementsRequest(ListElementsRequest::default())
-    ));
+    assert_eq!(
+        generations.load(Ordering::Acquire),
+        before,
+        "rejected ZonePublish must not synthesize compositor work"
+    );
 }

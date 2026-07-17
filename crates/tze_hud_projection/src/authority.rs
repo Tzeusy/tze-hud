@@ -695,6 +695,51 @@ impl ProjectionAuthority {
             .min()
     }
 
+    /// Earliest expiry of any non-terminal viewer input item.
+    ///
+    /// The runtime scheduler uses this to transition an otherwise-idle portal
+    /// exactly when its pending-input TTL elapses, without relying on a future
+    /// owner poll or acknowledgement.
+    pub fn next_pending_input_expiry_wall_us(&self) -> Option<u64> {
+        self.sessions
+            .values()
+            .flat_map(|session| session.pending_input.iter())
+            .filter(|item| !item.delivery_state.is_terminal())
+            .map(|item| item.expires_at_wall_us)
+            .min()
+    }
+
+    /// Expire due viewer input and schedule one portal-state materialisation per
+    /// affected session. Returns the transitioned projection IDs.
+    pub fn sweep_pending_input_expiry(&mut self, server_timestamp_wall_us: u64) -> Vec<String> {
+        let mut scheduled = Vec::new();
+        for (projection_id, session) in &mut self.sessions {
+            let has_due_input = session.pending_input.iter().any(|item| {
+                !item.delivery_state.is_terminal()
+                    && server_timestamp_wall_us >= item.expires_at_wall_us
+            });
+            if !has_due_input {
+                continue;
+            }
+            expire_pending(session, server_timestamp_wall_us);
+            scheduled.push((projection_id.clone(), schedule_portal_state_update(session)));
+        }
+        for (projection_id, sequence) in &scheduled {
+            self.cadence_coalescer.record_append(
+                projection_id,
+                Vec::new(),
+                *sequence,
+                server_timestamp_wall_us,
+            );
+        }
+        let mut transitioned: Vec<String> = scheduled
+            .into_iter()
+            .map(|(projection_id, _)| projection_id)
+            .collect();
+        transitioned.sort_unstable();
+        transitioned
+    }
+
     /// Whether this projection's stale state was opened by the liveness sweep.
     pub fn is_agent_liveness_degraded(&self, projection_id: &str) -> bool {
         self.sessions

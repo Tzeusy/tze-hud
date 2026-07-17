@@ -69,10 +69,11 @@ use tze_hud_projection::{
 };
 use tze_hud_scene::{
     Capability, Rect, SceneGraph,
-    types::{SceneId, TileScrollConfig},
+    types::{LeaseState, SceneId, TileScrollConfig},
 };
 use tze_hud_telemetry::LatencyBucket;
 
+use crate::idle_efficiency::RuntimeWakeupSource;
 use crate::resident_grpc_bridge::BridgeMessage;
 
 /// Which transport materialises a portal projection's scene presence (hud-g7ool).
@@ -101,6 +102,34 @@ pub enum PortalTransport {
     InProcess,
     /// The resident gRPC bridge is the sole materialiser for this projection.
     ResidentGrpcBridge,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum PortalDeadlineFamily {
+    ImmediateWork,
+    Cadence,
+    ActivityCue,
+    AgentLiveness,
+    PendingInputExpiry,
+    LeaseLifecycle,
+}
+
+impl PortalDeadlineFamily {
+    pub(super) const fn wakeup_source(self) -> RuntimeWakeupSource {
+        match self {
+            Self::ImmediateWork => RuntimeWakeupSource::SceneChange,
+            Self::Cadence | Self::ActivityCue => RuntimeWakeupSource::AnimationDeadline,
+            Self::AgentLiveness | Self::PendingInputExpiry | Self::LeaseLifecycle => {
+                RuntimeWakeupSource::TtlDeadline
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PortalWakeDeadline {
+    pub(super) wall_us: u64,
+    pub(super) family: PortalDeadlineFamily,
 }
 
 /// Line-height multiplier used by the compositor's text shaper (text.rs).
@@ -664,10 +693,12 @@ impl InProcessPortalDriver {
     /// portal authority again: cadence release, activity-cue quiescence,
     /// agent-liveness transition, or a projection lease's orphan-grace/TTL
     /// boundary.
-    pub fn next_wake_deadline_wall_us(&self, scene: &SceneGraph) -> Option<u64> {
+    pub(super) fn next_wake_deadline(&self, scene: &SceneGraph) -> Option<PortalWakeDeadline> {
         let now_us = now_wall_us();
+        let immediate_work = self.has_immediate_work(scene).then_some(now_us);
         let cadence = self.authority.next_pending_due_at_us(now_us);
         let agent_liveness = self.authority.next_agent_liveness_deadline_wall_us();
+        let pending_input_expiry = self.authority.next_pending_input_expiry_wall_us();
         let activity = self
             .drive
             .entries
@@ -680,26 +711,82 @@ impl InProcessPortalDriver {
             .values()
             .filter_map(|entry| entry.scene_lease_id)
             .filter_map(|lease_id| scene.leases.get(&lease_id))
-            .filter_map(|lease| {
-                let ttl = (lease.ttl_ms > 0).then(|| {
+            .filter_map(|lease| match lease.state {
+                LeaseState::Active | LeaseState::Requested => (lease.ttl_ms > 0).then(|| {
                     lease
                         .granted_at_ms
                         .saturating_add(lease.ttl_ms)
                         .saturating_mul(1_000)
-                });
-                let grace = lease.disconnected_at_ms.map(|at| {
-                    at.saturating_add(lease.grace_period_ms)
+                }),
+                LeaseState::Orphaned => {
+                    let ttl = (lease.ttl_ms > 0).then(|| {
+                        lease
+                            .granted_at_ms
+                            .saturating_add(lease.ttl_ms)
+                            .saturating_mul(1_000)
+                    });
+                    let grace = lease.disconnected_at_ms.map(|at| {
+                        at.saturating_add(lease.grace_period_ms)
+                            .saturating_mul(1_000)
+                    });
+                    ttl.into_iter().chain(grace).min()
+                }
+                LeaseState::Suspended => lease.suspended_at_ms.map(|at| {
+                    at.saturating_add(SceneGraph::DEFAULT_MAX_SUSPENSION_MS)
                         .saturating_mul(1_000)
-                });
-                ttl.into_iter().chain(grace).min()
+                }),
+                LeaseState::Denied
+                | LeaseState::Revoked
+                | LeaseState::Expired
+                | LeaseState::Released => None,
             })
             .min();
-        cadence
-            .into_iter()
-            .chain(activity)
-            .chain(agent_liveness)
-            .chain(lease)
-            .min()
+        [
+            immediate_work.map(|wall_us| PortalWakeDeadline {
+                wall_us,
+                family: PortalDeadlineFamily::ImmediateWork,
+            }),
+            cadence.map(|wall_us| PortalWakeDeadline {
+                wall_us,
+                family: PortalDeadlineFamily::Cadence,
+            }),
+            activity.map(|wall_us| PortalWakeDeadline {
+                wall_us,
+                family: PortalDeadlineFamily::ActivityCue,
+            }),
+            agent_liveness.map(|wall_us| PortalWakeDeadline {
+                wall_us,
+                family: PortalDeadlineFamily::AgentLiveness,
+            }),
+            pending_input_expiry.map(|wall_us| PortalWakeDeadline {
+                wall_us,
+                family: PortalDeadlineFamily::PendingInputExpiry,
+            }),
+            lease.map(|wall_us| PortalWakeDeadline {
+                wall_us,
+                family: PortalDeadlineFamily::LeaseLifecycle,
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        .min_by_key(|deadline| (deadline.wall_us, deadline.family))
+    }
+
+    /// Whether scene access is required again even if no timed portal deadline
+    /// or producer event remains. This keeps cleanup/degraded/reconciliation
+    /// work from stranding after a try-lock miss.
+    fn has_immediate_work(&self, scene: &SceneGraph) -> bool {
+        !self.drive.pending_tile_removals.is_empty()
+            || !self.drive.pending_lease_revocations.is_empty()
+            || self.drive.entries.values().any(|entry| {
+                entry.needs_degraded_repaint
+                    || entry.scene_lease_id.is_some_and(|lease_id| {
+                        scene
+                            .leases
+                            .get(&lease_id)
+                            .is_none_or(|lease| lease.state.is_terminal())
+                    })
+            })
     }
 
     /// Install (or clear) the resident gRPC portal bridge channel (hud-d7frs).
@@ -1678,6 +1765,12 @@ impl InProcessPortalDriver {
         now_us: u64,
     ) {
         self.drain_pending_tile_removals(scene);
+
+        // Pending viewer input has an authority-owned TTL independent of owner
+        // polling. Expire due items first and enqueue a coalesced state update so
+        // a parked static portal repaints its count/bytes/delivery cue exactly at
+        // the boundary.
+        self.authority.sweep_pending_input_expiry(now_us.max(1));
 
         // Agent-side liveness sweep (hud-ccj2o). Authentication recency lives
         // in the projection authority; presentation and removal stay runtime-
@@ -2688,7 +2781,7 @@ impl InProcessPortalDriver {
     ///
     /// Runs at the END of every drain (after the render passes; the resume-side
     /// reconnect is handled up front by [`Self::reconnect_lease_grace_on_resume`]).
-    /// The windowed scheduler uses [`Self::next_wake_deadline_wall_us`] to wake
+    /// The windowed scheduler uses [`Self::next_wake_deadline`] to wake
     /// exactly at the next per-projection grace boundary, so an otherwise-idle
     /// screen still reaps on time without periodic polling. The steps are cheap
     /// map scans, both no-ops on the common all-live path:
@@ -2739,12 +2832,18 @@ impl InProcessPortalDriver {
             }
         }
 
-        // 2. REAP: each elapsed orphan lease identifies exactly one projection.
-        // This remains valid for bridge-only shadow leases whose removed-tile
-        // list is intentionally empty.
+        // 2. REAP + RECONCILE: any due projection lease (or a terminal lease
+        // already reaped by the compositor) identifies exactly one projection.
+        // This includes the long resident TTL: once it elapses, authority and
+        // drive state expire with the scene surface instead of retaining a stale
+        // cached lease/tile and scheduling its past deadline forever.
         let mut reaped = Vec::new();
         for (projection_id, lease_id, _) in &lifecycle {
-            if scene.lease_is_orphaned(lease_id) && scene.expire_lease(lease_id).is_some() {
+            let already_terminal = scene
+                .leases
+                .get(lease_id)
+                .is_some_and(|lease| lease.state.is_terminal());
+            if already_terminal || scene.expire_lease(lease_id).is_some() {
                 reaped.push(projection_id.clone());
             }
         }
@@ -2824,8 +2923,8 @@ mod tests {
     use tze_hud_projection::{
         AcknowledgeInputRequest, AttachRequest, ContentClassification, GetPendingInputRequest,
         InputAckState, OperationEnvelope, OutputKind, PORTAL_UPDATE_RATE_WINDOW_WALL_US,
-        PortalInputFeedbackState, ProjectionBounds, ProjectionOperation, ProviderKind,
-        PublishOutputRequest,
+        PortalInputFeedbackState, PortalInputSubmission, ProjectionBounds, ProjectionOperation,
+        ProviderKind, PublishOutputRequest,
     };
     use tze_hud_scene::{NodeData, SceneGraph};
 
@@ -2848,7 +2947,11 @@ mod tests {
         }
     }
 
-    fn attach_and_get_token(driver: &mut InProcessPortalDriver, projection_id: &str) -> String {
+    fn attach_and_get_token_at(
+        driver: &mut InProcessPortalDriver,
+        projection_id: &str,
+        server_timestamp_wall_us: u64,
+    ) -> String {
         let resp = driver.authority_mut().handle_attach(
             AttachRequest {
                 envelope: test_envelope(
@@ -2866,11 +2969,15 @@ mod tests {
                 idempotency_key: None,
             },
             "test-caller",
-            1000,
+            server_timestamp_wall_us,
         );
         assert!(resp.accepted, "attach must be accepted");
         resp.owner_token
             .expect("owner_token must be present after attach")
+    }
+
+    fn attach_and_get_token(driver: &mut InProcessPortalDriver, projection_id: &str) -> String {
+        attach_and_get_token_at(driver, projection_id, 1000)
     }
 
     fn publish(
@@ -7086,6 +7193,242 @@ mod tests {
         output
     }
 
+    #[test]
+    fn parked_portal_repaints_pending_count_at_input_expiry() {
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("pending_input_expiry"),
+            drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
+        };
+        let projection_id = "pending-expiry-proj";
+        let now_us = now_wall_us();
+        let submitted_at_us = now_us.saturating_add(1);
+        let pending_at_us = now_us.saturating_add(2);
+        let expires_at_us = now_us.saturating_add(1_000_000);
+        let token = attach_and_get_token_at(&mut driver, projection_id, now_us);
+        driver.attach_projection(projection_id, Vec::new());
+        publish(
+            &mut driver,
+            projection_id,
+            &token,
+            "waiting",
+            submitted_at_us,
+        );
+
+        let mut scene = SceneGraph::new(800.0, 600.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), submitted_at_us);
+        let tile_id = driver.drive.entries[projection_id]
+            .tile_scene_id
+            .expect("initial drain creates portal tile");
+
+        let feedback = driver.authority_mut().submit_portal_input(
+            projection_id,
+            PortalInputSubmission {
+                input_id: "pending-expiry-input".to_string(),
+                submission_text: "will expire".to_string(),
+                submitted_at_wall_us: pending_at_us,
+                expires_at_wall_us: Some(expires_at_us),
+                content_classification: ContentClassification::Private,
+            },
+        );
+        assert_eq!(feedback.feedback_state, PortalInputFeedbackState::Accepted);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), pending_at_us);
+        let pending_markdown = tile_markdown(&scene, tile_id);
+        assert!(
+            pending_markdown.contains("pending HUD input: 1"),
+            "accepted pending input must render its compact count: {pending_markdown}"
+        );
+        assert_eq!(
+            driver.next_wake_deadline(&scene),
+            Some(PortalWakeDeadline {
+                wall_us: expires_at_us,
+                family: PortalDeadlineFamily::PendingInputExpiry,
+            })
+        );
+
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), expires_at_us);
+        let summary = driver.authority_mut().state_summary(projection_id).unwrap();
+        assert_eq!(summary.pending_input_count, 0);
+        assert_eq!(summary.pending_input_bytes, 0);
+        let expired_markdown = tile_markdown(&scene, tile_id);
+        assert!(
+            expired_markdown.contains("pending HUD input: 0"),
+            "the expiry drain must repaint the compact pending count: {expired_markdown}"
+        );
+        assert_ne!(
+            driver
+                .next_wake_deadline(&scene)
+                .map(|deadline| deadline.family),
+            Some(PortalDeadlineFamily::PendingInputExpiry),
+            "expiry deadline must be one-shot after the parked transition"
+        );
+    }
+
+    #[test]
+    fn portal_deadline_families_preserve_source_and_equal_deadline_tie() {
+        let mut driver = InProcessPortalDriver {
+            authority: ProjectionAuthority::new(ProjectionBounds {
+                max_portal_updates_per_second: 100,
+                agent_liveness_degraded_after_wall_us: 10_000_000,
+                ..ProjectionBounds::default()
+            })
+            .unwrap(),
+            drive: InProcessPortalDriveState::new(),
+            lease_id: None,
+            portal_publish_to_present_latency: LatencyBucket::new("deadline_families"),
+            drain_deferral_count: 0,
+            resident_grpc_bridge_tx: None,
+        };
+        let projection_id = "deadline-family-proj";
+        let now_us = now_wall_us();
+        let token = attach_and_get_token_at(&mut driver, projection_id, now_us);
+        driver.attach_projection(projection_id, Vec::new());
+        publish(&mut driver, projection_id, &token, "first", now_us);
+        let mut scene = SceneGraph::new(800.0, 600.0);
+
+        assert_eq!(
+            driver.next_wake_deadline(&scene).unwrap().family,
+            PortalDeadlineFamily::Cadence
+        );
+
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), now_us);
+        driver
+            .drive
+            .entries
+            .get_mut(projection_id)
+            .unwrap()
+            .activity_cue_clear_due_us = Some(now_us.saturating_add(500));
+        assert_eq!(
+            driver.next_wake_deadline(&scene),
+            Some(PortalWakeDeadline {
+                wall_us: now_us.saturating_add(500),
+                family: PortalDeadlineFamily::ActivityCue,
+            })
+        );
+
+        driver
+            .drive
+            .entries
+            .get_mut(projection_id)
+            .unwrap()
+            .activity_cue_clear_due_us = None;
+        publish(
+            &mut driver,
+            projection_id,
+            &token,
+            "second",
+            now_us.saturating_add(100),
+        );
+        let cadence_deadline = driver
+            .next_wake_deadline(&scene)
+            .expect("pending publish schedules cadence");
+        assert_eq!(cadence_deadline.family, PortalDeadlineFamily::Cadence);
+        driver
+            .drive
+            .entries
+            .get_mut(projection_id)
+            .unwrap()
+            .activity_cue_clear_due_us = Some(cadence_deadline.wall_us);
+        assert_eq!(
+            driver.next_wake_deadline(&scene).unwrap().family,
+            PortalDeadlineFamily::Cadence,
+            "equal cadence/activity deadlines use the declared family order"
+        );
+        assert!(
+            [
+                (
+                    PortalDeadlineFamily::ImmediateWork,
+                    RuntimeWakeupSource::SceneChange,
+                ),
+                (
+                    PortalDeadlineFamily::Cadence,
+                    RuntimeWakeupSource::AnimationDeadline,
+                ),
+                (
+                    PortalDeadlineFamily::ActivityCue,
+                    RuntimeWakeupSource::AnimationDeadline,
+                ),
+                (
+                    PortalDeadlineFamily::AgentLiveness,
+                    RuntimeWakeupSource::TtlDeadline,
+                ),
+                (
+                    PortalDeadlineFamily::PendingInputExpiry,
+                    RuntimeWakeupSource::TtlDeadline,
+                ),
+                (
+                    PortalDeadlineFamily::LeaseLifecycle,
+                    RuntimeWakeupSource::TtlDeadline,
+                ),
+            ]
+            .into_iter()
+            .all(|(family, source)| family.wakeup_source() == source),
+            "every portal deadline family must retain its counter attribution"
+        );
+    }
+
+    #[test]
+    fn cleanup_and_drop_work_remain_immediate_after_a_simulated_lock_miss() {
+        let mut driver = InProcessPortalDriver::new();
+        let projection_id = "retry-cleanup-proj";
+        let token = attach_and_get_token(&mut driver, projection_id);
+        driver.attach_projection(projection_id, Vec::new());
+        publish(&mut driver, projection_id, &token, "surface", 100);
+        let mut scene = SceneGraph::new(800.0, 600.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 100);
+        assert_eq!(scene.tile_count(), 1);
+
+        driver.detach_projection(projection_id);
+        // No drain here models the about_to_wait turn whose scene try-lock
+        // missed. The scheduler must still discover immediate cleanup work.
+        assert!(driver.has_immediate_work(&scene));
+        assert_eq!(
+            driver.next_wake_deadline(&scene).unwrap().family,
+            PortalDeadlineFamily::ImmediateWork
+        );
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 101);
+        assert_eq!(scene.tile_count(), 0);
+        assert!(!driver.has_immediate_work(&scene));
+
+        let projection_id = "retry-drop-proj";
+        let token = attach_and_get_token(&mut driver, projection_id);
+        driver.attach_projection(projection_id, Vec::new());
+        publish(&mut driver, projection_id, &token, "live surface", 200);
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 200);
+        let lease_id = driver.drive.entries[projection_id]
+            .scene_lease_id
+            .expect("drop test lease");
+        driver.mark_all_projections_disconnected();
+        assert!(driver.has_immediate_work(&scene));
+        assert_eq!(
+            driver.next_wake_deadline(&scene).unwrap().family,
+            PortalDeadlineFamily::ImmediateWork
+        );
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 201);
+        assert!(scene.lease_is_orphaned(&lease_id));
+        assert!(
+            driver
+                .authority_mut()
+                .projected_portal_state(projection_id, &ProjectedPortalPolicy::permit_all())
+                .unwrap()
+                .connection_degraded
+        );
+        assert!(!driver.drive.entries[projection_id].needs_degraded_repaint);
+    }
+
     /// A fully-idle in-process portal must quiesce its activity cue on its own:
     /// after the terminal append, a one-shot force-repaint past the quiesce
     /// window clears the "⋯ writing" header + streaming cursor with no new update.
@@ -8453,8 +8796,11 @@ mod tests {
 
         driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_100);
         assert_eq!(
-            driver.next_wake_deadline_wall_us(&scene),
-            Some(1_001_100),
+            driver.next_wake_deadline(&scene),
+            Some(PortalWakeDeadline {
+                wall_us: 1_001_100,
+                family: PortalDeadlineFamily::AgentLiveness,
+            }),
             "an idle runtime must schedule the first liveness sweep"
         );
         let lease = driver
@@ -8486,8 +8832,11 @@ mod tests {
             .saturating_add(scene_lease.grace_period_ms)
             .saturating_mul(1_000);
         assert_eq!(
-            driver.next_wake_deadline_wall_us(&scene),
-            Some(expected_grace_deadline_us),
+            driver.next_wake_deadline(&scene),
+            Some(PortalWakeDeadline {
+                wall_us: expected_grace_deadline_us,
+                family: PortalDeadlineFamily::LeaseLifecycle,
+            }),
             "after degradation the idle runtime must wake at the same governed grace boundary"
         );
 
@@ -8504,6 +8853,53 @@ mod tests {
                 .projected_portal_state(projection_id, &ProjectedPortalPolicy::permit_all())
                 .is_none(),
             "the grace-reaped projection cannot rematerialize stale state"
+        );
+    }
+
+    #[test]
+    fn terminal_resident_lease_reconciles_without_past_deadline_spin() {
+        use std::sync::Arc;
+        use tze_hud_scene::TestClock;
+
+        let mut driver = InProcessPortalDriver::new();
+        let projection_id = "resident-ttl-expiry";
+        let token = attach_and_get_token(&mut driver, projection_id);
+        driver.attach_projection(projection_id, Vec::new());
+        publish(&mut driver, projection_id, &token, "resident", 1_000_000);
+
+        let clock = TestClock::new(1_000);
+        let mut scene = SceneGraph::new_with_clock(800.0, 600.0, Arc::new(clock.clone()));
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let mut processor = InputProcessor::new();
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_000_000);
+        let lease_id = driver.drive.entries[projection_id]
+            .scene_lease_id
+            .expect("portal lease must exist");
+        let ttl_ms = scene.leases[&lease_id].ttl_ms;
+        assert!(ttl_ms >= 24 * 60 * 60 * 1_000);
+
+        clock.advance(ttl_ms + 1);
+        let expiries = scene.expire_leases();
+        assert!(expiries.iter().any(|expiry| expiry.lease_id == lease_id));
+        assert_eq!(scene.tile_count(), 0);
+        assert_eq!(
+            driver.next_wake_deadline(&scene).unwrap().family,
+            PortalDeadlineFamily::ImmediateWork,
+            "a compositor-reaped terminal lease requests one reconciliation drain, not its past TTL"
+        );
+
+        driver.drain_inner(&mut scene, &mut processor, Some(tab_id), 1_000_001);
+        assert!(!driver.drive.entries.contains_key(projection_id));
+        assert!(
+            driver
+                .authority_mut()
+                .projected_portal_state(projection_id, &ProjectedPortalPolicy::permit_all())
+                .is_none()
+        );
+        assert_eq!(
+            driver.next_wake_deadline(&scene),
+            None,
+            "reconciled terminal lease must not schedule a clamped past deadline"
         );
     }
 

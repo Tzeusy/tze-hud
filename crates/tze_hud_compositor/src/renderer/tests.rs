@@ -9410,6 +9410,60 @@ async fn idle_render_gate_renders_for_composer_echo_and_caret_blink() {
         !compositor.drain_local_composer_and_needs_render(),
         "once the composer is gone the gate MUST be able to skip the static idle frame"
     );
+
+    // ── 6. Real out-of-band focus/grip handles dirty transition frames. ──
+    // These are the same shared slots written by the windowed runtime. They do
+    // not bump scene.version, so the idle gate itself must observe each change.
+    let tab_id = SceneId::new();
+    let tile_id = SceneId::new();
+    let focused = FocusRingOwner {
+        tab_id,
+        tile_id,
+        node_id: None,
+    };
+    *compositor.focus_ring_owner_state.lock().unwrap() = Some(focused);
+    assert!(compositor.drain_local_composer_and_needs_render());
+    assert!(
+        !compositor.drain_local_composer_and_needs_render(),
+        "an unchanged focus-ring owner must not keep the idle gate dirty"
+    );
+    *compositor.focus_ring_owner_state.lock().unwrap() = None;
+    assert!(compositor.drain_local_composer_and_needs_render());
+    assert!(!compositor.drain_local_composer_and_needs_render());
+
+    *compositor.resize_grip_hover_state.lock().unwrap() = Some(tile_id);
+    assert!(compositor.drain_local_composer_and_needs_render());
+    assert!(
+        !compositor.drain_local_composer_and_needs_render(),
+        "an unchanged resize-grip target must not keep the idle gate dirty"
+    );
+    *compositor.resize_grip_hover_state.lock().unwrap() = None;
+    assert!(compositor.drain_local_composer_and_needs_render());
+    assert!(!compositor.drain_local_composer_and_needs_render());
+}
+
+#[test]
+fn static_focus_and_resize_grip_transitions_each_dirty_exactly_once() {
+    let tab_id = SceneId::new();
+    let tile_id = SceneId::new();
+    let focused = Some(FocusRingOwner {
+        tab_id,
+        tile_id,
+        node_id: None,
+    });
+
+    assert!(focus_or_grip_changed(None, focused, None, None));
+    assert!(!focus_or_grip_changed(focused, focused, None, None));
+    assert!(focus_or_grip_changed(focused, None, None, None));
+    assert!(!focus_or_grip_changed(None, None, None, None));
+
+    assert!(focus_or_grip_changed(None, None, None, Some(tile_id)));
+    assert!(!focus_or_grip_changed(
+        None,
+        None,
+        Some(tile_id),
+        Some(tile_id),
+    ));
 }
 
 /// Headless readback regression for the text-stream portal output pane.

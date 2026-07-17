@@ -3475,6 +3475,34 @@ fn pending_input_bounds_and_acknowledgement_state_conflicts_are_enforced() {
 }
 
 #[test]
+fn pending_input_expiry_sweep_schedules_idle_portal_state_update() {
+    let mut authority = ProjectionAuthority::new(ProjectionBounds::default()).unwrap();
+    attach(&mut authority, "projection-expiry");
+    authority
+        .enqueue_input(
+            "projection-expiry",
+            "input-expiry",
+            "expires while parked".to_string(),
+            20,
+            100,
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(authority.next_pending_input_expiry_wall_us(), Some(100));
+    assert!(authority.sweep_pending_input_expiry(99).is_empty());
+    assert_eq!(
+        authority.sweep_pending_input_expiry(100),
+        vec!["projection-expiry".to_string()]
+    );
+    assert_eq!(authority.next_pending_input_expiry_wall_us(), None);
+    let summary = authority.state_summary("projection-expiry").unwrap();
+    assert_eq!(summary.pending_input_count, 0);
+    assert_eq!(summary.pending_input_bytes, 0);
+    assert_eq!(authority.coalescer_pending_portal_count(), 1);
+}
+
+#[test]
 fn deferred_input_redelivers_after_not_before_and_expires_before_delivery() {
     let mut authority = ProjectionAuthority::default();
     let owner_token = attach(&mut authority, "projection-a");

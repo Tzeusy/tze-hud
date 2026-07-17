@@ -1477,13 +1477,22 @@ impl Compositor {
     /// [`caret_visible_at`]: image_cache::caret_visible_at
     pub fn drain_local_composer_and_needs_render(&mut self) -> bool {
         let was_active = self.local_composer.is_some();
+        let previous_focus_ring_owner = self.focus_ring_owner;
+        let previous_resize_grip_hover = self.resize_grip_hover;
         self.drain_local_composer_state();
         let is_active = self.local_composer.is_some();
         // `is_active`  → focused composer: caret blink + any pending echo.
         // `was_active` → covers the deactivation transition frame: the overlay
         //                was drawn last frame and must be cleared by one render
         //                even though `local_composer` is now `None`.
-        is_active || was_active
+        is_active
+            || was_active
+            || focus_or_grip_changed(
+                previous_focus_ring_owner,
+                self.focus_ring_owner,
+                previous_resize_grip_hover,
+                self.resize_grip_hover,
+            )
     }
 
     /// Prime the markdown parse cache for all [`TextMarkdownNode`] nodes in the scene.
@@ -2354,6 +2363,15 @@ impl Compositor {
             bg_vertex_count,
         )
     }
+}
+
+pub(crate) fn focus_or_grip_changed(
+    previous_focus: Option<focus_ring::FocusRingOwner>,
+    current_focus: Option<focus_ring::FocusRingOwner>,
+    previous_grip: Option<tze_hud_scene::SceneId>,
+    current_grip: Option<tze_hud_scene::SceneId>,
+) -> bool {
+    previous_focus != current_focus || previous_grip != current_grip
 }
 
 /// Collect [`TextItem`]s for all `TextOverflow::Ellipsis` nodes reachable from

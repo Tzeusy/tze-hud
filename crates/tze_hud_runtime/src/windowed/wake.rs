@@ -5,7 +5,6 @@
 //! A notification that races with inspection advances the generation, so the
 //! waiter observes it without parking.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -154,13 +153,50 @@ impl CompositorWake {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct RuntimeWakeEvent;
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct MainWorkCheckpoint {
+    generation: u64,
+    source: RuntimeWakeupSource,
+}
+
+#[derive(Debug)]
+struct MainWorkState {
+    generation: u64,
+    finished_generation: u64,
+    source: RuntimeWakeupSource,
+}
+
+#[derive(Debug)]
+struct MainEventState {
+    source: RuntimeWakeupSource,
+    proxy_event_pending: bool,
+}
+
+impl Default for MainEventState {
+    fn default() -> Self {
+        Self {
+            source: RuntimeWakeupSource::SceneChange,
+            proxy_event_pending: false,
+        }
+    }
+}
+
+impl Default for MainWorkState {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            finished_generation: 0,
+            source: RuntimeWakeupSource::SceneChange,
+        }
+    }
+}
+
 /// Single production owner of cross-thread wake delivery and wake counters.
 #[derive(Clone)]
 pub(super) struct WindowedWake {
     proxy: Option<EventLoopProxy<RuntimeWakeEvent>>,
-    proxy_event_pending: Arc<AtomicBool>,
-    main_work_pending: Arc<AtomicBool>,
-    main_source: Arc<Mutex<RuntimeWakeupSource>>,
+    main_event: Arc<Mutex<MainEventState>>,
+    main_work: Arc<Mutex<MainWorkState>>,
     compositor: CompositorWake,
     counters: Arc<IdleEfficiencyCounters>,
 }
@@ -169,9 +205,8 @@ impl WindowedWake {
     pub(super) fn new(proxy: EventLoopProxy<RuntimeWakeEvent>) -> Self {
         Self {
             proxy: Some(proxy),
-            proxy_event_pending: Arc::new(AtomicBool::new(false)),
-            main_work_pending: Arc::new(AtomicBool::new(false)),
-            main_source: Arc::new(Mutex::new(RuntimeWakeupSource::SceneChange)),
+            main_event: Arc::new(Mutex::new(MainEventState::default())),
+            main_work: Arc::new(Mutex::new(MainWorkState::default())),
             compositor: CompositorWake::default(),
             counters: Arc::new(IdleEfficiencyCounters::default()),
         }
@@ -181,9 +216,8 @@ impl WindowedWake {
     pub(super) fn disconnected() -> Self {
         Self {
             proxy: None,
-            proxy_event_pending: Arc::new(AtomicBool::new(false)),
-            main_work_pending: Arc::new(AtomicBool::new(false)),
-            main_source: Arc::new(Mutex::new(RuntimeWakeupSource::SceneChange)),
+            main_event: Arc::new(Mutex::new(MainEventState::default())),
+            main_work: Arc::new(Mutex::new(MainWorkState::default())),
             compositor: CompositorWake::default(),
             counters: Arc::new(IdleEfficiencyCounters::default()),
         }
@@ -192,78 +226,140 @@ impl WindowedWake {
     pub(super) fn render_notifier(&self) -> tze_hud_scene::render_wake::RenderWakeNotifier {
         let wake = self.clone();
         tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
-            wake.notify(RuntimeWakeupSource::SceneChange);
+            wake.notify_direct_render(RuntimeWakeupSource::SceneChange);
         })
     }
 
-    pub(super) fn notify(&self, source: RuntimeWakeupSource) {
-        // Cross-thread render notifications can wake the compositor before the
-        // winit thread drains the producer's channel and creates the actual
-        // scene work. Remember that a post-drain notification is still owed.
-        self.main_work_pending.store(true, Ordering::Release);
+    /// Wake only the main-thread ingress owner. The owner records render work
+    /// after its drain only when the scene actually changed, so side-effect-free
+    /// ingress such as an empty portal input poll never reaches the compositor.
+    pub(super) fn main_work_notifier(&self) -> tze_hud_scene::render_wake::RenderWakeNotifier {
+        let wake = self.clone();
+        tze_hud_scene::render_wake::RenderWakeNotifier::new(move || {
+            wake.notify_main(RuntimeWakeupSource::SceneChange);
+        })
+    }
+
+    /// Notify after a direct shared-scene mutation has already completed.
+    ///
+    /// The compositor must wake immediately, while the main thread is woken
+    /// only to perform bookkeeping/present polling.  It must not create
+    /// main-work debt: `about_to_wait` has no mutation to acknowledge here,
+    /// and doing so would emit a duplicate compositor generation.
+    pub(super) fn notify_direct_render(&self, source: RuntimeWakeupSource) {
         self.compositor.notify(source);
         self.notify_main(source);
     }
 
-    pub(super) fn mark_main_work_pending(&self) {
-        self.main_work_pending.store(true, Ordering::Release);
+    pub(super) fn mark_main_work_pending(&self, source: RuntimeWakeupSource) -> MainWorkCheckpoint {
+        let mut main_work = self
+            .main_work
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        main_work.generation = main_work.generation.wrapping_add(1);
+        main_work.source = source;
+        MainWorkCheckpoint {
+            generation: main_work.generation,
+            source,
+        }
+    }
+
+    /// Snapshot the producer generations that the next main-thread drain may
+    /// acknowledge. Work arriving after this checkpoint remains unacknowledged
+    /// for the following drain instead of being erased by this one.
+    pub(super) fn main_work_checkpoint(&self) -> MainWorkCheckpoint {
+        let main_work = self
+            .main_work
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        MainWorkCheckpoint {
+            generation: main_work.generation,
+            source: main_work.source,
+        }
     }
 
     /// Publish work created by the main thread after it drained an async
     /// producer or serviced a main-owned deadline.
-    pub(super) fn finish_main_work(&self, source: RuntimeWakeupSource) -> bool {
-        if self.main_work_pending.swap(false, Ordering::AcqRel) {
-            self.compositor.notify(source);
+    pub(super) fn finish_main_work(&self, checkpoint: MainWorkCheckpoint) -> bool {
+        let should_notify = {
+            let mut main_work = self
+                .main_work
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if checkpoint.generation > main_work.finished_generation {
+                main_work.finished_generation = checkpoint.generation;
+                true
+            } else {
+                false
+            }
+        };
+        if should_notify {
+            self.compositor.notify(checkpoint.source);
             true
         } else {
             false
         }
     }
 
-    pub(super) fn post_main_mutation_wake(
+    /// Finish a main-thread settle pass without racing two wake sources for the
+    /// same portal mutation. A typed producer/deadline checkpoint owns the
+    /// attribution when present; otherwise a portal mutation discovered during
+    /// the drain creates one `SceneChange` generation after all writes settle.
+    pub(super) fn finish_main_work_after_settle(
         &self,
-        source: RuntimeWakeupSource,
-    ) -> PostMainMutationWake {
-        PostMainMutationWake {
-            wake: self.clone(),
-            source,
+        checkpoint: MainWorkCheckpoint,
+        portal_scene_changed: bool,
+    ) -> bool {
+        let finished_typed_work = self.finish_main_work(checkpoint);
+        if portal_scene_changed && !finished_typed_work {
+            self.notify_compositor(RuntimeWakeupSource::SceneChange);
+            true
+        } else {
+            finished_typed_work
         }
     }
 
     pub(super) fn notify_main(&self, source: RuntimeWakeupSource) {
-        *self
-            .main_source
+        self.notify_main_after_source_write(source, || {});
+    }
+
+    fn notify_main_after_source_write(
+        &self,
+        source: RuntimeWakeupSource,
+        after_source_write: impl FnOnce(),
+    ) {
+        let mut main_event = self
+            .main_event
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = source;
-        if !self.proxy_event_pending.swap(true, Ordering::AcqRel) {
-            let sent = self
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        main_event.source = source;
+        after_source_write();
+        if !main_event.proxy_event_pending {
+            main_event.proxy_event_pending = self
                 .proxy
                 .as_ref()
                 .is_some_and(|proxy| proxy.send_event(RuntimeWakeEvent).is_ok());
-            if !sent {
-                self.proxy_event_pending.store(false, Ordering::Release);
-            }
         }
+    }
+
+    pub(super) fn has_pending_proxy_event(&self) -> bool {
+        self.main_event
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .proxy_event_pending
+    }
+
+    pub(super) fn take_main_source(&self) -> RuntimeWakeupSource {
+        let mut main_event = self
+            .main_event
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        main_event.proxy_event_pending = false;
+        main_event.source
     }
 
     pub(super) fn notify_compositor(&self, source: RuntimeWakeupSource) {
         self.compositor.notify(source);
-    }
-
-    pub(super) fn has_pending_proxy_event(&self) -> bool {
-        self.proxy_event_pending.load(Ordering::Acquire)
-    }
-
-    pub(super) fn take_main_source(&self) -> RuntimeWakeupSource {
-        let source = self
-            .main_source
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // Clear the coalescing bit while holding the source lock. A concurrent
-        // notifier must either be represented by this source or enqueue a new
-        // proxy event; it cannot overwrite the source between clear and read.
-        self.proxy_event_pending.store(false, Ordering::Release);
-        *source
     }
 
     pub(super) fn compositor(&self) -> &CompositorWake {
@@ -275,19 +371,9 @@ impl WindowedWake {
     }
 }
 
-pub(super) struct PostMainMutationWake {
-    wake: WindowedWake,
-    source: RuntimeWakeupSource,
-}
-
-impl Drop for PostMainMutationWake {
-    fn drop(&mut self) {
-        self.wake.notify_compositor(self.source);
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use crate::idle_efficiency::{IdleEfficiencyCounters, RuntimeWakeupSource};
@@ -416,32 +502,168 @@ mod tests {
     #[test]
     fn main_owned_work_gets_a_post_mutation_compositor_generation() {
         let wake = WindowedWake::disconnected();
-        let before_producer = wake.compositor().checkpoint();
-        wake.notify(RuntimeWakeupSource::SceneChange);
-        let producer_wake = wake.compositor().wait(before_producer, None);
-
-        let before_main_mutation = producer_wake.generation;
-        assert!(wake.finish_main_work(RuntimeWakeupSource::SceneChange));
+        let before_main_mutation = wake.compositor().checkpoint();
+        let checkpoint = wake.mark_main_work_pending(RuntimeWakeupSource::SceneChange);
+        assert!(wake.finish_main_work(checkpoint));
         let post_mutation = wake.compositor().wait(before_main_mutation, None);
         assert!(post_mutation.generation > before_main_mutation);
+    }
+
+    #[test]
+    fn direct_render_work_wakes_once_without_post_settle_debt() {
+        let wake = WindowedWake::disconnected();
+        let compositor_checkpoint = wake.compositor().checkpoint();
+
+        wake.notify_direct_render(RuntimeWakeupSource::SceneChange);
+
+        assert_eq!(
+            wake.compositor().checkpoint(),
+            compositor_checkpoint + 1,
+            "a direct post-mutation notifier owns exactly one compositor generation"
+        );
+        assert!(
+            !wake.finish_main_work(wake.main_work_checkpoint()),
+            "the main bookkeeping wake must not manufacture a second render generation"
+        );
+        assert_eq!(wake.compositor().checkpoint(), compositor_checkpoint + 1);
     }
 
     #[test]
     fn frame_ready_does_not_bypass_the_next_compositor_deadline() {
         let wake = WindowedWake::disconnected();
         wake.notify_main(RuntimeWakeupSource::FrameReady);
-        assert!(!wake.finish_main_work(RuntimeWakeupSource::FrameReady));
+        assert!(!wake.finish_main_work(wake.main_work_checkpoint()));
     }
 
     #[test]
-    fn os_event_guard_notifies_after_the_main_mutation_scope() {
+    fn repeated_main_only_ingress_does_not_advance_compositor_generation() {
         let wake = WindowedWake::disconnected();
-        let checkpoint = wake.compositor().checkpoint();
-        {
-            let _post_mutation = wake.post_main_mutation_wake(RuntimeWakeupSource::SceneChange);
-            assert_eq!(wake.compositor().checkpoint(), checkpoint);
+        let notifier = wake.main_work_notifier();
+        let compositor_checkpoint = wake.compositor().checkpoint();
+        for _ in 0..=200 {
+            notifier.notify();
         }
-        let observed = wake.compositor().wait(checkpoint, None);
-        assert!(observed.generation > checkpoint);
+        assert_eq!(wake.compositor().checkpoint(), compositor_checkpoint);
+        assert!(
+            !wake.finish_main_work(wake.main_work_checkpoint()),
+            "empty ingress drains must not synthesize post-drain render work"
+        );
+        assert_eq!(wake.compositor().checkpoint(), compositor_checkpoint);
+    }
+
+    #[test]
+    fn main_source_and_pending_transition_cannot_be_split_by_event_consumption() {
+        let wake = Arc::new(WindowedWake::disconnected());
+        {
+            let mut main_event = wake.main_event.lock().unwrap();
+            main_event.source = RuntimeWakeupSource::FrameReady;
+            main_event.proxy_event_pending = true;
+        }
+        let (source_written_tx, source_written_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let notifier = Arc::clone(&wake);
+        let notify_thread = std::thread::spawn(move || {
+            notifier.notify_main_after_source_write(RuntimeWakeupSource::TtlDeadline, || {
+                source_written_tx.send(()).unwrap();
+                resume_rx.recv().unwrap();
+            });
+        });
+        source_written_rx.recv().unwrap();
+
+        let (taken_tx, taken_rx) = std::sync::mpsc::channel();
+        let consumer = Arc::clone(&wake);
+        let take_thread = std::thread::spawn(move || {
+            taken_tx.send(consumer.take_main_source()).unwrap();
+        });
+        assert!(
+            taken_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+            "event consumption must remain blocked while source and pending state are updated"
+        );
+        resume_tx.send(()).unwrap();
+        notify_thread.join().unwrap();
+        assert_eq!(taken_rx.recv().unwrap(), RuntimeWakeupSource::TtlDeadline);
+        take_thread.join().unwrap();
+        assert!(!wake.has_pending_proxy_event());
+    }
+
+    #[test]
+    fn portal_scene_change_without_typed_work_notifies_once_after_settle() {
+        let wake = WindowedWake::disconnected();
+        let settle_checkpoint = wake.main_work_checkpoint();
+        let compositor_checkpoint = wake.compositor().checkpoint();
+
+        assert!(wake.finish_main_work_after_settle(settle_checkpoint, true));
+        assert_eq!(wake.compositor().checkpoint(), compositor_checkpoint + 1);
+        let observed = wake.compositor().wait(compositor_checkpoint, None);
+        assert_eq!(observed.source, RuntimeWakeupSource::SceneChange);
+    }
+
+    #[test]
+    fn typed_deadline_owns_one_portal_scene_change_generation() {
+        let wake = WindowedWake::disconnected();
+        wake.mark_main_work_pending(RuntimeWakeupSource::TtlDeadline);
+        let settle_checkpoint = wake.main_work_checkpoint();
+        let compositor_checkpoint = wake.compositor().checkpoint();
+
+        assert!(wake.finish_main_work_after_settle(settle_checkpoint, true));
+        assert_eq!(wake.compositor().checkpoint(), compositor_checkpoint + 1);
+        let observed = wake.compositor().wait(compositor_checkpoint, None);
+        assert_eq!(observed.source, RuntimeWakeupSource::TtlDeadline);
+    }
+
+    #[test]
+    fn arrival_after_drain_checkpoint_is_finished_by_the_next_drain() {
+        let wake = WindowedWake::disconnected();
+        wake.mark_main_work_pending(RuntimeWakeupSource::SceneChange);
+        let first_drain = wake.main_work_checkpoint();
+
+        // This producer arrives after the main thread has completed its drain
+        // but before that drain acknowledges its checkpoint.
+        wake.mark_main_work_pending(RuntimeWakeupSource::SceneChange);
+        let late_arrival = wake.main_work_checkpoint();
+        assert!(late_arrival.generation > first_drain.generation);
+
+        let before_first_finish = wake.compositor().checkpoint();
+        assert!(wake.finish_main_work(first_drain));
+        let first_post_mutation = wake.compositor().wait(before_first_finish, None);
+
+        // Finishing the earlier checkpoint must not consume the late arrival.
+        assert!(wake.finish_main_work(late_arrival));
+        let late_post_mutation = wake.compositor().wait(first_post_mutation.generation, None);
+        assert!(late_post_mutation.generation > first_post_mutation.generation);
+    }
+
+    #[test]
+    fn main_work_checkpoint_preserves_each_timer_source_across_late_arrival() {
+        let wake = WindowedWake::disconnected();
+        wake.mark_main_work_pending(RuntimeWakeupSource::AnimationDeadline);
+        let animation = wake.main_work_checkpoint();
+        wake.mark_main_work_pending(RuntimeWakeupSource::TtlDeadline);
+        let ttl = wake.main_work_checkpoint();
+
+        let before_animation = wake.compositor().checkpoint();
+        assert!(wake.finish_main_work(animation));
+        let animation_observed = wake.compositor().wait(before_animation, None);
+        assert_eq!(
+            animation_observed.source,
+            RuntimeWakeupSource::AnimationDeadline
+        );
+
+        assert!(wake.finish_main_work(ttl));
+        let ttl_observed = wake.compositor().wait(animation_observed.generation, None);
+        assert_eq!(ttl_observed.source, RuntimeWakeupSource::TtlDeadline);
+    }
+
+    #[test]
+    fn os_event_generation_notifies_only_after_the_settle_checkpoint_finishes() {
+        let wake = WindowedWake::disconnected();
+        let compositor_checkpoint = wake.compositor().checkpoint();
+        wake.mark_main_work_pending(RuntimeWakeupSource::SceneChange);
+        let settle_checkpoint = wake.main_work_checkpoint();
+        assert_eq!(wake.compositor().checkpoint(), compositor_checkpoint);
+
+        assert!(wake.finish_main_work(settle_checkpoint));
+        let post_settle = wake.compositor().wait(compositor_checkpoint, None);
+        assert!(post_settle.generation > compositor_checkpoint);
     }
 }

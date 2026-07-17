@@ -100,7 +100,10 @@ use input::scene_node_contains;
 pub use input_event_bus::{InputEventReceiver, InputEventRecvError, InputEventSender};
 use leases::{handle_lease_release, handle_lease_renew, handle_lease_request};
 pub use lifecycle::SessionState;
-use media::{close_active_media_ingress, handle_media_ingress_close, handle_media_ingress_open};
+use media::{
+    MediaIngressCloseDisposition, close_active_media_ingress, handle_media_ingress_close,
+    handle_media_ingress_open,
+};
 use mutations::{apply_queued_batch_to_scene, handle_mutation_batch};
 pub use service::HudSessionImpl;
 pub use stream_session::CapabilityRevocationEvent;
@@ -697,6 +700,7 @@ impl HudSession for HudSessionImpl {
                 upload_command_rx,
                 upload_event_tx,
                 upload_rate_limit_bytes_per_sec,
+                render_wake.clone(),
             ));
 
             // Main message loop
@@ -734,8 +738,13 @@ impl HudSession for HudSessionImpl {
                     let freeze_active = state.lock().await.freeze_active;
                     if !freeze_active && !session.freeze_queue.is_empty() {
                         let queued = session.freeze_queue.drain();
+                        let mut applied_render_work = false;
                         for queued_batch in queued {
-                            apply_queued_batch_to_scene(&state, session, queued_batch).await;
+                            applied_render_work |=
+                                apply_queued_batch_to_scene(&state, session, queued_batch).await;
+                        }
+                        if applied_render_work {
+                            render_wake.notify();
                         }
                     }
                 }
@@ -779,7 +788,12 @@ impl HudSession for HudSessionImpl {
                     // to the scene graph and notifies the agent with CapabilityNotice
                     // + LeaseStateChange (both transactional — never dropped).
                     revocation_result = capability_revocation_rx.recv() => {
-                        if let LoopAction::Break = session.on_capability_revocation(revocation_result, &state, &tx).await {
+                        if let LoopAction::Break = session.on_capability_revocation(
+                            revocation_result,
+                            &state,
+                            &tx,
+                            &render_wake,
+                        ).await {
                             break;
                         }
                     }
@@ -837,10 +851,13 @@ impl HudSession for HudSessionImpl {
                     &state,
                     session,
                     &tx,
-                    MediaCloseReason::SessionDisconnected as i32,
-                    "session closed with active media ingress stream",
-                    MediaSessionState::Closed as i32,
-                    None,
+                    MediaIngressCloseDisposition {
+                        reason: MediaCloseReason::SessionDisconnected as i32,
+                        detail: "session closed with active media ingress stream".to_string(),
+                        final_state: MediaSessionState::Closed as i32,
+                        retry_after_us: None,
+                    },
+                    &render_wake,
                 )
                 .await;
             }
@@ -900,19 +917,21 @@ async fn handle_client_message(
         return;
     };
 
-    let creates_render_work = client_payload_creates_render_work(&payload);
     match payload {
         ClientPayload::MutationBatch(batch) => {
-            handle_mutation_batch(state, session, tx, batch).await;
+            handle_mutation_batch(state, session, tx, batch, render_wake).await;
         }
         ClientPayload::LeaseRequest(req) => {
-            handle_lease_request(state, session, tx, client_sequence, req).await;
+            let _ =
+                handle_lease_request(state, session, tx, client_sequence, req, render_wake).await;
         }
         ClientPayload::LeaseRenew(renew) => {
-            handle_lease_renew(state, session, tx, client_sequence, renew).await;
+            let _ =
+                handle_lease_renew(state, session, tx, client_sequence, renew, render_wake).await;
         }
         ClientPayload::LeaseRelease(release) => {
-            handle_lease_release(state, session, tx, client_sequence, release).await;
+            let _ = handle_lease_release(state, session, tx, client_sequence, release, render_wake)
+                .await;
         }
         ClientPayload::SubscriptionChange(change) => {
             handle_subscription_change(session, tx, change).await;
@@ -921,7 +940,8 @@ async fn handle_client_message(
             handle_list_elements_request(state, session, tx, request).await;
         }
         ClientPayload::ZonePublish(publish) => {
-            handle_zone_publish(state, session, tx, client_sequence, publish).await;
+            let _ = handle_zone_publish(state, session, tx, client_sequence, publish, render_wake)
+                .await;
         }
         ClientPayload::Heartbeat(hb) => {
             handle_heartbeat(session, tx, hb).await;
@@ -962,12 +982,22 @@ async fn handle_client_message(
         // Durable-widget publishes receive WidgetPublishResult (ServerMessage field 47).
         // Ephemeral-widget publishes are fire-and-forget (no result).
         ClientPayload::WidgetPublish(publish) => {
-            handle_widget_publish(state, session, tx, client_sequence, publish).await;
+            let _ =
+                handle_widget_publish(state, session, tx, client_sequence, publish, render_wake)
+                    .await;
         }
         // Widget asset register/upload (session-protocol spec §Requirement: Widget Asset Registration via Session Stream).
         // Always transactional; every request receives WidgetAssetRegisterResult.
         ClientPayload::WidgetAssetRegister(register) => {
-            handle_widget_asset_register(state, session, tx, client_sequence, register).await;
+            handle_widget_asset_register(
+                state,
+                session,
+                tx,
+                client_sequence,
+                register,
+                render_wake,
+            )
+            .await;
         }
         ClientPayload::ResourceUploadStart(start) => {
             let _ = upload_command_tx
@@ -1015,10 +1045,18 @@ async fn handle_client_message(
         // field 64 are treated as an unrecognised payload by prost and will not match
         // this arm; the outer fallthrough handler covers that case.
         ClientPayload::MediaIngressOpen(open) => {
-            handle_media_ingress_open(state, session, tx, media_ingress_config, open).await;
+            let _ = handle_media_ingress_open(
+                state,
+                session,
+                tx,
+                media_ingress_config,
+                open,
+                render_wake,
+            )
+            .await;
         }
         ClientPayload::MediaIngressClose(close) => {
-            handle_media_ingress_close(state, session, tx, close).await;
+            handle_media_ingress_close(state, session, tx, close, render_wake).await;
         }
         ClientPayload::MediaSdpAnswer(_)
         | ClientPayload::MediaPauseRequest(_)
@@ -1041,27 +1079,6 @@ async fn handle_client_message(
         // outbound error flooding if an agent mistakenly sends them (RFC 0014 §2.4).
         ClientPayload::MediaIceCandidate(_) => {}
     }
-    if creates_render_work {
-        render_wake.notify();
-    }
-}
-
-fn client_payload_creates_render_work(payload: &ClientPayload) -> bool {
-    matches!(
-        payload,
-        ClientPayload::MutationBatch(_)
-            | ClientPayload::LeaseRequest(_)
-            | ClientPayload::LeaseRenew(_)
-            | ClientPayload::LeaseRelease(_)
-            | ClientPayload::ZonePublish(_)
-            | ClientPayload::InputCaptureRequest(_)
-            | ClientPayload::InputCaptureRelease(_)
-            | ClientPayload::SessionClose(_)
-            | ClientPayload::WidgetPublish(_)
-            | ClientPayload::WidgetAssetRegister(_)
-            | ClientPayload::MediaIngressOpen(_)
-            | ClientPayload::MediaIngressClose(_)
-    )
 }
 
 /// Send a `RuntimeError` server message.
@@ -1346,6 +1363,7 @@ impl StreamSession {
         >,
         state: &Arc<Mutex<SharedState>>,
         tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, tonic::Status>>,
+        render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
     ) -> LoopAction {
         match revocation_result {
             Ok(event) => {
@@ -1353,7 +1371,7 @@ impl StreamSession {
                 let global_media_ingress_revoke =
                     event.capability_name == "media_ingress" && event.lease_id.is_null();
                 if global_media_ingress_revoke || self.lease_ids.contains(&event.lease_id) {
-                    handle_capability_revocation(state, self, tx, event).await;
+                    handle_capability_revocation(state, self, tx, event, render_wake).await;
                 }
                 LoopAction::Continue
             }

@@ -609,6 +609,27 @@ struct WinitApp {
     state: WindowedRuntimeState,
 }
 
+impl WinitApp {
+    /// Claim a scheduled deadline that became due before or during this event
+    /// loop turn. `WaitCancelled` may arrive just before the deadline and the
+    /// settle work may cross it, so `ResumeTimeReached` cannot be the only claim
+    /// point.
+    fn claim_due_scheduled_main_deadline(
+        &mut self,
+        now: Instant,
+    ) -> Option<wake::MainWorkCheckpoint> {
+        let deadline = self
+            .state
+            .scheduled_main_deadline
+            .filter(|deadline| deadline.at <= now)?;
+        self.state.scheduled_main_deadline = None;
+        // This deadline piggybacks on the already-counted proxy/OS event that
+        // cancelled the wait. Only `ResumeTimeReached` records a timer-caused
+        // main-loop wakeup.
+        Some(self.state.wake.mark_main_work_pending(deadline.source))
+    }
+}
+
 impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
         match cause {
@@ -623,7 +644,7 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
                     // Mark a post-mutation compositor notification as owed; a
                     // pre-mutation wake can otherwise be consumed against the
                     // old scene and strand the newly-created work.
-                    self.state.wake.mark_main_work_pending();
+                    self.state.wake.mark_main_work_pending(deadline.source);
                 }
             }
             StartCause::WaitCancelled { .. } => {
@@ -657,6 +678,14 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
     /// Pending mode switches must therefore be handled here in `about_to_wait`
     /// rather than in `resumed()`.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // A proxy/OS event can cancel WaitUntil immediately before its instant,
+        // then settle work can cross the deadline. Claim it before the work
+        // checkpoint so its typed post-settle compositor wake cannot be lost.
+        let _ = self.claim_due_scheduled_main_deadline(Instant::now());
+        // Acknowledge only producer work that was visible before this drain.
+        // Notifications racing after this checkpoint retain a later generation
+        // for the next event-loop turn and cannot be erased at settle time.
+        let main_work_checkpoint = self.state.wake.main_work_checkpoint();
         if self.state.shutdown.is_triggered() {
             event_loop.exit();
             return;
@@ -669,7 +698,7 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
         }
         self.refresh_cursor_position_from_os();
         self.drain_input_capture_commands();
-        self.drain_paste_inject();
+        let paste_scene_changed = self.drain_paste_inject();
         self.synthesize_left_release_if_physically_up();
         self.refresh_widget_hover_tracking();
         self.update_overlay_cursor_hittest();
@@ -716,7 +745,8 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
         // Must run AFTER composer flush so draft state is settled before portal
         // content is refreshed.  Uses try_lock on the scene to avoid blocking
         // the main thread (deferred to next about_to_wait if busy).
-        self.drain_portal_projection();
+        let portal_scene_changed = self.drain_portal_projection();
+        let settled_scene_changed = paste_scene_changed || portal_scene_changed;
         // Prune stale portal_resize_states entries for tiles removed from the
         // scene (hud-kgu8u). Uses try_lock; silently deferred if lock is busy.
         self.prune_portal_resize_states();
@@ -736,6 +766,7 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
         self.maybe_present_frame();
 
         let now = Instant::now();
+        let deadline_crossed_during_settle = self.claim_due_scheduled_main_deadline(now);
         let mut deadlines = Vec::new();
         if let Some(at) =
             crate::widget_hover::next_hover_deadline(&self.state.widget_hover_trackers)
@@ -750,14 +781,14 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
             && let Ok(scene) = state.scene.try_lock()
         {
             inspected_scene_deadlines = true;
-            if let Some(wall_us) = self
+            if let Some(portal_deadline) = self
                 .state
                 .portal_projection_driver
-                .next_wake_deadline_wall_us(&scene)
+                .next_wake_deadline(&scene)
             {
                 let mut deadline = deadline_from_wall_us(
-                    wall_us,
-                    crate::idle_efficiency::RuntimeWakeupSource::TtlDeadline,
+                    portal_deadline.wall_us,
+                    portal_deadline.family.wakeup_source(),
                 );
                 if deadline.at <= now {
                     deadline.at = now + std::time::Duration::from_millis(1);
@@ -796,9 +827,16 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
         let next = deadlines.iter().copied().min_by_key(|deadline| deadline.at);
         self.state.scheduled_main_deadline = next;
         event_loop.set_control_flow(control_flow_for_deadlines(now, deadlines));
-        self.state
-            .wake
-            .finish_main_work(crate::idle_efficiency::RuntimeWakeupSource::SceneChange);
+        if let Some(deadline_checkpoint) = deadline_crossed_during_settle {
+            self.state.wake.finish_main_work(main_work_checkpoint);
+            self.state
+                .wake
+                .finish_main_work_after_settle(deadline_checkpoint, settled_scene_changed);
+        } else {
+            self.state
+                .wake
+                .finish_main_work_after_settle(main_work_checkpoint, settled_scene_changed);
+        }
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -1771,16 +1809,7 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        let wake_source = match &event {
-            WindowEvent::Resized(_) => crate::idle_efficiency::RuntimeWakeupSource::Resize,
-            WindowEvent::CloseRequested => crate::idle_efficiency::RuntimeWakeupSource::Shutdown,
-            _ => crate::idle_efficiency::RuntimeWakeupSource::SceneChange,
-        };
-        // Notify on every exit from this callback, after the OS event's scene
-        // and out-of-band compositor state mutations have completed. Waking at
-        // callback entry permits the compositor to consume the generation and
-        // park against the old state while the main thread is still mutating.
-        let _post_main_mutation_wake = self.state.wake.post_main_mutation_wake(wake_source);
+        let wake_source = main_work_source_for_window_event(&event);
         match event {
             // ── Close ──────────────────────────────────────────────────────
             WindowEvent::CloseRequested => {
@@ -1793,6 +1822,9 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
 
             // ── Resize ─────────────────────────────────────────────────────
             WindowEvent::Resized(physical_size) => {
+                if let Some(source) = wake_source {
+                    self.state.wake.mark_main_work_pending(source);
+                }
                 if physical_size.width > 0 && physical_size.height > 0 {
                     self.state.config.window.width = physical_size.width;
                     self.state.config.window.height = physical_size.height;
@@ -1836,6 +1868,9 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
             // Stage 1: Drain OS input event → InputEvent ring buffer.
             // Stage 2: Apply local feedback.
             WindowEvent::CursorMoved { position, .. } => {
+                if let Some(source) = wake_source {
+                    self.state.wake.mark_main_work_pending(source);
+                }
                 self.state.cursor_x = position.x as f32;
                 self.state.cursor_y = position.y as f32;
 
@@ -1847,6 +1882,9 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
 
             // ── Pointer: button press/release ──────────────────────────────
             WindowEvent::MouseInput { state, button, .. } => {
+                if let Some(source) = wake_source {
+                    self.state.wake.mark_main_work_pending(source);
+                }
                 if button == MouseButton::Left {
                     let kind = match state {
                         ElementState::Pressed => PointerEventKind::Down,
@@ -1884,6 +1922,9 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
 
             // ── Pointer: wheel scroll ────────────────────────────────────────
             WindowEvent::MouseWheel { delta, .. } => {
+                if let Some(source) = wake_source {
+                    self.state.wake.mark_main_work_pending(source);
+                }
                 let (delta_x, delta_y) = normalize_mouse_wheel_delta(&delta);
                 self.enqueue_scroll_event(delta_x, delta_y);
             }
@@ -1949,6 +1990,17 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
                             }
                             _ => {}
                         }
+                    }
+                }
+
+                let matching_shell_release_is_consumed = event.state == ElementState::Released
+                    && self
+                        .state
+                        .consumed_shell_shortcut_keydowns
+                        .contains(&physical_key_to_key_code_str(&event.physical_key));
+                if !matching_shell_release_is_consumed {
+                    if let Some(source) = wake_source {
+                        self.state.wake.mark_main_work_pending(source);
                     }
                 }
 
@@ -2036,6 +2088,9 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
             //
             // Preedit events (Ime::Preedit) are v1-reserved and not forwarded.
             WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+                if let Some(source) = wake_source {
+                    self.state.wake.mark_main_work_pending(source);
+                }
                 let timestamp_mono_us = tze_hud_scene::MonoUs(nanoseconds_since_start() / 1_000);
                 let raw_char = RawCharacterEvent {
                     character: text.clone(),
@@ -2059,6 +2114,61 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
 
             _ => {}
         }
+    }
+}
+
+/// Only OS events that can produce compositor-visible main-thread work own a
+/// post-settle wake generation. Present polling, modifier bookkeeping, and
+/// shutdown are not scene mutations and must not manufacture another frame.
+fn main_work_source_for_window_event(
+    event: &WindowEvent,
+) -> Option<crate::idle_efficiency::RuntimeWakeupSource> {
+    use crate::idle_efficiency::RuntimeWakeupSource;
+
+    match event {
+        WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
+            Some(RuntimeWakeupSource::Resize)
+        }
+        WindowEvent::CursorMoved { .. }
+        | WindowEvent::MouseInput {
+            button: MouseButton::Left,
+            ..
+        }
+        | WindowEvent::MouseInput {
+            button: MouseButton::Right,
+            state: ElementState::Released,
+            ..
+        }
+        | WindowEvent::MouseWheel { .. }
+        | WindowEvent::KeyboardInput { .. }
+        | WindowEvent::Ime(winit::event::Ime::Commit(_)) => Some(RuntimeWakeupSource::SceneChange),
+        _ => None,
+    }
+}
+
+/// Move resident-bridge input onto the main-owned authority queue, then wake
+/// that owner to drain it. Queue ingress is deliberately not compositor work:
+/// the authority decides whether the drained input changes the scene.
+async fn forward_resident_bridge_input_to_main(
+    input: crate::resident_grpc_bridge::ResidentBridgeInput,
+    main_input_tx: &tokio::sync::mpsc::Sender<crate::resident_grpc_bridge::ResidentBridgeInput>,
+    portal_ingress_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
+) -> bool {
+    if main_input_tx.send(input).await.is_err() {
+        return false;
+    }
+    portal_ingress_wake.notify();
+    true
+}
+
+/// Schedule compositor work only when safe mode actually left its active state.
+/// Repeated Ctrl+Shift+Escape signals while inactive are side-effect-free.
+fn notify_after_safe_mode_exit(
+    result: &crate::shell::SafeModeExitResult,
+    render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
+) {
+    if result.exited {
+        render_wake.notify();
     }
 }
 
@@ -2098,6 +2208,7 @@ impl WindowedRuntime {
         event_loop.set_control_flow(ControlFlow::Wait);
         let wake = WindowedWake::new(event_loop.create_proxy());
         let render_wake = wake.render_notifier();
+        let portal_ingress_wake = wake.main_work_notifier();
 
         // Resolve the effective window mode, applying platform fallback checks.
         // Spec §Unsupported overlay fallback (line 185): if overlay is requested
@@ -2243,6 +2354,7 @@ impl WindowedRuntime {
             degradation_level: tze_hud_protocol::session::RuntimeDegradationLevel::Normal,
             media_ingress_active: None,
             input_capture_tx: Some(input_capture_tx),
+            input_capture_wake: wake.main_work_notifier(),
             // Expose the runtime's ACTIVE-profile resolved portal tokens over the
             // session handshake so clients (the text-stream portal exemplar)
             // render the runtime's live look rather than a client-side mirror
@@ -2398,6 +2510,7 @@ impl WindowedRuntime {
                     Some(paste_inject_tx),
                     portal_op_tx_opt.take(),
                     render_wake.clone(),
+                    portal_ingress_wake.clone(),
                 )) {
                     Ok((handle, local_addr)) => {
                         network_handles.push(handle);
@@ -2463,8 +2576,9 @@ impl WindowedRuntime {
                                         Arc::clone(&chrome_for_exit),
                                     );
                                     let result = ctrl.exit_safe_mode().await;
-                                    render_wake_for_exit.notify();
+                                    notify_after_safe_mode_exit(&result, &render_wake_for_exit);
                                     tracing::info!(
+                                        exited = result.exited,
                                         leases_resumed = result.leases_resumed,
                                         sessions_notified = result.sessions_notified,
                                         suspension_duration_us = result.suspension_duration_us,
@@ -2599,13 +2713,18 @@ impl WindowedRuntime {
                         let (input_tx, mut bridge_input_rx) = tokio::sync::mpsc::channel(64);
                         let (main_input_tx, main_input_rx) = tokio::sync::mpsc::channel(64);
                         resident_grpc_input_rx = Some(main_input_rx);
-                        let bridge_input_wake = render_wake.clone();
+                        let bridge_input_wake = portal_ingress_wake.clone();
                         network_handles.push(rt.rt.spawn(async move {
                             while let Some(input) = bridge_input_rx.recv().await {
-                                if main_input_tx.send(input).await.is_err() {
+                                if !forward_resident_bridge_input_to_main(
+                                    input,
+                                    &main_input_tx,
+                                    &bridge_input_wake,
+                                )
+                                .await
+                                {
                                     break;
                                 }
-                                bridge_input_wake.notify();
                             }
                         }));
                         let handle = crate::resident_grpc_bridge::spawn_resident_grpc_bridge(
@@ -2777,5 +2896,66 @@ impl WindowedRuntime {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod wake_accounting_tests {
+    use super::*;
+
+    #[test]
+    fn passive_window_events_do_not_create_main_work_debt() {
+        assert_eq!(
+            main_work_source_for_window_event(&WindowEvent::RedrawRequested),
+            None,
+            "present polling must not schedule another compositor frame"
+        );
+        assert_eq!(
+            main_work_source_for_window_event(&WindowEvent::CloseRequested),
+            None,
+            "shutdown owns its lifecycle without a post-settle render wake"
+        );
+        assert_eq!(
+            main_work_source_for_window_event(&WindowEvent::Resized(
+                winit::dpi::PhysicalSize::new(0, 0)
+            )),
+            None,
+            "a zero-sized suspended surface has no renderable resize work"
+        );
+    }
+
+    #[test]
+    fn safe_mode_exit_wakes_only_after_an_actual_transition() {
+        let wake = WindowedWake::disconnected();
+        let render_wake = wake.render_notifier();
+        let compositor_before = wake.compositor().checkpoint();
+        let no_op = crate::shell::SafeModeExitResult {
+            exited: false,
+            leases_resumed: 0,
+            lease_resumes: Vec::new(),
+            sessions_notified: 0,
+            suspension_duration_us: 0,
+        };
+
+        notify_after_safe_mode_exit(&no_op, &render_wake);
+        assert_eq!(
+            wake.compositor().checkpoint(),
+            compositor_before,
+            "an idempotent safe-mode exit must not create compositor work"
+        );
+
+        let transition = crate::shell::SafeModeExitResult {
+            exited: true,
+            leases_resumed: 0,
+            lease_resumes: Vec::new(),
+            sessions_notified: 0,
+            suspension_duration_us: 0,
+        };
+        notify_after_safe_mode_exit(&transition, &render_wake);
+        assert_eq!(
+            wake.compositor().checkpoint(),
+            compositor_before.wrapping_add(1),
+            "a real safe-mode exit must wake the compositor exactly once"
+        );
     }
 }

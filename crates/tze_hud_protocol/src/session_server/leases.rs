@@ -32,7 +32,8 @@ pub(super) async fn handle_lease_request(
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     client_sequence: u64,
     req: LeaseRequest,
-) {
+    render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
+) -> bool {
     // Retransmit dedup (RFC 0005 §5.3): if we have already processed this
     // client sequence, replay the cached response.
     if client_sequence > 0 {
@@ -57,7 +58,7 @@ pub(super) async fn handle_lease_request(
                     })),
                 }))
                 .await;
-            return;
+            return false;
         }
     }
 
@@ -120,7 +121,7 @@ pub(super) async fn handle_lease_request(
                 })),
             }))
             .await;
-        return;
+        return false;
     }
 
     // Lease capability scope must stay within the session's currently granted
@@ -165,7 +166,7 @@ pub(super) async fn handle_lease_request(
                 })),
             }))
             .await;
-        return;
+        return false;
     }
 
     let granted_capabilities: Vec<String> = req.capabilities.clone();
@@ -186,19 +187,18 @@ pub(super) async fn handle_lease_request(
     // `effective_priority` returns u32 (wire type); priority values are 0-4 so the
     // conversion to u8 is always lossless.
     let priority_u8 = granted_priority as u8;
-    let st = state.lock().await;
-    let lease_result = st
-        .scene
-        .lock()
-        .await
-        .try_grant_lease_for_session_with_budget(
+    let lease_result = {
+        let st = state.lock().await;
+        let mut scene = st.scene.lock().await;
+        scene.try_grant_lease_for_session_with_budget(
             &session.namespace,
             session.scene_session_id,
             ttl,
             priority_u8,
             capabilities,
             session.resource_budget.clone(),
-        );
+        )
+    };
     let lease_id = match lease_result {
         Ok(lease_id) => lease_id,
         Err(error) => {
@@ -231,9 +231,10 @@ pub(super) async fn handle_lease_request(
                     })),
                 }))
                 .await;
-            return;
+            return false;
         }
     };
+    render_wake.notify();
     session.lease_ids.push(lease_id);
     let lease_id_bytes = scene_id_to_bytes(lease_id);
 
@@ -288,6 +289,7 @@ pub(super) async fn handle_lease_request(
             })),
         }))
         .await;
+    true
 }
 
 pub(super) async fn handle_lease_renew(
@@ -296,7 +298,8 @@ pub(super) async fn handle_lease_renew(
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     client_sequence: u64,
     renew: LeaseRenew,
-) {
+    render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
+) -> bool {
     // Retransmit dedup (RFC 0005 §5.3).
     if client_sequence > 0 {
         if let Some(cached) = session
@@ -320,7 +323,7 @@ pub(super) async fn handle_lease_renew(
                     })),
                 }))
                 .await;
-            return;
+            return false;
         }
     }
 
@@ -356,11 +359,10 @@ pub(super) async fn handle_lease_renew(
                     })),
                 }))
                 .await;
-            return;
+            return false;
         }
     };
 
-    let st = state.lock().await;
     let ttl = if renew.new_ttl_ms > 0 {
         renew.new_ttl_ms
     } else {
@@ -369,6 +371,7 @@ pub(super) async fn handle_lease_renew(
     let lease_id_bytes = scene_id_to_bytes(lease_id);
 
     let renew_result = {
+        let st = state.lock().await;
         let mut scene = st.scene.lock().await;
         let result = scene.renew_lease(lease_id, ttl);
         // Read the stored priority while we hold the scene lock.
@@ -379,6 +382,9 @@ pub(super) async fn handle_lease_renew(
             .unwrap_or(2);
         result.map(|()| stored_priority)
     };
+    if renew_result.is_ok() {
+        render_wake.notify();
+    }
 
     match renew_result {
         Ok(stored_priority) => {
@@ -435,6 +441,7 @@ pub(super) async fn handle_lease_renew(
                     })),
                 }))
                 .await;
+            true
         }
         Err(e) => {
             let seq = session.next_server_seq();
@@ -466,6 +473,7 @@ pub(super) async fn handle_lease_renew(
                     })),
                 }))
                 .await;
+            false
         }
     }
 }
@@ -476,7 +484,8 @@ pub(super) async fn handle_lease_release(
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     client_sequence: u64,
     release: LeaseRelease,
-) {
+    render_wake: &tze_hud_scene::render_wake::RenderWakeNotifier,
+) -> bool {
     // Retransmit dedup (RFC 0005 §5.3).
     // Replay the cached LeaseResponse for both success and denial paths so the
     // client always receives a LeaseResponse on retransmit (consistent with the
@@ -504,7 +513,7 @@ pub(super) async fn handle_lease_release(
                     })),
                 }))
                 .await;
-            return;
+            return false;
         }
     }
 
@@ -540,15 +549,21 @@ pub(super) async fn handle_lease_release(
                     })),
                 }))
                 .await;
-            return;
+            return false;
         }
     };
 
-    let st = state.lock().await;
     let lease_id_bytes = scene_id_to_bytes(lease_id);
 
-    match st.scene.lock().await.revoke_lease(lease_id) {
+    let revoke_result = {
+        let st = state.lock().await;
+        let mut scene = st.scene.lock().await;
+        scene.revoke_lease(lease_id)
+    };
+
+    match revoke_result {
         Ok(()) => {
+            render_wake.notify();
             // Remove from session's tracked leases
             session.lease_ids.retain(|&id| id != lease_id);
 
@@ -600,6 +615,7 @@ pub(super) async fn handle_lease_release(
                     })),
                 }))
                 .await;
+            true
         }
         Err(e) => {
             let seq = session.next_server_seq();
@@ -631,6 +647,7 @@ pub(super) async fn handle_lease_release(
                     })),
                 }))
                 .await;
+            false
         }
     }
 }
