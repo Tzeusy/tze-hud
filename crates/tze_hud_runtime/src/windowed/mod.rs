@@ -195,7 +195,7 @@ mod event_loop_harness;
 pub use self::config::{
     DEFAULT_RESIDENT_GRPC_AGENT_ID, DEFAULT_RESIDENT_GRPC_LEASE_TTL_MS,
     ResidentGrpcCredentialSource, ResidentGrpcPortalSettings, WindowedBenchmarkConfig,
-    WindowedConfig,
+    WindowedConfig, WindowedQuiescentEfficiencyConfig,
 };
 use self::hittest::{refresh_interaction_hit_regions_after_render, sync_scene_display_area};
 use self::input_dispatch::{
@@ -205,9 +205,9 @@ use self::input_dispatch::{
 use self::keyboard::{ComposerDeliveryContext, PendingKeyboardEvent};
 use self::lifecycle::{
     BENCHMARK_NO_PROGRESS_TIMEOUT, PendingInputLatencySamples, WindowedBenchmarkRunState,
-    begin_os_mouse_capture, detect_monitor_size, drain_pending_input_latency, end_os_mouse_capture,
-    focus_window_for_text_input, read_windows_clipboard_text, seed_windowed_benchmark_scene,
-    windowed_frame_needs_render,
+    WindowedQuiescentEfficiencyRunState, begin_os_mouse_capture, detect_monitor_size,
+    drain_pending_input_latency, end_os_mouse_capture, focus_window_for_text_input,
+    read_windows_clipboard_text, seed_windowed_benchmark_scene, windowed_frame_needs_render,
 };
 pub use self::network::render_attach_info;
 use self::network::{
@@ -365,6 +365,9 @@ struct WindowedRuntimeState {
     shutdown: ShutdownToken,
     /// Set when benchmark output failed after the event loop was already running.
     benchmark_failed: Arc<std::sync::atomic::AtomicBool>,
+    /// Optional event-driven quiescent-efficiency measurement, initialized only
+    /// after a real compositor and window surface exist.
+    quiescent_efficiency: Option<WindowedQuiescentEfficiencyRunState>,
     /// Current cursor position (updated by CursorMoved events).
     cursor_x: f32,
     cursor_y: f32,
@@ -634,7 +637,16 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
         match cause {
             StartCause::ResumeTimeReached { .. } => {
-                if let Some(deadline) = self.state.scheduled_main_deadline.take() {
+                if self
+                    .state
+                    .scheduled_main_deadline
+                    .is_some_and(|deadline| deadline.at <= Instant::now())
+                {
+                    let deadline = self
+                        .state
+                        .scheduled_main_deadline
+                        .take()
+                        .expect("a due main deadline was checked above");
                     self.state
                         .wake
                         .counters()
@@ -766,6 +778,52 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
         self.maybe_present_frame();
 
         let now = Instant::now();
+        let counters = Arc::clone(self.state.wake.counters());
+        let quiescent_completion = self
+            .state
+            .quiescent_efficiency
+            .as_mut()
+            .and_then(|measurement| measurement.advance(now, counters.as_ref()));
+        if let Some(completion) = quiescent_completion {
+            let measurement = self
+                .state
+                .quiescent_efficiency
+                .as_ref()
+                .expect("measurement must remain available until its artifact is written");
+            let artifact_path = measurement.emit_path().to_path_buf();
+            let write_result = measurement.write(&completion);
+            if let Err(error) = write_result {
+                tracing::error!(
+                    %error,
+                    path = %artifact_path.display(),
+                    "failed to write quiescent-efficiency runtime artifact"
+                );
+                self.state
+                    .benchmark_failed
+                    .store(true, std::sync::atomic::Ordering::Release);
+            } else if completion.validation.passed {
+                tracing::info!(
+                    path = %artifact_path.display(),
+                    wakeups = completion.artifact.wakeups.combined_runtime_driven,
+                    "quiescent-efficiency runtime artifact written"
+                );
+            } else {
+                tracing::error!(
+                    path = %artifact_path.display(),
+                    violations = ?completion.validation.violations,
+                    "quiescent-efficiency runtime artifact failed validation"
+                );
+                self.state
+                    .benchmark_failed
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+            self.state
+                .shutdown
+                .trigger(crate::threads::ShutdownReason::Clean);
+            event_loop.exit();
+            return;
+        }
+
         let deadline_crossed_during_settle = self.claim_due_scheduled_main_deadline(now);
         let mut deadlines = Vec::new();
         if let Some(at) =
@@ -826,7 +884,23 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
         }
         let next = deadlines.iter().copied().min_by_key(|deadline| deadline.at);
         self.state.scheduled_main_deadline = next;
-        event_loop.set_control_flow(control_flow_for_deadlines(now, deadlines));
+        let quiescent_deadline = self
+            .state
+            .quiescent_efficiency
+            .as_ref()
+            .and_then(WindowedQuiescentEfficiencyRunState::next_deadline);
+        let control_flow = match (
+            control_flow_for_deadlines(now, deadlines),
+            quiescent_deadline,
+        ) {
+            (ControlFlow::Wait, Some(deadline)) => ControlFlow::WaitUntil(deadline),
+            (ControlFlow::WaitUntil(main_deadline), Some(deadline)) => {
+                ControlFlow::WaitUntil(main_deadline.min(deadline))
+            }
+            (ControlFlow::Poll, Some(_)) => ControlFlow::Poll,
+            (control_flow, None) => control_flow,
+        };
+        event_loop.set_control_flow(control_flow);
         if let Some(deadline_checkpoint) = deadline_crossed_during_settle {
             self.state.wake.finish_main_work(main_work_checkpoint);
             self.state
@@ -1058,8 +1132,17 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
             .expect("failed to build startup tokio runtime");
 
         let is_overlay = self.state.effective_mode == WindowMode::Overlay;
+        let constrained_measurement = cfg.quiescent_efficiency.is_some();
         let (mut compositor, window_surface) = rt.block_on(async {
-            let mut c = if is_overlay {
+            let mut c = if constrained_measurement {
+                Compositor::new_windowed_constrained(
+                    window_clone,
+                    surface_width,
+                    surface_height,
+                    is_overlay,
+                )
+                .await
+            } else if is_overlay {
                 Compositor::new_windowed_overlay(window_clone, surface_width, surface_height).await
             } else {
                 Compositor::new_windowed(window_clone, surface_width, surface_height).await
@@ -1144,6 +1227,22 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
         // Reverse channel: read the compositor's per-frame wrapped-line layout for
         // soft-wrap vertical caret movement (hud-21o6x).
         self.state.composer_visual_layout = Arc::clone(&compositor.composer_visual_layout);
+
+        if let Some(config) = cfg.quiescent_efficiency.clone() {
+            self.state.quiescent_efficiency = Some(WindowedQuiescentEfficiencyRunState::new(
+                config,
+                self.state.effective_mode,
+                surface_width,
+                surface_height,
+                compositor.adapter_info().clone(),
+                Instant::now(),
+            ));
+            tracing::info!(
+                settling_ms = tze_hud_telemetry::QUIESCENT_SETTLING_MIN_MS,
+                interval_ms = tze_hud_telemetry::QUIESCENT_INTERVAL_MIN_MS,
+                "quiescent efficiency measurement armed; waiting for first actual present"
+            );
+        }
 
         // ── Wire compositor thread ─────────────────────────────────────────
         // Pre-clone the scene Arc so the compositor thread can lock the scene
@@ -2782,6 +2881,7 @@ impl WindowedRuntime {
             pipeline: FramePipeline::new(),
             shutdown,
             benchmark_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            quiescent_efficiency: None,
             cursor_x: 0.0,
             cursor_y: 0.0,
             left_button_down: false,

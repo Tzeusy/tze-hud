@@ -17,6 +17,21 @@ pub struct WindowedBenchmarkConfig {
     pub emit_path: PathBuf,
 }
 
+/// Bounded, event-driven quiescent-efficiency measurement for the real
+/// windowed compositor.
+///
+/// Unlike [`WindowedBenchmarkConfig`], this mode never requests a render
+/// cadence. The runtime first observes a real presentation, settles for the
+/// mandatory five seconds, then measures the untouched overlay for sixty
+/// seconds and emits the counter delta at `emit_path`.
+#[derive(Debug, Clone)]
+pub struct WindowedQuiescentEfficiencyConfig {
+    /// Destination for the runtime-emitted artifact consumed by the CI gate.
+    pub emit_path: PathBuf,
+    /// Immutable build identity supplied by the application entry point.
+    pub build: String,
+}
+
 /// Default agent identity presented for the resident gRPC portal session.
 ///
 /// Kept in sync with the historical env-only enablement path, which hard-coded
@@ -187,6 +202,8 @@ pub struct WindowedConfig {
     pub monitor_index: Option<usize>,
     /// Optional bounded benchmark run for the windowed compositor.
     pub benchmark: Option<WindowedBenchmarkConfig>,
+    /// Optional bounded, event-driven quiescent-efficiency measurement.
+    pub quiescent_efficiency: Option<WindowedQuiescentEfficiencyConfig>,
     /// First-class resident gRPC portal bridge configuration (hud-x2e2v).
     ///
     /// `None` (default) keeps the bridge **off** unless the
@@ -211,6 +228,7 @@ impl Default for WindowedConfig {
             debug_zones: false,
             monitor_index: None,
             benchmark: None,
+            quiescent_efficiency: None,
             bind_all_interfaces: false,
             resident_grpc_portal: None,
         }

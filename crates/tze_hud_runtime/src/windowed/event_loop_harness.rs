@@ -118,6 +118,7 @@ impl WindowedRuntimeState {
             pipeline: crate::pipeline::FramePipeline::new(),
             shutdown: crate::threads::ShutdownToken::new(),
             benchmark_failed: Arc::new(AtomicBool::new(false)),
+            quiescent_efficiency: None,
             cursor_x: 0.0,
             cursor_y: 0.0,
             left_button_down: false,

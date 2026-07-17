@@ -43,9 +43,7 @@
 use crate::component_startup::{register_profile_widgets, run_component_startup};
 use crate::degradation::{DegradationController, DegradationEnvelope, TileDescriptor};
 use crate::element_store::bootstrap_scene_element_store;
-use crate::idle_efficiency::{
-    IdleEfficiencyCounters, IdleEfficiencySnapshot, RuntimeWakeupSource,
-};
+use crate::idle_efficiency::{IdleEfficiencyCounters, IdleEfficiencySnapshot, RuntimeWakeupSource};
 use crate::pipeline::{FramePipeline, HitTestSnapshot};
 use crate::reload_triggers::{RuntimeServiceImpl, spawn_sighup_listener};
 use crate::runtime_context::{FallbackPolicy, RuntimeContext};

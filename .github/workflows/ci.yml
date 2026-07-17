@@ -13,6 +13,7 @@
 #   test-v1-thesis — cargo test -p integration --test v1_thesis
 #   production-boot — cargo test -p vertical_slice --test production_boot
 #   windows-performance-budget — headless Windows benchmark + locked budget gate
+#     and a real constrained WARP overlay quiescent-efficiency artifact gate
 #   constrained-envelope-budget — llvmpipe proxy, exactly two logical CPUs, same normalized ceilings
 #   release-artifact-provenance-smoke — cross-build tze_hud.exe and verify uploaded checksum round-trip
 #   vocabulary-lint — scripts/check_canonical_vocabulary.sh
@@ -322,6 +323,16 @@ jobs:
           python scripts/ci/check_windows_perf_budgets.py `
             --benchmark-json test_results/windows-performance-budget/benchmark.json `
             --output-json test_results/windows-performance-budget/budget-gate.json
+      - name: Build canonical windowed runtime for quiescent evidence
+        shell: pwsh
+        run: cargo build -p tze_hud_app --release
+      - name: Prove static overlay idle efficiency on WARP / two CPUs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          .\scripts\ci\windows\run-quiescent-efficiency.ps1 `
+            -ExePath target\release\tze_hud.exe `
+            -OutputDir test_results\windows-performance-budget\quiescent-efficiency
       # ── Cross-run telemetry trend (informational; hud-kkx15, hud-bp3c3) ──────
       #
       # The gate above is a hard PASS/FAIL against the checked-in baseline; it
