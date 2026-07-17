@@ -247,6 +247,23 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
         self.assertNotIn("EventBatch", script)
         self.assertNotIn("input_event_tx", script)
 
+    def test_windows_diagnostic_input_script_hides_console_before_actions(self) -> None:
+        script = portal.windows_diagnostic_input_script(
+            [{"kind": "click", "label": "focus", "x": 10.0, "y": 20.0}]
+        )
+
+        self.assertIn("[Native.Win]::GetConsoleWindow()", script)
+        self.assertIn("[Native.Win]::ShowWindow($hudConsole, 0)", script)
+        self.assertIn("Start-Sleep -Milliseconds 400", script)
+        hide_console = script.index("[Native.Win]::GetConsoleWindow()")
+        hide_window = script.index("[Native.Win]::ShowWindow($hudConsole, 0)")
+        settle_delay = script.index("Start-Sleep -Milliseconds 400")
+        first_action = script.index("diagnostic:focus")
+
+        self.assertLess(hide_console, hide_window)
+        self.assertLess(hide_window, settle_delay)
+        self.assertLess(settle_delay, first_action)
+
     def test_windows_diagnostic_input_script_scales_scene_to_desktop_coordinates(self) -> None:
         script = portal.windows_diagnostic_input_script(
             [{"kind": "click", "label": "focus", "x": 3000.0, "y": 1200.0}],
