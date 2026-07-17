@@ -84,7 +84,7 @@ Source: GitHub Actions run `29577838185`, artifact `token-footprint-calibration/
 | `hud-hnigs` | PR #1209 work included in PR #1204, merge `6b9afb51` | Added producer-wakeup-driven idle behavior, counters, checker, WARP runner, operation guide, and `idle_efficiency_counters` tests. The Windows CI artifact above is the actual measurement proof and carries the WARP limitation. |
 | `hud-pngbn` | PR #1192, merge `a7349a43` | Added deterministic token-footprint fixture, checker tests, baseline documentation, and CI calibration artifact. It proves exactly the approved three flows; it does not silently define a separate status-dashboard flow. |
 | `hud-rofdj` | PR #1196, merge `fa79dedf` | Added the constrained-envelope runner, checker, checker tests, operation guide, and CI lane. It rejects missing/incorrect provenance rather than broadening thresholds for a different machine. |
-| `hud-48s45` | PR #1181, merge `eab64877` | Produced `docs/reports/hud-48s45_desktop_headroom_assumption_audit_20260716.md`, which made desktop assumptions and VR-readiness gaps explicit. Findings F3, F8, F9, and F11 remain reviewer-relevant rather than being erased by the later supporting work. |
+| `hud-48s45` | PR #1181, merge `eab64877` | Produced `docs/reports/hud-48s45_desktop_headroom_assumption_audit_20260716.md`, which made desktop assumptions and VR-readiness gaps explicit. Findings F3, F8, and F9 remain reviewer-relevant; F11's missing production command path was remediated later by PR #1185 (`90a7a308`). |
 
 ## Supporting runtime decisions
 
@@ -104,7 +104,7 @@ Both are useful remediation from the audit, but neither changes the conclusion o
 1. **Active v1 change-proportional-work gap.** The invalidation closure artifact and 50-tile one-node gate are still required by the active `efficiency-budgets` delta. Audit finding F3 is direct evidence that the existing full-scene rebuild behavior needs resolution. This is the principal closeout blocker for claiming doctrine completion.
 2. **Status-dashboard token identity is unknown.** The doctrine names a status dashboard, while the approved calibration names zone, portal, and widget operations. A reviewer must decide whether a specific widget fixture is the canonical dashboard or require a separately versioned flow before claiming full coverage.
 3. **Constrained CI is not device qualification.** WARP and llvmpipe are valuable fail-closed proxy lanes, but their artifacts explicitly do not establish performance on a physical reference GPU, glasses, or VR hardware.
-4. **VR-readiness findings remain outside scope.** The audit's output-view monoscopic path (F8), blocking `Maintain::Wait` path (F9), and pointer-free command-input production seam (F11) require separately scoped decisions. This report makes no future-device delivery claim.
+4. **VR-readiness findings remain outside scope.** The audit's output-view monoscopic path (F8) and blocking `Maintain::Wait` path (F9) require separately scoped decisions. F11's specific production reachability gap was subsequently closed by PR #1185 (`90a7a308`): the Windows keyboard adapter now delivers `RawCommandEvent` through `CommandProcessor` and transactional `CommandInputEvent` dispatch. Other device-specific sources remain deferred. This report makes no future-device delivery claim.
 5. **OpenSpec task markers are stale as status signals.** The active efficiency-budgets `tasks.md` retains unchecked boxes even where later merged work supplies evidence. Its strict validation proves structure, not completion; this report deliberately relies on code and artifacts instead.
 
 ## Evidence appendix
@@ -117,5 +117,6 @@ Both are useful remediation from the audit, but neither changes the conclusion o
 | Constrained CI artifact | Run `29589493117`, `constrained-envelope-budget/budget-gate.json` | Actual two-CPU llvmpipe normalized metrics, provenance, and passing gate. |
 | Token CI artifact | Run `29577838185`, `token-footprint-calibration/{measurement.json,repeat.json,gate-report.json}` | Deterministic owner-approved token baseline and passing regression gate. |
 | Desktop-headroom audit | `docs/reports/hud-48s45_desktop_headroom_assumption_audit_20260716.md:13-152` | Assumptions, current gaps, and future-device routing. |
+| F11 remediation | PR #1185 / `90a7a308`; `crates/tze_hud_runtime/src/windowed/{keyboard,input_dispatch}.rs` | Keyboard-derived pointer-free commands now reach the production `CommandProcessor` and transactional runtime dispatch; this does not add device-specific sources. |
 
 The following commits provide the report's closed-lane provenance: `b619a83c`, `789dfd26`, `be55511f`, `846c7c32`, `a8d3de54`, `6b9afb51`, `a7349a43`, `fa79dedf`, and `eab64877`.
