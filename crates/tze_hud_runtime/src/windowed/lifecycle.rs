@@ -51,6 +51,98 @@ fn hwnd_for_window(window: &Window) -> Option<windows::Win32::Foundation::HWND> 
     Some(HWND(handle.hwnd.get() as *mut c_void))
 }
 
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ForegroundLockTimeoutAttempt {
+    previous_timeout: Option<u32>,
+    lock_cleared: bool,
+    lock_restored: Option<bool>,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl ForegroundLockTimeoutAttempt {
+    fn setting_may_be_left_altered(self) -> bool {
+        self.lock_cleared && self.lock_restored != Some(true)
+    }
+}
+
+/// Run focus acquisition while the foreground-lock timeout is temporarily zero.
+///
+/// The prior value must be captured before it is changed. If the capture fails,
+/// the caller keeps its normal focus path rather than risk leaving a system-wide
+/// setting altered without a value to restore.
+#[cfg(any(target_os = "windows", test))]
+fn with_temporary_foreground_lock_timeout<T>(
+    read_timeout: impl FnOnce() -> Option<u32>,
+    mut set_timeout: impl FnMut(u32) -> bool,
+    focus: impl FnOnce() -> T,
+) -> (T, ForegroundLockTimeoutAttempt) {
+    let previous_timeout = read_timeout();
+    let lock_cleared = match previous_timeout {
+        Some(0) => true,
+        Some(_) => set_timeout(0),
+        None => false,
+    };
+    let focus_result = focus();
+    let lock_restored = match previous_timeout {
+        Some(0) => Some(true),
+        Some(timeout) => Some(set_timeout(timeout)),
+        None => None,
+    };
+
+    (
+        focus_result,
+        ForegroundLockTimeoutAttempt {
+            previous_timeout,
+            lock_cleared,
+            lock_restored,
+        },
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn read_foreground_lock_timeout() -> Option<u32> {
+    use std::ffi::c_void;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SPI_GETFOREGROUNDLOCKTIMEOUT, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+    };
+
+    let mut timeout = 0;
+    // SAFETY: The caller is on the event-loop thread. This reads the current
+    // foreground-lock timeout and has no persistent or broadcast side effect.
+    unsafe {
+        SystemParametersInfoW(
+            SPI_GETFOREGROUNDLOCKTIMEOUT,
+            0,
+            Some(&mut timeout as *mut u32 as *mut c_void),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+        .is_ok()
+        .then_some(timeout)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn set_foreground_lock_timeout(timeout: u32) -> bool {
+    use std::ffi::c_void;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SPI_SETFOREGROUNDLOCKTIMEOUT, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+    };
+
+    // SAFETY: SPI_SETFOREGROUNDLOCKTIMEOUT reads its value from pvParam. The
+    // zero flags keep this temporary change out of the user profile and avoid a
+    // WM_SETTINGCHANGE broadcast.
+    unsafe {
+        SystemParametersInfoW(
+            SPI_SETFOREGROUNDLOCKTIMEOUT,
+            0,
+            Some(timeout as usize as *mut c_void),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+        .is_ok()
+    }
+}
+
 pub(super) fn focus_window_for_text_input(window: &Window) {
     window.focus_window();
     window.set_ime_allowed(true);
@@ -76,13 +168,16 @@ pub(super) fn focus_window_for_text_input(window: &Window) {
             // composer is focused at the scene level (hud-dwcr7).
             //
             // The standard Win32 workaround is to temporarily attach this
-            // thread's input queue to the current foreground window's thread,
-            // which lifts the foreground-lock for the duration of the attach so
-            // SetForegroundWindow + SetFocus take effect, then detach.
+            // thread's input queue to the current foreground window's thread.
+            // On the reference overlay, AttachThreadInput alone was insufficient
+            // when SPI_GETFOREGROUNDLOCKTIMEOUT was effectively infinite. Save
+            // the timeout, temporarily clear it with zero SPI flags (therefore
+            // no persisted setting or WM_SETTINGCHANGE broadcast), then restore
+            // it around SetForegroundWindow + SetFocus.
             //
             // SAFETY: The HWND is owned by this winit window on the event-loop
             // thread; all calls are standard user32 focus APIs invoked on that
-            // thread.  AttachThreadInput is always paired (TRUE then FALSE).
+            // thread. AttachThreadInput is always paired (TRUE then FALSE).
             unsafe {
                 let _ = BringWindowToTop(hwnd);
 
@@ -95,18 +190,52 @@ pub(super) fn focus_window_for_text_input(window: &Window) {
                     GetWindowThreadProcessId(fg, None)
                 };
 
-                let attached = fg_thread != 0 && fg_thread != our_thread && {
-                    AttachThreadInput(our_thread, fg_thread, TRUE).as_bool()
-                };
+                let attach_required = fg_thread != 0 && fg_thread != our_thread;
+                let attached =
+                    attach_required && { AttachThreadInput(our_thread, fg_thread, TRUE).as_bool() };
 
-                let _ = SetForegroundWindow(hwnd);
-                // SetFocus targets the keyboard-focus window within the (now)
-                // foreground thread's input queue; needed in addition to
-                // SetForegroundWindow so WM_KEY* messages route to our HWND.
-                let _ = SetFocus(hwnd);
+                let (sfw, timeout_attempt) = with_temporary_foreground_lock_timeout(
+                    read_foreground_lock_timeout,
+                    set_foreground_lock_timeout,
+                    || {
+                        let sfw = SetForegroundWindow(hwnd).as_bool();
+                        // SetFocus targets the keyboard-focus window within the
+                        // (now) foreground thread's input queue; needed in
+                        // addition to SetForegroundWindow so WM_KEY* messages
+                        // route to our HWND.
+                        let _ = SetFocus(hwnd);
+                        sfw
+                    },
+                );
 
                 if attached {
                     let _ = AttachThreadInput(our_thread, fg_thread, FALSE);
+                }
+
+                // The scheduled-task overlay has no stdout/stderr capture, so
+                // durable diagnostics are useful when this fragile Windows path
+                // fails. Success remains silent to avoid per-click log noise.
+                let timeout_may_be_left_altered = timeout_attempt.setting_may_be_left_altered();
+                if !sfw || (attach_required && !attached) || timeout_may_be_left_altered {
+                    let fg_after = GetForegroundWindow();
+                    crate::diag::diag_write(&format!(
+                        "FOCUS-WARN(hud-ktwsz): foreground focus repair incomplete for overlay \
+                         hwnd={:?} fg_before={:?} attached={} attach_required={} \
+                         prev_lock_timeout={:?} lock_cleared={} lock_restored={:?} \
+                         timeout_may_be_left_altered={} set_foreground_window={} \
+                         fg_after={:?} fg_after_is_ours={}",
+                        hwnd.0,
+                        fg.0,
+                        attached,
+                        attach_required,
+                        timeout_attempt.previous_timeout,
+                        timeout_attempt.lock_cleared,
+                        timeout_attempt.lock_restored,
+                        timeout_may_be_left_altered,
+                        sfw,
+                        fg_after.0,
+                        fg_after.0 == hwnd.0,
+                    ));
                 }
             }
         }
@@ -2315,6 +2444,7 @@ pub(super) fn detect_monitor_size(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::sync::Arc;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
@@ -2324,6 +2454,228 @@ mod tests {
     use tze_hud_scene::graph::SceneGraph;
 
     use super::*;
+
+    #[test]
+    fn foreground_lock_timeout_is_restored_after_focus() {
+        let saved_timeout = 2_147_483_647;
+        let calls = RefCell::new(Vec::new());
+        let (focused, attempt) = with_temporary_foreground_lock_timeout(
+            || {
+                calls.borrow_mut().push("read".to_string());
+                Some(saved_timeout)
+            },
+            |timeout| {
+                calls.borrow_mut().push(format!("set:{timeout}"));
+                true
+            },
+            || {
+                calls.borrow_mut().push("focus".to_string());
+                true
+            },
+        );
+
+        assert!(focused, "the existing focus sequence must still run");
+        assert_eq!(
+            calls.into_inner(),
+            vec![
+                "read".to_string(),
+                "set:0".to_string(),
+                "focus".to_string(),
+                format!("set:{saved_timeout}"),
+            ],
+            "the saved timeout must be restored after foreground acquisition"
+        );
+        assert_eq!(
+            attempt,
+            ForegroundLockTimeoutAttempt {
+                previous_timeout: Some(saved_timeout),
+                lock_cleared: true,
+                lock_restored: Some(true),
+            }
+        );
+        assert!(
+            !attempt.setting_may_be_left_altered(),
+            "a complete SPI bracket must remain silent in the failure-only diagnostic path"
+        );
+    }
+
+    #[test]
+    fn foreground_lock_timeout_zero_is_not_rewritten() {
+        let calls = RefCell::new(Vec::new());
+        let (focused, attempt) = with_temporary_foreground_lock_timeout(
+            || {
+                calls.borrow_mut().push("read".to_string());
+                Some(0)
+            },
+            |timeout| {
+                calls.borrow_mut().push(format!("set:{timeout}"));
+                true
+            },
+            || {
+                calls.borrow_mut().push("focus".to_string());
+                true
+            },
+        );
+
+        assert!(focused, "the existing focus sequence must still run");
+        assert_eq!(
+            calls.into_inner(),
+            vec!["read".to_string(), "focus".to_string()],
+            "an already-clear lock must not incur redundant global SPI writes"
+        );
+        assert_eq!(
+            attempt,
+            ForegroundLockTimeoutAttempt {
+                previous_timeout: Some(0),
+                lock_cleared: true,
+                lock_restored: Some(true),
+            }
+        );
+        assert!(
+            !attempt.setting_may_be_left_altered(),
+            "an already-clear lock must not enter the failure-only diagnostic path"
+        );
+    }
+
+    #[test]
+    fn foreground_lock_timeout_is_not_changed_without_a_saved_value() {
+        let calls = RefCell::new(Vec::new());
+        let (focused, attempt) = with_temporary_foreground_lock_timeout(
+            || {
+                calls.borrow_mut().push("read".to_string());
+                None
+            },
+            |timeout| {
+                calls.borrow_mut().push(format!("set:{timeout}"));
+                true
+            },
+            || {
+                calls.borrow_mut().push("focus".to_string());
+                true
+            },
+        );
+
+        assert!(
+            focused,
+            "a failed SPI read must preserve the existing focus path"
+        );
+        assert_eq!(
+            calls.into_inner(),
+            vec!["read".to_string(), "focus".to_string()],
+            "without the previous timeout, the helper must not make an un-restorable change"
+        );
+        assert!(
+            !attempt.setting_may_be_left_altered(),
+            "a failed read cannot leave the setting altered and must not produce a false foreground-acquisition warning"
+        );
+        assert_eq!(
+            attempt,
+            ForegroundLockTimeoutAttempt {
+                previous_timeout: None,
+                lock_cleared: false,
+                lock_restored: None,
+            }
+        );
+    }
+
+    #[test]
+    fn foreground_lock_timeout_is_restored_after_a_failed_clear() {
+        let saved_timeout = 2_147_483_647;
+        let calls = RefCell::new(Vec::new());
+        let set_results = RefCell::new(VecDeque::from([false, true]));
+        let (focused, attempt) = with_temporary_foreground_lock_timeout(
+            || {
+                calls.borrow_mut().push("read".to_string());
+                Some(saved_timeout)
+            },
+            |timeout| {
+                calls.borrow_mut().push(format!("set:{timeout}"));
+                set_results
+                    .borrow_mut()
+                    .pop_front()
+                    .expect("clear and restore calls must be paired")
+            },
+            || {
+                calls.borrow_mut().push("focus".to_string());
+                true
+            },
+        );
+
+        assert!(
+            focused,
+            "a failed clear must preserve the existing focus path"
+        );
+        assert_eq!(
+            calls.into_inner(),
+            vec![
+                "read".to_string(),
+                "set:0".to_string(),
+                "focus".to_string(),
+                format!("set:{saved_timeout}"),
+            ],
+            "a captured timeout must be restored even when the clear call reports failure"
+        );
+        assert_eq!(
+            attempt,
+            ForegroundLockTimeoutAttempt {
+                previous_timeout: Some(saved_timeout),
+                lock_cleared: false,
+                lock_restored: Some(true),
+            }
+        );
+        assert!(
+            !attempt.setting_may_be_left_altered(),
+            "a failed clear followed by a successful restore cannot leave the setting altered"
+        );
+    }
+
+    #[test]
+    fn foreground_lock_timeout_restore_failure_is_reported() {
+        let saved_timeout = 2_147_483_647;
+        let calls = RefCell::new(Vec::new());
+        let set_results = RefCell::new(VecDeque::from([true, false]));
+        let (focused, attempt) = with_temporary_foreground_lock_timeout(
+            || {
+                calls.borrow_mut().push("read".to_string());
+                Some(saved_timeout)
+            },
+            |timeout| {
+                calls.borrow_mut().push(format!("set:{timeout}"));
+                set_results
+                    .borrow_mut()
+                    .pop_front()
+                    .expect("clear and restore calls must be paired")
+            },
+            || {
+                calls.borrow_mut().push("focus".to_string());
+                true
+            },
+        );
+
+        assert!(focused, "the existing focus sequence must still run");
+        assert_eq!(
+            calls.into_inner(),
+            vec![
+                "read".to_string(),
+                "set:0".to_string(),
+                "focus".to_string(),
+                format!("set:{saved_timeout}"),
+            ],
+            "a successful clear must still be followed by restoration after focus"
+        );
+        assert_eq!(
+            attempt,
+            ForegroundLockTimeoutAttempt {
+                previous_timeout: Some(saved_timeout),
+                lock_cleared: true,
+                lock_restored: Some(false),
+            }
+        );
+        assert!(
+            attempt.setting_may_be_left_altered(),
+            "only a successful clear followed by a failed restore warrants a foreground-repair warning"
+        );
+    }
 
     #[test]
     fn seed_windowed_benchmark_scene_creates_deterministic_tile_stack() {

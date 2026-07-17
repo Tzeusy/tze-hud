@@ -64,10 +64,24 @@ tool/sub-agent attributed turns — operator confirms color distinction in OUTPU
 - Detach the cooperative projection session; dismiss exemplar tiles (release lease).
 - Truncate/rotate hud-diag.log if ballooned; restore operator windows after captures.
 
-## Artifact index (filled as produced)
+## Artifact index
 
-- `exemplar-evidence.json` — six-axis exemplar artifact (reference tag)
-- `agent-ergonomics-ceremony.md` — op-by-op ceremony log, cooperative adapter
-- `orphan-path.md` — governance live axis notes
-- `shots/` — per-axis screenshots
-- `human-round.md` — Track B operator results (fill per table row)
+- `exemplar-evidence.json` — six-axis exemplar artifact ✅ (`is_reference: true`; all six
+  phases completed, 0 errors; cadence: 20/20 within present budget, runtime overhead
+  beyond transport RTT 0.001–0.003 ms — caveat: all cycles used the documented
+  rtt-proxy fallback, not live FramePresented acks)
+- `agent-ergonomics-ceremony.md` — ✅ 15 ops, full lifecycle incl. runtime-restart and
+  lease-reap recoveries via idempotency-key replay; zero scene mutations in LLM context
+- `orphan-path.md` — governance live axis ✅ with one FAIL finding (no visible
+  stale/degraded window before removal → hud-ccj2o)
+- `shots/` — cooperative-demo-portal-2.png (two-pane chrome rendering, unread divider,
+  coalesced stream), orphan-t0/t95/t300 sequence
+- `human-round.md` — Track B operator results — **PENDING (only remaining gate item
+  besides re-judging the cadence proxy caveat)**
+
+## Session results snapshot (Track A, 2026-07-17)
+
+Deploy: exe sha256 `26bedaca…` (main), pid 55468 → later relaunched by host as 37168.
+Found+fixed live: exemplar burst over the 30 Hz envelope (hud-2j9as, fix on main).
+Redaction/safe-mode/freeze governance: covered by `text_stream_portal_governance.rs`
+suite on this commit (CI); not re-exercised live this session.
