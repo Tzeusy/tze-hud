@@ -130,6 +130,125 @@ pub struct DamageWorkItemId {
     pub bounds: PixelRect,
 }
 
+trait WorkItemIdentity {
+    fn validate_components(
+        &self,
+        category_name: &str,
+        evidence_kind: &str,
+        violations: &mut Vec<String>,
+    );
+}
+
+fn validate_required_component(
+    value: &str,
+    component_name: &str,
+    category_name: &str,
+    evidence_kind: &str,
+    violations: &mut Vec<String>,
+) {
+    if value.trim().is_empty() {
+        violations.push(format!(
+            "{category_name} {evidence_kind} identity {component_name} must be non-empty"
+        ));
+    }
+}
+
+impl WorkItemIdentity for NodeWorkItemId {
+    fn validate_components(
+        &self,
+        category_name: &str,
+        evidence_kind: &str,
+        violations: &mut Vec<String>,
+    ) {
+        validate_required_component(
+            &self.tile_id,
+            "tile_id",
+            category_name,
+            evidence_kind,
+            violations,
+        );
+        validate_required_component(
+            &self.node_id,
+            "node_id",
+            category_name,
+            evidence_kind,
+            violations,
+        );
+    }
+}
+
+impl WorkItemIdentity for TextureUploadWorkItemId {
+    fn validate_components(
+        &self,
+        category_name: &str,
+        evidence_kind: &str,
+        violations: &mut Vec<String>,
+    ) {
+        validate_required_component(
+            &self.tile_id,
+            "tile_id",
+            category_name,
+            evidence_kind,
+            violations,
+        );
+        validate_required_component(
+            &self.resource_id,
+            "resource_id",
+            category_name,
+            evidence_kind,
+            violations,
+        );
+    }
+}
+
+impl WorkItemIdentity for RenderPlanWorkItemId {
+    fn validate_components(
+        &self,
+        category_name: &str,
+        evidence_kind: &str,
+        violations: &mut Vec<String>,
+    ) {
+        validate_required_component(
+            &self.tile_id,
+            "tile_id",
+            category_name,
+            evidence_kind,
+            violations,
+        );
+        validate_required_component(
+            &self.plan_id,
+            "plan_id",
+            category_name,
+            evidence_kind,
+            violations,
+        );
+    }
+}
+
+impl WorkItemIdentity for DamageWorkItemId {
+    fn validate_components(
+        &self,
+        category_name: &str,
+        evidence_kind: &str,
+        violations: &mut Vec<String>,
+    ) {
+        validate_required_component(
+            &self.tile_id,
+            "tile_id",
+            category_name,
+            evidence_kind,
+            violations,
+        );
+        validate_required_component(
+            &self.region_id,
+            "region_id",
+            category_name,
+            evidence_kind,
+            violations,
+        );
+    }
+}
+
 /// One eligible member of an invalidation closure.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClosureWorkItem<T> {
@@ -532,7 +651,11 @@ impl ChangeEfficiencyArtifact {
         {
             for item in &self.closure.texture_upload.closure_items {
                 if item.identity.tile_id != changed_identity.tile_id
-                    || item.dependency_reason != InvalidationDependencyReason::DirectChange
+                    || !matches!(
+                        item.dependency_reason,
+                        InvalidationDependencyReason::DirectChange
+                            | InvalidationDependencyReason::ResourceDependency
+                    )
                 {
                     violations.push(
                         "canonical one-node texture upload closure includes an unrelated item"
@@ -611,10 +734,12 @@ fn validate_category<T>(
     violations: &mut Vec<String>,
 ) -> ChangeEfficiencyCategoryReport
 where
-    T: Clone + Debug + Ord,
+    T: Clone + Debug + Ord + WorkItemIdentity,
 {
     let mut eligible = BTreeSet::new();
     for work in &category.closure_items {
+        work.identity
+            .validate_components(category_name, "closure", violations);
         if !eligible.insert(work.identity.clone()) {
             violations.push(format!(
                 "{category_name} closure contains duplicate identity {:?}",
@@ -625,6 +750,8 @@ where
 
     let mut actual_operation_count = 0_u64;
     for work in &category.actual_work {
+        work.identity
+            .validate_components(category_name, "actual_work", violations);
         if work.operations == 0 {
             violations.push(format!(
                 "{category_name} actual work item {:?} has zero operations",

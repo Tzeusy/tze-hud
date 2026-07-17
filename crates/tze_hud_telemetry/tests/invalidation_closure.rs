@@ -238,6 +238,139 @@ fn texture_upload_report_includes_uploaded_bytes() {
 }
 
 #[test]
+fn canonical_changed_tile_resource_upload_is_contract_valid() {
+    let mut artifact = valid_one_node_artifact();
+    let texture = TextureUploadWorkItemId {
+        tile_id: "tile-0".into(),
+        resource_id: "glyph-atlas-0".into(),
+    };
+    artifact.closure.texture_upload.closure_items = vec![ClosureWorkItem {
+        identity: texture.clone(),
+        dependency_reason: InvalidationDependencyReason::ResourceDependency,
+    }];
+    artifact.closure.texture_upload.actual_work = vec![TextureUploadActualWork {
+        identity: texture,
+        operations: 1,
+        uploaded_bytes: 512,
+    }];
+
+    let report = artifact.validate();
+
+    assert!(!report.passed, "{report:#?}");
+    assert!(report.contract_satisfied, "{report:#?}");
+    assert_eq!(
+        report.status,
+        ChangeEfficiencyValidationStatus::PendingRuntimeInstrumentation,
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn blank_typed_identity_components_fail_closed() {
+    let mut artifact = valid_one_node_artifact();
+    artifact.scenario.name = "identity_validation".into();
+    artifact.scene_tile_count = 1;
+
+    artifact.closure.layout.closure_items[0]
+        .identity
+        .tile_id
+        .clear();
+    artifact.closure.layout.closure_items[0]
+        .identity
+        .node_id
+        .clear();
+    artifact.closure.layout.actual_work[0]
+        .identity
+        .tile_id
+        .clear();
+    artifact.closure.layout.actual_work[0]
+        .identity
+        .node_id
+        .clear();
+    artifact.closure.raster.closure_items[0]
+        .identity
+        .tile_id
+        .clear();
+    artifact.closure.raster.closure_items[0]
+        .identity
+        .node_id
+        .clear();
+    artifact.closure.raster.actual_work[0]
+        .identity
+        .tile_id
+        .clear();
+    artifact.closure.raster.actual_work[0]
+        .identity
+        .node_id
+        .clear();
+    artifact.closure.render_encoding.closure_items[0]
+        .identity
+        .tile_id
+        .clear();
+    artifact.closure.render_encoding.closure_items[0]
+        .identity
+        .plan_id
+        .clear();
+    artifact.closure.render_encoding.actual_work[0]
+        .identity
+        .tile_id
+        .clear();
+    artifact.closure.render_encoding.actual_work[0]
+        .identity
+        .plan_id
+        .clear();
+    artifact.closure.composition_damage.closure_items[0]
+        .identity
+        .tile_id
+        .clear();
+    artifact.closure.composition_damage.closure_items[0]
+        .identity
+        .region_id
+        .clear();
+    artifact.closure.composition_damage.actual_work[0]
+        .identity
+        .tile_id
+        .clear();
+    artifact.closure.composition_damage.actual_work[0]
+        .identity
+        .region_id
+        .clear();
+
+    let texture = TextureUploadWorkItemId {
+        tile_id: "".into(),
+        resource_id: "".into(),
+    };
+    artifact.closure.texture_upload.closure_items = vec![ClosureWorkItem {
+        identity: texture.clone(),
+        dependency_reason: InvalidationDependencyReason::ResourceDependency,
+    }];
+    artifact.closure.texture_upload.actual_work = vec![TextureUploadActualWork {
+        identity: texture,
+        operations: 1,
+        uploaded_bytes: 1,
+    }];
+
+    let report = artifact.validate();
+
+    assert!(!report.passed, "{report:#?}");
+    assert!(!report.contract_satisfied, "{report:#?}");
+    assert_eq!(
+        report.status,
+        ChangeEfficiencyValidationStatus::InvalidArtifact,
+        "{report:#?}"
+    );
+    for component in ["tile_id", "node_id", "resource_id", "plan_id", "region_id"] {
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|violation| violation.contains(component)),
+            "missing {component} violation: {report:#?}"
+        );
+    }
+}
+
+#[test]
 fn full_surface_fallback_is_diagnostic_not_a_proportional_pass() {
     let mut artifact = valid_one_node_artifact();
     let full_surface = damage(
