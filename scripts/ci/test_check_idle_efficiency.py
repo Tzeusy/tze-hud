@@ -109,6 +109,14 @@ class IdleEfficiencyCheckerTests(unittest.TestCase):
         )
         self.assertTrue(any("llvmpipe" in failure for failure in failures))
 
+    def test_linux_constrained_lane_rejects_unproved_cpu_enforcement(self) -> None:
+        artifact = valid_artifact()
+        artifact["constrained_profile"]["cpu_limit_enforcement"] = "requested two cpus"
+        _report, failures = check_idle_efficiency.validate_artifact(
+            artifact, require_constrained=True
+        )
+        self.assertTrue(any("sched_getaffinity" in failure for failure in failures))
+
     def test_gpu_work_and_wakeup_overage_both_fail(self) -> None:
         artifact = valid_artifact()
         artifact["gpu"]["queue_submissions"] = 1

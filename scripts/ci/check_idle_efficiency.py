@@ -152,7 +152,7 @@ def validate_artifact(
                 constrained, "constrained_profile", "operating_system", failures
             )
             _nonempty_string(constrained, "constrained_profile", "cpu_model", failures)
-            _nonempty_string(
+            enforcement = _nonempty_string(
                 constrained, "constrained_profile", "cpu_limit_enforcement", failures
             )
             logical_cpu_limit = _integer(
@@ -167,6 +167,12 @@ def validate_artifact(
             adapter_lower = adapter.lower() if adapter else ""
             backend_lower = backend.lower() if backend else ""
             if operating_system == "linux":
+                if enforcement is not None and not enforcement.startswith(
+                    "sched_getaffinity:"
+                ):
+                    failures.append(
+                        "constrained_profile.cpu_limit_enforcement: Linux lane must prove observed sched_getaffinity"
+                    )
                 if "llvmpipe" not in adapter_lower and "lavapipe" not in adapter_lower:
                     failures.append(
                         "renderer.adapter: Linux constrained lane must prove llvmpipe or lavapipe"
@@ -176,6 +182,12 @@ def validate_artifact(
                         "renderer.backend: Linux constrained lane must identify Vulkan"
                     )
             elif operating_system == "windows":
+                if enforcement is not None and not enforcement.startswith(
+                    "GetProcessAffinityMask:"
+                ):
+                    failures.append(
+                        "constrained_profile.cpu_limit_enforcement: Windows lane must prove observed GetProcessAffinityMask"
+                    )
                 if "warp" not in adapter_lower:
                     failures.append(
                         "renderer.adapter: Windows constrained lane must prove WARP"

@@ -43,6 +43,9 @@
 use crate::component_startup::{register_profile_widgets, run_component_startup};
 use crate::degradation::{DegradationController, DegradationEnvelope, TileDescriptor};
 use crate::element_store::bootstrap_scene_element_store;
+use crate::idle_efficiency::{
+    IdleEfficiencyCounters, IdleEfficiencySnapshot, RuntimeWakeupSource,
+};
 use crate::pipeline::{FramePipeline, HitTestSnapshot};
 use crate::reload_triggers::{RuntimeServiceImpl, spawn_sighup_listener};
 use crate::runtime_context::{FallbackPolicy, RuntimeContext};
@@ -252,6 +255,7 @@ pub struct HeadlessRuntime {
     degradation_controller: DegradationController,
     degradation_notices: DegradationNoticeSender,
     degradation_clock_start: Instant,
+    idle_efficiency_counters: IdleEfficiencyCounters,
 }
 
 impl HeadlessRuntime {
@@ -426,6 +430,7 @@ impl HeadlessRuntime {
             ),
             degradation_notices,
             degradation_clock_start: Instant::now(),
+            idle_efficiency_counters: IdleEfficiencyCounters::default(),
         })
     }
 
@@ -444,6 +449,14 @@ impl HeadlessRuntime {
         &self.state
     }
 
+    /// Snapshot the monotonic counters used by the quiescent-efficiency gate.
+    ///
+    /// Callers take a baseline after settling and subtract it after the
+    /// observation interval. The snapshot never resets production counters.
+    pub fn idle_efficiency_snapshot(&self) -> IdleEfficiencySnapshot {
+        self.idle_efficiency_counters.snapshot()
+    }
+
     /// Run one frame through the full 8-stage pipeline.
     ///
     /// Stages 1-8 run sequentially in the calling task (no cross-thread signalling
@@ -454,6 +467,8 @@ impl HeadlessRuntime {
     /// `render_frame_headless()`, which includes the `copy_to_buffer` step so
     /// that `read_pixels()` returns actual rendered pixel data after this call.
     pub async fn render_frame(&mut self) -> FrameTelemetry {
+        self.idle_efficiency_counters
+            .record_compositor_wakeup(RuntimeWakeupSource::SceneChange);
         let frame_start = Instant::now();
         // Include all active scene/compositor work performed for this frame;
         // this boundary precedes expiry, animation, and Stage 3 work and ends
@@ -568,6 +583,12 @@ impl HeadlessRuntime {
         let compositor_telemetry = self
             .compositor
             .render_frame_headless(&mut scene_guard, &self.surface);
+        // HeadlessSurface::acquire_frame is infallible and the compositor only
+        // returns from this call after submitting its encoder. Record at this
+        // completed-operation boundary so the evidence counter cannot advance
+        // for work that was merely requested.
+        self.idle_efficiency_counters.record_surface_acquisition();
+        self.idle_efficiency_counters.record_gpu_submission();
         // Total frame time from Compositor covers encode + submit
         let stage6_us = compositor_telemetry.stage6_render_encode_us;
         let stage7_us = compositor_telemetry.stage7_gpu_submit_us;
@@ -980,6 +1001,44 @@ impl HeadlessRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn idle_efficiency_counters_follow_real_headless_gpu_operations() {
+        let _runtime_guard = crate::test_support::lock_headless_runtime().await;
+        let mut runtime = HeadlessRuntime::new(HeadlessConfig {
+            width: 64,
+            height: 64,
+            grpc_port: 0,
+            bind_all_interfaces: false,
+            psk: "idle-efficiency-test".into(),
+            config_toml: None,
+        })
+        .await
+        .expect("runtime init");
+
+        let before = runtime.idle_efficiency_snapshot();
+        runtime.render_frame().await;
+        let rendered = runtime
+            .idle_efficiency_snapshot()
+            .delta_since(&before)
+            .expect("monotonic counters");
+
+        assert_eq!(rendered.compositor_loop_wakeups, 1);
+        assert_eq!(rendered.sources["compositor.scene_change"], 1);
+        assert_eq!(rendered.surface_acquisitions, 1);
+        assert_eq!(rendered.gpu_queue_submissions, 1);
+        assert_eq!(rendered.presents, 0, "headless present is a no-op");
+
+        let settled = runtime.idle_efficiency_snapshot();
+        let unchanged = runtime
+            .idle_efficiency_snapshot()
+            .delta_since(&settled)
+            .expect("monotonic counters");
+        assert_eq!(unchanged.combined_runtime_wakeups(), 0);
+        assert_eq!(unchanged.gpu_queue_submissions, 0);
+        assert_eq!(unchanged.surface_acquisitions, 0);
+        assert_eq!(unchanged.presents, 0);
+    }
 
     /// Verify that grpc_port = 0 does not start a server by default.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
