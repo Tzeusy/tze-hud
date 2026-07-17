@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import io
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 try:
@@ -503,6 +504,50 @@ class HudGrpcClientTests(unittest.IsolatedAsyncioTestCase):
         sleep.assert_awaited_once()
         self.assertAlmostEqual(sleep.await_args.args[0], 0.025, places=6)
         self.assertEqual(client._last_batch_send_mono, 10.035)
+
+    async def test_configured_batch_pacing_serializes_concurrent_waiters(self):
+        """Concurrent callers cannot clear the same pacing interval together."""
+        client, sent_batch_ids, set_wait = self._mutation_retry_client()
+        client.configure_batch_pacing(0.035)
+        client._last_batch_send_mono = 10.0
+        native_sleep = asyncio.sleep
+        first_sleep_entered = asyncio.Event()
+        release_first_sleep = asyncio.Event()
+        sleep_calls: list[float] = []
+
+        async def controlled_sleep(delay: float) -> None:
+            sleep_calls.append(delay)
+            if len(sleep_calls) == 1:
+                first_sleep_entered.set()
+                await release_first_sleep.wait()
+
+        async def accepted_wait(payload_name, timeout, matcher=None):
+            return self._accepted_result(sent_batch_ids[-1])
+
+        set_wait(accepted_wait)
+        first = None
+        second = None
+        with patch(
+            "hud_grpc_client.time", SimpleNamespace(monotonic=lambda: 10.0)
+        ), patch(
+            "hud_grpc_client.asyncio.sleep", side_effect=controlled_sleep,
+        ):
+            try:
+                first = asyncio.create_task(
+                    client.apply_mutations(b"\x01" * 16, [])
+                )
+                await asyncio.wait_for(first_sleep_entered.wait(), timeout=0.5)
+                second = asyncio.create_task(
+                    client.apply_mutations(b"\x01" * 16, [])
+                )
+                await native_sleep(0)
+                self.assertEqual(len(sleep_calls), 1)
+                self.assertEqual(sent_batch_ids, [])
+            finally:
+                release_first_sleep.set()
+                await asyncio.gather(
+                    *(task for task in (first, second) if task is not None),
+                )
 
     async def test_configured_batch_pacing_gates_apply_and_retry_submit_paths(self):
         """Both mutation-batch choke points use the same opt-in pacing gate."""
