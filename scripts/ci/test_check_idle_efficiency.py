@@ -117,6 +117,28 @@ class IdleEfficiencyCheckerTests(unittest.TestCase):
         )
         self.assertTrue(any("sched_getaffinity" in failure for failure in failures))
 
+    def test_windows_basic_render_driver_alias_proves_warp(self) -> None:
+        artifact = valid_artifact()
+        artifact["renderer"] = {
+            "backend": "Dx12",
+            "adapter": "Microsoft Basic Render Driver",
+            "software": True,
+        }
+        artifact["constrained_profile"] = {
+            "operating_system": "windows",
+            "cpu_model": "test-cpu",
+            "logical_cpu_limit": 2,
+            "cpu_limit_enforcement": "GetProcessAffinityMask:0x3",
+            "memory_limit_bytes": None,
+        }
+
+        report, failures = check_idle_efficiency.validate_artifact(
+            artifact, require_constrained=True
+        )
+
+        self.assertEqual([], failures)
+        self.assertEqual("pass", report["status"])
+
     def test_required_overlay_rejects_a_fullscreen_fallback(self) -> None:
         artifact = valid_artifact()
         artifact["runtime"]["window_mode"] = "fullscreen"

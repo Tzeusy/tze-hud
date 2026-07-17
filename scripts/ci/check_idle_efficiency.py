@@ -196,7 +196,13 @@ def validate_artifact(
                     failures.append(
                         "constrained_profile.cpu_limit_enforcement: Windows lane must prove observed GetProcessAffinityMask"
                     )
-                if "warp" not in adapter_lower:
+                # WARP reports its DX12 adapter through wgpu as either an
+                # explicit WARP name or the standard Microsoft Basic Render Driver.
+                is_warp_adapter = (
+                    "warp" in adapter_lower
+                    or adapter_lower == "microsoft basic render driver"
+                )
+                if not is_warp_adapter:
                     failures.append(
                         "renderer.adapter: Windows constrained lane must prove WARP"
                     )
