@@ -8,29 +8,29 @@
     "vocab_fingerprint": "sha256:446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d",
     "counting_policy": "each canonical JSON-RPC body independently; UTF-8 bytes; encode_with_special_tokens; operation and flow totals are integer sums"
   },
-  "fixture_fingerprint": "blake3:9d1eadc5f141a0cd6b57b05fabc2915b9ef106f819a0f0e68297baa7b3c7da15",
+  "fixture_fingerprint": "blake3:70f65a5eb9beea36e6b9e0de4f62de2de9ec88a60ce28c3062df11c6f5d7c26e",
   "flows": {
     "portal_projection": {
       "flow_version": 2,
-      "flow_fingerprint": "blake3:337fd0f648841c3d0aed2eb3e2f51bf36802f91904befd81527563f5599c66c7",
+      "flow_fingerprint": "blake3:891009a81b03f7196b180ffa758ed0007256df290a339d8ce7b4436d9d82359d",
       "operations": {
         "portal_projection_acknowledge_input": {
           "request": {"bytes": 419, "tokens": 114},
-          "response": {"bytes": 89, "tokens": 25},
-          "total": {"bytes": 508, "tokens": 139}
+          "response": {"bytes": 51, "tokens": 18},
+          "total": {"bytes": 470, "tokens": 132}
         },
         "portal_projection_attach": {
           "request": {"bytes": 535, "tokens": 148},
-          "response": {"bytes": 120, "tokens": 33},
-          "total": {"bytes": 655, "tokens": 181}
+          "response": {"bytes": 81, "tokens": 27},
+          "total": {"bytes": 616, "tokens": 175}
         },
         "portal_projection_publish": {
           "request": {"bytes": 489, "tokens": 125},
-          "response": {"bytes": 426, "tokens": 103},
-          "total": {"bytes": 915, "tokens": 228}
+          "response": {"bytes": 265, "tokens": 73},
+          "total": {"bytes": 754, "tokens": 198}
         }
       },
-      "total": {"bytes": 2078, "tokens": 548}
+      "total": {"bytes": 1840, "tokens": 505}
     },
     "publish_to_widget": {
       "flow_version": 1,
@@ -60,6 +60,6 @@
   "approval": {
     "status": "candidate_unapproved",
     "decision_reference": null,
-    "basis": "hud-vconx isolated v2 candidate; preserved v1 gate remains the only owner-approved baseline and this packet requires an owner decision before any checker or CI baseline update"
+    "basis": "combined hud-veklx response-diet and pending-input piggyback candidate; explicit owner approval is required before any v2 comparison authority or CI baseline change"
   }
 }
