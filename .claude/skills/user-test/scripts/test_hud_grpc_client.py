@@ -12,7 +12,7 @@ import asyncio
 import contextlib
 import io
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 try:
     from PIL import Image
@@ -474,6 +474,52 @@ class HudGrpcClientTests(unittest.IsolatedAsyncioTestCase):
                 accepted=True,
             )
         )
+
+    # ── Opt-in mutation-batch pacing (hud-2j9as) ────────────────────────────
+    async def test_default_batch_pacing_is_unpaced(self):
+        """Clients that do not opt in preserve their existing burst behavior."""
+        client = HudClient("example.invalid:50051", psk="test-key")
+
+        with patch(
+            "hud_grpc_client.asyncio.sleep", new_callable=AsyncMock
+        ) as sleep:
+            await client._pace_batch_send()
+
+        sleep.assert_not_awaited()
+
+    async def test_configured_batch_pacing_waits_for_remaining_interval(self):
+        """An opted-in client sleeps only for the unelapsed interval remainder."""
+        client = HudClient("example.invalid:50051", psk="test-key")
+        client.configure_batch_pacing(0.035)
+        client._last_batch_send_mono = 10.0
+
+        with patch(
+            "hud_grpc_client.time.monotonic", side_effect=[10.010, 10.035]
+        ), patch(
+            "hud_grpc_client.asyncio.sleep", new_callable=AsyncMock
+        ) as sleep:
+            await client._pace_batch_send()
+
+        sleep.assert_awaited_once()
+        self.assertAlmostEqual(sleep.await_args.args[0], 0.025, places=6)
+        self.assertEqual(client._last_batch_send_mono, 10.035)
+
+    async def test_configured_batch_pacing_gates_apply_and_retry_submit_paths(self):
+        """Both mutation-batch choke points use the same opt-in pacing gate."""
+        client, sent_batch_ids, set_wait = self._mutation_retry_client()
+        client.configure_batch_pacing(0.035)
+        pace = AsyncMock()
+        client._pace_batch_send = pace
+
+        async def accepted_wait(payload_name, timeout, matcher=None):
+            return self._accepted_result(sent_batch_ids[-1])
+
+        set_wait(accepted_wait)
+
+        await client.apply_mutations(b"\x01" * 16, [])
+        await client._submit_mutation_batch_once(b"\x01" * 16, [], timeout=0.05)
+
+        self.assertEqual(pace.await_count, 2)
 
     async def test_submit_mutation_batch_retries_single_transient_timeout(self):
         """A single transient mutation-ack timeout is retried (resubmitted with
