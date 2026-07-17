@@ -577,6 +577,7 @@ class HudClient:
         # inside the production profile's per-agent update-rate envelope.
         self._min_batch_interval_s: float = 0.0
         self._last_batch_send_mono: float = 0.0
+        self._batch_pacing_lock = asyncio.Lock()
         self._response_queue: asyncio.Queue = asyncio.Queue()
         self._deferred_responses: list[Any] = []
         self._response_wait_lock = asyncio.Lock()
@@ -1170,14 +1171,17 @@ class HudClient:
         """Wait only when opt-in batch pacing requires it."""
         if self._min_batch_interval_s <= 0.0:
             return
-        wait = (
-            self._last_batch_send_mono
-            + self._min_batch_interval_s
-            - time.monotonic()
-        )
-        if wait > 0.0:
-            await asyncio.sleep(wait)
-        self._last_batch_send_mono = time.monotonic()
+        async with self._batch_pacing_lock:
+            if self._min_batch_interval_s <= 0.0:
+                return
+            wait = (
+                self._last_batch_send_mono
+                + self._min_batch_interval_s
+                - time.monotonic()
+            )
+            if wait > 0.0:
+                await asyncio.sleep(wait)
+            self._last_batch_send_mono = time.monotonic()
 
     async def apply_mutations(
         self,
