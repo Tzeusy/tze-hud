@@ -78,6 +78,39 @@ fn stdio_surface_rejects_oversized_lines_and_continues() {
 }
 
 #[test]
+fn stdio_surface_rejects_caller_supplied_list_scope_or_credentials() {
+    let mut cli = AuthorityCli::spawn();
+
+    for request in [
+        json!({
+            "operation": "list",
+            "projection_id": "another-callers-projection",
+            "request_id": "list-with-projection-id",
+            "client_timestamp_wall_us": 1,
+        }),
+        json!({
+            "operation": "list",
+            "owner_token": "not-an-input-to-list",
+            "request_id": "list-with-owner-token",
+            "client_timestamp_wall_us": 2,
+        }),
+    ] {
+        let denied = cli.send(request);
+        assert_eq!(denied["response"]["accepted"], false);
+        assert_eq!(
+            denied["response"]["error_code"],
+            "PROJECTION_INVALID_ARGUMENT"
+        );
+        assert!(
+            denied["response"]["projections"]
+                .as_array()
+                .is_none_or(Vec::is_empty),
+            "rejected list requests must not disclose summaries"
+        );
+    }
+}
+
+#[test]
 fn stdio_surface_rejects_operator_authority_process_argument() {
     let output = Command::new(env!("CARGO_BIN_EXE_tze_hud_projection_authority"))
         .arg("--operator-authority")

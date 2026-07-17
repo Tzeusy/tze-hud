@@ -29,6 +29,7 @@ shape. This client uses it first and falls back to the legacy bare-method
 dialect only when an older server reports `tools/call` as method-not-found.
 
 Subcommands:
+  list     (bounded, caller-scoped projection summaries; no owner token)
   attach   --projection-id ID [--display-name S] [--provider-kind claude]
            [--workspace-hint S] [--repository-hint S] [--icon-profile S]
            [--classification private] [--idempotency-key S]
@@ -536,10 +537,11 @@ def rpc(method, params):
         die(f"malformed JSON from {mcp_url()}: {raw[:400]!r}")
 
 
-def call_tool(tool, args):
+def call_tool(tool, args, *, include_contract_metadata=True):
     """Use standard MCP tools/call first; retain bare-method compatibility."""
-    args.setdefault("client_timestamp_wall_us", int(time.time() * 1_000_000))
-    args.setdefault("request_id", f"req-{tool}-{int(time.time() * 1000)}")
+    if include_contract_metadata:
+        args.setdefault("client_timestamp_wall_us", int(time.time() * 1_000_000))
+        args.setdefault("request_id", f"req-{tool}-{int(time.time() * 1000)}")
     resp = rpc("tools/call", {"name": tool, "arguments": args})
     if (resp.get("error") or {}).get("code") == -32601:
         return rpc(tool, args)
@@ -608,6 +610,17 @@ def replay_continuity(projection_id, owner_token, continuity):
 def cmd_attach(a):
     with continuity_lock(a.projection_id):
         _cmd_attach_locked(a)
+
+
+def cmd_list(_a):
+    """List only the resident caller's bounded, content-free summaries."""
+    emit(
+        result_or_die(
+            call_tool(
+                "portal_projection_list", {}, include_contract_metadata=False
+            )
+        )
+    )
 
 
 def _cmd_attach_locked(a):
@@ -798,6 +811,9 @@ def main():
     def base(sp):
         sp.add_argument("--projection-id", required=True)
         return sp
+
+    sp = sub.add_parser("list")
+    sp.set_defaults(fn=cmd_list)
 
     sp = base(sub.add_parser("attach"))
     sp.add_argument("--display-name")

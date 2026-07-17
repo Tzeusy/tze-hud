@@ -47,6 +47,8 @@ pub const DEFAULT_MAX_PENDING_INPUT_TOTAL_BYTES: usize = 32_768;
 pub const DEFAULT_MAX_POLL_ITEMS: usize = 8;
 /// Default maximum bytes returned by one pending-input poll.
 pub const DEFAULT_MAX_POLL_RESPONSE_BYTES: usize = 16_384;
+/// Default maximum projection summaries returned by one caller-scoped list.
+pub const DEFAULT_MAX_LIST_ITEMS: usize = 8;
 /// Default maximum HUD portal updates per second.
 pub const DEFAULT_MAX_PORTAL_UPDATES_PER_SECOND: u32 = 10;
 /// Default maximum retained publish-output logical-unit IDs per projection.

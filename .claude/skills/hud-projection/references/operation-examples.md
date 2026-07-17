@@ -26,6 +26,31 @@ The runtime retains direct tool-name methods only as a legacy fallback for
 older lightweight clients. Both dialects use the same tool names, operation
 payloads, authorization, and capability gates.
 
+## List
+
+`list` is caller-scoped recovery/reconciliation, not an owner-token operation.
+The authority-level request contains `operation: "list"`, a request ID, and a
+timestamp but deliberately no projection ID or owner token. The Resident MCP
+facade generates that metadata, so call it with an empty arguments object:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "portal_projection_list",
+    "arguments": {}
+  }
+}
+```
+
+The result contains at most eight `projections` entries. Each entry has only
+`projection_id`, `display_name`, `lifecycle_state`, `unread_output_count`, and
+`pending_input_count`. It never returns transcript text, pending-input text,
+owner tokens, lease data, or another resident principal's sessions, and it does
+not attach, detach, clean up, rotate a token, or change lifecycle state.
+
 ## Attach
 
 Codex:
