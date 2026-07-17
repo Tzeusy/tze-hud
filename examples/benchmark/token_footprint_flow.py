@@ -98,7 +98,9 @@ def add_common_fields(method, params):
 def invoke_portal_tool(method, params):
     params = add_common_fields(method, params)
     params["operation"] = PORTAL_OPERATIONS[method]
-    response = portal_client.call_tool(method, params)
+    # Pin the v1 fixture to the production client's bare-method compatibility
+    # transport rather than its policy-selected default dialect.
+    response = portal_client.rpc(method, params)
     if response.get("error"):
         raise RuntimeError(f"{method} rejected: {response['error']}")
     return response["result"]

@@ -12,10 +12,11 @@ its MCP HTTP server:
 The Python flow driver imports and uses the production
 `.claude/skills/hud-projection/scripts/portal_client.py` transport. Zone and
 widget publishes use the MCP-standard `tools/call` envelope; the portal turn
-uses the production client's bare-method compatibility path and the same
-`operation` discriminator fields as its CLI commands. The fixture supplies
-fixed IDs, timestamps, content, order, and response input. The live owner token
-is required for the real calls but is replaced with the canonical
+explicitly uses the client's raw bare-method compatibility transport rather
+than its policy-selected default dialect, and includes the same `operation`
+discriminator fields as its CLI commands. The fixture supplies fixed IDs,
+timestamps, content, order, and response input. The live owner token is
+required for the real calls but is replaced with the canonical
 `<OWNER_TOKEN>` sentinel in measured bodies. HTTP headers and credentials are
 excluded. No model or external network call occurs.
 

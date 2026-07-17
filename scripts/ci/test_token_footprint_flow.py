@@ -56,14 +56,22 @@ class CanonicalFlowFramingTests(unittest.TestCase):
             ["publish_to_zone", "publish_to_widget"],
         )
 
-    def test_portal_requests_include_production_operation_discriminator(self):
+    def test_portal_requests_pin_bare_method_compatibility_frame(self):
         captured = []
 
-        def fake_call_tool(method, params):
+        def unexpected_call_tool(method, params):
+            raise AssertionError(
+                "canonical portal calibration must not follow call_tool dialect policy"
+            )
+
+        def fake_rpc(method, params):
             captured.append((method, params.copy()))
             return {"jsonrpc": "2.0", "id": 1, "result": {"accepted": True}}
 
-        with mock.patch.object(flow.portal_client, "call_tool", fake_call_tool):
+        with (
+            mock.patch.object(flow.portal_client, "call_tool", unexpected_call_tool),
+            mock.patch.object(flow.portal_client, "rpc", fake_rpc),
+        ):
             for method in (
                 "portal_projection_attach",
                 "portal_projection_publish",
@@ -72,6 +80,15 @@ class CanonicalFlowFramingTests(unittest.TestCase):
             ):
                 flow.invoke_portal_tool(method, {"projection_id": "fixture"})
 
+        self.assertEqual(
+            [method for method, _ in captured],
+            [
+                "portal_projection_attach",
+                "portal_projection_publish",
+                "portal_projection_get_pending_input",
+                "portal_projection_acknowledge_input",
+            ],
+        )
         self.assertEqual(
             [params["operation"] for _, params in captured],
             ["attach", "publish_output", "get_pending_input", "acknowledge_input"],
