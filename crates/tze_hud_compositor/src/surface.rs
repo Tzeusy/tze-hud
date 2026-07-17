@@ -100,6 +100,37 @@ pub struct CompositorFrame {
     pub view: wgpu::TextureView,
     /// Ownership guard — keeps the backing resource alive until this frame is dropped.
     pub _guard: Box<dyn Any + Send>,
+    /// Whether this build acquired a new surface texture or reused a pending one.
+    pub acquisition: SurfaceFrameAcquisition,
+}
+
+/// How a compositor build obtained its renderable surface texture.
+///
+/// A windowed build may reuse the texture acquired by an earlier build while
+/// the main thread has not presented it yet. That reuse remains render work but
+/// is not another swapchain acquisition for idle-efficiency telemetry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurfaceFrameAcquisition {
+    /// This build acquired a new texture from the surface boundary.
+    Fresh,
+    /// This build reused a texture that was already pending presentation.
+    ReusedPending,
+}
+
+impl SurfaceFrameAcquisition {
+    const fn from_pending_surface(has_pending_surface: bool) -> Self {
+        if has_pending_surface {
+            Self::ReusedPending
+        } else {
+            Self::Fresh
+        }
+    }
+
+    /// Whether this build acquired a new surface texture.
+    #[must_use]
+    pub const fn is_fresh(self) -> bool {
+        matches!(self, Self::Fresh)
+    }
 }
 
 // ─── CompositorSurface trait ─────────────────────────────────────────────────
@@ -401,6 +432,7 @@ impl WindowSurface {
         &self,
         slot: std::sync::MutexGuard<'_, SwapchainSlot>,
         view: wgpu::TextureView,
+        acquisition: SurfaceFrameAcquisition,
     ) -> Option<CompositorFrame> {
         drop(slot);
         let guard = EncodingGuard {
@@ -410,6 +442,7 @@ impl WindowSurface {
         Some(CompositorFrame {
             view,
             _guard: Box::new(guard),
+            acquisition,
         })
     }
 
@@ -521,6 +554,7 @@ impl CompositorSurface for WindowSurface {
         // the condvar, so neither can destroy the SurfaceTexture while the
         // compositor holds a TextureView referencing it.
         slot.encoding = true;
+        let acquisition = SurfaceFrameAcquisition::from_pending_surface(slot.pending.is_some());
 
         // Build the frame's TextureView (if any) while holding the lock. On the
         // success paths we hand off `slot` to `finish_frame`, which constructs
@@ -556,7 +590,7 @@ impl CompositorSurface for WindowSurface {
         };
 
         match view {
-            Some(view) => self.finish_frame(slot, view),
+            Some(view) => self.finish_frame(slot, view, acquisition),
             None => {
                 // Skip this frame: close the critical section under the held
                 // lock and wake any waiter (present/reconfigure) before
@@ -771,6 +805,7 @@ impl CompositorSurface for HeadlessSurface {
         Some(CompositorFrame {
             view,
             _guard: Box::new(()), // no-op guard — HeadlessSurface owns the texture
+            acquisition: SurfaceFrameAcquisition::Fresh,
         })
     }
 
@@ -986,6 +1021,14 @@ mod tests {
             }
         }
 
+        /// Classify the next compositor build against the same pending-frame
+        /// state used by the real window surface. This lets the regression stay
+        /// deterministic without constructing a live swapchain.
+        fn acquisition_for_next_build(&self) -> SurfaceFrameAcquisition {
+            let slot = self.slot.lock().expect("slot poisoned");
+            SurfaceFrameAcquisition::from_pending_surface(slot.pending.is_some())
+        }
+
         /// Main-thread present: wait for encoding to finish, then take+destroy
         /// the texture. Mirrors `present_pending_texture`.
         fn present(&self) {
@@ -1010,6 +1053,37 @@ mod tests {
                 t.alive.store(false, Ordering::Release);
             }
         }
+    }
+
+    /// Two compositor builds can target the same pending swapchain texture
+    /// before the main thread presents it. Only the first build acquired a new
+    /// surface texture; telemetry must not count the reuse as a second acquire.
+    #[test]
+    fn two_builds_before_present_report_one_fresh_swapchain_acquisition() {
+        let harness = SwapchainHarness::new();
+
+        let first = harness.acquisition_for_next_build();
+        let first_guard = harness.acquire();
+        drop(first_guard);
+
+        let second = harness.acquisition_for_next_build();
+        let second_guard = harness.acquire();
+        drop(second_guard);
+
+        assert_eq!(first, SurfaceFrameAcquisition::Fresh);
+        assert_eq!(second, SurfaceFrameAcquisition::ReusedPending);
+        assert!(first.is_fresh());
+        assert!(
+            !second.is_fresh(),
+            "a build reusing the pending texture must not increment surface_acquisitions"
+        );
+
+        harness.present();
+        assert_eq!(
+            harness.acquisition_for_next_build(),
+            SurfaceFrameAcquisition::Fresh,
+            "presentation consumes the pending texture, so the next build acquires anew"
+        );
     }
 
     /// Concurrent reconfigure/present vs encode→submit must never destroy a

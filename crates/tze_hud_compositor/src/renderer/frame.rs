@@ -50,6 +50,9 @@ pub struct WindowedFrameBuild {
 /// operation even when a later operation in the stage fails.
 pub struct WindowedPresentOutcome {
     pub telemetry: FrameTelemetry,
+    /// True only when this build acquired a new surface texture. Reusing a
+    /// pending texture before main-thread presentation is render work, not a
+    /// second surface acquisition.
     pub surface_acquired: bool,
     pub gpu_submitted: bool,
 }
@@ -667,6 +670,7 @@ impl Compositor {
                 };
             }
         };
+        let surface_acquired = frame.acquisition.is_fresh();
 
         let (mut encoder, encode_us) = self.encode_from_inputs(
             &vertices,
@@ -744,7 +748,7 @@ impl Compositor {
             telemetry.frame_time_us = frame_start.elapsed().as_micros() as u64;
             return WindowedPresentOutcome {
                 telemetry,
-                surface_acquired: true,
+                surface_acquired,
                 gpu_submitted,
             };
         }
@@ -755,7 +759,7 @@ impl Compositor {
         telemetry.frame_time_us = frame_start.elapsed().as_micros() as u64;
         WindowedPresentOutcome {
             telemetry,
-            surface_acquired: true,
+            surface_acquired,
             gpu_submitted,
         }
     }
