@@ -406,15 +406,17 @@ impl ProjectionAuthority {
             .reconnect
             .last_reconnect_wall_us
             .is_some_and(|last| last < metadata.last_reconnect_wall_us);
-        let connection_changed = session.hud_connection.as_ref().is_some_and(|connection| {
-            connection.connection_id != metadata.connection_id
-                || connection.authenticated_session_id != metadata.authenticated_session_id
+        // A transport connection can rotate when the same authenticated session
+        // reconnects. Only a different authenticated session is a takeover that
+        // must not inherit the prior advisory lease.
+        let session_takeover = session.hud_connection.as_ref().is_some_and(|connection| {
+            connection.authenticated_session_id != metadata.authenticated_session_id
         });
         if is_reconnect {
             session.reconnect.reconnect_count += 1;
         }
         session.reconnect.last_reconnect_wall_us = Some(metadata.last_reconnect_wall_us);
-        if is_reconnect || connection_changed {
+        if session_takeover {
             session.advisory_lease = None;
         }
         session.hud_connection = Some(metadata);

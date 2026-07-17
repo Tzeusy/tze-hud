@@ -2610,7 +2610,7 @@ fn stale_or_overbroad_lease_identity_cannot_authorize_republish() {
 }
 
 #[test]
-fn reconnect_updates_bookkeeping_and_requires_fresh_lease() {
+fn same_session_reconnect_preserves_advisory_lease() {
     let mut authority = ProjectionAuthority::default();
     attach(&mut authority, "projection-a");
     authority
@@ -2625,11 +2625,48 @@ fn reconnect_updates_bookkeeping_and_requires_fresh_lease() {
 
     let mut reconnected = connection_metadata(&["create_tiles", "modify_own_tiles"]);
     reconnected.connection_id = "connection-2".to_string();
-    reconnected.authenticated_session_id = "runtime-session-2".to_string();
     reconnected.connected_at_wall_us = 40;
     reconnected.last_reconnect_wall_us = 40;
     authority
         .record_hud_connection("projection-a", reconnected)
+        .unwrap();
+
+    let summary = authority.state_summary("projection-a").unwrap();
+    assert_eq!(summary.reconnect.reconnect_count, 1);
+    assert_eq!(summary.reconnect.last_reconnect_wall_us, Some(40));
+    assert!(summary.has_advisory_lease);
+    assert_eq!(
+        authority.authorize_portal_republish(
+            "projection-a",
+            "lease-1",
+            &[String::from("create_tiles")],
+            41
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn authenticated_session_takeover_drops_advisory_lease() {
+    let mut authority = ProjectionAuthority::default();
+    attach(&mut authority, "projection-a");
+    authority
+        .record_hud_connection(
+            "projection-a",
+            connection_metadata(&["create_tiles", "modify_own_tiles"]),
+        )
+        .unwrap();
+    authority
+        .record_advisory_lease("projection-a", advisory_lease(&["create_tiles"], 100), 22)
+        .unwrap();
+
+    let mut takeover = connection_metadata(&["create_tiles", "modify_own_tiles"]);
+    takeover.connection_id = "connection-2".to_string();
+    takeover.authenticated_session_id = "runtime-session-2".to_string();
+    takeover.connected_at_wall_us = 40;
+    takeover.last_reconnect_wall_us = 40;
+    authority
+        .record_hud_connection("projection-a", takeover)
         .unwrap();
 
     let summary = authority.state_summary("projection-a").unwrap();
@@ -2645,24 +2682,6 @@ fn reconnect_updates_bookkeeping_and_requires_fresh_lease() {
         ),
         Err(ProjectionErrorCode::ProjectionUnauthorized)
     );
-
-    authority
-        .record_advisory_lease("projection-a", advisory_lease(&["create_tiles"], 100), 42)
-        .unwrap();
-    authority.mark_hud_disconnected("projection-a", 50).unwrap();
-    let mut after_disconnect = connection_metadata(&["create_tiles"]);
-    after_disconnect.connection_id = "connection-3".to_string();
-    after_disconnect.authenticated_session_id = "runtime-session-3".to_string();
-    after_disconnect.connected_at_wall_us = 60;
-    after_disconnect.last_reconnect_wall_us = 60;
-    authority
-        .record_hud_connection("projection-a", after_disconnect)
-        .unwrap();
-
-    let summary = authority.state_summary("projection-a").unwrap();
-    assert_eq!(summary.reconnect.reconnect_count, 2);
-    assert_eq!(summary.reconnect.last_disconnect_wall_us, Some(50));
-    assert!(!summary.has_advisory_lease);
 }
 
 #[test]
