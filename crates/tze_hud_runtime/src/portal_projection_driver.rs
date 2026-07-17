@@ -695,7 +695,16 @@ impl InProcessPortalDriver {
     /// boundary.
     pub(super) fn next_wake_deadline(&self, scene: &SceneGraph) -> Option<PortalWakeDeadline> {
         let now_us = now_wall_us();
-        let immediate_work = self.has_immediate_work(scene).then_some(now_us);
+        // Queued cleanup or degraded repaint must win over any stale timed
+        // deadline. A missed scene-lock turn needs an immediate retry; sorting
+        // it by wall time could otherwise attribute and delay that retry behind
+        // an already-overdue liveness/TTL deadline.
+        if self.has_immediate_work(scene) {
+            return Some(PortalWakeDeadline {
+                wall_us: now_us,
+                family: PortalDeadlineFamily::ImmediateWork,
+            });
+        }
         let cadence = self.authority.next_pending_due_at_us(now_us);
         let agent_liveness = self.authority.next_agent_liveness_deadline_wall_us();
         let pending_input_expiry = self.authority.next_pending_input_expiry_wall_us();
@@ -742,10 +751,6 @@ impl InProcessPortalDriver {
             })
             .min();
         [
-            immediate_work.map(|wall_us| PortalWakeDeadline {
-                wall_us,
-                family: PortalDeadlineFamily::ImmediateWork,
-            }),
             cadence.map(|wall_us| PortalWakeDeadline {
                 wall_us,
                 family: PortalDeadlineFamily::Cadence,
