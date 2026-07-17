@@ -99,6 +99,8 @@ statig = { version = "0.4", default-features = false }
 image = { version = "0.25", default-features = false }
 # Temporary directories in tests and dev-mode tools.
 tempfile = "3"
+# Offline token counting for deterministic LLM-facing wire-footprint calibration.
+tiktoken-rs = "=0.12.0"
 # Windows platform APIs.
 # Features are the union of all consuming crates; each crate uses { workspace = true }
 # and may rely on a subset — Cargo's feature union guarantees it compiles correctly.

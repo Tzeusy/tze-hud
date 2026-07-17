@@ -289,6 +289,35 @@ jobs:
             --test text_stream_portal_styling \
             --test drag_reposition \
             --test movable_elements_e2e
+      - name: Test token-footprint gate contract
+        run: >-
+          python3 -m unittest
+          scripts.ci.test_check_token_footprint
+          scripts.ci.test_token_footprint_flow
+      - name: Calibrate deterministic LLM-facing token footprint
+        env:
+          HEADLESS_FORCE_SOFTWARE: "1"
+        run: |
+          mkdir -p test_results/token-footprint
+          cargo run -p benchmark --features headless \
+            --bin token_footprint_calibration -- \
+            --output test_results/token-footprint/measurement.json
+          cargo run -p benchmark --features headless \
+            --bin token_footprint_calibration -- \
+            --output test_results/token-footprint/repeat.json
+          cmp test_results/token-footprint/measurement.json \
+            test_results/token-footprint/repeat.json
+          python3 scripts/ci/check_token_footprint.py \
+            --measurement test_results/token-footprint/measurement.json \
+            --baseline scripts/ci/token_footprint_candidate_v1.json \
+            --output test_results/token-footprint/gate-report.json
+      - name: Upload token-footprint calibration artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: token-footprint-calibration
+          path: test_results/token-footprint/
+          if-no-files-found: error
 
   windows-performance-budget:
     name: Windows performance budget
