@@ -19,7 +19,7 @@ use crate::idle_efficiency::{
 };
 
 /// Version of the change-proportional efficiency artifact schema.
-pub const CHANGE_EFFICIENCY_SCHEMA_VERSION: u32 = 1;
+pub const CHANGE_EFFICIENCY_SCHEMA_VERSION: u32 = 2;
 /// Stable name of the canonical one-node, fifty-tile scenario.
 pub const ONE_NODE_FIFTY_TILE_SCENARIO_NAME: &str = "one_node_change_50_tiles";
 /// Version of the canonical one-node, fifty-tile scenario.
@@ -33,6 +33,23 @@ pub enum ChangeMeasurementStatus {
     Complete,
     /// The producer could not complete a valid observation.
     Invalid,
+}
+
+/// Origin of the operation evidence carried by a change-efficiency artifact.
+///
+/// A schema fixture may exercise the validator, but it must never certify an
+/// incremental renderer.  Certification is reserved for a compositor capture
+/// taken after a retained render plan has actually encoded and submitted its
+/// scoped GPU work.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeMeasurementProvenance {
+    /// Hand-built or test-fixture evidence; useful for contract coverage only.
+    Fixture,
+    /// Work captured from the retained headless compositor path.
+    ObservedRetainedRuntime,
+    /// A real full-frame runtime fallback captured as a non-passing diagnostic.
+    ObservedFullFrameRuntime,
 }
 
 /// Why a closure member legitimately expands beyond the directly changed item.
@@ -314,6 +331,22 @@ pub struct InvalidationClosure {
     pub composition_damage: DamageCategory,
 }
 
+/// Encoder-side observations that distinguish a retained partial update from a
+/// full-frame fallback.
+///
+/// These counters are deliberately separate from the typed closure.  The
+/// closure answers *which* work was eligible; this observation records whether
+/// the renderer nonetheless cleared or encoded the whole surface.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangeRenderWorkObservation {
+    /// Number of full-surface clear operations encoded for this change.
+    pub full_surface_clear_operations: u64,
+    /// Number of full-frame encodes performed for this change.
+    pub full_frame_encode_operations: u64,
+    /// Number of closure-scoped render encodes performed for this change.
+    pub scoped_render_encode_operations: u64,
+}
+
 /// Structured reason for a full-surface invalidation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -326,6 +359,9 @@ pub enum FullSurfaceInvalidationReason {
     DeviceRecovery,
     /// The active backend cannot make the required partial-present guarantee.
     UnsupportedPartialPresentBackend,
+    /// The retained planner cannot establish the bounded closure required for
+    /// this changed scene, so it deliberately falls back to a full frame.
+    UnsupportedRetainedSceneChange,
 }
 
 /// Whether the renderer/backend reports partial-present support for this event.
@@ -370,10 +406,14 @@ pub struct ChangeEfficiencyArtifact {
     pub interval_duration_ms: u64,
     /// Whether the measurement completed all required observations.
     pub status: ChangeMeasurementStatus,
+    /// Whether this is fixture data or a completed retained-runtime capture.
+    pub measurement_provenance: ChangeMeasurementProvenance,
     /// Number of visible scene tiles before the changed work was rendered.
     pub scene_tile_count: u32,
     /// Typed closure membership and actual-operation evidence.
     pub closure: InvalidationClosure,
+    /// Observed encoder work, kept distinct from closure eligibility.
+    pub render_observation: ChangeRenderWorkObservation,
     /// Draw calls encoded for this change; not a substitute for encode work.
     pub encoded_draw_calls: u64,
     /// Required only when the damaged region covers the whole viewport.
@@ -435,6 +475,9 @@ pub enum ChangeEfficiencyValidationStatus {
     /// The artifact satisfies the schema contract but lacks a real scoped runtime
     /// producer, so it cannot certify change-proportional rendering yet.
     PendingRuntimeInstrumentation,
+    /// An opaque retained compositor capture proved scoped work and all closure
+    /// invariants held. Raw artifact JSON never reaches this status by itself.
+    CertifiedRetainedRuntime,
 }
 
 /// Deterministic, machine-readable result of closure validation.
@@ -442,7 +485,7 @@ pub enum ChangeEfficiencyValidationStatus {
 pub struct ChangeEfficiencyValidation {
     /// Whether this artifact certifies the ordinary closure-scoped gate.
     ///
-    /// This remains false until retained/delta rendering supplies a real scoped
+    /// This remains false until retained rendering supplies a real scoped
     /// producer. A schema fixture must never become a substitute for that proof.
     pub passed: bool,
     /// Whether all schema-level closure and damage invariants were satisfied.
@@ -471,9 +514,10 @@ pub struct ChangeEfficiencyValidation {
 impl ChangeEfficiencyArtifact {
     /// Validate the fail-closed invalidation-closure and damage contracts.
     ///
-    /// This module currently validates an evidence contract only. It refuses to
-    /// certify proportional rendering until a runtime producer captures actual
-    /// retained/delta work from the compositor.
+    /// Artifact data validates the contract but remains non-certifying, even
+    /// when deserialized data claims retained-runtime provenance. The compositor
+    /// owns the opaque capture that can upgrade a valid observed artifact to a
+    /// certification after the actual retained render returns.
     pub fn validate(&self) -> ChangeEfficiencyValidation {
         let mut violations = Vec::new();
 
@@ -499,6 +543,7 @@ impl ChangeEfficiencyArtifact {
             == composition_damage.viewport_pixel_area
             && composition_damage.viewport_pixel_area > 0;
         self.validate_full_surface(full_surface, &mut violations);
+        self.validate_render_observation(&render_encoding, full_surface, &mut violations);
 
         if !full_surface {
             self.validate_canonical_one_node_scenario(
@@ -588,6 +633,33 @@ impl ChangeEfficiencyArtifact {
         }
     }
 
+    fn validate_render_observation(
+        &self,
+        render_encoding: &ChangeEfficiencyCategoryReport,
+        full_surface: bool,
+        violations: &mut Vec<String>,
+    ) {
+        let observation = &self.render_observation;
+        if !full_surface
+            && (observation.full_surface_clear_operations > 0
+                || observation.full_frame_encode_operations > 0)
+        {
+            violations.push(
+                "closure-scoped damage cannot include full-surface clear or full-frame encode work"
+                    .into(),
+            );
+        }
+        if self.measurement_provenance == ChangeMeasurementProvenance::ObservedRetainedRuntime
+            && !full_surface
+            && observation.scoped_render_encode_operations != render_encoding.actual_operation_count
+        {
+            violations.push(format!(
+                "observed retained render encodes {} do not equal render-encoding operations {}",
+                observation.scoped_render_encode_operations, render_encoding.actual_operation_count
+            ));
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn validate_canonical_one_node_scenario(
         &self,
@@ -645,6 +717,16 @@ impl ChangeEfficiencyArtifact {
             composition_damage,
             violations,
         );
+
+        if self.render_observation.full_surface_clear_operations != 0
+            || self.render_observation.full_frame_encode_operations != 0
+            || self.render_observation.scoped_render_encode_operations != 1
+        {
+            violations.push(
+                "canonical one-node scenario requires one scoped encode and no full-surface clear or full-frame encode"
+                    .into(),
+            );
+        }
 
         if texture_upload.category.actual_operation_count > 0
             || texture_upload.category.closure_cardinality > 0

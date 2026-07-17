@@ -999,6 +999,10 @@ impl HeadlessRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tze_hud_scene::types::{
+        FontFamily, Node, NodeData, ResourceBudget, Rgba, TextAlign, TextMarkdownNode, TextOverflow,
+    };
+    use tze_hud_scene::{Capability, MutationBatch, SceneMutation};
 
     #[tokio::test]
     async fn idle_efficiency_counters_follow_real_headless_gpu_operations() {
@@ -1036,6 +1040,252 @@ mod tests {
         assert_eq!(unchanged.gpu_queue_submissions, 0);
         assert_eq!(unchanged.surface_acquisitions, 0);
         assert_eq!(unchanged.presents, 0);
+    }
+
+    #[tokio::test]
+    async fn canonical_one_node_update_captures_only_retained_changed_tile_work() {
+        let _runtime_guard = crate::test_support::lock_headless_runtime().await;
+        let mut runtime = HeadlessRuntime::new(HeadlessConfig {
+            width: 1_000,
+            height: 500,
+            grpc_port: 0,
+            bind_all_interfaces: false,
+            psk: "change-efficiency-test".into(),
+            config_toml: None,
+        })
+        .await
+        .expect("runtime init");
+
+        let (scene_arc, lease_id, changed_tile_id, changed_node_id) = {
+            let shared_state = runtime.shared_state().lock().await;
+            let scene_arc = Arc::clone(&shared_state.scene);
+            drop(shared_state);
+            let mut scene = scene_arc.lock().await;
+            let tab_id = scene.create_tab("Canonical", 0).expect("tab creation");
+            let lease_id = scene
+                .try_grant_lease_for_session_with_budget(
+                    "change-efficiency-agent",
+                    SceneId::nil(),
+                    60_000,
+                    tze_hud_scene::lease::priority::PRIORITY_DEFAULT,
+                    vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+                    ResourceBudget {
+                        max_tiles: 50,
+                        ..ResourceBudget::default()
+                    },
+                )
+                .expect("canonical lease creation");
+            let mut changed = None;
+            for row in 0..5 {
+                for column in 0..10 {
+                    let index = row * 10 + column;
+                    let tile_id = scene
+                        .create_tile(
+                            tab_id,
+                            "change-efficiency-agent",
+                            lease_id,
+                            Rect::new((column * 100) as f32, (row * 100) as f32, 100.0, 100.0),
+                            index,
+                        )
+                        .expect("canonical tile creation");
+                    let node = Node {
+                        id: SceneId::new(),
+                        children: vec![],
+                        layout: Default::default(),
+                        data: NodeData::TextMarkdown(TextMarkdownNode {
+                            // The update below preserves this glyph inventory,
+                            // so an observed zero-upload capture is meaningful.
+                            content: "AB".into(),
+                            bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                            font_size_px: 18.0,
+                            font_family: FontFamily::SystemSansSerif,
+                            color: Rgba::WHITE,
+                            background: None,
+                            alignment: TextAlign::Start,
+                            overflow: TextOverflow::Clip,
+                            color_runs: Box::default(),
+                        }),
+                    };
+                    if index == 0 {
+                        changed = Some((tile_id, node.id));
+                    }
+                    scene
+                        .set_tile_root(tile_id, node)
+                        .expect("canonical text root");
+                }
+            }
+            let (changed_tile_id, changed_node_id) = changed.expect("first tile exists");
+            drop(scene);
+            (scene_arc, lease_id, changed_tile_id, changed_node_id)
+        };
+
+        // Baseline: real full headless render that seeds the private retained
+        // snapshot and glyph atlas. It is deliberately not the evidence frame.
+        runtime.render_frame().await;
+        let baseline_pixels = runtime.read_pixels();
+
+        {
+            let mut scene = scene_arc.lock().await;
+            let update = MutationBatch {
+                batch_id: SceneId::new(),
+                agent_namespace: "change-efficiency-agent".into(),
+                mutations: vec![SceneMutation::UpdateNodeContent {
+                    tile_id: changed_tile_id,
+                    node_id: changed_node_id,
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "BA".into(),
+                        bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                        font_size_px: 18.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::WHITE,
+                        background: None,
+                        alignment: TextAlign::Start,
+                        overflow: TextOverflow::Clip,
+                        color_runs: Box::default(),
+                    }),
+                }],
+                timing_hints: None,
+                lease_id: Some(lease_id),
+            };
+            let update_result = scene.apply_batch(&update);
+            assert!(
+                update_result.applied,
+                "UpdateNodeContent applies: {update_result:#?}"
+            );
+        }
+
+        // Evidence frame: the normal runtime API must select the retained
+        // compositor path; this test never manufactures an artifact.
+        runtime.render_frame().await;
+        let updated_pixels = runtime.read_pixels();
+        let capture = runtime
+            .compositor
+            .take_change_efficiency_capture()
+            .expect("real retained compositor capture after UpdateNodeContent");
+        let artifact = capture.artifact();
+        let report = capture.validate();
+
+        assert!(report.passed, "{report:#?}");
+        assert!(
+            runtime
+                .compositor
+                .take_change_efficiency_diagnostic()
+                .is_none(),
+            "successful retained capture must supersede the baseline full-frame diagnostic"
+        );
+        assert_eq!(artifact.scene_tile_count, 50);
+        assert_eq!(report.layout.closure_cardinality, 1);
+        assert_eq!(report.layout.actual_operation_count, 1);
+        assert_eq!(report.raster.closure_cardinality, 1);
+        assert_eq!(report.raster.actual_operation_count, 1);
+        assert_eq!(report.texture_upload.category.closure_cardinality, 0);
+        assert_eq!(report.texture_upload.category.actual_operation_count, 0);
+        assert_eq!(report.render_encoding.closure_cardinality, 1);
+        assert_eq!(report.render_encoding.actual_operation_count, 1);
+        assert!(artifact.full_surface_invalidation.is_none());
+        assert_eq!(
+            artifact.render_observation.full_surface_clear_operations, 0,
+            "a retained capture must not clear the full surface"
+        );
+        assert_eq!(
+            artifact.render_observation.full_frame_encode_operations, 0,
+            "a retained capture must not encode a full frame"
+        );
+        assert_eq!(
+            artifact.render_observation.scoped_render_encode_operations,
+            1
+        );
+        assert_eq!(
+            artifact.closure.layout.actual_work[0].identity.tile_id,
+            changed_tile_id.to_string()
+        );
+        assert_eq!(
+            artifact.closure.layout.actual_work[0].identity.node_id,
+            changed_node_id.to_string()
+        );
+
+        // The artifact is not accepted as a proxy for rendering correctness.
+        // Read back both submitted surfaces: LoadOp::Load plus the scoped
+        // scissors must preserve every pixel outside the changed tile and must
+        // visibly update at least one pixel inside it.
+        let damage = &artifact.closure.composition_damage.actual_work[0]
+            .identity
+            .bounds;
+        let mut changed_pixels_inside_damage = 0_u64;
+        for y in 0..500 {
+            for x in 0..1_000 {
+                let offset = ((y * 1_000 + x) * 4) as usize;
+                let before = &baseline_pixels[offset..offset + 4];
+                let after = &updated_pixels[offset..offset + 4];
+                let inside_damage = x >= damage.x
+                    && x < damage.x + damage.width
+                    && y >= damage.y
+                    && y < damage.y + damage.height;
+                if inside_damage {
+                    changed_pixels_inside_damage += u64::from(before != after);
+                } else {
+                    assert_eq!(
+                        before, after,
+                        "retained update changed pixel outside damage at ({x}, {y})"
+                    );
+                }
+            }
+        }
+        assert!(
+            changed_pixels_inside_damage > 0,
+            "retained update did not visibly change its declared damage region"
+        );
+
+        // A canonical scene change that leaves the deliberately narrow proof
+        // envelope (new glyph inventory) must be a structured, non-passing
+        // full-frame diagnostic instead of a silent proportionality claim.
+        {
+            let mut scene = scene_arc.lock().await;
+            let unsupported_update = MutationBatch {
+                batch_id: SceneId::new(),
+                agent_namespace: "change-efficiency-agent".into(),
+                mutations: vec![SceneMutation::UpdateNodeContent {
+                    tile_id: changed_tile_id,
+                    node_id: changed_node_id,
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "AC".into(),
+                        bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                        font_size_px: 18.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::WHITE,
+                        background: None,
+                        alignment: TextAlign::Start,
+                        overflow: TextOverflow::Clip,
+                        color_runs: Box::default(),
+                    }),
+                }],
+                timing_hints: None,
+                lease_id: Some(lease_id),
+            };
+            assert!(
+                scene.apply_batch(&unsupported_update).applied,
+                "unsupported canonical update still applies to the scene"
+            );
+        }
+        runtime.render_frame().await;
+        let diagnostic = runtime
+            .compositor
+            .take_change_efficiency_diagnostic()
+            .expect("unsupported retained change emits a structured diagnostic");
+        let diagnostic_report = diagnostic.validate();
+        assert!(!diagnostic_report.passed, "{diagnostic_report:#?}");
+        assert_eq!(
+            diagnostic_report.status,
+            tze_hud_telemetry::ChangeEfficiencyValidationStatus::DiagnosticFullSurface,
+            "{diagnostic_report:#?}"
+        );
+        assert_eq!(
+            diagnostic
+                .full_surface_invalidation
+                .expect("full diagnostic metadata")
+                .reason,
+            tze_hud_telemetry::FullSurfaceInvalidationReason::UnsupportedRetainedSceneChange
+        );
     }
 
     /// Verify that grpc_port = 0 does not start a server by default.
