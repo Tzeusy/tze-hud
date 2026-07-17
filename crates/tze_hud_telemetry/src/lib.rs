@@ -7,6 +7,7 @@
 
 pub mod collector;
 pub mod idle_efficiency;
+pub mod invalidation_closure;
 pub mod media_audit;
 pub mod publish_load;
 pub mod record;
@@ -22,6 +23,17 @@ pub use idle_efficiency::{
     QUIESCENT_INTERVAL_MIN_MS, QUIESCENT_RUNTIME_WAKEUP_CEILING, QUIESCENT_SCENARIO_NAME,
     QUIESCENT_SCENARIO_VERSION, QUIESCENT_SETTLING_MIN_MS, QuiescentEfficiencyArtifact,
     QuiescentEfficiencyValidation, QuiescentMeasurementStatus,
+};
+pub use invalidation_closure::{
+    ActualWorkItem, AmplificationRatio, CHANGE_EFFICIENCY_SCHEMA_VERSION, ChangeEfficiencyArtifact,
+    ChangeEfficiencyCategoryReport, ChangeEfficiencyDamageReport,
+    ChangeEfficiencyTextureUploadReport, ChangeEfficiencyValidation,
+    ChangeEfficiencyValidationStatus, ChangeMeasurementStatus, ClosureWorkItem, DamageCategory,
+    DamageWorkItemId, FullSurfaceInvalidation, FullSurfaceInvalidationReason, InvalidationCategory,
+    InvalidationClosure, InvalidationDependencyReason, NodeWorkItemId,
+    ONE_NODE_FIFTY_TILE_SCENARIO_NAME, ONE_NODE_FIFTY_TILE_SCENARIO_VERSION,
+    PartialPresentCapability, PixelRect, RenderPlanWorkItemId, TextureUploadActualWork,
+    TextureUploadCategory, TextureUploadWorkItemId,
 };
 pub use media_audit::{
     DegradationStep, DegradationTrigger, MediaAuditEvent, MediaCloseReason, MediaRejectCode,
