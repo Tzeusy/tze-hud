@@ -575,6 +575,22 @@ impl InProcessPortalDriveState {
     }
 }
 
+/// Parsed MCP publish fields before they become an authority request.
+///
+/// Both ordinary publish acknowledgement and the question-publish piggyback
+/// use this single conversion path so output parsing, idempotency, and
+/// reconnect bookkeeping cannot diverge.
+struct PortalPublishOutputOp {
+    projection_id: String,
+    owner_token: String,
+    output_text: String,
+    logical_unit_id: Option<String>,
+    output_kind: Option<String>,
+    content_classification: Option<String>,
+    coalesce_key: Option<String>,
+    expects_reply: bool,
+}
+
 /// In-process projection authority driver.
 ///
 /// Hosts a `ProjectionAuthority` inside the runtime process and runs the portal
@@ -1053,6 +1069,71 @@ impl InProcessPortalDriver {
         self.drive.apply_token_map(overrides);
     }
 
+    /// Publish one output unit through the authority, preserving the ordinary
+    /// output idempotency and reconnect behavior for every MCP response shape.
+    fn publish_output(
+        &mut self,
+        publish: PortalPublishOutputOp,
+        now_us: u64,
+    ) -> Result<(), PortalOpRejection> {
+        let PortalPublishOutputOp {
+            projection_id,
+            owner_token,
+            output_text,
+            logical_unit_id,
+            output_kind,
+            content_classification,
+            coalesce_key,
+            expects_reply,
+        } = publish;
+        let output_kind = parse_output_kind(output_kind.as_deref()).map_err(|reason| {
+            PortalOpRejection::new(ProjectionErrorCode::ProjectionInvalidArgument, reason)
+        })?;
+        let content_classification =
+            parse_content_classification(content_classification.as_deref()).map_err(|reason| {
+                PortalOpRejection::new(ProjectionErrorCode::ProjectionInvalidArgument, reason)
+            })?;
+        let req = PublishOutputRequest {
+            envelope: OperationEnvelope {
+                operation: ProjectionOperation::PublishOutput,
+                projection_id: projection_id.clone(),
+                request_id: uuid::Uuid::now_v7().to_string(),
+                client_timestamp_wall_us: now_us.max(1),
+            },
+            owner_token,
+            output_text,
+            output_kind,
+            content_classification,
+            logical_unit_id,
+            coalesce_key,
+            expects_reply,
+        };
+        let response =
+            self.authority
+                .handle_publish_output(req, MCP_PORTAL_CALLER_IDENTITY, now_us);
+        if response.accepted {
+            // A successful owner publish after an ungraceful drop is the
+            // reconnect signal. It is a no-op for ordinary publishes.
+            self.clear_projection_disconnect_at(&projection_id, now_us);
+            tracing::debug!(
+                proj_id = %projection_id,
+                coalesced = response.coalesced_output_count,
+                "portal_op: PublishOutput accepted"
+            );
+            Ok(())
+        } else {
+            let error_code = response
+                .error_code
+                .unwrap_or(ProjectionErrorCode::ProjectionInternalError);
+            tracing::warn!(
+                proj_id = %projection_id,
+                error_code = %error_code,
+                "portal_op: PublishOutput denied"
+            );
+            Err(PortalOpRejection::new(error_code, response.status_summary))
+        }
+    }
+
     /// Dispatch one [`PortalOp`] message received from the MCP channel.
     ///
     /// Called from `windowed.rs::drain_portal_ops()` on the event-loop thread,
@@ -1257,74 +1338,111 @@ impl InProcessPortalDriver {
                 expects_reply,
                 reply,
             } => {
-                // Parse the optional snake_case classification strings into the
-                // projection enums. Omitted fields default safely
-                // (assistant / private — privacy is safe-by-default). An
-                // unrecognized value is rejected before the authority sees it.
-                let output_kind = match parse_output_kind(output_kind.as_deref()) {
-                    Ok(kind) => kind,
-                    Err(reason) => {
-                        let _ = reply.send(Err(PortalOpRejection::new(
-                            ProjectionErrorCode::ProjectionInvalidArgument,
-                            reason,
-                        )));
-                        return;
-                    }
-                };
-                let content_classification =
-                    match parse_content_classification(content_classification.as_deref()) {
-                        Ok(classification) => classification,
-                        Err(reason) => {
-                            let _ = reply.send(Err(PortalOpRejection::new(
-                                ProjectionErrorCode::ProjectionInvalidArgument,
-                                reason,
-                            )));
-                            return;
-                        }
-                    };
-                let request_id = uuid::Uuid::now_v7().to_string();
-                let req = PublishOutputRequest {
-                    envelope: OperationEnvelope {
-                        operation: ProjectionOperation::PublishOutput,
-                        projection_id: projection_id.clone(),
-                        request_id,
-                        client_timestamp_wall_us: now_us.max(1),
+                let result = self.publish_output(
+                    PortalPublishOutputOp {
+                        projection_id,
+                        owner_token,
+                        output_text,
+                        logical_unit_id,
+                        output_kind,
+                        content_classification,
+                        coalesce_key,
+                        expects_reply: expects_reply.unwrap_or(false),
                     },
-                    owner_token,
-                    output_text,
-                    output_kind,
-                    content_classification,
-                    logical_unit_id,
-                    coalesce_key,
-                    expects_reply: expects_reply.unwrap_or(false),
-                };
-                let resp =
-                    self.authority
-                        .handle_publish_output(req, MCP_PORTAL_CALLER_IDENTITY, now_us);
-                if resp.accepted {
-                    // A successful owner publish after an ungraceful drop is the
-                    // reconnect signal: restore the connection so the degraded
-                    // treatment clears (hud-5i16d). Guarded to a no-op unless the
-                    // projection is currently latched disconnected, so normal
-                    // publishes never perturb the reconnect bookkeeping.
-                    self.clear_projection_disconnect_at(&projection_id, now_us);
-                    tracing::debug!(
-                        proj_id = %projection_id,
-                        coalesced = resp.coalesced_output_count,
-                        "portal_op: PublishOutput accepted"
-                    );
-                    let _ = reply.send(Ok(()));
-                } else {
-                    let error_code = resp
-                        .error_code
-                        .unwrap_or(ProjectionErrorCode::ProjectionInternalError);
-                    tracing::warn!(
-                        proj_id = %projection_id,
-                        error_code = %error_code,
-                        "portal_op: PublishOutput denied"
-                    );
-                    let _ =
-                        reply.send(Err(PortalOpRejection::new(error_code, resp.status_summary)));
+                    now_us,
+                );
+                let _ = reply.send(result);
+            }
+
+            PortalOp::PublishOutputWithPendingInput {
+                projection_id,
+                owner_token,
+                output_text,
+                logical_unit_id,
+                output_kind,
+                content_classification,
+                coalesce_key,
+                reply,
+            } => {
+                // Keep a copy for the subsequent authority poll. The output must
+                // be accepted before delivery is attempted so a rejected publish
+                // never advances a viewer turn to Delivered.
+                let pending_projection_id = projection_id.clone();
+                let pending_owner_token = owner_token.clone();
+                let publish = self.publish_output(
+                    PortalPublishOutputOp {
+                        projection_id,
+                        owner_token,
+                        output_text,
+                        logical_unit_id,
+                        output_kind,
+                        content_classification,
+                        coalesce_key,
+                        expects_reply: true,
+                    },
+                    now_us,
+                );
+                match publish {
+                    Err(rejection) => {
+                        let _ = reply.send(Err(rejection));
+                    }
+                    Ok(()) => {
+                        // Deliberately use the ordinary authority handler rather
+                        // than duplicating its state mutation. This preserves its
+                        // FIFO/bounds behavior, Pending/Deferred -> Delivered
+                        // transition, repaint scheduling, audit event, and later
+                        // acknowledgement idempotency exactly.
+                        let pending_response = self.authority.handle_get_pending_input(
+                            GetPendingInputRequest {
+                                envelope: OperationEnvelope {
+                                    operation: ProjectionOperation::GetPendingInput,
+                                    projection_id: pending_projection_id.clone(),
+                                    request_id: uuid::Uuid::now_v7().to_string(),
+                                    client_timestamp_wall_us: now_us.max(1),
+                                },
+                                owner_token: pending_owner_token,
+                                max_items: Some(1),
+                                max_bytes: None,
+                            },
+                            MCP_PORTAL_CALLER_IDENTITY,
+                            now_us,
+                        );
+                        if pending_response.accepted {
+                            let batch = PendingInputBatch {
+                                items: pending_response
+                                    .pending_input
+                                    .iter()
+                                    .map(pending_input_entry_from_item)
+                                    .collect(),
+                                remaining_count: pending_response.pending_remaining_count,
+                                remaining_bytes: pending_response.pending_remaining_bytes,
+                            };
+                            tracing::debug!(
+                                proj_id = %pending_projection_id,
+                                delivered = batch.items.len(),
+                                remaining = batch.remaining_count,
+                                "portal_op: PublishOutput pending input piggyback accepted"
+                            );
+                            let _ = reply.send(Ok(batch));
+                        } else {
+                            // This is unreachable for a valid owner token in the
+                            // same single-threaded dispatch turn after a successful
+                            // publish, but preserve the stable authority code if a
+                            // future contract change breaks that invariant.
+                            let error_code = pending_response
+                                .error_code
+                                .unwrap_or(ProjectionErrorCode::ProjectionInternalError);
+                            tracing::error!(
+                                proj_id = %pending_projection_id,
+                                error_code = %error_code,
+                                "portal_op: pending input piggyback denied after accepted publish"
+                            );
+                            let _ = reply.send(Err(PortalOpRejection::new(
+                                error_code,
+                                pending_response.status_summary,
+                            )));
+                        }
+                    }
                 }
             }
 
@@ -6469,6 +6587,173 @@ mod tests {
             scene.tile_count(),
             1,
             "exactly one live portal tile — the fresh one"
+        );
+    }
+
+    /// hud-vconx: a question publish must take delivery through the exact
+    /// `GetPendingInput` authority path before returning. That gives the caller
+    /// one bounded viewer turn without weakening the Delivered/repaint/ack
+    /// contract of the ordinary poll.
+    #[test]
+    fn dispatch_question_publish_piggybacks_input_and_preserves_ack_replay() {
+        use tze_hud_projection::{ContentClassification, ProjectedPortalPolicy};
+
+        let mut driver = InProcessPortalDriver::new();
+        let projection_id = "proj-piggyback";
+        let owner_token = dispatch_attach_and_get_token(&mut driver, projection_id);
+        let now = now_wall_us().max(1);
+        driver
+            .authority_mut()
+            .enqueue_input(
+                projection_id,
+                "input-piggyback-1",
+                "Ship the release".to_string(),
+                now,
+                now + 60_000_000,
+                Some(ContentClassification::Private),
+            )
+            .expect("seeded HUD input must be accepted");
+        driver
+            .authority_mut()
+            .enqueue_input(
+                projection_id,
+                "input-piggyback-2",
+                "Wait for the soak result".to_string(),
+                now + 1,
+                now + 60_000_000,
+                Some(ContentClassification::Private),
+            )
+            .expect("second seeded HUD input must be accepted");
+
+        // Remove the attach/submission paints so any remaining state assertion
+        // comes from the question publish and its delivery transition.
+        while let Some(due_projection_id) = driver.authority_mut().next_due_projection_id() {
+            let _ = driver
+                .authority_mut()
+                .take_due_portal_update(&due_projection_id, now + 1);
+        }
+
+        let (publish_tx, publish_rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::PublishOutputWithPendingInput {
+            projection_id: projection_id.to_string(),
+            owner_token: owner_token.clone(),
+            output_text: "Should I ship this release?".to_string(),
+            logical_unit_id: Some("question-1".to_string()),
+            output_kind: None,
+            content_classification: None,
+            coalesce_key: None,
+            reply: publish_tx,
+        });
+        let batch = publish_rx
+            .blocking_recv()
+            .expect("piggyback reply must arrive")
+            .expect("question publish must be accepted");
+        assert_eq!(batch.items.len(), 1, "one FIFO viewer turn is piggybacked");
+        assert_eq!(batch.items[0].input_id, "input-piggyback-1");
+        assert_eq!(batch.items[0].delivery_state, "delivered");
+        assert_eq!(
+            batch.remaining_count, 1,
+            "the second eligible turn must remain bounded behind the one-item piggyback"
+        );
+        assert_eq!(
+            driver.authority_mut().next_due_projection_id().as_deref(),
+            Some(projection_id),
+            "the ordinary poll-driven delivery repaint must remain scheduled"
+        );
+
+        let projected = driver
+            .authority_mut()
+            .projected_portal_state(projection_id, &ProjectedPortalPolicy::permit_all())
+            .expect("projection remains materializable after piggyback delivery");
+        assert_eq!(
+            projected.latest_viewer_delivery_state,
+            Some(tze_hud_projection::InputDeliveryState::Pending),
+            "the newest second input remains pending while the first returned batch item proves the ordinary Pending -> Delivered transition"
+        );
+
+        // The normal terminal acknowledgement remains replay-safe after a
+        // piggybacked delivery; the second identical acknowledgement is accepted
+        // rather than becoming a conflict.
+        for _ in 0..2 {
+            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+            driver.dispatch_portal_op(PortalOp::AcknowledgeInput {
+                projection_id: projection_id.to_string(),
+                owner_token: owner_token.clone(),
+                input_id: "input-piggyback-1".to_string(),
+                ack_state: "handled".to_string(),
+                ack_message: Some("done".to_string()),
+                not_before_wall_us: None,
+                reply: ack_tx,
+            });
+            ack_rx
+                .blocking_recv()
+                .expect("acknowledge reply must arrive")
+                .expect("identical terminal acknowledgement must remain idempotent");
+        }
+
+        // Replaying the idempotent logical output unit must never re-deliver
+        // the terminal first input. A distinct still-pending second input is
+        // eligible for the next bounded turn, proving FIFO plus the one-item
+        // response cap rather than merely a single-item happy path.
+        let (replay_tx, replay_rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::PublishOutputWithPendingInput {
+            projection_id: projection_id.to_string(),
+            owner_token: owner_token.clone(),
+            output_text: "Should I ship this release?".to_string(),
+            logical_unit_id: Some("question-1".to_string()),
+            output_kind: None,
+            content_classification: None,
+            coalesce_key: None,
+            reply: replay_tx,
+        });
+        let replay = replay_rx
+            .blocking_recv()
+            .expect("replay reply must arrive")
+            .expect("idempotent publish replay must be accepted");
+        assert_eq!(
+            replay.items.len(),
+            1,
+            "the remaining distinct pending input is delivered on the next turn"
+        );
+        assert_eq!(
+            replay.items[0].input_id, "input-piggyback-2",
+            "the terminal first input must never be redelivered by a replayed output unit"
+        );
+        assert_eq!(replay.remaining_count, 0);
+
+        let (final_ack_tx, final_ack_rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::AcknowledgeInput {
+            projection_id: projection_id.to_string(),
+            owner_token: owner_token.clone(),
+            input_id: "input-piggyback-2".to_string(),
+            ack_state: "handled".to_string(),
+            ack_message: Some("done".to_string()),
+            not_before_wall_us: None,
+            reply: final_ack_tx,
+        });
+        final_ack_rx
+            .blocking_recv()
+            .expect("second acknowledgement reply must arrive")
+            .expect("second terminal acknowledgement must be accepted");
+
+        let (final_replay_tx, final_replay_rx) = tokio::sync::oneshot::channel();
+        driver.dispatch_portal_op(PortalOp::PublishOutputWithPendingInput {
+            projection_id: projection_id.to_string(),
+            owner_token,
+            output_text: "Should I ship this release?".to_string(),
+            logical_unit_id: Some("question-1".to_string()),
+            output_kind: None,
+            content_classification: None,
+            coalesce_key: None,
+            reply: final_replay_tx,
+        });
+        let final_replay = final_replay_rx
+            .blocking_recv()
+            .expect("final replay reply must arrive")
+            .expect("final idempotent publish replay must be accepted");
+        assert!(
+            final_replay.items.is_empty(),
+            "no terminal input may be redelivered after both acknowledgements"
         );
     }
 

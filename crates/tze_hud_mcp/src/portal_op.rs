@@ -159,6 +159,34 @@ pub enum PortalOp {
         /// validation / auth failure.
         reply: tokio::sync::oneshot::Sender<Result<(), PortalOpRejection>>,
     },
+    /// Publish a question and immediately return the bounded next viewer turn.
+    ///
+    /// This is the internal transport shape for an MCP
+    /// `portal_projection_publish` request with `expects_reply: true`. The
+    /// runtime performs the ordinary output publish first, then delegates the
+    /// inbox delivery to the same authority path used by
+    /// [`PortalOp::GetPendingInput`]. It is deliberately a separate variant so
+    /// ordinary output publishes retain their compact unit acknowledgement.
+    PublishOutputWithPendingInput {
+        /// Projection identifier matching a prior successful `Attach`.
+        projection_id: String,
+        /// Owner token returned by the `Attach` response.
+        owner_token: String,
+        /// Text to append to the transcript.
+        output_text: String,
+        /// Optional logical-unit ID for idempotent replay detection.
+        logical_unit_id: Option<String>,
+        /// Optional output kind as a snake_case string.
+        output_kind: Option<String>,
+        /// Optional viewer-facing content classification as a snake_case string.
+        content_classification: Option<String>,
+        /// Optional coalesce key for the transcript unit.
+        coalesce_key: Option<String>,
+        /// One-shot response channel. A successful response contains the bounded
+        /// inbox batch returned by the same delivery-state path as
+        /// [`PortalOp::GetPendingInput`].
+        reply: tokio::sync::oneshot::Sender<Result<PendingInputBatch, PortalOpRejection>>,
+    },
     /// Publish a lifecycle status to an existing projection session.
     ///
     /// This is step 3 of the cooperative workflow and the only way the owning
