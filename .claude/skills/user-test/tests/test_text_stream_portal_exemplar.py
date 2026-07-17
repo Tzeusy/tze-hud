@@ -281,6 +281,7 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
             [
                 "focus-composer",
                 "focus-output-pane",
+                "settle-portal-keyboard-focus",
                 "resize-grow-ctrl-equal",
             ],
         )
@@ -289,6 +290,7 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
             [
                 "focus-composer",
                 "focus-output-pane",
+                "settle-portal-keyboard-focus",
                 "resize-shrink-ctrl-minus",
             ],
         )
@@ -322,6 +324,13 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
                     script.index("Start-Sleep -Milliseconds 400"),
                     script.index("diagnostic:"),
                 )
+                if stage != "baseline":
+                    focus = script.index("diagnostic:focus-output-pane")
+                    settle = script.index("diagnostic:settle-portal-keyboard-focus")
+                    chord = script.index("diagnostic:resize-")
+                    self.assertIn("Start-Sleep -Milliseconds 700", script)
+                    self.assertLess(focus, settle)
+                    self.assertLess(settle, chord)
 
     def test_scene_snapshot_portal_bounds_selects_only_target_frame(self) -> None:
         frame_id = uuid.UUID("00000000-0000-0000-0000-0000000000ab")

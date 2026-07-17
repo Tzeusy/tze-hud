@@ -1196,6 +1196,7 @@ def build_resize_hotkey_snapshot_plan(
     *,
     grow_steps: int = 6,
     shrink_steps: int = 12,
+    focus_settle_ms: int = 700,
 ) -> dict[str, list[dict[str, Any]]]:
     """Build staged OS input for authoritative Ctrl +/- resize validation.
 
@@ -1212,6 +1213,7 @@ def build_resize_hotkey_snapshot_plan(
     composer_y = portal_y + input_rect.y + min(input_rect.h - 10.0, 72.0)
     output_x = portal_x + output_rect.x + output_rect.w / 2.0
     output_y = portal_y + output_rect.y + output_rect.h / 2.0
+    focus_settle_ms = max(0, int(focus_settle_ms))
 
     def focused_output_actions() -> list[dict[str, Any]]:
         return [
@@ -1234,6 +1236,11 @@ def build_resize_hotkey_snapshot_plan(
         "grow": [
             *focused_output_actions(),
             {
+                "kind": "wait",
+                "label": "settle-portal-keyboard-focus",
+                "milliseconds": focus_settle_ms,
+            },
+            {
                 "kind": "chord",
                 "label": "resize-grow-ctrl-equal",
                 "mod_vk": 0x11,
@@ -1243,6 +1250,11 @@ def build_resize_hotkey_snapshot_plan(
         ],
         "shrink": [
             *focused_output_actions(),
+            {
+                "kind": "wait",
+                "label": "settle-portal-keyboard-focus",
+                "milliseconds": focus_settle_ms,
+            },
             {
                 "kind": "chord",
                 "label": "resize-shrink-ctrl-minus",
@@ -1537,6 +1549,12 @@ def windows_diagnostic_input_script(
                 f"Write-Output {ps_single_quoted('diagnostic:' + str(action.get('label', 'text')))}",
                 f"Send-Text {ps_single_quoted(str(action.get('text', '')))}",
                 "Start-Sleep -Milliseconds 120",
+            ])
+        elif kind == "wait":
+            milliseconds = max(0, int(action.get("milliseconds", 0)))
+            lines.extend([
+                f"Write-Output {ps_single_quoted('diagnostic:' + str(action.get('label', 'wait')))}",
+                f"Start-Sleep -Milliseconds {milliseconds}",
             ])
         elif kind == "chord":
             mod_vk = int(action.get("mod_vk", 0x11))
