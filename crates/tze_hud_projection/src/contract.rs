@@ -306,6 +306,15 @@ impl ProjectionBounds {
                 "visible transcript bound cannot exceed retained transcript bound".to_string(),
             ));
         }
+        // Strict FIFO delivery cannot make progress if an accepted item cannot
+        // fit in a single capped poll response.
+        if self.max_poll_response_bytes < self.max_pending_input_bytes_per_item {
+            return Err(ProjectionContractError::InvalidArgument(
+                "max_poll_response_bytes cannot be smaller than \
+                 max_pending_input_bytes_per_item"
+                    .to_string(),
+            ));
+        }
         if !(crate::MIN_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US
             ..=crate::MAX_AGENT_LIVENESS_DEGRADED_AFTER_WALL_US)
             .contains(&self.agent_liveness_degraded_after_wall_us)

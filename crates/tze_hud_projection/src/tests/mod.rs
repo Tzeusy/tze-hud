@@ -841,6 +841,34 @@ fn list_bound_must_be_non_zero() {
 }
 
 #[test]
+fn poll_response_bound_must_cover_each_accepted_input_item() {
+    let error = ProjectionAuthority::new(ProjectionBounds {
+        max_poll_response_bytes: DEFAULT_MAX_PENDING_INPUT_BYTES_PER_ITEM - 1,
+        ..ProjectionBounds::default()
+    })
+    .expect_err("an accepted input must fit in at least one bounded poll response");
+
+    assert!(
+        matches!(
+            error,
+            ProjectionContractError::InvalidArgument(ref message)
+                if message.contains("max_poll_response_bytes")
+                    && message.contains("max_pending_input_bytes_per_item")
+        ),
+        "the invalid poll/input-bound relationship must fail closed"
+    );
+}
+
+#[test]
+fn poll_response_bound_equal_to_input_item_bound_is_valid() {
+    ProjectionAuthority::new(ProjectionBounds {
+        max_poll_response_bytes: DEFAULT_MAX_PENDING_INPUT_BYTES_PER_ITEM,
+        ..ProjectionBounds::default()
+    })
+    .expect("one maximum-sized accepted input must fit in one bounded poll response");
+}
+
+#[test]
 fn attach_materializes_content_layer_projected_portal_and_reuses_idempotently() {
     let mut authority = ProjectionAuthority::default();
     let first = authority.handle_attach(attach_request("projection-a", "req-a"), "caller-a", 10);
@@ -1738,6 +1766,190 @@ fn default_bounds_match_projection_spec_values() {
         bounds.max_portal_updates_per_second,
         DEFAULT_MAX_PORTAL_UPDATES_PER_SECOND
     );
+}
+
+#[test]
+fn default_and_oversized_item_poll_requests_return_32_small_fifo_inputs() {
+    for (case, max_items) in [("default", None), ("oversized", Some(33))] {
+        let mut authority = ProjectionAuthority::new(ProjectionBounds {
+            // The retained queue must be larger than the poll cap to make the
+            // default poll-item limit observable.
+            max_pending_input_items: 33,
+            ..ProjectionBounds::default()
+        })
+        .expect("test bounds are valid");
+        let owner_token = attach(&mut authority, "projection-a");
+        for index in 0..33 {
+            authority
+                .enqueue_input(
+                    "projection-a",
+                    &format!("input-{index:02}"),
+                    format!("message-{index:02}"),
+                    20 + index as u64,
+                    10_000,
+                    None,
+                )
+                .expect("small input fits the test queue");
+        }
+
+        let poll = authority.handle_get_pending_input(
+            GetPendingInputRequest {
+                envelope: envelope(
+                    ProjectionOperation::GetPendingInput,
+                    "projection-a",
+                    &format!("req-poll-{case}"),
+                ),
+                owner_token,
+                max_items,
+                max_bytes: None,
+            },
+            "caller-a",
+            100,
+        );
+
+        assert!(poll.accepted, "{case} request must be accepted");
+        assert_eq!(
+            poll.pending_input.len(),
+            32,
+            "{case} request must be clamped to the default item cap"
+        );
+        assert!(
+            poll.pending_input
+                .iter()
+                .map(|item| item.submission_text.len())
+                .sum::<usize>()
+                < DEFAULT_MAX_POLL_RESPONSE_BYTES,
+            "{case} test data must leave the byte cap nonbinding"
+        );
+        for (index, item) in poll.pending_input.iter().enumerate() {
+            assert_eq!(item.input_id, format!("input-{index:02}"));
+            assert_eq!(item.submission_text, format!("message-{index:02}"));
+            assert_eq!(item.delivery_state, InputDeliveryState::Delivered);
+        }
+        assert_eq!(poll.pending_remaining_count, 1);
+        assert_eq!(poll.pending_remaining_bytes, "message-32".len());
+    }
+}
+
+#[test]
+fn default_and_oversized_byte_poll_requests_keep_byte_backpressure() {
+    for (case, max_bytes) in [
+        ("default", None),
+        ("oversized", Some(DEFAULT_MAX_POLL_RESPONSE_BYTES + 1)),
+    ] {
+        let mut authority = ProjectionAuthority::default();
+        let owner_token = attach(&mut authority, "projection-a");
+        for index in 0..5 {
+            authority
+                .enqueue_input(
+                    "projection-a",
+                    &format!("input-{index}"),
+                    "x".repeat(DEFAULT_MAX_PENDING_INPUT_BYTES_PER_ITEM),
+                    20 + index as u64,
+                    10_000,
+                    None,
+                )
+                .expect("input fits the default queue and per-item bounds");
+        }
+
+        let poll = authority.handle_get_pending_input(
+            GetPendingInputRequest {
+                envelope: envelope(
+                    ProjectionOperation::GetPendingInput,
+                    "projection-a",
+                    &format!("req-poll-{case}"),
+                ),
+                owner_token,
+                // Five items makes the item cap nonbinding; this test exercises
+                // only the independent response-byte backpressure limit.
+                max_items: Some(DEFAULT_MAX_POLL_ITEMS + 1),
+                max_bytes,
+            },
+            "caller-a",
+            100,
+        );
+
+        assert!(poll.accepted, "{case} request must be accepted");
+        assert_eq!(poll.pending_input.len(), 4);
+        assert_eq!(
+            poll.pending_input
+                .iter()
+                .map(|item| item.submission_text.len())
+                .sum::<usize>(),
+            DEFAULT_MAX_POLL_RESPONSE_BYTES
+        );
+        for (index, item) in poll.pending_input.iter().enumerate() {
+            assert_eq!(item.input_id, format!("input-{index}"));
+            assert_eq!(item.delivery_state, InputDeliveryState::Delivered);
+        }
+        assert_eq!(poll.pending_remaining_count, 1);
+        assert_eq!(
+            poll.pending_remaining_bytes,
+            DEFAULT_MAX_PENDING_INPUT_BYTES_PER_ITEM
+        );
+    }
+}
+
+#[test]
+fn byte_bounded_polling_keeps_the_fifo_prefix_after_the_first_overflow() {
+    for (case, max_bytes) in [
+        ("default", None),
+        ("oversized", Some(DEFAULT_MAX_POLL_RESPONSE_BYTES + 1)),
+    ] {
+        let mut authority = ProjectionAuthority::default();
+        let owner_token = attach(&mut authority, "projection-a");
+        for (index, payload_bytes) in [4_096, 4_096, 4_096, 4_095, 2, 1].into_iter().enumerate() {
+            authority
+                .enqueue_input(
+                    "projection-a",
+                    &format!("input-{index}"),
+                    "x".repeat(payload_bytes),
+                    20 + index as u64,
+                    10_000,
+                    None,
+                )
+                .expect("input fits the default queue and per-item bounds");
+        }
+
+        let poll = authority.handle_get_pending_input(
+            GetPendingInputRequest {
+                envelope: envelope(
+                    ProjectionOperation::GetPendingInput,
+                    "projection-a",
+                    &format!("req-poll-fifo-{case}"),
+                ),
+                owner_token,
+                // Exercise caller-side item-limit normalization without letting the
+                // item cap bind; this isolates FIFO behavior under the byte cap.
+                max_items: Some(DEFAULT_MAX_POLL_ITEMS + 1),
+                max_bytes,
+            },
+            "caller-a",
+            100,
+        );
+
+        assert!(poll.accepted, "{case} request must be accepted");
+        assert_eq!(
+            poll.pending_input
+                .iter()
+                .map(|item| item.input_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["input-0", "input-1", "input-2", "input-3"],
+            "{case} request must stop at the first non-fitting eligible input"
+        );
+        assert_eq!(
+            poll.pending_input
+                .iter()
+                .map(|item| item.submission_text.len())
+                .sum::<usize>(),
+            DEFAULT_MAX_POLL_RESPONSE_BYTES - 1
+        );
+        for item in &poll.pending_input {
+            assert_eq!(item.delivery_state, InputDeliveryState::Delivered);
+        }
+        assert_eq!(poll.pending_remaining_count, 2);
+        assert_eq!(poll.pending_remaining_bytes, 3);
+    }
 }
 
 #[test]
@@ -3998,6 +4210,7 @@ proptest! {
     ) {
         let mut authority = ProjectionAuthority::new(ProjectionBounds {
             max_pending_input_items: 32,
+            max_pending_input_bytes_per_item: 128,
             max_pending_input_total_bytes: 4096,
             max_poll_items: 16,
             max_poll_response_bytes: 128,
