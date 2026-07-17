@@ -14,11 +14,19 @@ pub struct DegradationNoticeSender {
 
 struct Inner {
     current: DegradationNotice,
-    subscribers: Vec<tokio::sync::mpsc::Sender<DegradationNotice>>,
+    next_subscriber_id: u64,
+    subscribers: Vec<Subscriber>,
+}
+
+struct Subscriber {
+    id: u64,
+    tx: tokio::sync::mpsc::Sender<DegradationNotice>,
 }
 
 pub struct DegradationNoticeReceiver {
     rx: tokio::sync::mpsc::Receiver<DegradationNotice>,
+    subscriber_id: u64,
+    inner: Arc<Mutex<Inner>>,
 }
 
 impl Default for DegradationNoticeSender {
@@ -38,6 +46,7 @@ impl DegradationNoticeSender {
                     affected_capabilities: Vec::new(),
                     timestamp_wall_us: 0,
                 },
+                next_subscriber_id: 0,
                 subscribers: Vec::new(),
             })),
             capacity,
@@ -45,6 +54,8 @@ impl DegradationNoticeSender {
     }
 
     /// Atomically register for future transitions and capture current state.
+    /// Dropping the returned receiver unregisters its session lane without
+    /// requiring a later degradation transition.
     pub fn subscribe_with_current(&self) -> (DegradationNoticeReceiver, DegradationNotice) {
         let (tx, rx) = tokio::sync::mpsc::channel(self.capacity);
         let mut inner = self
@@ -52,8 +63,23 @@ impl DegradationNoticeSender {
             .lock()
             .expect("degradation notice registry poisoned");
         let current = inner.current.clone();
-        inner.subscribers.push(tx);
-        (DegradationNoticeReceiver { rx }, current)
+        let subscriber_id = inner.next_subscriber_id;
+        inner.next_subscriber_id = inner
+            .next_subscriber_id
+            .checked_add(1)
+            .expect("degradation notice subscriber id space exhausted");
+        inner.subscribers.push(Subscriber {
+            id: subscriber_id,
+            tx,
+        });
+        (
+            DegradationNoticeReceiver {
+                rx,
+                subscriber_id,
+                inner: Arc::clone(&self.inner),
+            },
+            current,
+        )
     }
 
     pub fn current(&self) -> DegradationNotice {
@@ -107,7 +133,11 @@ impl DegradationNoticeSender {
             .lock()
             .expect("degradation notice registry poisoned");
         inner.current = notice;
-        inner.subscribers.clone()
+        inner
+            .subscribers
+            .iter()
+            .map(|subscriber| subscriber.tx.clone())
+            .collect()
     }
 
     fn prune_closed(&self) {
@@ -115,13 +145,23 @@ impl DegradationNoticeSender {
             .lock()
             .expect("degradation notice registry poisoned")
             .subscribers
-            .retain(|tx| !tx.is_closed());
+            .retain(|subscriber| !subscriber.tx.is_closed());
     }
 }
 
 impl DegradationNoticeReceiver {
     pub async fn recv(&mut self) -> Option<DegradationNotice> {
         self.rx.recv().await
+    }
+}
+
+impl Drop for DegradationNoticeReceiver {
+    fn drop(&mut self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner
+                .subscribers
+                .retain(|subscriber| subscriber.id != self.subscriber_id);
+        }
     }
 }
 
@@ -199,5 +239,54 @@ mod tests {
             .await;
         assert!(!sender.should_emit_state_stream(1));
         assert!(sender.should_emit_state_stream(2));
+    }
+
+    #[tokio::test]
+    async fn dropped_receiver_unregisters_only_its_own_lane_without_a_transition() {
+        let sender = DegradationNoticeSender::new(1);
+        let baseline = sender
+            .inner
+            .lock()
+            .expect("degradation notice registry poisoned")
+            .subscribers
+            .len();
+
+        let (receiver, _) = sender.subscribe_with_current();
+        let (mut remaining_receiver, _) = sender.subscribe_with_current();
+        assert_eq!(
+            sender
+                .inner
+                .lock()
+                .expect("degradation notice registry poisoned")
+                .subscribers
+                .len(),
+            baseline + 2,
+            "each live receiver must have its own registered lane"
+        );
+
+        drop(receiver);
+
+        assert_eq!(
+            sender
+                .inner
+                .lock()
+                .expect("degradation notice registry poisoned")
+                .subscribers
+                .len(),
+            baseline + 1,
+            "dropping one receiver must unregister only its own lane without waiting for an unrelated transition"
+        );
+
+        assert_eq!(
+            sender
+                .publish(notice(DegradationLevel::CoalescingMore))
+                .await,
+            1,
+            "the remaining live receiver must still receive future transitions"
+        );
+        assert_eq!(
+            remaining_receiver.recv().await.unwrap().level,
+            DegradationLevel::CoalescingMore as i32
+        );
     }
 }
