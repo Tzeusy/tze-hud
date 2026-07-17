@@ -2661,7 +2661,8 @@ fn authenticated_session_takeover_drops_advisory_lease() {
         .unwrap();
 
     let mut takeover = connection_metadata(&["create_tiles", "modify_own_tiles"]);
-    takeover.connection_id = "connection-2".to_string();
+    // Keep the transport identity stable: the authenticated-session identity is
+    // the takeover boundary, independently of a transport rotation.
     takeover.authenticated_session_id = "runtime-session-2".to_string();
     takeover.connected_at_wall_us = 40;
     takeover.last_reconnect_wall_us = 40;
