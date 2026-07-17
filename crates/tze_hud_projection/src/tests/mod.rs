@@ -841,6 +841,34 @@ fn list_bound_must_be_non_zero() {
 }
 
 #[test]
+fn poll_response_bound_must_cover_each_accepted_input_item() {
+    let error = ProjectionAuthority::new(ProjectionBounds {
+        max_poll_response_bytes: DEFAULT_MAX_PENDING_INPUT_BYTES_PER_ITEM - 1,
+        ..ProjectionBounds::default()
+    })
+    .expect_err("an accepted input must fit in at least one bounded poll response");
+
+    assert!(
+        matches!(
+            error,
+            ProjectionContractError::InvalidArgument(ref message)
+                if message.contains("max_poll_response_bytes")
+                    && message.contains("max_pending_input_bytes_per_item")
+        ),
+        "the invalid poll/input-bound relationship must fail closed"
+    );
+}
+
+#[test]
+fn poll_response_bound_equal_to_input_item_bound_is_valid() {
+    ProjectionAuthority::new(ProjectionBounds {
+        max_poll_response_bytes: DEFAULT_MAX_PENDING_INPUT_BYTES_PER_ITEM,
+        ..ProjectionBounds::default()
+    })
+    .expect("one maximum-sized accepted input must fit in one bounded poll response");
+}
+
+#[test]
 fn attach_materializes_content_layer_projected_portal_and_reuses_idempotently() {
     let mut authority = ProjectionAuthority::default();
     let first = authority.handle_attach(attach_request("projection-a", "req-a"), "caller-a", 10);
@@ -4182,6 +4210,7 @@ proptest! {
     ) {
         let mut authority = ProjectionAuthority::new(ProjectionBounds {
             max_pending_input_items: 32,
+            max_pending_input_bytes_per_item: 128,
             max_pending_input_total_bytes: 4096,
             max_poll_items: 16,
             max_poll_response_bytes: 128,
