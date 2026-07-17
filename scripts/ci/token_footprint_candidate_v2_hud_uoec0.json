@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "runtime_build": "0.1.0",
+  "tokenizer": {
+    "name": "o200k_base",
+    "implementation": "tiktoken-rs",
+    "version": "0.12.0",
+    "vocab_fingerprint": "sha256:446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d",
+    "counting_policy": "each canonical JSON-RPC body independently; UTF-8 bytes; encode_with_special_tokens; operation and flow totals are integer sums"
+  },
+  "fixture_fingerprint": "blake3:34452932b9fc5d4eea3889e4d88a836fa886adccaa5bfce63a0be6159c823980",
+  "flows": {
+    "portal_projection": {
+      "flow_version": 2,
+      "flow_fingerprint": "blake3:f1791479fd7731343e0a7a0a12474bfd4fd87119bfabb56add470f5b3bde4e27",
+      "operations": {
+        "portal_projection_acknowledge_input": {
+          "request": {"bytes": 419, "tokens": 114},
+          "response": {"bytes": 51, "tokens": 18},
+          "total": {"bytes": 470, "tokens": 132}
+        },
+        "portal_projection_attach": {
+          "request": {"bytes": 535, "tokens": 148},
+          "response": {"bytes": 81, "tokens": 27},
+          "total": {"bytes": 616, "tokens": 175}
+        },
+        "portal_projection_get_pending_input": {
+          "request": {"bytes": 368, "tokens": 107},
+          "response": {"bytes": 267, "tokens": 74},
+          "total": {"bytes": 635, "tokens": 181}
+        },
+        "portal_projection_publish": {
+          "request": {"bytes": 489, "tokens": 125},
+          "response": {"bytes": 105, "tokens": 28},
+          "total": {"bytes": 594, "tokens": 153}
+        }
+      },
+      "total": {"bytes": 2315, "tokens": 641}
+    },
+    "publish_to_widget": {
+      "flow_version": 1,
+      "flow_fingerprint": "blake3:e37e93be69e0e0855bc099e25c970fdfdb2192baa22dcb8caa4af511b80232cd",
+      "operations": {
+        "publish_to_widget": {
+          "request": {"bytes": 357, "tokens": 112},
+          "response": {"bytes": 182, "tokens": 56},
+          "total": {"bytes": 539, "tokens": 168}
+        }
+      },
+      "total": {"bytes": 539, "tokens": 168}
+    },
+    "publish_to_zone": {
+      "flow_version": 1,
+      "flow_fingerprint": "blake3:82a47f35fb8516932e604a1148198cc7b1e5c4e35b33d5e366432cffba7de51e",
+      "operations": {
+        "publish_to_zone": {
+          "request": {"bytes": 477, "tokens": 141},
+          "response": {"bytes": 192, "tokens": 56},
+          "total": {"bytes": 669, "tokens": 197}
+        }
+      },
+      "total": {"bytes": 669, "tokens": 197}
+    }
+  },
+  "approval": {
+    "status": "candidate_unapproved",
+    "decision_reference": null,
+    "basis": "candidate for hud-uoec0 MCP response-field diet; requires explicit owner approval before replacing the v1 comparison authority"
+  }
+}

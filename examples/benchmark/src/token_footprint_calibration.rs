@@ -19,6 +19,7 @@ mod calibration {
 
     const PSK: &str = "token-calibration-resident-psk";
     const CANONICAL_FLOW_VERSION: u32 = 1;
+    const PORTAL_RESPONSE_DIET_FLOW_VERSION: u32 = 2;
     const VOCAB_FINGERPRINT: &str =
         "sha256:446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d";
 
@@ -201,6 +202,14 @@ mod calibration {
         format!("blake3:{}", hasher.finalize().to_hex())
     }
 
+    fn flow_version(flow_name: &str) -> u32 {
+        if flow_name == "portal_projection" {
+            PORTAL_RESPONSE_DIET_FLOW_VERSION
+        } else {
+            CANONICAL_FLOW_VERSION
+        }
+    }
+
     fn build_output(driver: DriverOutput) -> CalibrationOutput {
         let bpe = tiktoken_rs::o200k_base().expect("load bundled o200k_base vocabulary");
         let mut grouped: BTreeMap<String, Vec<Transaction>> = BTreeMap::new();
@@ -253,10 +262,11 @@ mod calibration {
                     },
                 );
             }
+            let version = flow_version(&flow_name);
             flows.insert(
                 flow_name,
                 FlowMeasurement {
-                    flow_version: CANONICAL_FLOW_VERSION,
+                    flow_version: version,
                     flow_fingerprint: fingerprint(flow_parts),
                     operations,
                     total: flow_total,
@@ -363,6 +373,13 @@ mod calibration {
                 fingerprint(["ab".to_string(), "c".to_string()]),
                 fingerprint(["a".to_string(), "bc".to_string()])
             );
+        }
+
+        #[test]
+        fn response_diet_bumps_only_the_portal_flow_version() {
+            assert_eq!(flow_version("portal_projection"), 2);
+            assert_eq!(flow_version("publish_to_zone"), 1);
+            assert_eq!(flow_version("publish_to_widget"), 1);
         }
     }
 }

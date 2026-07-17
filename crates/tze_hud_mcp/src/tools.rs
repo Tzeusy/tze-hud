@@ -2244,31 +2244,29 @@ pub async fn handle_portal_projection_list(
 /// Parameters for `portal_projection_attach`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionAttachParams {
-    /// Session id (max 128 bytes), unique among active projections. Reuse needs a matching `idempotency_key`.
+    /// Session id, max 128 bytes; reuse needs matching `idempotency_key`.
     pub projection_id: String,
-    /// Human-readable label (max 128 bytes).
+    /// Label, max 128 bytes.
     pub display_name: String,
-    /// Optional key for replay-safe re-attach after an interruption. A matching
-    /// authenticated replay returns a fresh owner token and invalidates the old
-    /// token without extending the original expiry deadline.
+    /// Replay key; matching attach rotates the owner token.
     #[serde(default)]
     pub idempotency_key: Option<String>,
-    /// Optional provider: `codex`|`claude`|`opencode`|`other` (default `other`).
+    /// `codex`|`claude`|`opencode`|`other`; default `other`.
     #[serde(default)]
     pub provider_kind: Option<String>,
-    /// Optional classification: `public`|`household`|`private`|`sensitive` (default `private`).
+    /// `public`|`household`|`private`|`sensitive`; default `private`.
     #[serde(default)]
     pub content_classification: Option<String>,
-    /// Optional workspace hint (e.g. project directory).
+    /// Workspace hint.
     #[serde(default)]
     pub workspace_hint: Option<String>,
-    /// Optional repository hint (e.g. repo URL or name).
+    /// Repository hint.
     #[serde(default)]
     pub repository_hint: Option<String>,
-    /// Optional icon profile hint for visual identity.
+    /// Icon-profile hint.
     #[serde(default)]
     pub icon_profile_hint: Option<String>,
-    /// Optional HUD target hint for multi-display routing.
+    /// HUD target hint.
     #[serde(default)]
     pub hud_target: Option<String>,
 }
@@ -2281,7 +2279,8 @@ pub struct PortalProjectionAttachResult {
     /// Owner token (only present on success). Required for
     /// subsequent `portal_projection_publish` calls.
     pub owner_token: Option<String>,
-    /// Human-readable status summary.
+    /// Empty successful summaries are omitted from MCP JSON.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub status_summary: String,
 }
 
@@ -2340,7 +2339,7 @@ pub async fn handle_portal_projection_attach(
         Ok(Ok(token)) => Ok(PortalProjectionAttachResult {
             accepted: true,
             owner_token: Some(token),
-            status_summary: "projection attached".to_string(),
+            status_summary: String::new(),
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
             error_code: rejection.error_code,
@@ -2357,25 +2356,25 @@ pub async fn handle_portal_projection_attach(
 /// Parameters for `portal_projection_publish`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionPublishParams {
-    /// Projection session id from attach.
+    /// Session id.
     pub projection_id: String,
-    /// Owner token from attach.
+    /// Owner token.
     pub owner_token: String,
-    /// Text to append to the transcript.
+    /// Append text.
     pub output_text: String,
-    /// Optional logical-unit id for idempotent dedup (max 128 bytes).
+    /// Dedup id, max 128 bytes.
     #[serde(default)]
     pub logical_unit_id: Option<String>,
-    /// Optional kind: `assistant` (default)|`tool`|`status`|`error`|`other`.
+    /// `assistant` (default)|`tool`|`status`|`error`|`other`.
     #[serde(default)]
     pub output_kind: Option<String>,
-    /// Optional classification: `public`|`household`|`private`|`sensitive` (default `private`).
+    /// `public`|`household`|`private`|`sensitive`; default `private`.
     #[serde(default)]
     pub content_classification: Option<String>,
-    /// Optional key; repeated publishes with the same key collapse in-place instead of appending.
+    /// Repeated matching key coalesces in-place.
     #[serde(default)]
     pub coalesce_key: Option<String>,
-    /// Optional; `true` marks this output as a question awaiting a viewer reply.
+    /// `true` awaits a viewer reply.
     #[serde(default)]
     pub expects_reply: Option<bool>,
 }
@@ -2483,13 +2482,13 @@ pub async fn handle_portal_projection_publish(
 /// Parameters for `portal_projection_publish_status`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionPublishStatusParams {
-    /// Projection session id from attach.
+    /// Session id.
     pub projection_id: String,
-    /// Owner token from attach.
+    /// Owner token.
     pub owner_token: String,
-    /// Lifecycle: `attached`|`active`|`degraded`|`hud_unavailable`|`detached`|`cleanup_pending`|`expired`. No `waiting`/`blocked` — use `status_text`.
+    /// `attached`|`active`|`degraded`|`hud_unavailable`|`detached`|`cleanup_pending`|`expired`.
     pub lifecycle_state: String,
-    /// Optional status detail (bounded by the authority's `max_status_text_bytes`).
+    /// Bounded status detail.
     #[serde(default)]
     pub status_text: Option<String>,
 }
@@ -2499,11 +2498,11 @@ pub struct PortalProjectionPublishStatusParams {
 pub struct PortalProjectionPublishStatusResult {
     /// `true` when the authority accepted and applied the lifecycle state.
     pub accepted: bool,
-    /// Human-readable status summary.
+    /// Empty successful summaries are omitted from MCP JSON.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub status_summary: String,
-    /// The applied lifecycle state echoed back as a snake_case string — the
-    /// observable round-trip confirming the viewer-facing state the authority
-    /// now holds for this projection.
+    /// Retained for direct callers; the MCP caller supplied this value.
+    #[serde(skip_serializing)]
     pub lifecycle_state: String,
 }
 
@@ -2573,7 +2572,7 @@ pub async fn handle_portal_projection_publish_status(
     match reply_rx.await {
         Ok(Ok(lifecycle_state)) => Ok(PortalProjectionPublishStatusResult {
             accepted: true,
-            status_summary: "lifecycle status applied".to_string(),
+            status_summary: String::new(),
             lifecycle_state,
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
@@ -2591,17 +2590,17 @@ pub async fn handle_portal_projection_publish_status(
 /// Parameters for `portal_projection_get_pending_input`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionGetPendingInputParams {
-    /// Projection session id from attach.
+    /// Session id.
     pub projection_id: String,
-    /// Owner token from attach.
+    /// Owner token.
     pub owner_token: String,
-    /// Optional cap on items returned (clamped to the authority's `max_poll_items`).
+    /// Item cap, clamped to `max_poll_items`.
     #[serde(default)]
     pub max_items: Option<usize>,
-    /// Optional cap on response bytes (clamped to the authority's `max_poll_response_bytes`).
+    /// Byte cap, clamped to `max_poll_response_bytes`.
     #[serde(default)]
     pub max_bytes: Option<usize>,
-    /// Optional long-poll wait in ms (clamped to 30000); blocks until input arrives or elapses. Omit/`0` returns immediately.
+    /// Wait ms, max 30000; omit/`0` returns immediately.
     #[serde(default)]
     pub wait_ms: Option<u64>,
 }
@@ -2617,7 +2616,8 @@ pub struct PortalProjectionGetPendingInputResult {
     pub remaining_count: usize,
     /// Total byte size of still-pending items that did not fit.
     pub remaining_bytes: usize,
-    /// Human-readable status summary.
+    /// Empty successful summaries are omitted from MCP JSON.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub status_summary: String,
 }
 
@@ -2706,7 +2706,7 @@ pub async fn handle_portal_projection_get_pending_input(
                 items: batch.items,
                 remaining_count: batch.remaining_count,
                 remaining_bytes: batch.remaining_bytes,
-                status_summary: "pending input returned".to_string(),
+                status_summary: String::new(),
             });
         }
 
@@ -2721,18 +2721,18 @@ pub async fn handle_portal_projection_get_pending_input(
 /// Parameters for `portal_projection_acknowledge_input`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionAcknowledgeInputParams {
-    /// Projection session id from attach.
+    /// Session id.
     pub projection_id: String,
-    /// Owner token from attach.
+    /// Owner token.
     pub owner_token: String,
-    /// Input item id from a `get_pending_input` response.
+    /// Input id from `get_pending_input`.
     pub input_id: String,
     /// `handled`|`deferred`|`rejected`.
     pub ack_state: String,
-    /// Optional message recorded with the acknowledgement.
+    /// Acknowledgement detail.
     #[serde(default)]
     pub ack_message: Option<String>,
-    /// Optional re-delivery floor (wall-clock µs); valid only with `deferred`.
+    /// Re-delivery wall-clock µs; only with `deferred`.
     #[serde(default)]
     pub not_before_wall_us: Option<u64>,
 }
@@ -2742,7 +2742,8 @@ pub struct PortalProjectionAcknowledgeInputParams {
 pub struct PortalProjectionAcknowledgeInputResult {
     /// `true` when the authority accepted the acknowledgement.
     pub accepted: bool,
-    /// Human-readable status summary.
+    /// Empty successful summaries are omitted from MCP JSON.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub status_summary: String,
 }
 
@@ -2808,7 +2809,7 @@ pub async fn handle_portal_projection_acknowledge_input(
     match reply_rx.await {
         Ok(Ok(())) => Ok(PortalProjectionAcknowledgeInputResult {
             accepted: true,
-            status_summary: "input acknowledged".to_string(),
+            status_summary: String::new(),
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
             error_code: rejection.error_code,
@@ -2825,11 +2826,11 @@ pub async fn handle_portal_projection_acknowledge_input(
 /// Parameters for `portal_projection_detach`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionDetachParams {
-    /// Projection session id from attach.
+    /// Session id.
     pub projection_id: String,
-    /// Owner token from attach.
+    /// Owner token.
     pub owner_token: String,
-    /// Human-readable reason for the audit log.
+    /// Audit reason.
     pub reason: String,
 }
 
@@ -2838,7 +2839,8 @@ pub struct PortalProjectionDetachParams {
 pub struct PortalProjectionDetachResult {
     /// `true` when the authority accepted the detach.
     pub accepted: bool,
-    /// Human-readable status summary.
+    /// Empty successful summaries are omitted from MCP JSON.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub status_summary: String,
 }
 
@@ -2894,7 +2896,7 @@ pub async fn handle_portal_projection_detach(
     match reply_rx.await {
         Ok(Ok(())) => Ok(PortalProjectionDetachResult {
             accepted: true,
-            status_summary: "projection detached and private state purged".to_string(),
+            status_summary: String::new(),
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
             error_code: rejection.error_code,
@@ -2911,17 +2913,17 @@ pub async fn handle_portal_projection_detach(
 /// Parameters for `portal_projection_cleanup`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionCleanupParams {
-    /// Projection session id from attach.
+    /// Session id.
     pub projection_id: String,
     /// `owner` or `operator`.
     pub cleanup_authority: String,
-    /// Owner token (required when `cleanup_authority = owner`).
+    /// Owner token when authority is `owner`.
     #[serde(default)]
     pub owner_token: Option<String>,
-    /// Operator credential (required when `cleanup_authority = operator`).
+    /// Operator credential when authority is `operator`.
     #[serde(default)]
     pub operator_authority: Option<String>,
-    /// Human-readable reason for the audit log.
+    /// Audit reason.
     pub reason: String,
 }
 
@@ -2930,7 +2932,8 @@ pub struct PortalProjectionCleanupParams {
 pub struct PortalProjectionCleanupResult {
     /// `true` when the authority accepted the cleanup.
     pub accepted: bool,
-    /// Human-readable status summary.
+    /// Empty successful summaries are omitted from MCP JSON.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub status_summary: String,
 }
 
@@ -3021,7 +3024,7 @@ pub async fn handle_portal_projection_cleanup(
     match reply_rx.await {
         Ok(Ok(())) => Ok(PortalProjectionCleanupResult {
             accepted: true,
-            status_summary: "projection cleanup accepted and private state purged".to_string(),
+            status_summary: String::new(),
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
             error_code: rejection.error_code,
@@ -6746,8 +6749,57 @@ mod tests {
         assert!(result.accepted);
         assert_eq!(
             result.lifecycle_state, "degraded",
-            "the applied lifecycle state must round-trip back to the MCP caller"
+            "the applied lifecycle state remains available to direct handler callers"
         );
+        assert_eq!(
+            serde_json::to_value(result).expect("status result must serialize"),
+            json!({ "accepted": true }),
+            "successful status responses must not echo the caller-supplied lifecycle state or a fixed summary"
+        );
+    }
+
+    #[test]
+    fn portal_success_results_omit_empty_status_summaries() {
+        let attach = PortalProjectionAttachResult {
+            accepted: true,
+            owner_token: Some("owner".to_string()),
+            status_summary: String::new(),
+        };
+        let pending = PortalProjectionGetPendingInputResult {
+            accepted: true,
+            items: Vec::new(),
+            remaining_count: 0,
+            remaining_bytes: 0,
+            status_summary: String::new(),
+        };
+        let acknowledged = PortalProjectionAcknowledgeInputResult {
+            accepted: true,
+            status_summary: String::new(),
+        };
+        let detached = PortalProjectionDetachResult {
+            accepted: true,
+            status_summary: String::new(),
+        };
+        let cleaned = PortalProjectionCleanupResult {
+            accepted: true,
+            status_summary: String::new(),
+        };
+
+        for result in [
+            serde_json::to_value(attach),
+            serde_json::to_value(pending),
+            serde_json::to_value(acknowledged),
+            serde_json::to_value(detached),
+            serde_json::to_value(cleaned),
+        ] {
+            assert!(
+                result
+                    .expect("success result must serialize")
+                    .get("status_summary")
+                    .is_none(),
+                "a fixed success summary is redundant MCP payload"
+            );
+        }
     }
 
     /// A `publish_status` authority rejection must surface as a structured
