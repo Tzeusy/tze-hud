@@ -65,6 +65,12 @@ pub struct HudSessionImpl {
     pub(super) fallback_unrestricted: bool,
     /// Bounded never-drop sender for transactional degradation notices.
     pub degradation_notices: super::DegradationNoticeSender,
+    /// Runtime-to-session durable bridge for terminal lease transitions.
+    ///
+    /// The compositor publishes each `SceneGraph::expire_leases()` result here
+    /// after releasing the scene lock. The handler that owns the lease emits
+    /// the wire `LeaseResponse` and `LeaseStateChange` transactionally.
+    pub lease_expirations: super::LeaseExpirySender,
     /// Broadcast sender for live capability revocation commands (RFC 0001 §3.3, GAP-G3-4).
     ///
     /// When the runtime calls `revoke_capability_on_lease`, it broadcasts a
@@ -122,6 +128,7 @@ impl HudSessionImpl {
     #[cfg(any(test, feature = "dev-mode"))]
     pub fn new(scene: SceneGraph, psk: &str) -> Self {
         let degradation_notices = super::DegradationNoticeSender::default();
+        let lease_expirations = super::LeaseExpirySender::default();
         let (capability_revocation_tx, _) =
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
         let input_event_tx = super::InputEventSender::new(super::BROADCAST_CHANNEL_CAPACITY);
@@ -156,6 +163,7 @@ impl HudSessionImpl {
             budget_enforcer: None,
             fallback_unrestricted: true,
             degradation_notices,
+            lease_expirations,
             capability_revocation_tx,
             input_event_tx,
             element_repositioned_tx,
@@ -265,6 +273,7 @@ impl HudSessionImpl {
     ) -> Self {
         let (capability_revocation_tx, _) =
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
+        let lease_expirations = super::LeaseExpirySender::default();
         let input_event_tx = super::InputEventSender::new(super::BROADCAST_CHANNEL_CAPACITY);
         let (element_repositioned_tx, _) =
             tokio::sync::broadcast::channel(super::BROADCAST_CHANNEL_CAPACITY);
@@ -280,6 +289,7 @@ impl HudSessionImpl {
             budget_enforcer,
             fallback_unrestricted,
             degradation_notices,
+            lease_expirations,
             capability_revocation_tx,
             input_event_tx,
             element_repositioned_tx,

@@ -11,6 +11,31 @@ use super::keyboard::ComposerDeliveryContext;
 use super::lifecycle::{INTERACTION_LOCK_BUDGET, spin_acquire};
 use super::{WindowedConfig, WinitApp};
 
+/// Result of one best-effort portal projection drain.
+///
+/// A busy scene is distinct from a completed no-op: the windowed scheduler
+/// must install its coalesced availability wake only for the former. Treating
+/// both as `false` loses the information needed to avoid retrying a past
+/// portal deadline on a frame cadence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PortalProjectionDrain {
+    Deferred,
+    Completed { scene_changed: bool },
+}
+
+impl PortalProjectionDrain {
+    pub(super) const fn scene_changed(self) -> bool {
+        match self {
+            Self::Deferred => false,
+            Self::Completed { scene_changed } => scene_changed,
+        }
+    }
+
+    pub(super) const fn is_deferred(self) -> bool {
+        matches!(self, Self::Deferred)
+    }
+}
+
 /// Approximate line height (physical px) used ONLY for the input-pane
 /// history's scroll-content-height bookkeeping (hud-qbcp8).
 ///
@@ -1619,17 +1644,16 @@ impl WinitApp {
     /// drain record that carries append geometry (spec §3.2 / §3.3).
     ///
     /// Uses `try_lock` on the shared scene to avoid blocking the main thread.
-    /// If the scene lock is busy, the drain is silently deferred to the next
-    /// `about_to_wait` call (NOT silent fail-open — the pending work is picked
-    /// up on the very next iteration).
-    pub(super) fn drain_portal_projection(&mut self) -> bool {
+    /// If the scene lock is busy, returns [`PortalProjectionDrain::Deferred`]
+    /// so `about_to_wait` can arrange one release-driven availability wake.
+    pub(super) fn drain_portal_projection(&mut self) -> PortalProjectionDrain {
         let Ok(state) = self.state.shared_state.try_lock() else {
             tracing::trace!("portal drain deferred: shared_state lock busy");
-            return false;
+            return PortalProjectionDrain::Deferred;
         };
         let Ok(mut scene) = state.scene.try_lock() else {
             tracing::trace!("portal drain deferred: scene lock busy");
-            return false;
+            return PortalProjectionDrain::Deferred;
         };
         let tab_id = scene.active_tab;
         let scene_version_before = scene.version;
@@ -1647,7 +1671,7 @@ impl WinitApp {
         if scene.active_tab != tab_id {
             state.refresh_active_tab_mirror(&scene);
         }
-        scene_changed
+        PortalProjectionDrain::Completed { scene_changed }
     }
 
     /// Remove stale entries from `portal_resize_states` for tiles that no
@@ -2007,6 +2031,7 @@ mod tests {
             frame_ready_tx: Some(frame_ready_tx),
             frame_presented_tx: None,
             degradation_notices: None,
+            lease_expirations: None,
             compositor: None,
             window_surface: None,
             input_processor,
@@ -2126,9 +2151,11 @@ mod tests {
         let checkpoint = app.state.wake.main_work_checkpoint();
         let compositor_generation = app.state.wake.compositor().checkpoint();
 
-        let scene_changed = app.drain_portal_projection();
+        let drain = app.drain_portal_projection();
+        let scene_changed = drain.scene_changed();
 
         assert!(!scene_changed);
+        assert!(!drain.is_deferred());
         assert!(
             !app.state
                 .wake
@@ -2137,6 +2164,63 @@ mod tests {
         assert_eq!(
             app.state.wake.compositor().checkpoint(),
             compositor_generation
+        );
+    }
+
+    /// Portal work deferred by a held scene lock must wait for the one
+    /// availability completion, not manufacture periodic retry wakes from its
+    /// already-due portal deadline.
+    #[test]
+    fn held_scene_lock_retries_portal_drain_only_after_availability() {
+        use std::time::{Duration, Instant};
+
+        let mut app = make_windowed_app_with_pending_portal_publish("proj-availability-wake");
+        let shared_state = Arc::clone(&app.state.shared_state);
+        let guard = shared_state
+            .try_lock()
+            .expect("shared scene must be free before inducing contention");
+        let compositor_before = app.state.wake.compositor().checkpoint();
+        let main_work_before = app.state.wake.main_work_generation();
+
+        let drain = app.drain_portal_projection();
+        assert_eq!(drain, PortalProjectionDrain::Deferred);
+        app.schedule_shared_scene_availability_wake();
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            app.state.wake.main_work_generation(),
+            main_work_before,
+            "held scene lock must cause zero periodic portal retry wakes"
+        );
+        assert_eq!(
+            app.state.wake.compositor().checkpoint(),
+            compositor_before,
+            "held scene lock must not create compositor retry work"
+        );
+
+        drop(guard);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while app.state.wake.main_work_generation() == main_work_before {
+            assert!(
+                Instant::now() < deadline,
+                "availability release must schedule the deferred portal drain"
+            );
+            std::thread::yield_now();
+        }
+
+        let drain = app.drain_portal_projection();
+        assert_eq!(
+            drain,
+            PortalProjectionDrain::Completed {
+                scene_changed: true
+            }
+        );
+        let checkpoint = app.state.wake.main_work_checkpoint();
+        assert!(app.state.wake.finish_main_work(checkpoint));
+        assert_eq!(
+            app.state.wake.compositor().checkpoint(),
+            compositor_before + 1,
+            "the release-driven portal drain owns exactly one compositor wake"
         );
     }
 
@@ -2152,9 +2236,11 @@ mod tests {
             (scene.version, scene.tiles.len())
         };
 
-        let scene_changed = app.drain_portal_projection();
+        let drain = app.drain_portal_projection();
+        let scene_changed = drain.scene_changed();
 
         assert!(scene_changed);
+        assert!(!drain.is_deferred());
         {
             let shared = app.state.shared_state.try_lock().unwrap();
             let scene = shared.scene.try_lock().unwrap();
@@ -2190,9 +2276,11 @@ mod tests {
         let checkpoint = app.state.wake.main_work_checkpoint();
         let compositor_generation = app.state.wake.compositor().checkpoint();
 
-        let scene_changed = app.drain_portal_projection();
+        let drain = app.drain_portal_projection();
+        let scene_changed = drain.scene_changed();
 
         assert!(scene_changed);
+        assert!(!drain.is_deferred());
         assert!(
             app.state
                 .wake

@@ -5,6 +5,7 @@
 //! A notification that races with inspection advances the generation, so the
 //! waiter observes it without parking.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -197,6 +198,10 @@ pub(super) struct WindowedWake {
     proxy: Option<EventLoopProxy<RuntimeWakeEvent>>,
     main_event: Arc<Mutex<MainEventState>>,
     main_work: Arc<Mutex<MainWorkState>>,
+    /// Coalesces a lock-availability waiter for deferred main-thread work.
+    main_availability_waiting: Arc<AtomicBool>,
+    /// Coalesces a lock-availability waiter for a compositor `try_lock` miss.
+    compositor_availability_waiting: Arc<AtomicBool>,
     compositor: CompositorWake,
     counters: Arc<IdleEfficiencyCounters>,
 }
@@ -207,6 +212,8 @@ impl WindowedWake {
             proxy: Some(proxy),
             main_event: Arc::new(Mutex::new(MainEventState::default())),
             main_work: Arc::new(Mutex::new(MainWorkState::default())),
+            main_availability_waiting: Arc::new(AtomicBool::new(false)),
+            compositor_availability_waiting: Arc::new(AtomicBool::new(false)),
             compositor: CompositorWake::default(),
             counters: Arc::new(IdleEfficiencyCounters::default()),
         }
@@ -218,6 +225,8 @@ impl WindowedWake {
             proxy: None,
             main_event: Arc::new(Mutex::new(MainEventState::default())),
             main_work: Arc::new(Mutex::new(MainWorkState::default())),
+            main_availability_waiting: Arc::new(AtomicBool::new(false)),
+            compositor_availability_waiting: Arc::new(AtomicBool::new(false)),
             compositor: CompositorWake::default(),
             counters: Arc::new(IdleEfficiencyCounters::default()),
         }
@@ -278,6 +287,14 @@ impl WindowedWake {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn main_work_generation(&self) -> u64 {
+        self.main_work
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .generation
+    }
+
     /// Publish work created by the main thread after it drained an async
     /// producer or serviced a main-owned deadline.
     pub(super) fn finish_main_work(&self, checkpoint: MainWorkCheckpoint) -> bool {
@@ -321,6 +338,73 @@ impl WindowedWake {
 
     pub(super) fn notify_main(&self, source: RuntimeWakeupSource) {
         self.notify_main_after_source_write(source, || {});
+    }
+
+    /// Arrange one main-thread wake after a contended scene dependency becomes
+    /// available. The waiter is coalesced while it is blocked: neither this
+    /// method nor the main loop creates a periodic retry deadline.
+    ///
+    /// The completion is main work because the wake lets `about_to_wait` retry
+    /// deferred ingress. Its normal settle path owns the corresponding
+    /// compositor generation only after that retry has made forward progress.
+    pub(super) fn schedule_main_after_availability(
+        &self,
+        wait_until_available: impl FnOnce() + Send + 'static,
+    ) {
+        self.schedule_after_availability(
+            Arc::clone(&self.main_availability_waiting),
+            AvailabilityWakeTarget::Main,
+            wait_until_available,
+        );
+    }
+
+    /// Arrange one compositor wake after its `SceneGraph::try_lock` miss can
+    /// make progress. This replaces frame-cadence lock polling with a single
+    /// completion-driven retry.
+    pub(super) fn schedule_compositor_after_availability(
+        &self,
+        wait_until_available: impl FnOnce() + Send + 'static,
+    ) {
+        self.schedule_after_availability(
+            Arc::clone(&self.compositor_availability_waiting),
+            AvailabilityWakeTarget::Compositor,
+            wait_until_available,
+        );
+    }
+
+    fn schedule_after_availability(
+        &self,
+        waiting: Arc<AtomicBool>,
+        target: AvailabilityWakeTarget,
+        wait_until_available: impl FnOnce() + Send + 'static,
+    ) {
+        if waiting.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        let wake = self.clone();
+        let thread_waiting = Arc::clone(&waiting);
+        let spawn_result = std::thread::Builder::new()
+            .name("tze-scene-availability".to_string())
+            .spawn(move || {
+                wait_until_available();
+                // Clear before delivery so a fresh contention observed while
+                // this completion is queued can install its own waiter.
+                thread_waiting.store(false, Ordering::Release);
+                match target {
+                    AvailabilityWakeTarget::Main => {
+                        wake.mark_main_work_pending(RuntimeWakeupSource::SceneChange);
+                        wake.notify_main(RuntimeWakeupSource::SceneChange);
+                    }
+                    AvailabilityWakeTarget::Compositor => {
+                        wake.notify_compositor(RuntimeWakeupSource::SceneChange);
+                    }
+                }
+            });
+        if let Err(error) = spawn_result {
+            waiting.store(false, Ordering::Release);
+            tracing::error!(%error, "failed to start scene-availability wake waiter");
+        }
     }
 
     fn notify_main_after_source_write(
@@ -371,9 +455,15 @@ impl WindowedWake {
     }
 }
 
+#[derive(Clone, Copy)]
+enum AvailabilityWakeTarget {
+    Main,
+    Compositor,
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use crate::idle_efficiency::{IdleEfficiencyCounters, RuntimeWakeupSource};
@@ -665,5 +755,97 @@ mod tests {
         assert!(wake.finish_main_work(settle_checkpoint));
         let post_settle = wake.compositor().wait(compositor_checkpoint, None);
         assert!(post_settle.generation > compositor_checkpoint);
+    }
+
+    #[test]
+    fn held_scene_lock_has_no_retry_wake_and_one_main_render_after_release() {
+        let wake = WindowedWake::disconnected();
+        let lock = Arc::new(Mutex::new(()));
+        let guard = lock.lock().expect("test lock must be available");
+        let availability_lock = Arc::clone(&lock);
+        let compositor_before = wake.compositor().checkpoint();
+
+        wake.schedule_main_after_availability(move || {
+            drop(
+                availability_lock
+                    .lock()
+                    .expect("availability waiter must acquire after release"),
+            );
+        });
+        // A duplicate contention observation must join the same completion
+        // waiter rather than arm another timer or retry wake.
+        let duplicate_lock = Arc::clone(&lock);
+        wake.schedule_main_after_availability(move || {
+            drop(
+                duplicate_lock
+                    .lock()
+                    .expect("coalesced waiter must acquire after release"),
+            );
+        });
+
+        assert_eq!(
+            wake.compositor().checkpoint(),
+            compositor_before,
+            "a held lock must not create a periodic compositor retry"
+        );
+        assert_eq!(
+            wake.main_work_checkpoint().generation,
+            0,
+            "a held lock must not manufacture main work before availability"
+        );
+
+        drop(guard);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while wake.main_work_checkpoint().generation == 0 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let checkpoint = wake.main_work_checkpoint();
+        assert_eq!(
+            checkpoint.generation, 1,
+            "release must produce exactly one coalesced main-work completion"
+        );
+        assert!(
+            wake.finish_main_work(checkpoint),
+            "the availability event must drive the deferred work's render"
+        );
+        assert_eq!(
+            wake.compositor().checkpoint(),
+            compositor_before + 1,
+            "release-driven forward progress renders exactly once"
+        );
+    }
+
+    #[test]
+    fn compositor_lock_miss_waits_for_release_instead_of_frame_cadence() {
+        let wake = WindowedWake::disconnected();
+        let lock = Arc::new(Mutex::new(()));
+        let guard = lock.lock().expect("test lock must be available");
+        let availability_lock = Arc::clone(&lock);
+        let compositor_before = wake.compositor().checkpoint();
+
+        wake.schedule_compositor_after_availability(move || {
+            drop(
+                availability_lock
+                    .lock()
+                    .expect("availability waiter must acquire after release"),
+            );
+        });
+
+        assert_eq!(
+            wake.compositor().checkpoint(),
+            compositor_before,
+            "the failed try_lock must park without a cadence retry"
+        );
+
+        drop(guard);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while wake.compositor().checkpoint() == compositor_before && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            wake.compositor().checkpoint(),
+            compositor_before + 1,
+            "the compositor must resume once from the lock-release completion"
+        );
     }
 }

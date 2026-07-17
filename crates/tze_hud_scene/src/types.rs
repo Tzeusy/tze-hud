@@ -1476,6 +1476,8 @@ pub struct ResourceUsage {
 pub struct LeaseExpiry {
     /// The lease ID that was expired/cleaned up.
     pub lease_id: SceneId,
+    /// The non-terminal state that transitioned into `terminal_state`.
+    pub previous_state: LeaseState,
     /// The terminal state it entered.
     pub terminal_state: LeaseState,
     /// Tile IDs that were removed as a result.

@@ -55,6 +55,11 @@ pub(super) async fn handle_lease_request(
                         granted_capabilities: cached.granted_capabilities,
                         deny_reason: cached.deny_reason,
                         deny_code: cached.deny_code,
+                        result: if cached.granted {
+                            LeaseResult::Granted as i32
+                        } else {
+                            LeaseResult::Denied as i32
+                        },
                     })),
                 }))
                 .await;
@@ -98,6 +103,7 @@ pub(super) async fn handle_lease_request(
                     granted: false,
                     deny_code: "CONFIG_UNKNOWN_CAPABILITY".to_string(),
                     deny_reason,
+                    result: LeaseResult::Denied as i32,
                     ..Default::default()
                 })),
             }))
@@ -162,6 +168,7 @@ pub(super) async fn handle_lease_request(
                     granted: false,
                     deny_reason,
                     deny_code,
+                    result: LeaseResult::Denied as i32,
                     ..Default::default()
                 })),
             }))
@@ -227,6 +234,7 @@ pub(super) async fn handle_lease_request(
                         granted: false,
                         deny_reason,
                         deny_code,
+                        result: LeaseResult::Denied as i32,
                         ..Default::default()
                     })),
                 }))
@@ -266,6 +274,7 @@ pub(super) async fn handle_lease_request(
                 granted_ttl_ms: ttl,
                 granted_priority,
                 granted_capabilities,
+                result: LeaseResult::Granted as i32,
                 ..Default::default()
             })),
         }))
@@ -320,6 +329,11 @@ pub(super) async fn handle_lease_renew(
                         granted_capabilities: cached.granted_capabilities,
                         deny_reason: cached.deny_reason,
                         deny_code: cached.deny_code,
+                        result: if cached.granted {
+                            LeaseResult::Granted as i32
+                        } else {
+                            LeaseResult::Denied as i32
+                        },
                     })),
                 }))
                 .await;
@@ -355,6 +369,7 @@ pub(super) async fn handle_lease_renew(
                         granted: false,
                         deny_reason,
                         deny_code,
+                        result: LeaseResult::Denied as i32,
                         ..Default::default()
                     })),
                 }))
@@ -399,6 +414,7 @@ pub(super) async fn handle_lease_renew(
                 lease_id: lease_id_bytes.clone(),
                 granted_ttl_ms: ttl,
                 granted_priority: stored_priority,
+                result: LeaseResult::Granted as i32,
                 ..Default::default()
             };
             // Cache exactly what we send, so retransmit replays the same response.
@@ -469,6 +485,7 @@ pub(super) async fn handle_lease_renew(
                         granted: false,
                         deny_reason,
                         deny_code,
+                        result: LeaseResult::Denied as i32,
                         ..Default::default()
                     })),
                 }))
@@ -510,6 +527,11 @@ pub(super) async fn handle_lease_release(
                         granted_capabilities: cached.granted_capabilities,
                         deny_reason: cached.deny_reason,
                         deny_code: cached.deny_code,
+                        result: if cached.granted {
+                            LeaseResult::Released as i32
+                        } else {
+                            LeaseResult::Denied as i32
+                        },
                     })),
                 }))
                 .await;
@@ -545,6 +567,7 @@ pub(super) async fn handle_lease_release(
                         granted: false,
                         deny_reason,
                         deny_code,
+                        result: LeaseResult::Denied as i32,
                         ..Default::default()
                     })),
                 }))
@@ -573,6 +596,7 @@ pub(super) async fn handle_lease_release(
             let release_response = LeaseResponse {
                 granted: true,
                 lease_id: lease_id_bytes.clone(),
+                result: LeaseResult::Released as i32,
                 ..Default::default()
             };
             // Cache the LeaseResponse so retransmits replay it.
@@ -643,6 +667,7 @@ pub(super) async fn handle_lease_release(
                         granted: false,
                         deny_reason,
                         deny_code,
+                        result: LeaseResult::Denied as i32,
                         ..Default::default()
                     })),
                 }))

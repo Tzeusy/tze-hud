@@ -213,10 +213,11 @@ pub use self::network::render_attach_info;
 use self::network::{
     build_runtime_context, render_startup_banner, start_network_services_with_render_wake,
 };
-use self::portal::build_portal_projection_driver;
+use self::portal::{PortalProjectionDrain, build_portal_projection_driver};
 use self::wake::{
     Deadline, RuntimeWakeEvent, WindowedWake, control_flow_for_deadlines, deadline_from_wall_us,
 };
+use crate::portal_projection_driver::PortalWakeDeadline;
 
 fn publish_degradation_transition(
     controller: &crate::degradation::DegradationController,
@@ -245,6 +246,23 @@ fn publish_degradation_transition(
             .map(|duration| duration.as_micros() as u64)
             .unwrap_or(0);
         notices.publish_blocking(controller.protocol_notice(wall_us));
+    }
+}
+
+/// Forward terminal scene-lease results after releasing the scene lock.
+///
+/// `SceneGraph::expire_leases()` performs the authoritative transition and
+/// cleanup. This bridge only hands its immutable results to session handlers,
+/// which own the transactional wire responses for connected agents.
+fn publish_lease_expiries(
+    lease_expirations: Option<&tze_hud_protocol::session_server::LeaseExpirySender>,
+    expiries: Vec<tze_hud_scene::types::LeaseExpiry>,
+) {
+    let Some(lease_expirations) = lease_expirations else {
+        return;
+    };
+    for expiry in expiries {
+        let _ = lease_expirations.publish(expiry.into());
     }
 }
 
@@ -330,6 +348,9 @@ struct WindowedRuntimeState {
     frame_presented_tx:
         Option<tokio::sync::broadcast::Sender<tze_hud_protocol::proto::FramePresented>>,
     degradation_notices: Option<tze_hud_protocol::session_server::DegradationNoticeSender>,
+    /// Durable runtime-to-session lane for terminal `SceneGraph::expire_leases`
+    /// results. The compositor takes this sender when it starts.
+    lease_expirations: Option<tze_hud_protocol::session_server::LeaseExpirySender>,
     /// Compositor and surface (Some until compositor thread is spawned and takes the compositor).
     compositor: Option<Compositor>,
     /// The window surface (main thread owns this for the lifetime of the window).
@@ -612,7 +633,60 @@ struct WinitApp {
     state: WindowedRuntimeState,
 }
 
+/// Block a dedicated availability waiter until both locks needed by main-loop
+/// scene work have become obtainable, then return immediately. This function is
+/// only called off the winit event thread by [`WindowedWake`]'s coalesced
+/// completion waiter; the event loop itself always uses `try_lock`.
+fn wait_for_shared_scene_availability(shared_state: Arc<Mutex<SharedState>>) {
+    let shared = shared_state.blocking_lock();
+    let scene = Arc::clone(&shared.scene);
+    drop(shared);
+    drop(scene.blocking_lock());
+}
+
+/// Translate a portal authority deadline into an event-loop wait.
+///
+/// A past deadline normally gets one immediate turn after a successful drain.
+/// When that drain could not acquire the scene, however, retrying the same
+/// past deadline would be correctness polling; the caller installs a
+/// completion-driven availability wake instead.
+fn portal_deadline_after_drain(
+    portal_deadline: PortalWakeDeadline,
+    now: Instant,
+    now_wall_us: u64,
+    portal_drain: PortalProjectionDrain,
+) -> Option<Deadline> {
+    let remaining_us = portal_deadline.wall_us.saturating_sub(now_wall_us);
+    if remaining_us == 0 {
+        (!portal_drain.is_deferred())
+            .then_some(Deadline::new(now, portal_deadline.family.wakeup_source()))
+    } else {
+        // Keep the wall-clock observation paired with `now`. Calling
+        // `deadline_from_wall_us` here would take a second wall-clock sample;
+        // a deadline crossing between the two reads could become an accidental
+        // immediate retry while the portal drain is still deferred.
+        Some(Deadline::new(
+            now + std::time::Duration::from_micros(remaining_us),
+            portal_deadline.family.wakeup_source(),
+        ))
+    }
+}
+
 impl WinitApp {
+    /// Arrange one completion-driven retry for main-thread work that could not
+    /// inspect or mutate the shared scene because either async mutex was held.
+    ///
+    /// This deliberately runs the blocking waits on the dedicated availability
+    /// worker, never on winit's event thread.  Coalescing lives in
+    /// [`WindowedWake`], so multiple busy observations while the same holder is
+    /// active still create only one release-driven retry.
+    fn schedule_shared_scene_availability_wake(&self) {
+        let shared_state = Arc::clone(&self.state.shared_state);
+        self.state.wake.schedule_main_after_availability(move || {
+            wait_for_shared_scene_availability(shared_state);
+        });
+    }
+
     /// Claim a scheduled deadline that became due before or during this event
     /// loop turn. `WaitCancelled` may arrive just before the deadline and the
     /// settle work may cross it, so `ResumeTimeReached` cannot be the only claim
@@ -757,7 +831,8 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
         // Must run AFTER composer flush so draft state is settled before portal
         // content is refreshed.  Uses try_lock on the scene to avoid blocking
         // the main thread (deferred to next about_to_wait if busy).
-        let portal_scene_changed = self.drain_portal_projection();
+        let portal_drain = self.drain_portal_projection();
+        let portal_scene_changed = portal_drain.scene_changed();
         let settled_scene_changed = paste_scene_changed || portal_scene_changed;
         // Prune stale portal_resize_states entries for tiles removed from the
         // scene (hud-kgu8u). Uses try_lock; silently deferred if lock is busy.
@@ -844,14 +919,15 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
                 .portal_projection_driver
                 .next_wake_deadline(&scene)
             {
-                let mut deadline = deadline_from_wall_us(
-                    portal_deadline.wall_us,
-                    portal_deadline.family.wakeup_source(),
-                );
-                if deadline.at <= now {
-                    deadline.at = now + std::time::Duration::from_millis(1);
+                let now_wall_us = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_micros() as u64)
+                    .unwrap_or(0);
+                if let Some(deadline) =
+                    portal_deadline_after_drain(portal_deadline, now, now_wall_us, portal_drain)
+                {
+                    deadlines.push(deadline);
                 }
-                deadlines.push(deadline);
             }
             if let Some(menu) = &scene.overlay.drag_handle_context_menu {
                 const AUTO_DISMISS_NS: u64 = 3_000_000_000;
@@ -865,22 +941,14 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
                 ));
             }
         }
-        if !inspected_scene_deadlines {
-            // Never park indefinitely when lock contention prevented deadline
-            // discovery. The producer may have completed before this callback,
-            // so there need not be another notification after the lock drops.
-            deadlines.push(Deadline::new(
-                now + std::time::Duration::from_millis(1),
-                crate::idle_efficiency::RuntimeWakeupSource::SceneChange,
-            ));
-        }
-        if !self.state.pending_input_capture_commands.is_empty()
-            || !self.state.pending_keyboard_events.is_empty()
-        {
-            deadlines.push(Deadline::new(
-                now + std::time::Duration::from_millis(1),
-                crate::idle_efficiency::RuntimeWakeupSource::SceneChange,
-            ));
+        let has_deferred_scene_work = portal_drain.is_deferred()
+            || !self.state.pending_input_capture_commands.is_empty()
+            || !self.state.pending_keyboard_events.is_empty();
+        if !inspected_scene_deadlines || has_deferred_scene_work {
+            // Lock contention is not a deadline. Install one coalesced waiter
+            // that wakes the main loop only after the shared scene is actually
+            // available, rather than correctness-polling every millisecond.
+            self.schedule_shared_scene_availability_wake();
         }
         let next = deadlines.iter().copied().min_by_key(|deadline| deadline.at);
         self.state.scheduled_main_deadline = next;
@@ -1269,6 +1337,7 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
         // headless producer. `None` in compositor-only mode (no gRPC session).
         let frame_presented_tx = self.state.frame_presented_tx.take();
         let degradation_notices = self.state.degradation_notices.take();
+        let lease_expirations = self.state.lease_expirations.take();
         let degradation_shared_state = Arc::clone(&self.state.shared_state);
         let shutdown = self.state.shutdown.clone();
         let benchmark_failed = self.state.benchmark_failed.clone();
@@ -1325,12 +1394,6 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
                 // telemetry.  Plain u64 — accessed only on this thread; no atomics
                 // needed on the success path.
                 let mut scene_lock_miss_count: u64 = 0;
-                // hud-pi5wx present-stall watchdog: surfaces sustained Stage-4
-                // scene try_lock starvation (a handler holding the scene lock) vs a
-                // healthy present path. Reset on every successful commit+present below.
-                let mut consecutive_misses: u64 = 0;
-                let mut last_present_at = std::time::Instant::now();
-                let mut watchdog_logged = false;
                 // hud-ilivg idle render gate: scene.version of the last frame we
                 // actually built+presented. The loop skips the build/encode/present
                 // pass when scene.version is unchanged AND no animation is in
@@ -1484,7 +1547,7 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
                         // publications MUST be cleared before the next frame.
                         scene.drain_expired_zone_publications();
                         scene.drain_expired_widget_publications();
-                        scene.expire_leases();
+                        let terminal_lease_expiries = scene.expire_leases();
 
                         // Snapshot identity, priority, z-order, and selected
                         // policy atomically under this frame's scene lock.
@@ -1573,18 +1636,6 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
                         );
                         continue_at_cadence |= needs_render;
 
-                        // A successful try_lock means we are NOT lock-starved,
-                        // whether or not we present this frame — reset the
-                        // hud-pi5wx stall watchdog here so an idle (skipped) frame
-                        // is never mistaken for present starvation.
-                        if watchdog_logged {
-                            crate::diag::diag_write(&format!(
-                                "PRESENT-WATCHDOG: RECOVERED after {consecutive_misses} consecutive misses"
-                            ));
-                        }
-                        consecutive_misses = 0;
-                        watchdog_logged = false;
-
                         if !needs_render {
                             // Idle: scene unchanged and nothing animating. Release
                             // the lock without building vertices, encoding, or
@@ -1601,6 +1652,10 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
                                 )
                                 .min();
                             drop(scene);
+                            publish_lease_expiries(
+                                lease_expirations.as_ref(),
+                                terminal_lease_expiries,
+                            );
                             let now_us = degradation_clock_start.elapsed().as_micros() as u64;
                             if let Some(event) = degradation_controller.record_quiescent_at(now_us)
                             {
@@ -1672,6 +1727,10 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
                             // interaction path's `spin_acquire` (12ms budget) no
                             // longer times out and drops drag-move samples.
                             drop(scene);
+                            publish_lease_expiries(
+                                lease_expirations.as_ref(),
+                                terminal_lease_expiries,
+                            );
 
                             // ── Stage 6–7: Present lock-free ──────────────────
                             let present_outcome = compositor.present_windowed_frame_with_outcome(
@@ -1699,7 +1758,6 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
                                 compositor_wake.notify_main(
                                     crate::idle_efficiency::RuntimeWakeupSource::FrameReady,
                                 );
-                                last_present_at = std::time::Instant::now();
                                 // Advance the idle gate only after a completed
                                 // submit. A failed acquire must retry instead of
                                 // stranding an unpresented scene as "rendered".
@@ -1799,21 +1857,13 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
                         // (hud-3qpgv.2).  This branch has zero cost on the
                         // success path.
                         scene_lock_miss_count = scene_lock_miss_count.saturating_add(1);
-                        continue_at_cadence = true;
-                        // hud-pi5wx: sustained Stage-4 misses => a handler is holding
-                        // the scene lock and never releasing it (HB-1 lock starvation).
-                        consecutive_misses = consecutive_misses.saturating_add(1);
-                        if consecutive_misses >= 120
-                            && (!watchdog_logged || consecutive_misses % 600 == 0)
-                        {
-                            let stalled_ms = last_present_at.elapsed().as_millis();
-                            crate::diag::diag_write(&format!(
-                                "PRESENT-WATCHDOG: scene try_lock missed {consecutive_misses} \
-                                 consecutive frames, {stalled_ms}ms since last present — \
-                                 HB-1 lock-starvation candidate (a gRPC/MCP handler holds the scene lock)"
-                            ));
-                            watchdog_logged = true;
-                        }
+                        // Do not turn a temporary lock miss into a fixed frame
+                        // cadence. One coalesced waiter wakes the compositor
+                        // exactly when the held scene becomes available again.
+                        let availability_scene = Arc::clone(&compositor_scene);
+                        compositor_wake.schedule_compositor_after_availability(move || {
+                            drop(availability_scene.blocking_lock());
+                        });
                     }
 
                     // Benchmark no-progress watchdog (hud-gcn01): if the benchmark
@@ -2506,6 +2556,7 @@ impl WindowedRuntime {
             input_event_tx,
             frame_presented_tx,
             degradation_notices,
+            lease_expirations,
             grpc_bound_addr,
         ) = start_network_services_with_render_wake(
             cfg.grpc_port,
@@ -2869,6 +2920,7 @@ impl WindowedRuntime {
             frame_ready_tx: Some(frame_ready_tx),
             frame_presented_tx,
             degradation_notices,
+            lease_expirations,
             compositor: None,
             window_surface: None,
             input_processor: InputProcessor::new(),
@@ -3002,6 +3054,95 @@ impl WindowedRuntime {
 #[cfg(test)]
 mod wake_accounting_tests {
     use super::*;
+
+    #[test]
+    fn deferred_past_portal_deadline_waits_for_availability_not_immediate_retry() {
+        let now = Instant::now();
+        let past_deadline = PortalWakeDeadline {
+            wall_us: 99,
+            family: crate::portal_projection_driver::PortalDeadlineFamily::ImmediateWork,
+        };
+
+        assert_eq!(
+            portal_deadline_after_drain(past_deadline, now, 100, PortalProjectionDrain::Deferred,),
+            None,
+            "a busy portal drain must not rearm its past deadline as a retry timer"
+        );
+        assert_eq!(
+            portal_deadline_after_drain(
+                past_deadline,
+                now,
+                100,
+                PortalProjectionDrain::Completed {
+                    scene_changed: false,
+                },
+            ),
+            Some(Deadline::new(
+                now,
+                crate::idle_efficiency::RuntimeWakeupSource::SceneChange,
+            )),
+            "a successfully inspected past deadline still gets its one owning turn"
+        );
+
+        assert_eq!(
+            portal_deadline_after_drain(
+                PortalWakeDeadline {
+                    wall_us: 101,
+                    family: crate::portal_projection_driver::PortalDeadlineFamily::Cadence,
+                },
+                now,
+                100,
+                PortalProjectionDrain::Deferred,
+            ),
+            Some(Deadline::new(
+                now + std::time::Duration::from_micros(1),
+                crate::idle_efficiency::RuntimeWakeupSource::AnimationDeadline,
+            )),
+            "a genuinely future portal deadline remains a one-shot timed wake"
+        );
+    }
+
+    #[test]
+    fn terminal_lease_expiry_bridge_forwards_each_scene_result_once() {
+        let sender = tze_hud_protocol::session_server::LeaseExpirySender::default();
+        let mut receiver = sender.subscribe();
+        let lease_id = tze_hud_scene::SceneId::new();
+        let tile_id = tze_hud_scene::SceneId::new();
+
+        publish_lease_expiries(
+            Some(&sender),
+            vec![tze_hud_scene::types::LeaseExpiry {
+                lease_id,
+                previous_state: tze_hud_scene::types::LeaseState::Active,
+                terminal_state: tze_hud_scene::types::LeaseState::Expired,
+                removed_tiles: vec![tile_id],
+            }],
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let notice = runtime.block_on(receiver.recv()).unwrap();
+        assert_eq!(notice.lease_id, lease_id);
+        assert_eq!(
+            notice.previous_state,
+            tze_hud_scene::types::LeaseState::Active
+        );
+        assert_eq!(
+            notice.terminal_state,
+            tze_hud_scene::types::LeaseState::Expired
+        );
+        assert_eq!(notice.removed_tiles, vec![tile_id]);
+        assert!(
+            runtime.block_on(async {
+                tokio::time::timeout(std::time::Duration::from_millis(10), receiver.recv())
+                    .await
+                    .is_err()
+            }),
+            "one SceneGraph expiry result must produce exactly one bridge notice"
+        );
+    }
 
     #[test]
     fn passive_window_events_do_not_create_main_work_debt() {

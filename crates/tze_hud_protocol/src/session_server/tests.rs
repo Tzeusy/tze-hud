@@ -131,6 +131,37 @@ async fn setup_test() -> (
     (client, handle)
 }
 
+/// Start a connected test server whose scene clock can deterministically cross
+/// a finite lease TTL. The caller receives the same durable runtime-to-session
+/// publisher that the windowed compositor owns in production.
+async fn setup_test_with_lease_expiry_clock(
+    clock: tze_hud_scene::TestClock,
+) -> (
+    HudSessionClient<tonic::transport::Channel>,
+    tokio::task::JoinHandle<()>,
+    Arc<tokio::sync::Mutex<crate::session::SharedState>>,
+    LeaseExpirySender,
+) {
+    let scene = SceneGraph::new_with_clock(800.0, 600.0, Arc::new(clock));
+    let service = HudSessionImpl::new(scene, "test-key");
+    let state = Arc::clone(&service.state);
+    let lease_expirations = service.lease_expirations.clone();
+
+    let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        tonic::transport::Server::builder()
+            .add_service(HudSessionServer::new(service))
+            .serve_with_incoming(incoming)
+            .await
+            .unwrap();
+    });
+
+    let client = connect_test_client_with_retry(addr.port()).await;
+    (client, handle, state, lease_expirations)
+}
+
 fn direct_handler_test_session(namespace: &str, capabilities: Vec<String>) -> StreamSession {
     StreamSession {
         session_id: format!("{namespace}-direct-handler"),
@@ -164,6 +195,156 @@ fn direct_handler_test_session(namespace: &str, capabilities: Vec<String>) -> St
         media_ingress: None,
         next_media_stream_epoch: 1,
     }
+}
+
+/// A finite lease TTL is reaped by the scene, then the exact terminal result is
+/// delivered once to the still-connected owning agent. This exercises the
+/// production boundary end to end: `expire_leases()` cleanup → durable runtime
+/// bridge → session stream `LeaseResponse(result=EXPIRED)` + state transition.
+#[tokio::test]
+async fn short_ttl_expiry_reaches_owning_connected_agent_once_after_cleanup() {
+    use std::time::Duration;
+
+    let clock = tze_hud_scene::TestClock::new(1_000);
+    let (mut client, server, state, lease_expirations) =
+        setup_test_with_lease_expiry_clock(clock.clone()).await;
+    let (tx, _handshake, mut stream) = handshake(&mut client, "expiry-agent", "test-key").await;
+
+    tx.send(ClientMessage {
+        sequence: 2,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+            ttl_ms: 1,
+            capabilities: vec!["create_tiles".to_string()],
+            lease_priority: 2,
+        })),
+    })
+    .await
+    .unwrap();
+
+    let granted = next_non_state_change(&mut stream).await;
+    let lease_id = match granted.payload {
+        Some(ServerPayload::LeaseResponse(LeaseResponse {
+            granted: true,
+            lease_id,
+            result,
+            ..
+        })) => {
+            assert_eq!(result, LeaseResult::Granted as i32);
+            bytes_to_scene_id(&lease_id).expect("lease grant must carry a SceneId")
+        }
+        other => panic!("expected granted LeaseResponse, got {other:?}"),
+    };
+
+    // Consume the initial REQUESTED→ACTIVE state transition before driving the
+    // terminal transition, so the assertions below prove exactly one new pair.
+    let granted_state = stream.next().await.unwrap().unwrap();
+    assert!(matches!(
+        granted_state.payload,
+        Some(ServerPayload::LeaseStateChange(LeaseStateChange {
+            previous_state,
+            new_state,
+            ..
+        })) if previous_state == "REQUESTED" && new_state == "ACTIVE"
+    ));
+
+    let expiry = {
+        let shared = state.lock().await;
+        let mut scene = shared.scene.lock().await;
+        let tab_id = scene.create_tab("Expiry", 0).unwrap();
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "expiry-agent",
+                lease_id,
+                tze_hud_scene::Rect::new(0.0, 0.0, 120.0, 48.0),
+                1,
+            )
+            .unwrap();
+        assert_eq!(
+            scene.tile_count(),
+            1,
+            "lease owns one live resource before TTL"
+        );
+
+        clock.advance(2);
+        let mut expiries = scene.expire_leases();
+        assert_eq!(
+            expiries.len(),
+            1,
+            "short TTL must produce one terminal result"
+        );
+        let expiry = expiries.pop().unwrap();
+        assert_eq!(expiry.lease_id, lease_id);
+        assert_eq!(expiry.previous_state, LeaseState::Active);
+        assert_eq!(expiry.terminal_state, LeaseState::Expired);
+        assert_eq!(expiry.removed_tiles, vec![tile_id]);
+        assert_eq!(
+            scene.tile_count(),
+            0,
+            "terminal expiry clears the owned tile"
+        );
+        expiry
+    };
+
+    assert_eq!(
+        lease_expirations.publish(expiry.clone().into()),
+        1,
+        "the connected session handler must receive the terminal result"
+    );
+    assert_eq!(
+        lease_expirations.publish(expiry.into()),
+        1,
+        "the durable fan-out may receive a duplicate runtime notice"
+    );
+
+    let terminal_response = tokio::time::timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("terminal LeaseResponse must arrive promptly")
+        .expect("connected stream must remain open")
+        .expect("terminal LeaseResponse must be valid");
+    match terminal_response.payload {
+        Some(ServerPayload::LeaseResponse(LeaseResponse {
+            granted,
+            lease_id: response_lease_id,
+            result,
+            deny_code,
+            ..
+        })) => {
+            assert!(!granted);
+            assert_eq!(response_lease_id, scene_id_to_bytes(lease_id));
+            assert_eq!(result, LeaseResult::Expired as i32);
+            assert_eq!(deny_code, "LEASE_EXPIRED");
+        }
+        other => panic!("expected terminal LeaseResponse, got {other:?}"),
+    }
+
+    let terminal_state = tokio::time::timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("terminal LeaseStateChange must arrive promptly")
+        .expect("connected stream must remain open")
+        .expect("terminal LeaseStateChange must be valid");
+    assert!(matches!(
+        terminal_state.payload,
+        Some(ServerPayload::LeaseStateChange(LeaseStateChange {
+            lease_id: state_lease_id,
+            previous_state,
+            new_state,
+            ..
+        })) if state_lease_id == scene_id_to_bytes(lease_id)
+            && previous_state == "ACTIVE"
+            && new_state == "EXPIRED"
+    ));
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), stream.next())
+            .await
+            .is_err(),
+        "one terminal lease must emit exactly one response/state pair even if its runtime notice is duplicated"
+    );
+
+    drop(tx);
+    server.abort();
 }
 
 #[tokio::test]

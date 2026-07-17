@@ -564,8 +564,14 @@ impl SceneGraph {
     /// once. Shared reap body for [`Self::expire_leases_with_max_suspend`] and
     /// [`Self::expire_lease`].
     fn reap_lease(&mut self, id: SceneId, terminal_state: LeaseState) -> LeaseExpiry {
-        // Collect the namespace before mutating so we can clear zone pubs.
-        let namespace = self.leases.get(&id).map(|l| l.namespace.clone());
+        // Collect the old state and namespace before mutating so terminal
+        // delivery can report the actual transition and cleanup can clear
+        // namespace-scoped publications.
+        let (previous_state, namespace) = self
+            .leases
+            .get(&id)
+            .map(|lease| (lease.state, Some(lease.namespace.clone())))
+            .unwrap_or((terminal_state, None));
 
         // Collect tile IDs that will be removed
         let removed_tiles: Vec<SceneId> = self
@@ -598,6 +604,7 @@ impl SceneGraph {
 
         LeaseExpiry {
             lease_id: id,
+            previous_state,
             terminal_state,
             removed_tiles,
         }

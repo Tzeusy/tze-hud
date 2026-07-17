@@ -67,6 +67,7 @@ pub mod freeze_queue;
 pub mod handshake;
 pub mod input;
 pub mod input_event_bus;
+pub mod lease_expiry_bus;
 pub mod leases;
 pub mod lifecycle;
 pub mod media;
@@ -98,6 +99,7 @@ use input::{
 #[allow(unused_imports)]
 use input::scene_node_contains;
 pub use input_event_bus::{InputEventReceiver, InputEventRecvError, InputEventSender};
+pub use lease_expiry_bus::{LeaseExpiryNotice, LeaseExpiryReceiver, LeaseExpirySender};
 use leases::{handle_lease_release, handle_lease_renew, handle_lease_request};
 pub use lifecycle::SessionState;
 use media::{
@@ -177,6 +179,19 @@ pub(super) fn now_ms() -> u64 {
 
 pub(super) fn scene_id_to_bytes(id: tze_hud_scene::SceneId) -> Vec<u8> {
     id.as_uuid().as_bytes().to_vec()
+}
+
+fn lease_state_wire_name(state: LeaseState) -> &'static str {
+    match state {
+        LeaseState::Requested => "REQUESTED",
+        LeaseState::Active => "ACTIVE",
+        LeaseState::Suspended => "SUSPENDED",
+        LeaseState::Orphaned => "ORPHANED",
+        LeaseState::Denied => "DENIED",
+        LeaseState::Revoked => "REVOKED",
+        LeaseState::Expired => "EXPIRED",
+        LeaseState::Released => "RELEASED",
+    }
 }
 
 #[allow(clippy::result_large_err)] // tonic::Status is large by design; boxing it would add indirection on every call
@@ -500,6 +515,9 @@ impl HudSession for HudSessionImpl {
         let media_ingress_config = self.media_ingress_config.clone();
         let render_wake = self.render_wake.clone();
         let degradation_notices = self.degradation_notices.clone();
+        // This durable lane is subscribed before the handler task starts so a
+        // terminal transition cannot race a newly-connected session's setup.
+        let mut lease_expiry_rx = self.lease_expirations.subscribe();
         // Subscribe to the capability revocation broadcast channel.
         // Subscribing here ensures the session handler receives revocations issued
         // immediately after it is spawned (before the task subscribes itself).
@@ -794,6 +812,17 @@ impl HudSession for HudSessionImpl {
                             &tx,
                             &render_wake,
                         ).await {
+                            break;
+                        }
+                    }
+
+                    // ── Terminal lease transition from the compositor ─────────
+                    //
+                    // `SceneGraph::expire_leases()` owns the transition and
+                    // resource cleanup. This per-session durable lane owns the
+                    // corresponding wire notification, filtered by lease id.
+                    lease_expiry = lease_expiry_rx.recv() => {
+                        if let LoopAction::Break = session.on_lease_expiry(lease_expiry, &tx).await {
                             break;
                         }
                     }
@@ -1387,6 +1416,93 @@ impl StreamSession {
                 LoopAction::Break
             }
         }
+    }
+
+    /// Deliver one terminal scene-lease transition to its owning session.
+    ///
+    /// The compositor has already applied cleanup by the time it publishes the
+    /// notice. Removing the id before sending makes duplicate runtime notices
+    /// harmless and guarantees at most one terminal response/state pair for a
+    /// connected session.
+    async fn on_lease_expiry(
+        &mut self,
+        lease_expiry: Option<LeaseExpiryNotice>,
+        tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, tonic::Status>>,
+    ) -> LoopAction {
+        let Some(notice) = lease_expiry else {
+            self.transition(SessionState::Closed);
+            return LoopAction::Break;
+        };
+        if !self.lease_ids.contains(&notice.lease_id) {
+            return LoopAction::Continue;
+        }
+
+        self.lease_ids
+            .retain(|lease_id| *lease_id != notice.lease_id);
+        let lease_id = scene_id_to_bytes(notice.lease_id);
+        let (result, reason, deny_code) = match notice.terminal_state {
+            LeaseState::Expired => (
+                LeaseResult::Expired as i32,
+                "Lease TTL or reconnect grace period elapsed".to_string(),
+                "LEASE_EXPIRED".to_string(),
+            ),
+            LeaseState::Revoked => (
+                LeaseResult::Revoked as i32,
+                "Lease suspension timeout elapsed".to_string(),
+                "LEASE_REVOKED".to_string(),
+            ),
+            state => (
+                LeaseResult::Unspecified as i32,
+                format!(
+                    "Lease reached terminal state {}",
+                    lease_state_wire_name(state)
+                ),
+                "LEASE_TERMINAL".to_string(),
+            ),
+        };
+
+        let response_seq = self.next_server_seq();
+        if tx
+            .send(Ok(ServerMessage {
+                sequence: response_seq,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ServerPayload::LeaseResponse(LeaseResponse {
+                    granted: false,
+                    lease_id: lease_id.clone(),
+                    deny_reason: reason.clone(),
+                    deny_code,
+                    result,
+                    ..Default::default()
+                })),
+            }))
+            .await
+            .is_err()
+        {
+            self.transition(SessionState::Closed);
+            return LoopAction::Break;
+        }
+
+        let state_change_seq = self.next_server_seq();
+        if tx
+            .send(Ok(ServerMessage {
+                sequence: state_change_seq,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ServerPayload::LeaseStateChange(LeaseStateChange {
+                    lease_id,
+                    previous_state: lease_state_wire_name(notice.previous_state).to_string(),
+                    new_state: lease_state_wire_name(notice.terminal_state).to_string(),
+                    reason,
+                    timestamp_wall_us: now_wall_us(),
+                })),
+            }))
+            .await
+            .is_err()
+        {
+            self.transition(SessionState::Closed);
+            return LoopAction::Break;
+        }
+
+        LoopAction::Continue
     }
 
     /// Handle a runtime-injected input `EventBatch` broadcast result (hud-i6yd.6).

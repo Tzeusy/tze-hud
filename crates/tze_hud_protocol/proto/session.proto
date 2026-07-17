@@ -571,6 +571,15 @@ message LeaseRelease {
 
 // Server response to a lease operation (request, renew, or release).
 // Unified grant/denial response per v1 vocabulary.
+enum LeaseResult {
+  LEASE_RESULT_UNSPECIFIED = 0;
+  LEASE_RESULT_GRANTED = 1;
+  LEASE_RESULT_DENIED = 2;
+  LEASE_RESULT_RELEASED = 3;
+  LEASE_RESULT_REVOKED = 4;
+  LEASE_RESULT_EXPIRED = 5;
+}
+
 message LeaseResponse {
   // Whether the lease was granted or denied.
   bool   granted              = 1;
@@ -584,6 +593,11 @@ message LeaseResponse {
   // Populated when granted = false.
   string deny_reason          = 6;  // Human-readable denial reason
   string deny_code            = 7;  // Machine-readable denial code
+
+  // Canonical terminal/operation result. `granted` remains for backwards
+  // compatibility; clients should use this enum to distinguish a release,
+  // revocation, or expiry from an ordinary denial.
+  LeaseResult result          = 8;
 }
 
 // Server notifies of lease state change (revocation, expiry, suspension, etc.)
