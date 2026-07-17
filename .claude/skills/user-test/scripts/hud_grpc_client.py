@@ -572,6 +572,11 @@ class HudClient:
         self.resolved_portal_tokens: dict[str, str] = {}
         self.scene_snapshot_json: Optional[str] = None
         self.scene_display_area: Optional[tuple[float, float]] = None
+        # Optional minimum spacing between mutation-batch sends. The default
+        # keeps existing callers unpaced; portal evidence enables this to stay
+        # inside the production profile's per-agent update-rate envelope.
+        self._min_batch_interval_s: float = 0.0
+        self._last_batch_send_mono: float = 0.0
         self._response_queue: asyncio.Queue = asyncio.Queue()
         self._deferred_responses: list[Any] = []
         self._response_wait_lock = asyncio.Lock()
@@ -1157,6 +1162,23 @@ class HudClient:
             raise ValueError("avatar PNG must be exactly 32x32 pixels")
         return await self.upload_png_resource(png_bytes, timeout=timeout)
 
+    def configure_batch_pacing(self, min_interval_s: float) -> None:
+        """Set an opt-in minimum spacing between mutation-batch sends."""
+        self._min_batch_interval_s = max(0.0, float(min_interval_s))
+
+    async def _pace_batch_send(self) -> None:
+        """Wait only when opt-in batch pacing requires it."""
+        if self._min_batch_interval_s <= 0.0:
+            return
+        wait = (
+            self._last_batch_send_mono
+            + self._min_batch_interval_s
+            - time.monotonic()
+        )
+        if wait > 0.0:
+            await asyncio.sleep(wait)
+        self._last_batch_send_mono = time.monotonic()
+
     async def apply_mutations(
         self,
         lease_id: bytes,
@@ -1164,6 +1186,7 @@ class HudClient:
     ) -> session_pb2.MutationResult:
         """Submit a raw mutation batch and return the acknowledged result."""
         batch_id = _uuid_bytes()
+        await self._pace_batch_send()
         await self._send(
             mutation_batch=session_pb2.MutationBatch(
                 batch_id=batch_id,
@@ -1259,6 +1282,7 @@ class HudClient:
         ``submit_mutation_batch`` decides whether to resubmit.
         """
         batch_id = _uuid_bytes()
+        await self._pace_batch_send()
         await self._send(
             mutation_batch=session_pb2.MutationBatch(
                 batch_id=batch_id,
