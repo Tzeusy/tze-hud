@@ -40,7 +40,7 @@ that event is not relabeled as idle work.
 
 ## Fail-closed checker
 
-Validate a constrained Linux artifact with:
+Validate a constrained Windows WARP overlay artifact with:
 
 ```bash
 python3 scripts/ci/check_idle_efficiency.py \
@@ -71,7 +71,8 @@ python3 scripts/ci/test_check_idle_efficiency.py
 The required `windows-performance-budget` CI job builds the canonical
 `tze_hud.exe` and runs `scripts/ci/windows/run-quiescent-efficiency.ps1`. That
 harness requests an overlay, forces the windowed compositor's fallback adapter,
-sets a two-logical-CPU process affinity, and waits for the **runtime itself** to
+and applies the two-logical-CPU affinity while creating `tze_hud.exe` (before
+its first presentation can begin). It then waits for the **runtime itself** to
 write `test_results/windows-performance-budget/quiescent-efficiency/`
 `quiescent-efficiency.json`. The measurement starts only after an actual surface
 presentation, then holds the static scene through the five-second settle and

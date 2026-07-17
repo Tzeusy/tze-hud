@@ -1,9 +1,10 @@
 # Run the canonical windowed overlay through the bounded WARP quiescent gate.
 #
 # The runtime itself records the observed GetProcessAffinityMask result and
-# selected adapter in its artifact. This harness sets the two-CPU constraint,
-# waits for that real runtime to terminate, then makes the Python checker the
-# final fail-closed authority.
+# selected adapter in its artifact. This harness starts the measured executable
+# through `cmd start /affinity`, which installs the two-CPU constraint while
+# creating that application. It then makes the Python checker the final
+# fail-closed authority.
 
 [CmdletBinding()]
 param(
@@ -36,6 +37,7 @@ $stderrPath = Join-Path $OutputDir "runtime.stderr.log"
 $configPath = Join-Path $repoRoot "app\tze_hud_app\config\benchmark.toml"
 
 $psk = "quiescent-efficiency-$([Guid]::NewGuid().ToString('N'))"
+$affinityMask = "3"
 $arguments = @(
     "--config", $configPath,
     "--window-mode", "overlay",
@@ -47,31 +49,38 @@ $arguments = @(
     "--quiescent-efficiency-emit", $artifactPath
 )
 
-$process = Start-Process `
-    -FilePath $ExePath `
-    -ArgumentList $arguments `
+function ConvertTo-CmdArgument {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    return '"' + $Value.Replace('"', '\"') + '"'
+}
+
+if (-not $env:ComSpec) {
+    throw "COMSPEC is required to launch the constrained Windows application"
+}
+
+$quotedExePath = ConvertTo-CmdArgument -Value (Resolve-Path $ExePath).Path
+$quotedArguments = @($arguments | ForEach-Object {
+    ConvertTo-CmdArgument -Value $_
+})
+$launchCommand = 'start "" /b /wait /affinity {0} {1} {2}' -f `
+    $affinityMask, $quotedExePath, ($quotedArguments -join " ")
+
+# `start /affinity` applies this mask to the new tze_hud.exe process before
+# its executable code can run. `cmd.exe` is only the synchronous launcher;
+# the runtime artifact remains the authoritative observer of the child mask.
+$launcher = Start-Process `
+    -FilePath $env:ComSpec `
+    -ArgumentList @("/d", "/s", "/c", $launchCommand) `
+    -Wait `
     -PassThru `
     -RedirectStandardOutput $stdoutPath `
     -RedirectStandardError $stderrPath
 
-# Apply the limit before the five-second settling window starts. The runtime
-# independently observes this process mask via GetProcessAffinityMask and the
-# checker rejects any value other than exactly two logical CPUs.
-try {
-    $process.ProcessorAffinity = [IntPtr]3
-    $process.Refresh()
-    if ([uint64]$process.ProcessorAffinity -ne 3) {
-        throw "observed process affinity mask is $($process.ProcessorAffinity), expected 3"
-    }
-} catch {
-    if (-not $process.HasExited) {
-        Stop-Process -Id $process.Id -Force
-    }
-    throw "failed to enforce two-logical-CPU process affinity: $_"
-}
-
-$process.WaitForExit()
-$runtimeExit = $process.ExitCode
+$runtimeExit = $launcher.ExitCode
 if (-not (Test-Path $artifactPath)) {
     throw "quiescent runtime did not emit an artifact; exit=$runtimeExit stdout=$stdoutPath stderr=$stderrPath"
 }

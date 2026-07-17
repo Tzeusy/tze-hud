@@ -100,6 +100,8 @@ jobs:
         run: cargo check --workspace
       - name: Test idle-efficiency artifact gate
         run: python3 scripts/ci/test_check_idle_efficiency.py
+      - name: Test quiescent-efficiency startup contract
+        run: python3 scripts/ci/test_run_quiescent_efficiency_script.py
 
   fmt:
     name: cargo fmt
