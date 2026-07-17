@@ -48,13 +48,20 @@ fn main() {
     // commit, checkout, and merge).
     println!("cargo::rerun-if-changed=../../.git/HEAD");
     println!("cargo::rerun-if-changed=../../.git/refs");
+    // embed-resource delegates to windres, which consumes an RC wrapper and
+    // then embeds the XML manifest it references. Track both inputs so a
+    // manifest-only edit cannot leave a stale Windows executable behind.
+    println!("cargo::rerun-if-changed=tze_hud.rc");
+    println!("cargo::rerun-if-changed=tze_hud.manifest");
     let sha = capture_git_sha();
     println!("cargo::rustc-env=TZE_HUD_GIT_SHA={sha}");
 
-    // On non-Windows targets this block compiles to nothing.
-    #[cfg(target_os = "windows")]
-    {
-        embed_resource::compile("tze_hud.manifest", embed_resource::NONE)
+    // Build scripts compile for the host, so use Cargo's target metadata rather
+    // than a compile-time cfg when cross-building the Windows artifact on Linux.
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS")
+        .expect("Cargo must set CARGO_CFG_TARGET_OS for build scripts");
+    if target_os == "windows" {
+        embed_resource::compile("tze_hud.rc", embed_resource::NONE)
             .manifest_required()
             .expect("failed to compile required Windows PerMonitorV2 DPI-awareness manifest");
     }
