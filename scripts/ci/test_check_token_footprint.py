@@ -113,6 +113,50 @@ class GateTests(unittest.TestCase):
         self.assertEqual(report["status"], "baseline_incompatible")
         self.assertFalse(report["regressions"])
 
+    def test_missing_flow_fingerprint_on_both_sides_fails_closed(self):
+        baseline = fixture()
+        approve(baseline)
+        measurement = fixture()
+        del measurement["flows"]["portal_projection"]["flow_fingerprint"]
+        del baseline["flows"]["portal_projection"]["flow_fingerprint"]
+
+        report = checker.compare(measurement, baseline)
+
+        self.assertEqual(report["status"], "baseline_incompatible")
+        self.assertIn(
+            "missing or invalid flow fingerprint: measurement:portal_projection",
+            report["incompatibilities"],
+        )
+        self.assertIn(
+            "missing or invalid flow fingerprint: baseline:portal_projection",
+            report["incompatibilities"],
+        )
+
+    def test_empty_or_non_string_flow_fingerprint_fails_closed(self):
+        for invalid_fingerprint in ("", "   ", 1):
+            with self.subTest(invalid_fingerprint=invalid_fingerprint):
+                baseline = fixture()
+                approve(baseline)
+                measurement = fixture()
+                measurement["flows"]["portal_projection"][
+                    "flow_fingerprint"
+                ] = invalid_fingerprint
+                baseline["flows"]["portal_projection"][
+                    "flow_fingerprint"
+                ] = invalid_fingerprint
+
+                report = checker.compare(measurement, baseline)
+
+                self.assertEqual(report["status"], "baseline_incompatible")
+                self.assertIn(
+                    "missing or invalid flow fingerprint: measurement:portal_projection",
+                    report["incompatibilities"],
+                )
+                self.assertIn(
+                    "missing or invalid flow fingerprint: baseline:portal_projection",
+                    report["incompatibilities"],
+                )
+
     def test_unapproved_baseline_fails_closed(self):
         report = checker.compare(fixture(), fixture())
         self.assertEqual(report["status"], "baseline_incompatible")

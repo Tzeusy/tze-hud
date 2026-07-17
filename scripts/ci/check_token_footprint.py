@@ -51,7 +51,19 @@ def _incompatibility_checks(measurement, baseline):
             reasons.append(f"missing or invalid flow version: baseline:{flow_name}")
         if measured_flow_version != expected_flow_version:
             reasons.append(f"flow version changed: {flow_name}")
-        if measured.get("flow_fingerprint") != expected.get("flow_fingerprint"):
+        measured_fingerprint = measured.get("flow_fingerprint")
+        expected_fingerprint = expected.get("flow_fingerprint")
+        fingerprints_valid = True
+        for label, fingerprint in (
+            ("measurement", measured_fingerprint),
+            ("baseline", expected_fingerprint),
+        ):
+            if not isinstance(fingerprint, str) or not fingerprint.strip():
+                reasons.append(
+                    f"missing or invalid flow fingerprint: {label}:{flow_name}"
+                )
+                fingerprints_valid = False
+        if fingerprints_valid and measured_fingerprint != expected_fingerprint:
             reasons.append(f"flow fingerprint changed: {flow_name}")
         measured_ops = measured.get("operations")
         expected_ops = expected.get("operations")
