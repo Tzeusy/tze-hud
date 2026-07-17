@@ -54,6 +54,8 @@ fn main() {
     // On non-Windows targets this block compiles to nothing.
     #[cfg(target_os = "windows")]
     {
-        embed_resource::compile("tze_hud.manifest", embed_resource::NONE);
+        embed_resource::compile("tze_hud.manifest", embed_resource::NONE)
+            .manifest_required()
+            .expect("failed to compile required Windows PerMonitorV2 DPI-awareness manifest");
     }
 }
