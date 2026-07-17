@@ -43,7 +43,7 @@ The checker contract in `docs/operations/idle-efficiency-measurement.md:1-90` an
 | Quiescent GPU/surface work | Exactly zero queue submissions, surface acquisitions, and presents | All three counts were `0` |
 | Runtime profile | Actual Windows overlay process, WARP/DX12, two CPUs set at process creation | Microsoft Basic Render Driver, `software=true`, process affinity `0x3` |
 
-Source: GitHub Actions run `29589493117`, artifact `windows-performance-budget/quiescent-efficiency/{quiescent-efficiency.json,gate-report.json}`. The operation guide is explicit that this WARP lane is an actual runtime measurement but not a replacement for a live reference-GPU run.
+Source: GitHub Actions run `29589493117`, artifact `windows-performance-budget/quiescent-efficiency/{quiescent-efficiency.json,quiescent-efficiency-gate.json}`. The operation guide is explicit that this WARP lane is an actual runtime measurement but not a replacement for a live reference-GPU run.
 
 ### Constrained-envelope lane
 
@@ -113,7 +113,7 @@ Both are useful remediation from the audit, but neither changes the conclusion o
 | --- | --- | --- |
 | Doctrine | `about/heart-and-soul/efficiency.md:8-84` | Idle-zero-work, proportional-change, constrained-envelope, canonical-footprint principles and current Windows-only boundary. |
 | Active OpenSpec | `openspec/changes/efficiency-budgets/specs/{runtime-kernel,validation-framework}/spec.md` | The v1 requirements, guard semantics, and outstanding closure requirement. |
-| Idle CI artifact | Run `29589493117`, `windows-performance-budget/quiescent-efficiency/{quiescent-efficiency.json,gate-report.json}` | Actual WARP overlay zero-work result and passing gate. |
+| Idle CI artifact | Run `29589493117`, `windows-performance-budget/quiescent-efficiency/{quiescent-efficiency.json,quiescent-efficiency-gate.json}` | Actual WARP overlay zero-work result and passing gate. |
 | Constrained CI artifact | Run `29589493117`, `constrained-envelope-budget/budget-gate.json` | Actual two-CPU llvmpipe normalized metrics, provenance, and passing gate. |
 | Token CI artifact | Run `29577838185`, `token-footprint-calibration/{measurement.json,repeat.json,gate-report.json}` | Deterministic owner-approved token baseline and passing regression gate. |
 | Desktop-headroom audit | `docs/reports/hud-48s45_desktop_headroom_assumption_audit_20260716.md:13-152` | Assumptions, current gaps, and future-device routing. |
