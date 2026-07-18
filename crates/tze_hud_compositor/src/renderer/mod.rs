@@ -2193,11 +2193,9 @@ impl Compositor {
         rr_post.extend(self.collect_tile_rounded_rect_cmds(scene));
 
         // ── Text pass inputs (Stage 6) ────────────────────────────────────────
-        // Prime the composer horizontal caret-follow offset (hud-zlfi4) and the
-        // viewer-echo history wrap (hud-pncm3) BEFORE collecting text items —
-        // identical ordering to the pre-split encode_frame.
-        self.prime_composer_scroll_offset(scene);
-        self.prime_viewer_echo_layout(scene);
+        // The shared frame builder primes composer / viewer-echo layout before
+        // emitting any flat geometry, so text consumes the same resolved layout
+        // rather than reflowing after the composer chrome has been staged.
 
         let has_text_rasterizer = self.text_rasterizer.is_some();
         let text_items: Vec<TextItem> = if has_text_rasterizer {
