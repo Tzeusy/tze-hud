@@ -207,7 +207,8 @@ use self::lifecycle::{
     BENCHMARK_NO_PROGRESS_TIMEOUT, PendingInputLatencySamples, WindowedBenchmarkRunState,
     WindowedQuiescentEfficiencyRunState, begin_os_mouse_capture, detect_monitor_size,
     drain_pending_input_latency, end_os_mouse_capture, focus_window_for_text_input,
-    read_windows_clipboard_text, seed_windowed_benchmark_scene, windowed_frame_needs_render,
+    read_windows_clipboard_text, seed_windowed_benchmark_scene, update_surface_repaint_pending,
+    windowed_frame_needs_render,
 };
 pub use self::network::render_attach_info;
 use self::network::{
@@ -390,6 +391,10 @@ struct WindowedRuntimeState {
     shutdown: ShutdownToken,
     /// Set when benchmark output failed after the event loop was already running.
     benchmark_failed: Arc<std::sync::atomic::AtomicBool>,
+    /// Set by the compositor thread when a queued surface recovery cannot
+    /// resume. `WindowedRuntime::run` maps this to a non-zero process result
+    /// after the existing orderly event-loop cleanup completes.
+    terminal_surface_recovery_failed: Arc<std::sync::atomic::AtomicBool>,
     /// Optional event-driven quiescent-efficiency measurement, initialized only
     /// after a real compositor and window surface exist.
     quiescent_efficiency: Option<WindowedQuiescentEfficiencyRunState>,
@@ -696,6 +701,23 @@ fn portal_deadline_after_drain(
             portal_deadline.family.wakeup_source(),
         ))
     }
+}
+
+/// Preserve the runtime's terminal GPU-loss shutdown path when a compositor
+/// surface recovery cannot resume normal presentation.
+///
+/// The main event loop observes the shutdown token on its next proxy wake and
+/// exits cleanly; `ShutdownReason::GpuDeviceLost` retains the existing non-zero
+/// graceful-shutdown classification without changing any agent-facing API.
+fn shutdown_after_terminal_surface_recovery(
+    shutdown: &crate::threads::ShutdownToken,
+    wake: &WindowedWake,
+    terminal_surface_recovery_failed: &std::sync::atomic::AtomicBool,
+) {
+    tracing::error!("window surface recovery failed terminally; requesting GPU-loss shutdown");
+    terminal_surface_recovery_failed.store(true, std::sync::atomic::Ordering::Release);
+    shutdown.trigger(crate::threads::ShutdownReason::GpuDeviceLost);
+    wake.notify_main(crate::idle_efficiency::RuntimeWakeupSource::Shutdown);
 }
 
 impl WinitApp {
@@ -1366,6 +1388,7 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
         let degradation_shared_state = Arc::clone(&self.state.shared_state);
         let shutdown = self.state.shutdown.clone();
         let benchmark_failed = self.state.benchmark_failed.clone();
+        let terminal_surface_recovery_failed = self.state.terminal_surface_recovery_failed.clone();
         let compositor_wake = self.state.wake.clone();
         let telemetry_collector = TelemetryCollector::new();
         let surface_for_compositor = window_surface.clone();
@@ -1431,6 +1454,10 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
                 // idle gate. Content caches stay gated on scene.version so the
                 // translate never re-primes them (hud-uyhpn).
                 let mut last_rendered_geometry_epoch: u64 = u64::MAX;
+                // A recovered swapchain needs a fresh submit even if the scene
+                // lock is briefly unavailable in the recovery iteration. Keep
+                // this debt until a frame actually submits.
+                let mut surface_repaint_pending = false;
                 // Benchmark progress is acknowledged by the main thread after
                 // `SurfaceTexture::present()`, not by a compositor-side attempt.
                 // Keep only the latest telemetry for the currently pending
@@ -1550,6 +1577,27 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
                         compositor.height = pending_h;
                     }
 
+                    // ── Surface recovery check ───────────────────────────
+                    // `WindowSurface::acquire_frame` queues real Lost/Outdated
+                    // failures. Consume that queue here, on the normal
+                    // compositor thread that owns the wgpu Device, before the
+                    // next scene build attempts another acquire.
+                    let surface_recovery = compositor
+                        .attempt_pending_surface_recovery(surface_for_compositor.as_ref());
+                    if surface_recovery.is_terminal() {
+                        shutdown_after_terminal_surface_recovery(
+                            &shutdown_tok,
+                            &compositor_wake,
+                            terminal_surface_recovery_failed.as_ref(),
+                        );
+                        break;
+                    }
+                    surface_repaint_pending = update_surface_repaint_pending(
+                        surface_repaint_pending,
+                        surface_recovery.reconfigured_surface(),
+                        false,
+                    );
+
                     // ── Stage 3: Mutation Intake ───────────────────────────
                     // (placeholder — real mutations come via gRPC session)
 
@@ -1658,6 +1706,7 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
                             compositor.has_inflight_animation(&scene),
                             composer_needs_render,
                             benchmark_state.is_some(),
+                            surface_repaint_pending,
                         );
                         continue_at_cadence |= needs_render;
 
@@ -1770,6 +1819,11 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
                             }
                             let compositor_telemetry = present_outcome.telemetry;
                             let frame_submitted = compositor_telemetry.stage7_gpu_submit_us > 0;
+                            surface_repaint_pending = update_surface_repaint_pending(
+                                surface_repaint_pending,
+                                false,
+                                frame_submitted,
+                            );
                             let degradation_work_time_us =
                                 degradation_work_start.elapsed().as_micros() as u64;
 
@@ -2958,6 +3012,7 @@ impl WindowedRuntime {
             pipeline: FramePipeline::new(),
             shutdown,
             benchmark_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            terminal_surface_recovery_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             quiescent_efficiency: None,
             cursor_x: 0.0,
             cursor_y: 0.0,
@@ -3062,6 +3117,14 @@ impl WindowedRuntime {
                 .rt
                 .shutdown_timeout(std::time::Duration::from_millis(500));
             tracing::info!("network runtime shutdown complete");
+        }
+
+        if app
+            .state
+            .terminal_surface_recovery_failed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err("windowed surface recovery failed terminally".into());
         }
 
         if app
@@ -3445,6 +3508,36 @@ mod wake_accounting_tests {
             wake.compositor().checkpoint(),
             compositor_before.wrapping_add(1),
             "a real safe-mode exit must wake the compositor exactly once"
+        );
+    }
+
+    #[test]
+    fn terminal_surface_recovery_triggers_gpu_lost_shutdown() {
+        let shutdown = crate::threads::ShutdownToken::new();
+        let mut shutdown_rx = shutdown.subscribe();
+        let wake = WindowedWake::disconnected();
+        let terminal_surface_recovery_failed = std::sync::atomic::AtomicBool::new(false);
+
+        shutdown_after_terminal_surface_recovery(
+            &shutdown,
+            &wake,
+            &terminal_surface_recovery_failed,
+        );
+
+        assert!(shutdown.is_triggered());
+        assert!(
+            terminal_surface_recovery_failed.load(std::sync::atomic::Ordering::Acquire),
+            "the windowed run result must report the terminal recovery as non-zero"
+        );
+        assert_eq!(
+            shutdown_rx.try_recv(),
+            Ok(crate::threads::ShutdownReason::GpuDeviceLost),
+            "terminal surface recovery must preserve the runtime's non-zero GPU-loss shutdown reason"
+        );
+        assert_eq!(
+            wake.take_main_source(),
+            crate::idle_efficiency::RuntimeWakeupSource::Shutdown,
+            "the main event loop must be woken so it can observe and exit on the terminal transition"
         );
     }
 }

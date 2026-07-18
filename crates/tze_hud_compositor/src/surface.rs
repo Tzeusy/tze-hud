@@ -133,6 +133,118 @@ impl SurfaceFrameAcquisition {
     }
 }
 
+/// A non-timeout failure observed while acquiring a window-backed surface.
+///
+/// This deliberately mirrors the recoverability classes of
+/// [`wgpu::SurfaceError`] without exposing wgpu's error type beyond the surface
+/// boundary. It is compositor-private evidence for the runtime-owned recovery
+/// lifecycle, not an agent-visible diagnostic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SurfaceAcquireFailure {
+    /// The swapchain was lost and should be reconfigured once.
+    Lost,
+    /// The swapchain configuration is stale and should be reconfigured once.
+    Outdated,
+    /// The GPU cannot allocate the next surface texture.
+    OutOfMemory,
+    /// The surface reported an unclassified backend failure.
+    Other,
+}
+
+/// Result of one production surface-recovery transition.
+///
+/// The runtime consumes only the coarse control disposition. This detailed
+/// compositor-private outcome remains available for the retained diagnostics
+/// follow-up without fabricating a parallel test-only event source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SurfaceRecoveryOutcome {
+    /// A lost or outdated surface was successfully reconfigured and needs a
+    /// fresh acquire before it is considered healthy again.
+    Reconfigured { trigger: SurfaceAcquireFailure },
+    /// The surface could not be recovered and requires terminal runtime
+    /// handling.
+    Terminal { trigger: SurfaceAcquireFailure },
+}
+
+/// One pending surface lifecycle transition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SurfaceRecoveryRequest {
+    Reconfigure { trigger: SurfaceAcquireFailure },
+    Terminal { trigger: SurfaceAcquireFailure },
+}
+
+/// Small, compositor-thread-owned state machine for window-surface recovery.
+///
+/// `WindowSurface::acquire_retry_view` records actual wgpu acquire errors here;
+/// the normal compositor loop later performs the queued reconfigure with its
+/// owned `wgpu::Device`. Keeping the observation and device operation separate
+/// preserves the `CompositorSurface` frame trait while making the transition
+/// explicit and production-owned.
+#[derive(Debug, Default)]
+struct SurfaceRecoveryState {
+    pending: Option<SurfaceRecoveryRequest>,
+}
+
+impl SurfaceRecoveryState {
+    /// Classify an actual wgpu acquire error into this recovery state machine.
+    ///
+    /// This is the production entry point used by
+    /// [`WindowSurface::acquire_retry_view`]. Keeping the mapping beside the
+    /// queue makes the Lost/Outdated regression exercise the same path that a
+    /// real surface error follows, rather than injecting a test-only request.
+    fn observe_wgpu_acquire_failure(&mut self, err: &wgpu::SurfaceError) {
+        let failure = match err {
+            wgpu::SurfaceError::Timeout => return,
+            wgpu::SurfaceError::Outdated => SurfaceAcquireFailure::Outdated,
+            wgpu::SurfaceError::Lost => SurfaceAcquireFailure::Lost,
+            wgpu::SurfaceError::OutOfMemory => SurfaceAcquireFailure::OutOfMemory,
+            wgpu::SurfaceError::Other => SurfaceAcquireFailure::Other,
+        };
+        self.observe_acquire_failure(failure);
+    }
+
+    /// Record an actual non-timeout acquire failure.
+    ///
+    /// Lost and Outdated remain recoverable surface conditions. Fatal acquire
+    /// classes, and a failed `Surface::configure` later, become terminal.
+    fn observe_acquire_failure(&mut self, failure: SurfaceAcquireFailure) {
+        if matches!(self.pending, Some(SurfaceRecoveryRequest::Terminal { .. })) {
+            return;
+        }
+
+        let request = match failure {
+            SurfaceAcquireFailure::Lost | SurfaceAcquireFailure::Outdated => {
+                SurfaceRecoveryRequest::Reconfigure { trigger: failure }
+            }
+            SurfaceAcquireFailure::OutOfMemory | SurfaceAcquireFailure::Other => {
+                SurfaceRecoveryRequest::Terminal { trigger: failure }
+            }
+        };
+        self.pending = Some(request);
+    }
+
+    /// Consume a queued transition and execute its reconfigure action.
+    ///
+    /// The production `WindowSurface` calls this exact state machine from its
+    /// compositor-thread recovery hook. The closure keeps the state machine
+    /// GPU-free and lets its recovery semantics be regression-tested without a
+    /// live window or swapchain.
+    fn attempt_pending_recovery(
+        &mut self,
+        reconfigure: impl FnOnce() -> Result<(), ()>,
+    ) -> Option<SurfaceRecoveryOutcome> {
+        match self.pending.take()? {
+            SurfaceRecoveryRequest::Reconfigure { trigger } => match reconfigure() {
+                Ok(()) => Some(SurfaceRecoveryOutcome::Reconfigured { trigger }),
+                Err(()) => Some(SurfaceRecoveryOutcome::Terminal { trigger }),
+            },
+            SurfaceRecoveryRequest::Terminal { trigger } => {
+                Some(SurfaceRecoveryOutcome::Terminal { trigger })
+            }
+        }
+    }
+}
+
 // ─── CompositorSurface trait ─────────────────────────────────────────────────
 
 /// Trait for compositor render targets.
@@ -224,6 +336,9 @@ pub struct WindowSurface {
     /// `present_pending_texture()` (main thread) and `reconfigure()`
     /// (compositor thread) can wait for an in-flight submit without spinning.
     swapchain_done: std::sync::Arc<std::sync::Condvar>,
+    /// Pending recovery lifecycle state, written by actual acquire failures and
+    /// consumed by the compositor thread before its next frame build.
+    surface_recovery: std::sync::Mutex<SurfaceRecoveryState>,
     /// Pending resize dimensions signalled from the main thread to the
     /// compositor thread. `(0, 0)` means no resize pending.
     ///
@@ -261,6 +376,7 @@ impl WindowSurface {
                 encoding: false,
             })),
             swapchain_done: std::sync::Arc::new(std::sync::Condvar::new()),
+            surface_recovery: std::sync::Mutex::new(SurfaceRecoveryState::default()),
             pending_resize_width: std::sync::atomic::AtomicU32::new(0),
             pending_resize_height: std::sync::atomic::AtomicU32::new(0),
             presented_frame_count: std::sync::atomic::AtomicU64::new(0),
@@ -271,6 +387,52 @@ impl WindowSurface {
     pub fn presented_frame_count(&self) -> u64 {
         self.presented_frame_count
             .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Attempt the recovery transition queued by a previous acquire failure.
+    ///
+    /// This is intentionally `pub(crate)`: the normal `Compositor` owns the
+    /// device needed to call it, while the detailed outcome remains internal to
+    /// the compositor for later retained-diagnostics wiring.
+    ///
+    /// Must run on the compositor thread, between frames. That is the same
+    /// ownership boundary as [`Self::reconfigure`].
+    pub(crate) fn attempt_pending_recovery(
+        &self,
+        device: &wgpu::Device,
+    ) -> Option<SurfaceRecoveryOutcome> {
+        let mut recovery = self
+            .surface_recovery
+            .lock()
+            .expect("surface recovery lock poisoned");
+        recovery.attempt_pending_recovery(|| self.reconfigure_current(device))
+    }
+
+    /// Reconfigure using the latest non-zero configuration dimensions and
+    /// translate a wgpu panic into a terminal recovery result.
+    fn reconfigure_current(&self, device: &wgpu::Device) -> Result<(), ()> {
+        let (width, height) = {
+            let config = self
+                .config
+                .lock()
+                .expect("WindowSurface config lock poisoned");
+            (config.width, config.height)
+        };
+        if width == 0 || height == 0 {
+            tracing::error!(
+                width,
+                height,
+                "WindowSurface recovery cannot reconfigure a zero-sized surface"
+            );
+            return Err(());
+        }
+
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.reconfigure(width, height, device);
+        }))
+        .map_err(|_| {
+            tracing::error!("WindowSurface recovery reconfigure panicked");
+        })
     }
 
     /// Reconfigure the surface after a window resize.
@@ -351,11 +513,7 @@ impl WindowSurface {
         self.surface.configure(device, &cfg);
         self.width.store(w, std::sync::atomic::Ordering::Release);
         self.height.store(h, std::sync::atomic::Ordering::Release);
-        tracing::info!(
-            width = w,
-            height = h,
-            "WindowSurface reconfigured after resize"
-        );
+        tracing::info!(width = w, height = h, "WindowSurface reconfigured");
     }
 
     /// Present the currently pending swapchain image, if any.
@@ -467,6 +625,10 @@ impl WindowSurface {
         slot: &mut SwapchainSlot,
         err: wgpu::SurfaceError,
     ) -> Option<wgpu::TextureView> {
+        // This is the only acquire-error ingress for window surfaces. It
+        // ignores a transient timeout, queues Lost/Outdated recovery, and
+        // marks terminal failures before this frame is skipped.
+        self.observe_wgpu_acquire_failure(&err);
         match err {
             wgpu::SurfaceError::Timeout => {
                 tracing::warn!(
@@ -482,6 +644,7 @@ impl WindowSurface {
                         Some(v)
                     }
                     Err(e2) => {
+                        self.observe_wgpu_acquire_failure(&e2);
                         tracing::error!(
                             first_error = %err,
                             second_error = %e2,
@@ -492,7 +655,15 @@ impl WindowSurface {
                     }
                 }
             }
-            wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost => {
+            wgpu::SurfaceError::Outdated => {
+                tracing::warn!(
+                    error = %err,
+                    "WindowSurface::acquire_frame: surface outdated or lost; \
+                     skipping frame to allow reconfiguration"
+                );
+                None
+            }
+            wgpu::SurfaceError::Lost => {
                 tracing::warn!(
                     error = %err,
                     "WindowSurface::acquire_frame: surface outdated or lost; \
@@ -516,6 +687,15 @@ impl WindowSurface {
             }
         }
     }
+
+    /// Classify a failed retry through the same production recovery transition
+    /// as a first-attempt acquire failure.
+    fn observe_wgpu_acquire_failure(&self, err: &wgpu::SurfaceError) {
+        self.surface_recovery
+            .lock()
+            .expect("surface recovery lock poisoned")
+            .observe_wgpu_acquire_failure(err);
+    }
 }
 
 impl CompositorSurface for WindowSurface {
@@ -536,10 +716,11 @@ impl CompositorSurface for WindowSurface {
     /// in `swapchain.pending` so the frame is not discarded on the compositor
     /// thread).
     ///
-    /// On the first recoverable error (`Outdated`, `Lost`, `Timeout`) a single
-    /// retry is attempted after logging a warning. If the retry also fails,
-    /// `None` is returned and the `encoding` marker is cleared (and waiters
-    /// woken) so the main thread is not blocked.
+    /// A `Timeout` retries once. `Outdated` and `Lost` queue the explicit
+    /// compositor-thread recovery transition that reconfigures before the next
+    /// fresh acquire. If a frame cannot be acquired, `None` is returned and the
+    /// `encoding` marker is cleared (and waiters woken) so the main thread is
+    /// not blocked.
     fn acquire_frame(&self) -> Option<CompositorFrame> {
         // Serialize acquire/pending-state handoff through the swapchain-
         // ownership mutex used by the main-thread present path and the
@@ -869,6 +1050,81 @@ mod tests {
         assert_eq!(h.load(Ordering::Acquire), 1080);
         w.store(2560, Ordering::Release);
         assert_eq!(w.load(Ordering::Acquire), 2560);
+    }
+
+    /// A real `Lost` result must enter the production recovery state machine
+    /// before the compositor thread attempts to configure the surface again.
+    ///
+    /// This enters through the same wgpu-error classifier used by
+    /// `WindowSurface::acquire_retry_view`; it deliberately does not inject a
+    /// test-only recovery request.
+    #[test]
+    fn lost_or_outdated_acquire_failure_queues_and_attempts_reconfigure() {
+        for (error, trigger) in [
+            (wgpu::SurfaceError::Lost, SurfaceAcquireFailure::Lost),
+            (
+                wgpu::SurfaceError::Outdated,
+                SurfaceAcquireFailure::Outdated,
+            ),
+        ] {
+            let mut recovery = SurfaceRecoveryState::default();
+            recovery.observe_wgpu_acquire_failure(&error);
+
+            let mut reconfigure_attempts = 0;
+            let outcome = recovery.attempt_pending_recovery(|| {
+                reconfigure_attempts += 1;
+                Ok(())
+            });
+
+            assert_eq!(reconfigure_attempts, 1);
+            assert_eq!(
+                outcome,
+                Some(SurfaceRecoveryOutcome::Reconfigured { trigger })
+            );
+        }
+    }
+
+    /// If the production reconfigure action fails, the recovery state must
+    /// surface a terminal outcome rather than retrying forever.
+    #[test]
+    fn failed_lost_reconfigure_records_terminal_recovery_outcome() {
+        let mut recovery = SurfaceRecoveryState::default();
+        recovery.observe_acquire_failure(SurfaceAcquireFailure::Lost);
+
+        let outcome = recovery.attempt_pending_recovery(|| Err(()));
+
+        assert_eq!(
+            outcome,
+            Some(SurfaceRecoveryOutcome::Terminal {
+                trigger: SurfaceAcquireFailure::Lost,
+            })
+        );
+    }
+
+    #[test]
+    fn out_of_memory_and_other_acquire_failures_are_terminal_without_reconfigure() {
+        for (error, trigger) in [
+            (
+                wgpu::SurfaceError::OutOfMemory,
+                SurfaceAcquireFailure::OutOfMemory,
+            ),
+            (wgpu::SurfaceError::Other, SurfaceAcquireFailure::Other),
+        ] {
+            let mut recovery = SurfaceRecoveryState::default();
+            recovery.observe_wgpu_acquire_failure(&error);
+
+            let mut reconfigure_attempted = false;
+            let outcome = recovery.attempt_pending_recovery(|| {
+                reconfigure_attempted = true;
+                Ok(())
+            });
+
+            assert!(
+                !reconfigure_attempted,
+                "{trigger:?} must not attempt to reconfigure a terminal surface"
+            );
+            assert_eq!(outcome, Some(SurfaceRecoveryOutcome::Terminal { trigger }));
+        }
     }
 
     /// Verify that a simulated double swapchain-acquire failure does NOT panic.

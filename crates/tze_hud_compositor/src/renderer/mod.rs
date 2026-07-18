@@ -31,7 +31,7 @@ use crate::pipeline::{
     RoundedRectDrawCmd, RoundedRectVertex, create_texture_rect_bind_group_layout,
     create_texture_rect_pipeline, rect_vertices,
 };
-use crate::surface::{CompositorSurface, HeadlessSurface};
+use crate::surface::{CompositorSurface, HeadlessSurface, SurfaceRecoveryOutcome, WindowSurface};
 use crate::text::{TextItem, TextRasterizer};
 use crate::widget::WidgetRenderer;
 use tze_hud_scene::DegradationLevel;
@@ -146,6 +146,35 @@ impl From<wgpu::AdapterInfo> for CompositorAdapterInfo {
     }
 }
 
+/// Coarse runtime control result for one queued window-surface recovery.
+///
+/// Detailed trigger evidence remains compositor-private in
+/// [`SurfaceRecoveryOutcome`]. The windowed runtime uses this narrow result to
+/// decide whether to repaint after a successful recovery or initiate its
+/// existing terminal GPU-loss shutdown path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowSurfaceRecoveryStatus {
+    /// No acquire failure had queued a recovery transition.
+    #[default]
+    NoPending,
+    /// The surface was configured and needs one repaint.
+    Reconfigured,
+    /// The surface cannot resume normal presentation.
+    Terminal,
+}
+
+impl WindowSurfaceRecoveryStatus {
+    /// Whether a real reconfigure completed and requires one repaint.
+    pub const fn reconfigured_surface(self) -> bool {
+        matches!(self, Self::Reconfigured)
+    }
+
+    /// Whether the surface failure is terminal for this compositor generation.
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Terminal)
+    }
+}
+
 pub struct Compositor {
     pub(crate) resident_ledger: Option<tze_hud_resource::ResidentLedger>,
     pub device: wgpu::Device,
@@ -185,6 +214,9 @@ pub struct Compositor {
     /// Retained snapshot and evidence slot for the narrowly-scoped canonical
     /// headless change-efficiency validation path.
     retained_render_state: retained::RetainedRenderState,
+    /// Latest real window-surface lifecycle outcome. This stays separate from
+    /// retained diagnostics until the dedicated follow-up consumes it.
+    latest_surface_recovery: Option<SurfaceRecoveryOutcome>,
     /// When true, the clear color uses alpha=0 for transparent overlay mode.
     pub overlay_mode: bool,
     /// When true, render all zone boundaries with colored tints even when
@@ -765,6 +797,7 @@ impl Compositor {
             height,
             frame_number: 0,
             retained_render_state: retained::RetainedRenderState::default(),
+            latest_surface_recovery: None,
             overlay_mode: false,
             debug_zone_tints: std::env::var("TZE_HUD_DEBUG_ZONES").is_ok_and(|v| v == "1"),
             degradation_level: DegradationLevel::Nominal,
@@ -1088,6 +1121,7 @@ impl Compositor {
             height: clamped_height,
             frame_number: 0,
             retained_render_state: retained::RetainedRenderState::default(),
+            latest_surface_recovery: None,
             overlay_mode: false,
             debug_zone_tints: std::env::var("TZE_HUD_DEBUG_ZONES").is_ok_and(|v| v == "1"),
             degradation_level: DegradationLevel::Nominal,
@@ -1150,6 +1184,56 @@ impl Compositor {
     /// Identity of the adapter selected when this compositor was created.
     pub fn adapter_info(&self) -> &CompositorAdapterInfo {
         &self.adapter_info
+    }
+
+    /// Attempt a recovery transition queued by a real window-surface acquire
+    /// failure.
+    ///
+    /// The compositor owns the `wgpu::Device`, so this is the only production
+    /// seam that may turn a `Lost`/`Outdated` acquire result into a configured
+    /// surface. The detailed outcome remains private to this crate; callers
+    /// receive only the control result needed to repaint or terminate safely.
+    pub fn attempt_pending_surface_recovery(
+        &mut self,
+        surface: &WindowSurface,
+    ) -> WindowSurfaceRecoveryStatus {
+        let Some(outcome) = surface.attempt_pending_recovery(&self.device) else {
+            return WindowSurfaceRecoveryStatus::default();
+        };
+
+        let status = match outcome {
+            SurfaceRecoveryOutcome::Reconfigured { trigger } => {
+                let (width, height) = surface.size();
+                self.width = width;
+                self.height = height;
+                tracing::info!(
+                    ?trigger,
+                    width,
+                    height,
+                    "window surface recovery reconfigured successfully"
+                );
+                WindowSurfaceRecoveryStatus::Reconfigured
+            }
+            SurfaceRecoveryOutcome::Terminal { trigger } => {
+                tracing::error!(
+                    ?trigger,
+                    "window surface recovery reached a terminal failure"
+                );
+                WindowSurfaceRecoveryStatus::Terminal
+            }
+        };
+        self.latest_surface_recovery = Some(outcome);
+        status
+    }
+
+    /// Drain the detailed outcome from a real surface recovery transition.
+    ///
+    /// Retained diagnostics intentionally do not consume this yet: wiring that
+    /// into a full-surface artifact belongs to hud-a890j. Keeping this private
+    /// avoids widening SceneDiff, WAL, protobuf, or agent-visible APIs.
+    #[allow(dead_code)] // Consumed by the retained-diagnostics follow-up.
+    pub(crate) fn take_latest_surface_recovery(&mut self) -> Option<SurfaceRecoveryOutcome> {
+        self.latest_surface_recovery.take()
     }
 
     /// Create a render pipeline targeting a specific texture format.
