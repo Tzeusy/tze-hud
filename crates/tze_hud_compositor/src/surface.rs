@@ -1101,6 +1101,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn out_of_memory_and_other_acquire_failures_are_terminal_without_reconfigure() {
+        for (error, trigger) in [
+            (
+                wgpu::SurfaceError::OutOfMemory,
+                SurfaceAcquireFailure::OutOfMemory,
+            ),
+            (wgpu::SurfaceError::Other, SurfaceAcquireFailure::Other),
+        ] {
+            let mut recovery = SurfaceRecoveryState::default();
+            recovery.observe_wgpu_acquire_failure(&error);
+
+            let mut reconfigure_attempted = false;
+            let outcome = recovery.attempt_pending_recovery(|| {
+                reconfigure_attempted = true;
+                Ok(())
+            });
+
+            assert!(
+                !reconfigure_attempted,
+                "{trigger:?} must not attempt to reconfigure a terminal surface"
+            );
+            assert_eq!(outcome, Some(SurfaceRecoveryOutcome::Terminal { trigger }));
+        }
+    }
+
     /// Verify that a simulated double swapchain-acquire failure does NOT panic.
     ///
     /// `WindowSurface::acquire_frame` uses a real `wgpu::Surface` and cannot be
