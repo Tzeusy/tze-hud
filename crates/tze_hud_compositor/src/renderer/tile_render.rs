@@ -65,6 +65,53 @@ pub(super) fn degradation_tile_opacity(opacity: f32, level: DegradationLevel) ->
     }
 }
 
+/// Whether a scene node receives the host tile's display scroll translation.
+///
+/// Most scrollable tiles remain deliberately tile-wide: changing that policy
+/// would rewrite the established raw-tile and materialized-part behavior. The
+/// resident expanded portal is the narrow exception. Its `PortalSurface`
+/// provides pane geometry but deliberately has no stable part-node IDs because
+/// each publish regenerates the inline subtree. In that geometry-only form,
+/// frame/pane/chrome nodes must stay tile-anchored; only markdown laid out below
+/// a declared Composer or Transcript pane's label band is document content.
+///
+/// This is shared by the flat geometry, rounded-rect draw-list, text, and focus
+/// paths so a post-resize wheel scroll cannot split the portal into independently
+/// translated layers (hud-yrcev).
+pub(super) fn node_uses_display_tile_scroll(
+    scene: &SceneGraph,
+    tile: &Tile,
+    node_id: SceneId,
+) -> bool {
+    let Some(surface) = scene.portal_surface(tile.id) else {
+        return true;
+    };
+
+    // Materialized portal parts retain the existing per-tile behavior. The
+    // geometry-only fallback below is specifically for the resident adapter's
+    // freshly regenerated inline node tree.
+    if surface.parts.iter().any(|part| part.node.is_some()) {
+        return true;
+    }
+
+    let Some(node) = scene.nodes.get(&node_id) else {
+        return false;
+    };
+    let NodeData::TextMarkdown(text) = &node.data else {
+        return false;
+    };
+
+    surface.parts.iter().any(|part| {
+        matches!(
+            part.kind,
+            PortalPartKind::Composer | PortalPartKind::Transcript
+        ) && text.bounds.is_within(&part.bounds)
+            // INPUT/OUTPUT labels start at the pane's top edge and are chrome;
+            // the resident adapter lays document markdown below that label band.
+            && text.bounds.y > part.bounds.y
+    })
+}
+
 // The composer's content inset (historically the `COMPOSER_TEXT_MARGIN = 6.0`
 // literal) is now token-driven: it resolves from the shared
 // `portal.spacing.content_inset_px` token into
@@ -186,12 +233,12 @@ pub(super) fn viewer_echo_divider_rects(
 /// reveals older lines; at the fully-scrolled bound the oldest line rests on
 /// `band_top`.
 ///
-/// `scroll_offset_y` is the tile's *displayed* vertical scroll offset (the eased
-/// value the rest of the tile — caret, clear_bg, hit region, draft glyphs —
-/// already translates by via `render_node`, hud-6n9iv), or `None` when the tile
-/// carries no scroll config yet: with no scroll config the block pins to the
-/// tail, reproducing the prior newest-fit window byte-for-byte. The offset is
-/// clamped to `[0, max_scrollback]` where
+/// `scroll_offset_y` is the tile's *displayed* vertical scroll offset. It moves
+/// this history document inside its fixed composer band; geometry-only resident
+/// portal chrome (caret, pane background, focus ring) remains tile-anchored.
+/// With no scroll config the block pins to the tail, reproducing the prior
+/// newest-fit window byte-for-byte. The offset is clamped to
+/// `[0, max_scrollback]` where
 /// `max_scrollback = (block_height - band_height).max(0)`, so the window can
 /// never overscroll past the oldest line or below the tail.
 ///
@@ -552,7 +599,11 @@ impl Compositor {
                 let NodeData::HitRegion(hr) = &node.data else {
                     return;
                 };
-                let (scroll_x, scroll_y) = self.display_tile_scroll_offset(scene, owner.tile_id);
+                let (scroll_x, scroll_y) = if node_uses_display_tile_scroll(scene, tile, node_id) {
+                    self.display_tile_scroll_offset(scene, owner.tile_id)
+                } else {
+                    (0.0, 0.0)
+                };
                 Rect::new(
                     tile.bounds.x + hr.bounds.x - scroll_x,
                     tile.bounds.y + hr.bounds.y - scroll_y,
@@ -2187,7 +2238,11 @@ impl Compositor {
             .get(&node_id)
             .copied()
             .unwrap_or_else(|| node.data.bounds().y);
-        let (scroll_x, scroll_y) = self.display_tile_scroll_offset(scene, tile.id);
+        let (scroll_x, scroll_y) = if node_uses_display_tile_scroll(scene, tile, node_id) {
+            self.display_tile_scroll_offset(scene, tile.id)
+        } else {
+            (0.0, 0.0)
+        };
         // §6.3 fade: the whole tile (backdrop + content backgrounds + text) must
         // fade as one unit. `tile_background_color` and `collect_text_items`
         // already apply this; the content-node backgrounds below MUST match, or a

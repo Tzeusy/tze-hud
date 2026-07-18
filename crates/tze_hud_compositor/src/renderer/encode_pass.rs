@@ -35,6 +35,7 @@ use crate::pipeline::{
 
 use super::LayerPartitionedRoundedRectCmds;
 use super::draw_cmds::TexturedDrawCmd;
+use super::tile_render::node_uses_display_tile_scroll;
 use super::token_colors::{
     NOTIFICATION_BACKDROP_OPACITY, STATIC_IMAGE_PLACEHOLDER_COLOR, VIDEO_SURFACE_PLACEHOLDER_COLOR,
     is_alert_banner_zone, linear_to_srgb, srgb_to_linear, urgency_to_notification_color,
@@ -593,9 +594,15 @@ impl super::Compositor {
                     .get(&node_id)
                     .copied()
                     .unwrap_or(sc.bounds.y);
+                let (node_scroll_x, node_scroll_y) =
+                    if node_uses_display_tile_scroll(scene, tile, node_id) {
+                        (scroll_x, scroll_y)
+                    } else {
+                        (0.0, 0.0)
+                    };
                 let rect = Rect::new(
-                    tile.bounds.x + sc.bounds.x - scroll_x,
-                    tile.bounds.y + effective_y - scroll_y,
+                    tile.bounds.x + sc.bounds.x - node_scroll_x,
+                    tile.bounds.y + effective_y - node_scroll_y,
                     sc.bounds.width,
                     sc.bounds.height,
                 );

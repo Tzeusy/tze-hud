@@ -16,6 +16,7 @@ use tze_hud_scene::types::*;
 use crate::text::TextItem;
 
 use super::icon::parse_notification_icon;
+use super::tile_render::node_uses_display_tile_scroll;
 use super::token_colors::{
     ICON_SIZE_PX, ICON_TEXT_GAP_PX, NOTIFICATION_BODY_SCALE, NOTIFICATION_DISMISS_BUTTON_SIZE_PX,
     NOTIFICATION_DISMISS_FONT_SIZE_PX, NOTIFICATION_DISMISS_FONT_WEIGHT,
@@ -401,7 +402,9 @@ impl super::Compositor {
                 // Per-part portal-surface consumption (hud-s4lrw): when the tile
                 // declares a `PortalSurface`, resolve each node's part so the
                 // recursion applies transcript scope + a per-part clip band only
-                // where the schema says. `None` → legacy tile-level behavior.
+                // where the schema says. `None` preserves legacy tile-level
+                // overflow/clip behavior; geometry-only resident surfaces still
+                // resolve their chrome-vs-document translation per node below.
                 let part_index = portal_part_index(scene, tile.id);
                 self.collect_text_items_from_node(
                     root_id,
@@ -1244,6 +1247,12 @@ impl super::Compositor {
         // P2). Threaded into children below so a container part scopes its whole
         // subtree.
         let effective_part = resolve_effective_part(part_index, node_id, active_part);
+        let (node_scroll_x, node_scroll_y) = if node_uses_display_tile_scroll(scene, tile, node_id)
+        {
+            (scroll_x, scroll_y)
+        } else {
+            (0.0, 0.0)
+        };
 
         if let NodeData::TextMarkdown(tm) = &node.data {
             // hud-pd9bp: when this node is a `NodeLayout::VerticalFlow` child, its
@@ -1261,9 +1270,9 @@ impl super::Compositor {
                 .get(&node_id)
                 .map(|resolved_y| resolved_y - tm.bounds.y)
                 .unwrap_or(0.0);
-            // Subtract scroll offset so text glyphs move with the scrolled
-            // content — matches the geometry pass in `render_node` which already
-            // applies `tile.bounds.x - scroll_x` / `tile.bounds.y - scroll_y`.
+            // Subtract scroll offset only for document content. Geometry-only
+            // resident portal surfaces keep their frame/header/pane labels fixed;
+            // this mirrors `render_node` and the rounded-rect draw-list.
             //
             // Phase-1 (hud-5jbra.2): try the markdown cache first.  Use
             // `get_by_key` with a precomputed key (O(1) — no re-hash on the
@@ -1324,8 +1333,8 @@ impl super::Compositor {
                 if let Some(parsed) = markdown_cache.get_by_key(&content_key) {
                     TextItem::from_text_markdown_cached(
                         tm,
-                        tile.bounds.x - scroll_x,
-                        tile.bounds.y - scroll_y + flow_dy,
+                        tile.bounds.x - node_scroll_x,
+                        tile.bounds.y - node_scroll_y + flow_dy,
                         parsed,
                     )
                 } else {
@@ -1371,8 +1380,8 @@ impl super::Compositor {
                             .map(|parsed| {
                                 TextItem::from_text_markdown_cached(
                                     tm,
-                                    tile.bounds.x - scroll_x,
-                                    tile.bounds.y - scroll_y + flow_dy,
+                                    tile.bounds.x - node_scroll_x,
+                                    tile.bounds.y - node_scroll_y + flow_dy,
                                     parsed,
                                 )
                             })
@@ -1383,8 +1392,8 @@ impl super::Compositor {
                         let parsed = crate::markdown::parse_markdown_subset(&tm.content, md_tokens);
                         let item = TextItem::from_text_markdown_cached(
                             tm,
-                            tile.bounds.x - scroll_x,
-                            tile.bounds.y - scroll_y + flow_dy,
+                            tile.bounds.x - node_scroll_x,
+                            tile.bounds.y - node_scroll_y + flow_dy,
                             &parsed,
                         );
                         self.markdown_fallback_cache
@@ -1399,8 +1408,8 @@ impl super::Compositor {
                 // intentionally bypassed here.
                 TextItem::from_text_markdown_node(
                     tm,
-                    tile.bounds.x - scroll_x,
-                    tile.bounds.y - scroll_y + flow_dy,
+                    tile.bounds.x - node_scroll_x,
+                    tile.bounds.y - node_scroll_y + flow_dy,
                 )
             };
             // Viewer-local whole-portal resize font scaling (hud-ovjxu.1): scale
@@ -1446,8 +1455,8 @@ impl super::Compositor {
             // `bounds_width`, so the shaped-buffer / truncation caches stay
             // keyed exactly as before. `None` reproduces the legacy content∩tile
             // clip.
-            let unscrolled_x = item.pixel_x + scroll_x;
-            let unscrolled_y = item.pixel_y + scroll_y;
+            let unscrolled_x = item.pixel_x + node_scroll_x;
+            let unscrolled_y = item.pixel_y + node_scroll_y;
             let part_band = portal_part_clip_band(effective_part, tile);
             let (clip_x, clip_y, clip_w, clip_h) = crate::text::portal_part_clip_rect(
                 (
@@ -1571,10 +1580,11 @@ pub(super) fn clamp_transcript_measure(bounds_width: f32, max_measure_px: f32) -
 /// `HashMap` for such small N (PR #1099 review).
 ///
 /// Returns `None` when the tile carries no surface **or** the surface has no
-/// materialized part nodes yet — the "one scene node per part" promotion is
-/// strictly additive, so both cases fall back to the pre-promotion tile-level
-/// behavior (the whole scrollable tile is treated as one transcript). This is
-/// what keeps legacy single-node portals byte-identical.
+/// materialized part nodes yet. In both cases, text overflow/clip treatment
+/// keeps the pre-promotion tile-level fallback (the whole scrollable tile is
+/// treated as one transcript). Geometry-only resident surfaces still use their
+/// declared bounds to keep chrome fixed while document text scrolls; that
+/// translation policy lives in `tile_render::node_uses_display_tile_scroll`.
 pub(super) fn portal_part_index(scene: &SceneGraph, tile_id: SceneId) -> Option<&[PortalPart]> {
     let surface = scene.portal_surface(tile_id)?;
     if surface.parts.iter().any(|p| p.node.is_some()) {
