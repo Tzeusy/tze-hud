@@ -699,8 +699,8 @@ pub struct ResidentGrpcPortalAdapter {
     /// produce the draft text + caret + at-capacity visual without any remote
     /// roundtrip.
     composer_display: Option<ComposerDisplayState>,
-    /// The portal-surface part **topology** last declared for this tile, or
-    /// `None` before the first declaration (hud-rpm9s).
+    /// The portal-surface topology and part-geometry signature last declared for
+    /// this tile, or `None` before the first declaration (hud-rpm9s).
     ///
     /// The structural `SetPortalSurface` declaration is Transactional and must
     /// ride exactly one render batch **per topology** — so steady-state renders
@@ -716,14 +716,15 @@ pub struct ResidentGrpcPortalAdapter {
     /// only when it actually changes, and coalescibly patches otherwise.
     ///
     /// The key also carries the spacing-geometry signature
-    /// (`header_height_px` / `section_gap_px` as raw f32 bits, hud-zn6yw): those
-    /// tokens size the declared Header/Transcript part bounds but ride ONLY the
-    /// `SetPortalSurface` declaration (the coalescible `UpdatePortalSurfaceState`
-    /// patch carries no geometry). So a live profile swap via `set_visual_tokens`
-    /// that changes them MUST re-declare, or the declared part bounds — and the
-    /// header/drag-band derived from them — would stay stale until the next
-    /// presentation/interaction transition.
-    declared_topology: Option<(ProjectedPortalPresentation, bool, u32, u32)>,
+    /// (`header_height_px` / `section_gap_px` as raw f32 bits, hud-zn6yw) and
+    /// the current tile-local width/height. Those values size the declared
+    /// Header/Transcript part bounds but ride ONLY the `SetPortalSurface`
+    /// declaration (the coalescible `UpdatePortalSurfaceState` patch carries no
+    /// geometry). A live profile swap or resize that changes them MUST
+    /// re-declare, or the declared part bounds — and the header/drag-band derived
+    /// from them — would stay stale until the next presentation/interaction
+    /// transition.
+    declared_topology: Option<(ProjectedPortalPresentation, bool, u32, u32, u32, u32)>,
 }
 
 /// Local composer draft display state cached in the adapter.
@@ -1375,8 +1376,8 @@ impl ResidentGrpcPortalAdapter {
     ///   surface descriptor governs; inline children paint without per-node
     ///   mutation fan-out.
     ///
-    /// Re-declaration is bounded to genuine topology transitions (profile-swap /
-    /// collapse-expand / interaction toggle), which are infrequent, so the
+    /// Re-declaration is bounded to structural or part-geometry changes
+    /// (profile-swap / collapse-expand / interaction toggle / resize), so the
     /// steady-state render stays on the coalescible path.
     ///
     /// Requires `record_created_tile` first (same contract as `render_batch`).
@@ -1386,15 +1387,19 @@ impl ResidentGrpcPortalAdapter {
         now_wall_us: u64,
     ) -> Result<session_proto::MutationBatch, ResidentGrpcAdapterError> {
         let mut batch = self.render_batch(state, now_wall_us)?;
-        // The declaration key is (presentation, interaction) PLUS the spacing
-        // geometry signature: header/section part bounds ride only the full
-        // declaration, so a token swap that changes them must re-declare too
-        // (hud-zn6yw).
+        // The declaration key is (presentation, interaction) PLUS all geometry
+        // that shapes the declared parts: header/section spacing and the current
+        // tile-local size. These bounds ride only the full declaration, so a
+        // token swap or local Ctrl+=/pointer resize must re-declare (hud-zn6yw,
+        // hud-yrcev).
+        let local_bounds = self.local_bounds_for_state(state);
         let topology = (
             state.presentation,
             state.interaction_enabled,
             self.visual_tokens.header_height_px.to_bits(),
             self.visual_tokens.section_gap_px.to_bits(),
+            local_bounds.width.to_bits(),
+            local_bounds.height.to_bits(),
         );
         if self.declared_topology != Some(topology) {
             // First declaration OR a topology-changing transition: (re)declare the
@@ -3740,6 +3745,58 @@ mod tests {
                 .iter()
                 .any(|m| matches!(&m.mutation, Some(M::UpdatePortalSurfaceState(_)))),
             "steady-state render carries the coalescible UpdatePortalSurfaceState patch"
+        );
+    }
+
+    /// A resize changes the declared part geometry even though the set of parts
+    /// stays the same. The surface must therefore be re-declared before the
+    /// newly-sized inline subtree is published; otherwise geometry-only part
+    /// bounds remain at the attach-time size while the body has already grown.
+    #[test]
+    fn render_batch_with_surface_redeclares_when_resized_bounds_change() {
+        let config = ResidentGrpcPortalConfig::new(vec![7u8; 16]);
+        let mut adapter = ResidentGrpcPortalAdapter::new(config);
+        adapter.record_created_tile(vec![9u8; 16]);
+
+        let initial = make_expanded_interaction_state("portal-resized-surface");
+        adapter
+            .render_batch_with_surface(&initial, 0)
+            .expect("initial render must declare the surface");
+
+        let resized_width = DEFAULT_EXPANDED_W + 180.0;
+        let resized_height = DEFAULT_EXPANDED_H + 120.0;
+        let mut resized = make_expanded_interaction_state("portal-resized-surface");
+        resized.resized_bounds = Some(crate::AdapterPortalRect::from_f32(
+            120.0,
+            80.0,
+            resized_width,
+            resized_height,
+        ));
+
+        let batch = adapter
+            .render_batch_with_surface(&resized, 1)
+            .expect("resized render must succeed");
+        let surface = set_portal_surface_of(&batch).expect(
+            "resized portal geometry must re-declare the surface instead of leaving stale parts",
+        );
+        let frame = part_of(surface, proto::PortalPartKindProto::PortalPartKindFrame);
+        let transcript = part_of(
+            surface,
+            proto::PortalPartKindProto::PortalPartKindTranscript,
+        );
+        assert_eq!(frame.width, resized_width);
+        assert_eq!(frame.height, resized_height);
+        assert_eq!(
+            transcript.height,
+            resized_height - adapter.visual_tokens().header_height_px,
+            "the re-declared OUTPUT part must track the resized body height"
+        );
+        assert!(
+            !batch
+                .mutations
+                .iter()
+                .any(|m| matches!(&m.mutation, Some(M::UpdatePortalSurfaceState(_)))),
+            "the structural re-declaration already carries lifecycle/display state"
         );
     }
 

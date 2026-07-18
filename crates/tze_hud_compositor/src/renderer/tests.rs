@@ -9685,6 +9685,259 @@ async fn scrolled_rounded_solid_preserves_original_shape_with_viewport_clip() {
     assert_eq!(clip.height, 60.0);
 }
 
+/// A first-class expanded portal is one movable/resizable surface: wheel scroll
+/// translates its document rows, never its frame, pane fills, header, or INPUT /
+/// OUTPUT labels. This reproduces the live post-resize failure where the
+/// `PortalSurface` carries geometry-only parts because its regenerated inline
+/// subtree has no stable node IDs (hud-yrcev).
+///
+/// The draw-list assertions exercise the rounded frame/pane path; the text-item
+/// assertions exercise the glyph path. Keeping both in one post-resize scene
+/// prevents the two passes from silently applying different scroll policies.
+#[tokio::test]
+async fn expanded_portal_chrome_stays_fixed_while_document_content_scrolls_after_resize() {
+    use tze_hud_scene::types::{
+        FontFamily, PortalDisplayState, PortalPart, PortalPartKind, PortalSurface, SolidColorNode,
+        TextAlign, TextMarkdownNode,
+    };
+
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(800, 520).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+    let mut scene = SceneGraph::new(800.0, 520.0);
+    let tab = scene.create_tab("expanded-portal", 0).unwrap();
+    let lease = scene.grant_lease("expanded-portal", 120_000, vec![]);
+    // Deliberately not the attach-time size: this is the operator's resized
+    // portal. Every declared part is already re-resolved to this whole-unit
+    // geometry before the wheel scroll happens.
+    let tile_bounds = Rect::new(80.0, 40.0, 600.0, 360.0);
+    let tile_id = scene
+        .create_tile(tab, "expanded-portal", lease, tile_bounds, 1)
+        .unwrap();
+    scene
+        .register_tile_scroll_config(
+            tile_id,
+            TileScrollConfig {
+                scrollable_x: false,
+                scrollable_y: true,
+                content_width: None,
+                content_height: Some(1_200.0),
+            },
+        )
+        .unwrap();
+
+    let header_h = 48.0;
+    let divider_w = 12.0;
+    let pane_w = (tile_bounds.width - divider_w) * 0.5;
+    let input_pane = Rect::new(0.0, header_h, pane_w, tile_bounds.height - header_h);
+    let output_pane = Rect::new(
+        pane_w + divider_w,
+        header_h,
+        pane_w,
+        tile_bounds.height - header_h,
+    );
+    let root_id = SceneId::new();
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                layout: Default::default(),
+                id: root_id,
+                children: vec![],
+                data: NodeData::SolidColor(SolidColorNode {
+                    color: Rgba::new(0.12, 0.12, 0.14, 1.0),
+                    bounds: Rect::new(0.0, 0.0, tile_bounds.width, tile_bounds.height),
+                    radius: Some(14.0),
+                }),
+            },
+        )
+        .unwrap();
+
+    let add_child = |scene: &mut SceneGraph, data: NodeData| {
+        scene
+            .add_node_to_tile(
+                tile_id,
+                Some(root_id),
+                Node {
+                    layout: Default::default(),
+                    id: SceneId::new(),
+                    children: vec![],
+                    data,
+                },
+            )
+            .unwrap();
+    };
+    add_child(
+        &mut scene,
+        NodeData::SolidColor(SolidColorNode {
+            color: Rgba::new(0.16, 0.16, 0.18, 1.0),
+            bounds: input_pane,
+            radius: Some(12.0),
+        }),
+    );
+    add_child(
+        &mut scene,
+        NodeData::SolidColor(SolidColorNode {
+            color: Rgba::new(0.03, 0.03, 0.04, 1.0),
+            bounds: output_pane,
+            radius: Some(12.0),
+        }),
+    );
+
+    let markdown = |content: &str, bounds: Rect| {
+        NodeData::TextMarkdown(TextMarkdownNode {
+            content: content.to_owned(),
+            bounds,
+            font_size_px: 16.0,
+            font_family: FontFamily::SystemSansSerif,
+            color: Rgba::new(0.9, 0.9, 0.9, 1.0),
+            background: None,
+            alignment: TextAlign::Start,
+            overflow: TextOverflow::Clip,
+            color_runs: Box::default(),
+        })
+    };
+    add_child(
+        &mut scene,
+        markdown("Portal header", Rect::new(12.0, 0.0, 576.0, header_h)),
+    );
+    add_child(
+        &mut scene,
+        markdown(
+            "INPUT",
+            Rect::new(12.0, input_pane.y, input_pane.width - 24.0, 24.0),
+        ),
+    );
+    add_child(
+        &mut scene,
+        markdown(
+            "OUTPUT",
+            Rect::new(
+                output_pane.x + 12.0,
+                output_pane.y,
+                output_pane.width - 24.0,
+                24.0,
+            ),
+        ),
+    );
+    add_child(
+        &mut scene,
+        markdown(
+            "output document",
+            Rect::new(
+                output_pane.x + 12.0,
+                output_pane.y + 28.0,
+                output_pane.width - 24.0,
+                output_pane.height - 40.0,
+            ),
+        ),
+    );
+
+    // This matches ResidentGrpcPortalAdapter::portal_surface_proto: it gives
+    // first-class part geometry but no stable node IDs, because each publish
+    // regenerates the inline subtree.
+    scene.overlay.portal_surfaces.insert(
+        tile_id,
+        PortalSurface {
+            display_state: PortalDisplayState::Expanded,
+            parts: vec![
+                PortalPart {
+                    kind: PortalPartKind::Frame,
+                    bounds: Rect::new(0.0, 0.0, tile_bounds.width, tile_bounds.height),
+                    node: None,
+                },
+                PortalPart {
+                    kind: PortalPartKind::Header,
+                    bounds: Rect::new(0.0, 0.0, tile_bounds.width, header_h),
+                    node: None,
+                },
+                PortalPart {
+                    kind: PortalPartKind::Composer,
+                    bounds: input_pane,
+                    node: None,
+                },
+                PortalPart {
+                    kind: PortalPartKind::Transcript,
+                    bounds: output_pane,
+                    node: None,
+                },
+                PortalPart {
+                    kind: PortalPartKind::Divider,
+                    bounds: Rect::new(pane_w, header_h, divider_w, tile_bounds.height - header_h),
+                    node: None,
+                },
+            ],
+            ..Default::default()
+        },
+    );
+    compositor.prime_markdown_cache(&scene);
+
+    let item_y = |items: &[crate::text::TextItem], content: &str| {
+        items
+            .iter()
+            .find(|item| item.text.as_ref() == content)
+            .unwrap_or_else(|| panic!("expected {content:?} TextItem"))
+            .pixel_y
+    };
+    let before = compositor.collect_text_items(&scene, 800.0, 520.0);
+    let header_before = item_y(&before, "Portal header");
+    let input_label_before = item_y(&before, "INPUT");
+    let output_label_before = item_y(&before, "OUTPUT");
+    let document_before = item_y(&before, "output document");
+
+    let scroll_y = 72.0;
+    scene
+        .set_tile_scroll_offset_local(tile_id, 0.0, scroll_y)
+        .unwrap();
+    let cmds = compositor.collect_tile_rounded_rect_cmds(&scene);
+    let frame = cmds
+        .iter()
+        .find(|cmd| cmd.width == tile_bounds.width && cmd.height == tile_bounds.height)
+        .expect("rounded frame draw command");
+    assert_eq!(frame.x, tile_bounds.x, "frame x must remain tile-anchored");
+    assert_eq!(
+        frame.y, tile_bounds.y,
+        "resized rounded frame must not translate with document scroll"
+    );
+    let panes: Vec<_> = cmds
+        .iter()
+        .filter(|cmd| cmd.width == pane_w && cmd.height == input_pane.height)
+        .collect();
+    assert_eq!(
+        panes.len(),
+        2,
+        "both resized rounded pane backdrops must reach the draw list"
+    );
+    for pane in panes {
+        assert_eq!(
+            pane.y,
+            tile_bounds.y + header_h,
+            "pane backdrop must remain whole-portal chrome under scroll"
+        );
+    }
+
+    let after = compositor.collect_text_items(&scene, 800.0, 520.0);
+    assert_eq!(
+        item_y(&after, "Portal header"),
+        header_before,
+        "header text must remain fixed with the frame"
+    );
+    assert_eq!(
+        item_y(&after, "INPUT"),
+        input_label_before,
+        "INPUT label must remain chrome"
+    );
+    assert_eq!(
+        item_y(&after, "OUTPUT"),
+        output_label_before,
+        "OUTPUT label must remain chrome"
+    );
+    assert!(
+        (document_before - item_y(&after, "output document") - scroll_y).abs() < 0.5,
+        "document content must translate by the display scroll offset"
+    );
+}
+
 /// `collect_text_items` does NOT shift text for tiles with zero scroll offset.
 ///
 /// Regression guard: ensuring the fix is additive (non-scrolled tiles
@@ -16448,8 +16701,9 @@ fn portal_part_index_classifies_parts_and_falls_back() {
 }
 
 /// A surface whose parts are all geometry-only (no materialized nodes) produces
-/// no index, so the render path falls back to the legacy tile-level behavior
-/// rather than a spurious empty map.
+/// no text-part index, so overflow/clip treatment keeps the legacy tile-level
+/// fallback rather than using a spurious empty map. Its display translation is
+/// separately resolved from the declared part bounds (hud-yrcev).
 #[test]
 fn portal_part_index_none_when_no_materialized_nodes() {
     use tze_hud_scene::types::{PortalPart, PortalPartKind, PortalSurface};
