@@ -214,8 +214,9 @@ pub struct Compositor {
     /// Retained snapshot and evidence slot for the narrowly-scoped canonical
     /// headless change-efficiency validation path.
     retained_render_state: retained::RetainedRenderState,
-    /// Latest real window-surface lifecycle outcome. This stays separate from
-    /// retained diagnostics until the dedicated follow-up consumes it.
+    /// Latest real window-surface lifecycle outcome. Successful recovery also
+    /// invalidates the compositor-private retained proof lane at this same
+    /// production fan-out point.
     latest_surface_recovery: Option<SurfaceRecoveryOutcome>,
     /// When true, the clear color uses alpha=0 for transparent overlay mode.
     pub overlay_mode: bool,
@@ -1186,6 +1187,25 @@ impl Compositor {
         &self.adapter_info
     }
 
+    /// Fan out an actual window-surface lifecycle outcome without widening any
+    /// scene, protocol, or agent-visible contract.
+    ///
+    /// A successfully reconfigured surface no longer has a trustworthy
+    /// retained contents baseline. The next canonical headless observation is
+    /// therefore forced through its structured full-surface diagnostic path;
+    /// terminal outcomes retain the existing shutdown behavior and only remain
+    /// available as compositor-private lifecycle evidence.
+    pub(super) fn record_surface_recovery_outcome(&mut self, outcome: SurfaceRecoveryOutcome) {
+        if let SurfaceRecoveryOutcome::Reconfigured { trigger } = outcome {
+            tracing::debug!(
+                ?trigger,
+                "reconfigured window surface invalidated retained validation state"
+            );
+            self.retained_render_state.note_device_recovery();
+        }
+        self.latest_surface_recovery = Some(outcome);
+    }
+
     /// Attempt a recovery transition queued by a real window-surface acquire
     /// failure.
     ///
@@ -1222,16 +1242,16 @@ impl Compositor {
                 WindowSurfaceRecoveryStatus::Terminal
             }
         };
-        self.latest_surface_recovery = Some(outcome);
+        self.record_surface_recovery_outcome(outcome);
         status
     }
 
     /// Drain the detailed outcome from a real surface recovery transition.
     ///
-    /// Retained diagnostics intentionally do not consume this yet: wiring that
-    /// into a full-surface artifact belongs to hud-a890j. Keeping this private
-    /// avoids widening SceneDiff, WAL, protobuf, or agent-visible APIs.
-    #[allow(dead_code)] // Consumed by the retained-diagnostics follow-up.
+    /// Retained diagnostics receive successful reconfiguration at the same
+    /// private fan-out point. Draining this lifecycle evidence still avoids
+    /// widening SceneDiff, WAL, protobuf, or agent-visible APIs.
+    #[allow(dead_code)] // Available for compositor-private lifecycle inspection.
     pub(crate) fn take_latest_surface_recovery(&mut self) -> Option<SurfaceRecoveryOutcome> {
         self.latest_surface_recovery.take()
     }

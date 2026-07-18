@@ -1,5 +1,5 @@
 use super::*;
-use crate::surface::HeadlessSurface;
+use crate::surface::{HeadlessSurface, SurfaceAcquireFailure, SurfaceRecoveryOutcome};
 use image_cache::{
     CARET_BLINK_HALF_PERIOD, ComposerLayout, caret_visible_at, composer_scroll_offset,
     composer_vertical_line_offset, composer_visible_line_count,
@@ -206,6 +206,56 @@ async fn test_static_image_node_renders_placeholder_quad() {
     assert!(
         any_warm_pixel,
         "expected warm-gray placeholder pixels from StaticImageNode"
+    );
+}
+
+/// A real recovered window-surface lifecycle outcome must invalidate the
+/// compositor-private retained proof lane. The next observed full frame is a
+/// structured diagnostic, never a proportional-render certification.
+#[tokio::test]
+async fn reconfigured_surface_recovery_is_a_non_passing_retained_diagnostic() {
+    let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+    let mut scene = scene_with_node(Node {
+        layout: Default::default(),
+        id: SceneId::new(),
+        children: vec![],
+        data: NodeData::SolidColor(SolidColorNode {
+            color: Rgba::new(0.5, 0.5, 0.5, 1.0),
+            bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
+            radius: None,
+        }),
+    });
+    compositor.prime_markdown_cache(&scene);
+    compositor.prime_truncation_cache(&scene);
+
+    // This is the exact compositor-private outcome emitted after a real
+    // Lost/Outdated surface acquire has been reconfigured, not a model-only
+    // retained-planner signal.
+    compositor.record_surface_recovery_outcome(SurfaceRecoveryOutcome::Reconfigured {
+        trigger: SurfaceAcquireFailure::Lost,
+    });
+    compositor.render_frame_headless(&mut scene, &surface);
+
+    assert!(
+        compositor.take_change_efficiency_capture().is_none(),
+        "a recovered surface must not leave a scoped retained capture available"
+    );
+    let diagnostic = compositor
+        .take_change_efficiency_diagnostic()
+        .expect("surface recovery emits a structured retained diagnostic");
+    let report = diagnostic.validate();
+    assert!(!report.passed, "{report:#?}");
+    assert_eq!(
+        report.status,
+        tze_hud_telemetry::ChangeEfficiencyValidationStatus::DiagnosticFullSurface,
+        "{report:#?}"
+    );
+    assert_eq!(
+        diagnostic
+            .full_surface_invalidation
+            .expect("full-surface diagnostic metadata")
+            .reason,
+        tze_hud_telemetry::FullSurfaceInvalidationReason::DeviceRecovery
     );
 }
 

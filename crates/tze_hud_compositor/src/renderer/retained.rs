@@ -258,10 +258,10 @@ impl RetainedRenderState {
         self.latest_diagnostic.take()
     }
 
-    /// Test-only planner seam. Production device-loss/recovery handling has not
-    /// yet been wired to this canonical retained-validation lane.
-    #[cfg(test)]
-    fn note_device_recovery(&mut self) {
+    /// Invalidate the retained proof baseline after a real production surface
+    /// recovery. The following observed frame must be a full-surface
+    /// diagnostic, never a scoped retained certification.
+    pub(super) fn note_device_recovery(&mut self) {
         self.device_recovery_pending = true;
         self.snapshot = None;
     }
@@ -1386,7 +1386,7 @@ mod tests {
     }
 
     #[test]
-    fn modeled_device_recovery_invalidates_the_private_snapshot() {
+    fn device_recovery_invalidates_the_private_snapshot() {
         let mut state = RetainedRenderState {
             snapshot: Some(CanonicalSceneSnapshot {
                 viewport: EfficiencyViewport {
