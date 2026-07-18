@@ -656,18 +656,19 @@ impl Compositor {
         };
 
         let tokens = resolve_composer_overlay_tokens(&self.token_map);
+        let font_size_px = self.scaled_portal_font(tokens.font_size_px, tile.id, scene);
         let line_height_multiplier =
             crate::markdown::MarkdownTokens::default().line_height_multiplier;
         let layout = self.composer_layout;
         let input_box = Self::composer_input_box(
             region,
-            tokens.font_size_px,
+            font_size_px,
             line_height_multiplier,
             layout.visible_lines,
             tokens.anchor,
             tokens.content_inset_px,
         );
-        let line_height = (tokens.font_size_px * line_height_multiplier).max(1.0);
+        let line_height = (font_size_px * line_height_multiplier).max(1.0);
         let content_inset = tokens.content_inset_px;
 
         // Caret x/y, box-local (relative to the input box's top-left interior).
@@ -1013,9 +1014,10 @@ impl Compositor {
         // `collect_composer_text_item`, which anchors the draft to the same box.
         let line_height_multiplier =
             crate::markdown::MarkdownTokens::default().line_height_multiplier;
+        let font_size_px = self.scaled_portal_font(tokens.font_size_px, tile.id, scene);
         let input_box = Self::composer_input_box(
             region,
-            tokens.font_size_px,
+            font_size_px,
             line_height_multiplier,
             self.composer_layout.visible_lines,
             tokens.anchor,
@@ -1204,19 +1206,19 @@ impl Compositor {
 
         // Locate the composer region the same way collect_composer_text_item does:
         // the first visible tile whose subtree contains the focused composer node.
-        let mut region: Option<Rect> = None;
+        let mut composer_target: Option<(SceneId, Rect)> = None;
         for tile in &Self::sort_tiles_with_drag_boost(self.policy_visible_tiles(scene), scene) {
             if let Some(r) = Self::composer_region_bounds(tile, scene, cs.node_id) {
-                region = Some(r);
+                composer_target = Some((tile.id, r));
                 break;
             }
         }
-        let Some(region) = region else {
+        let Some((tile_id, region)) = composer_target else {
             return;
         };
 
         let tokens = resolve_composer_overlay_tokens(&self.token_map);
-        let font_size_px = tokens.font_size_px;
+        let font_size_px = self.scaled_portal_font(tokens.font_size_px, tile_id, scene);
         let max_lines = tokens.max_lines.max(1);
         // Token-driven composer content inset (hud-ar10c); the caret-follow window
         // and keep-visible margin below key off the same value the draft render
@@ -1399,6 +1401,7 @@ impl Compositor {
         self.text_rasterizer.as_ref()?;
         let region = Self::composer_region_bounds(tile, scene, cs.node_id)?;
         let layout = self.composer_layout;
+        let font_size_px = self.scaled_portal_font(tokens.font_size_px, tile.id, scene);
         // The full HitRegion spans the whole portal (click-anywhere-to-focus,
         // hud-v4k1h); confine the rendered draft to the input box at its bottom
         // edge so it does not stretch across the portal (hud-2zsbf). The box grows
@@ -1406,7 +1409,7 @@ impl Compositor {
         // reproduces the single input-line strip.
         let input_box = Self::composer_input_box(
             region,
-            tokens.font_size_px,
+            font_size_px,
             crate::markdown::MarkdownTokens::default().line_height_multiplier,
             layout.visible_lines,
             tokens.anchor,
@@ -1447,7 +1450,7 @@ impl Compositor {
         let text_color = composer_draft_base_color(tokens, cs.at_capacity, placeholder.is_some());
 
         let bw = (region.width - text_margin * 2.0).max(1.0);
-        let line_height = (tokens.font_size_px
+        let line_height = (font_size_px
             * crate::markdown::MarkdownTokens::default().line_height_multiplier)
             .max(1.0);
 
@@ -1504,7 +1507,7 @@ impl Compositor {
         } else {
             // One-line interior height — identical to the pre-multiline strip.
             let one_line = (input_box.height - text_margin * 2.0).max(1.0);
-            (bw.max(layout.content_width + tokens.font_size_px), one_line)
+            (bw.max(layout.content_width + font_size_px), one_line)
         };
 
         Some(crate::text::TextItem {
@@ -1524,7 +1527,7 @@ impl Compositor {
             clip_pixel_y: input_box.y,
             clip_bounds_width: bw.max(1.0),
             clip_bounds_height: input_box.height.max(1.0),
-            font_size_px: tokens.font_size_px,
+            font_size_px,
             font_family: tze_hud_scene::types::FontFamily::SystemSansSerif,
             font_weight: 400,
             color: text_color,
@@ -1752,7 +1755,7 @@ impl Compositor {
             return;
         }
         let lhm = crate::markdown::MarkdownTokens::default().line_height_multiplier;
-        let echo_font = resolve_viewer_echo_tokens(&self.token_map).font_size_px;
+        let base_echo_font = resolve_viewer_echo_tokens(&self.token_map).font_size_px;
         // Token-driven composer content inset (hud-ar10c): the echo wrap-measure
         // zone width must match the render path's zone width in
         // `collect_viewer_echo_text_items`, which insets by the same value.
@@ -1760,7 +1763,7 @@ impl Compositor {
 
         // Gather (tile, zone_width, per-entry texts) under &self first, then
         // measure under &mut self.text_rasterizer — the two borrows do not overlap.
-        let mut jobs: Vec<(SceneId, f32, Vec<String>)> = Vec::new();
+        let mut jobs: Vec<(SceneId, f32, f32, Vec<String>)> = Vec::new();
         for tile in self.policy_visible_tiles(scene) {
             let Some(composer_node) = Self::find_composer_node_in_tile(tile, scene) else {
                 continue;
@@ -1774,13 +1777,14 @@ impl Compositor {
             jobs.push((
                 tile.id,
                 Self::viewer_echo_zone_width(region, content_inset),
+                self.scaled_portal_font(base_echo_font, tile.id, scene),
                 entries,
             ));
         }
 
         let mut results: Vec<(SceneId, Vec<usize>)> = Vec::with_capacity(jobs.len());
         if let Some(tr) = self.text_rasterizer.as_mut() {
-            for (tile_id, zone_width, entries) in &jobs {
+            for (tile_id, zone_width, echo_font, entries) in &jobs {
                 // Break-anywhere per-entry line count (WRAPPED_TEXT_WRAP, hud-n0x4u):
                 // an over-long single-word reply in one entry is counted as the
                 // multiple in-box lines it paints as, not one clipped line — so the
@@ -1789,7 +1793,7 @@ impl Compositor {
                 let per_entry: Vec<usize> = entries
                     .iter()
                     .map(|entry| {
-                        tr.measure_wrapped_line_count(entry, *zone_width, echo_font, lhm)
+                        tr.measure_wrapped_line_count(entry, *zone_width, *echo_font, lhm)
                             .max(1)
                     })
                     .collect();
@@ -1971,7 +1975,9 @@ impl Compositor {
         // into. The box is measured with the COMPOSER font (matching the draft box
         // exactly), while the echo lines use their own font below.
         let composer_tokens = resolve_composer_overlay_tokens(&self.token_map);
-        let composer_font_size_px = composer_tokens.font_size_px;
+        let composer_font_size_px =
+            self.scaled_portal_font(composer_tokens.font_size_px, tile.id, scene);
+        let echo_font_size_px = self.scaled_portal_font(tokens.font_size_px, tile.id, scene);
         let draft_box = Self::composer_input_box(
             region,
             composer_font_size_px,
@@ -1980,7 +1986,7 @@ impl Compositor {
             composer_tokens.anchor,
             composer_tokens.content_inset_px,
         );
-        let line_h = (tokens.font_size_px * line_height_multiplier).max(1.0);
+        let line_h = (echo_font_size_px * line_height_multiplier).max(1.0);
         let margin = composer_tokens.content_inset_px;
         let opacity = self.tile_effective_opacity(tile, scene);
         let zone_width = Self::viewer_echo_zone_width(region, composer_tokens.content_inset_px);
@@ -2056,7 +2062,7 @@ impl Compositor {
             clip_pixel_y: band_top,
             clip_bounds_width: zone_width,
             clip_bounds_height: band_height,
-            font_size_px: tokens.font_size_px,
+            font_size_px: echo_font_size_px,
             font_family: tze_hud_scene::types::FontFamily::SystemSansSerif,
             font_weight: 400,
             color: tokens.color,
@@ -2112,7 +2118,9 @@ impl Compositor {
         let line_height_multiplier =
             crate::markdown::MarkdownTokens::default().line_height_multiplier;
         let composer_tokens = resolve_composer_overlay_tokens(&self.token_map);
-        let composer_font_size_px = composer_tokens.font_size_px;
+        let composer_font_size_px =
+            self.scaled_portal_font(composer_tokens.font_size_px, tile.id, scene);
+        let echo_font_size_px = self.scaled_portal_font(echo_tokens.font_size_px, tile.id, scene);
         let draft_box = Self::composer_input_box(
             region,
             composer_font_size_px,
@@ -2121,7 +2129,7 @@ impl Compositor {
             composer_tokens.anchor,
             composer_tokens.content_inset_px,
         );
-        let line_h = (echo_tokens.font_size_px * line_height_multiplier).max(1.0);
+        let line_h = (echo_font_size_px * line_height_multiplier).max(1.0);
         let margin = composer_tokens.content_inset_px;
         let zone_width = Self::viewer_echo_zone_width(region, composer_tokens.content_inset_px);
 

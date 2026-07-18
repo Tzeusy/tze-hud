@@ -1053,6 +1053,103 @@ async fn test_viewer_echo_stack_tracks_live_composer_box() {
     );
 }
 
+/// hud-t8c3h: runtime-authored INPUT overlays must use the same viewer-local
+/// portal font scale as adapter-authored OUTPUT text.  The live composer draft
+/// and retained viewer-echo history own separate layout/measurement paths, so
+/// cover both their shaped font sizes and their leading-derived geometry after a
+/// whole-portal resize.
+///
+/// Draw-list-level only: this exercises the actual compositor collection + prime
+/// paths without depending on pixel readback.
+#[tokio::test]
+async fn portal_resize_scales_runtime_authored_input_text_and_layout() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(400, 300).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+    let (mut scene, tile_id) = viewer_echo_test_scene();
+    let composer_id = scene.tiles[&tile_id]
+        .root_node
+        .expect("viewer-echo fixture must root the tile at its composer node");
+    // Enough ordinary words to wrap at both scales, so this proves the prime
+    // measurement path updates alongside the TextItems' draw-time font sizes.
+    let draft = "resize-aware input text ".repeat(18);
+    let draft_len = draft.len();
+    compositor.local_composer = Some(LocalComposerState {
+        text: draft.clone(),
+        cursor_byte: draft_len,
+        selection_anchor: draft_len,
+        at_capacity: false,
+        node_id: composer_id,
+        placeholder: None,
+    });
+    compositor.viewer_echoes.append(tile_id, draft.clone(), 1);
+
+    let composer_tokens = resolve_composer_overlay_tokens(&compositor.token_map);
+    let echo_tokens = resolve_viewer_echo_tokens(&compositor.token_map);
+    let snapshot = |compositor: &mut Compositor, scene: &SceneGraph| {
+        compositor.prime_composer_scroll_offset(scene);
+        compositor.prime_viewer_echo_layout(scene);
+        let items = compositor.collect_text_items(scene, 400.0, 300.0);
+        let composer = items
+            .iter()
+            .find(|item| item.text.as_ref() == draft)
+            .expect("local composer draft must render");
+        let echo = find_echo(&items);
+        (
+            composer.font_size_px,
+            composer.bounds_height,
+            composer.clip_pixel_y,
+            echo.font_size_px,
+            echo.bounds_height,
+            echo.pixel_y,
+            compositor.composer_layout.total_lines,
+            compositor.viewer_echo_line_counts[&tile_id],
+        )
+    };
+
+    let before = snapshot(&mut compositor, &scene);
+    assert!(
+        (before.0 - composer_tokens.font_size_px).abs() < 0.01,
+        "unresized composer must use its base token font"
+    );
+    assert!(
+        (before.3 - echo_tokens.font_size_px).abs() < 0.01,
+        "unresized viewer history must use its base token font"
+    );
+
+    // `tile_font_scale` is the viewer-local whole-portal-resize contract used by
+    // the generic OUTPUT collector. INPUT's compositor-owned overlays must follow
+    // it without any adapter republish.
+    const SCALE: f32 = 1.5;
+    scene.set_tile_font_scale(tile_id, SCALE);
+    let after = snapshot(&mut compositor, &scene);
+
+    assert!(
+        (after.0 - composer_tokens.font_size_px * SCALE).abs() < 0.01,
+        "composer draw font must scale with the resized portal (got {})",
+        after.0
+    );
+    assert!(
+        (after.3 - echo_tokens.font_size_px * SCALE).abs() < 0.01,
+        "viewer-history draw font must scale with the resized portal (got {})",
+        after.3
+    );
+    assert!(
+        after.1 > before.1 && after.6 > before.6,
+        "composer leading/layout must be remeasured after resize: before={before:?}, after={after:?}"
+    );
+    assert!(
+        after.4 > before.4 && after.7 > before.7,
+        "viewer-history leading/wrap layout must be remeasured after resize: before={before:?}, after={after:?}"
+    );
+    assert!(
+        (after.5 + after.4 - after.2).abs() < 0.5,
+        "resized history must still bottom-align to the resized composer box: echo bottom={} box top={}",
+        after.5 + after.4,
+        after.2
+    );
+}
+
 // ── Viewer-echo wrap + newline rendering (hud-pncm3) ───────────────────────
 
 /// Build a portal tile rooted at a composer-input HitRegion spanning the tile,
