@@ -65,51 +65,16 @@ pub(super) fn degradation_tile_opacity(opacity: f32, level: DegradationLevel) ->
     }
 }
 
-/// Whether a scene node receives the host tile's display scroll translation.
+/// Renderer adapter for the scene-owned scroll classification.
 ///
-/// Most scrollable tiles remain deliberately tile-wide: changing that policy
-/// would rewrite the established raw-tile and materialized-part behavior. The
-/// resident expanded portal is the narrow exception. Its `PortalSurface`
-/// provides pane geometry but deliberately has no stable part-node IDs because
-/// each publish regenerates the inline subtree. In that geometry-only form,
-/// frame/pane/chrome nodes must stay tile-anchored; only markdown laid out below
-/// a declared Composer or Transcript pane's label band is document content.
-///
-/// This is shared by the flat geometry, rounded-rect draw-list, text, and focus
-/// paths so a post-resize wheel scroll cannot split the portal into independently
-/// translated layers (hud-yrcev).
+/// Pointer mapping uses the same `SceneGraph` decision, keeping fixed portal
+/// chrome and scrolling document coordinates aligned after resize (hud-jeqop).
 pub(super) fn node_uses_display_tile_scroll(
     scene: &SceneGraph,
     tile: &Tile,
     node_id: SceneId,
 ) -> bool {
-    let Some(surface) = scene.portal_surface(tile.id) else {
-        return true;
-    };
-
-    // Materialized portal parts retain the existing per-tile behavior. The
-    // geometry-only fallback below is specifically for the resident adapter's
-    // freshly regenerated inline node tree.
-    if surface.parts.iter().any(|part| part.node.is_some()) {
-        return true;
-    }
-
-    let Some(node) = scene.nodes.get(&node_id) else {
-        return false;
-    };
-    let NodeData::TextMarkdown(text) = &node.data else {
-        return false;
-    };
-
-    surface.parts.iter().any(|part| {
-        matches!(
-            part.kind,
-            PortalPartKind::Composer | PortalPartKind::Transcript
-        ) && text.bounds.is_within(&part.bounds)
-            // INPUT/OUTPUT labels start at the pane's top edge and are chrome;
-            // the resident adapter lays document markdown below that label band.
-            && text.bounds.y > part.bounds.y
-    })
+    scene.node_uses_display_tile_scroll(tile.id, node_id)
 }
 
 // The composer's content inset (historically the `COMPOSER_TEXT_MARGIN = 6.0`

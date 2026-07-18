@@ -1,5 +1,13 @@
 use super::*;
 
+#[derive(Clone, Copy)]
+struct TileHitTestCoordinates {
+    local_x: f32,
+    local_y: f32,
+    scroll_x: f32,
+    scroll_y: f32,
+}
+
 impl SceneGraph {
     // ─── Queries ─────────────────────────────────────────────────────────
 
@@ -12,6 +20,45 @@ impl SceneGraph {
         let mut tiles: Vec<&Tile> = self.tiles.values().filter(|t| t.tab_id == active).collect();
         tiles.sort_by_key(|t| t.z_order);
         tiles
+    }
+
+    /// Whether `node_id` receives its host tile's displayed scroll translation.
+    ///
+    /// Ordinary tiles and materialized portal parts preserve the established
+    /// tile-wide scroll behavior. The narrow geometry-only portal form emitted
+    /// by the resident adapter has no stable part-node IDs: its frame and pane
+    /// chrome remain tile-anchored, while only document markdown below a
+    /// Composer or Transcript label band scrolls. Rendering and pointer mapping
+    /// both use this classification so their coordinates stay aligned.
+    pub fn node_uses_display_tile_scroll(&self, tile_id: SceneId, node_id: SceneId) -> bool {
+        let Some(surface) = self.portal_surface(tile_id) else {
+            return true;
+        };
+
+        // Materialized portal parts retain the existing per-tile behavior. The
+        // geometry-only fallback below is specifically for the resident
+        // adapter's freshly regenerated inline node tree.
+        if surface.parts.iter().any(|part| part.node.is_some()) {
+            return true;
+        }
+
+        let Some(node) = self.nodes.get(&node_id) else {
+            return false;
+        };
+        let NodeData::TextMarkdown(text) = &node.data else {
+            return false;
+        };
+
+        surface.parts.iter().any(|part| {
+            matches!(
+                part.kind,
+                PortalPartKind::Composer | PortalPartKind::Transcript
+            ) && text.bounds.is_within(&part.bounds)
+                // INPUT/OUTPUT labels start at the pane's top edge and are
+                // chrome; the resident adapter lays document markdown below
+                // that label band.
+                && text.bounds.y > part.bounds.y
+        })
     }
 
     // ─── Portal frame / header-band resolution (hud-643dv) ───────────────
@@ -263,11 +310,17 @@ impl SceneGraph {
             // renderer drew; falls back to the authoritative offset otherwise
             // (hud-3lynp).
             let (scroll_x, scroll_y) = self.effective_tile_scroll_offset_local(tile.id);
-            let local_x = x - tile.bounds.x + scroll_x;
-            let local_y = y - tile.bounds.y + scroll_y;
+            let local_x = x - tile.bounds.x;
+            let local_y = y - tile.bounds.y;
+            let coordinates = TileHitTestCoordinates {
+                local_x,
+                local_y,
+                scroll_x,
+                scroll_y,
+            };
             let element_id = tile
                 .root_node
-                .and_then(|root| self.hit_test_node(root, local_x, local_y))
+                .and_then(|root| self.hit_test_tile_node(root, tile.id, coordinates))
                 .unwrap_or(tile.id);
             return HitResult::Chrome { element_id };
         }
@@ -281,12 +334,18 @@ impl SceneGraph {
             // Displayed (smoothed/lagged) offset during an in-flight scroll
             // animation; authoritative offset otherwise (hud-3lynp).
             let (scroll_x, scroll_y) = self.effective_tile_scroll_offset_local(tile.id);
-            let local_x = x - tile.bounds.x + scroll_x;
-            let local_y = y - tile.bounds.y + scroll_y;
+            let local_x = x - tile.bounds.x;
+            let local_y = y - tile.bounds.y;
+            let coordinates = TileHitTestCoordinates {
+                local_x,
+                local_y,
+                scroll_x,
+                scroll_y,
+            };
 
             // ── Phase 3: Within the tile — reverse tree order ────────────
             if let Some(root_id) = tile.root_node {
-                if let Some(node_id) = self.hit_test_node(root_id, local_x, local_y) {
+                if let Some(node_id) = self.hit_test_tile_node(root_id, tile.id, coordinates) {
                     // Retrieve interaction_id from the node (it must be HitRegionNode).
                     let interaction_id = self
                         .nodes
@@ -473,6 +532,63 @@ impl SceneGraph {
     pub(super) fn hit_test_node(&self, node_id: SceneId, x: f32, y: f32) -> Option<SceneId> {
         let mut visited = HashSet::new();
         self.hit_test_node_inner(node_id, x, y, &mut visited)
+    }
+
+    /// Hit-test a tile subtree using the per-node scroll classification shared
+    /// with rendering. `local_x`/`local_y` are unscrolled tile-local display
+    /// coordinates; `scroll_x`/`scroll_y` are added only for document nodes that
+    /// were actually rendered with the tile's displayed scroll translation.
+    fn hit_test_tile_node(
+        &self,
+        root_id: SceneId,
+        tile_id: SceneId,
+        coordinates: TileHitTestCoordinates,
+    ) -> Option<SceneId> {
+        let mut visited = HashSet::new();
+        self.hit_test_tile_node_inner(root_id, tile_id, coordinates, &mut visited)
+    }
+
+    fn hit_test_tile_node_inner(
+        &self,
+        node_id: SceneId,
+        tile_id: SceneId,
+        coordinates: TileHitTestCoordinates,
+        visited: &mut HashSet<SceneId>,
+    ) -> Option<SceneId> {
+        if !visited.insert(node_id) {
+            // Cycle detected — skip this node to avoid infinite recursion.
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "[tze_hud_scene] cycle detected in node graph at {node_id:?} during hit_test_tile_node"
+            );
+            return None;
+        }
+        let node = self.nodes.get(&node_id)?;
+
+        // Check children in reverse order (last child = front-most) — depth first.
+        for child_id in node.children.iter().rev() {
+            if let Some(hit) =
+                self.hit_test_tile_node_inner(*child_id, tile_id, coordinates, visited)
+            {
+                return Some(hit);
+            }
+        }
+
+        // Check this node — only HitRegionNode with accepts_pointer qualifies.
+        match &node.data {
+            NodeData::HitRegion(hr) if hr.accepts_pointer => {
+                let (node_x, node_y) = if self.node_uses_display_tile_scroll(tile_id, node_id) {
+                    (
+                        coordinates.local_x + coordinates.scroll_x,
+                        coordinates.local_y + coordinates.scroll_y,
+                    )
+                } else {
+                    (coordinates.local_x, coordinates.local_y)
+                };
+                hr.bounds.contains_point(node_x, node_y).then_some(node_id)
+            }
+            _ => None,
+        }
     }
 
     fn hit_test_node_inner(
