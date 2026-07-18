@@ -68,6 +68,16 @@ impl WindowedFrameBuild {
         self.vertices.len()
     }
 
+    /// Flat-rect geometry built for this frame (test / diagnostic accessor).
+    ///
+    /// Kept behind `cfg(test)` because callers must not reuse a frame build's
+    /// private staging buffer in production.  Renderer regressions use this to
+    /// verify that the first frame after a local reflow derives chrome from the
+    /// same layout as its text pass.
+    pub(crate) fn flat_rect_vertices(&self) -> &[RectVertex] {
+        &self.vertices
+    }
+
     /// Precomputed drag-handle chrome vertices this frame (test accessor).
     pub(crate) fn drag_handle_vertex_count(&self) -> usize {
         self.drag_handle_vertices.len()
@@ -126,10 +136,16 @@ impl Compositor {
         self.viewer_echoes
             .retain_tiles(|tile_id| scene.tiles.contains_key(&tile_id));
 
-        // Measure the viewer-echo history wrap (total + per-entry) BEFORE the tile
-        // loop so the turn-divider pass can place a token-styled rule on each
-        // entry boundary (hud-hsc1t). Idempotent with the pre-text-pass prime;
-        // no-op when the store is empty.
+        // Resolve every resize-sensitive local layout BEFORE any geometry reads
+        // it.  The composer fill and viewer-echo dividers below, plus the later
+        // text pass, must share one same-frame wrapped layout: reflowing only at
+        // text collection would leave chrome one frame behind after a resize.
+        // These are deliberately once-per-frame measurements, off the transcript
+        // hot path.
+        self.prime_composer_scroll_offset(scene);
+        // Measure the viewer-echo history wrap (total + per-entry) before the
+        // tile loop so the turn-divider pass can place a token-styled rule on
+        // each entry boundary from the same fresh composer anchor (hud-hsc1t).
         self.prime_viewer_echo_layout(scene);
         // hud-pd9bp: resolve vertical-flow child offsets once per frame,
         // before the geometry + text passes read them. No-op for Absolute scenes.
@@ -1188,16 +1204,9 @@ impl Compositor {
         }
 
         // ── Stage 6: Text pass (between content and chrome) ──────────────────
-        // Prime the composer horizontal caret-follow offset (hud-zlfi4) before
-        // collecting text items (measures the caret x with a mutable rasterizer
-        // borrow the collect path lacks).  No-op when no composer is active.
-        self.prime_composer_scroll_offset(scene);
-        // Measure the viewer-echo history wrap once per frame, before the
-        // text pass reads the line count for bottom-alignment (hud-pncm3).
-        self.prime_viewer_echo_layout(scene);
-        // hud-pd9bp: resolve vertical-flow child offsets once per frame,
-        // before the geometry + text passes read them. No-op for Absolute scenes.
-        self.prime_vertical_flow_layout(scene);
+        // Composer, viewer-echo, and vertical-flow layout were resolved by the
+        // shared frame builder before it emitted flat geometry, so this text pass
+        // consumes the exact same same-frame state as the chrome above.
         // Text is content — rendered above geometry rectangles but below chrome.
         let text_items_chrome: Vec<TextItem> = if self.text_rasterizer.is_some() {
             self.collect_text_items(scene, sw, sh)

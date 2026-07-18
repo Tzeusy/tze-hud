@@ -84,6 +84,124 @@ const INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX: f32 = INPUT_HISTORY_APPROX_FON
 /// case.
 const INPUT_HISTORY_WIDE_CHAR_ADVANCE_PX: f32 = INPUT_HISTORY_APPROX_FONT_SIZE_PX;
 
+/// Runtime scroll-seed metrics derived from the same viewer-local portal scale
+/// the compositor applies to INPUT text.  Keeping the line pitch and both
+/// character advances together prevents a resize from updating only part of the
+/// conservative tail approximation.
+#[derive(Clone, Copy, Debug)]
+struct InputHistorySeedMetrics {
+    line_height_px: f32,
+    narrow_char_advance_px: f32,
+    wide_char_advance_px: f32,
+}
+
+impl InputHistorySeedMetrics {
+    fn for_tile_font_scale(
+        tile_font_scale: f32,
+        token_map: &std::collections::HashMap<String, String>,
+    ) -> Self {
+        // SceneGraph only accepts positive finite scales, but preserve the
+        // unscaled baseline if this helper is ever called before validation.
+        let scale = if tile_font_scale.is_finite() && tile_font_scale > 0.0 {
+            tile_font_scale
+        } else {
+            1.0
+        };
+        // Mirror the compositor's `scaled_portal_font` contract for the default
+        // 15px viewer-history font.  Runtime tail bookkeeping has no rasterizer,
+        // but it must still use the FONT the compositor will actually shape —
+        // including profile token overrides and the legibility clamp.
+        let min = token_map
+            .get(tze_hud_scene::types::PORTAL_TEXT_MIN_FONT_PX_TOKEN)
+            .and_then(|value| value.parse::<f32>().ok())
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .unwrap_or(tze_hud_scene::types::PORTAL_TEXT_MIN_FONT_PX_DEFAULT);
+        let max = token_map
+            .get(tze_hud_scene::types::PORTAL_TEXT_MAX_FONT_PX_TOKEN)
+            .and_then(|value| value.parse::<f32>().ok())
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .unwrap_or(tze_hud_scene::types::PORTAL_TEXT_MAX_FONT_PX_DEFAULT);
+        let (min, max) = if min <= max { (min, max) } else { (max, min) };
+        let effective_font_px = if (scale - 1.0).abs() < f32::EPSILON {
+            INPUT_HISTORY_APPROX_FONT_SIZE_PX
+        } else {
+            (INPUT_HISTORY_APPROX_FONT_SIZE_PX * scale).clamp(min, max)
+        };
+        let effective_font_ratio = effective_font_px / INPUT_HISTORY_APPROX_FONT_SIZE_PX;
+        Self {
+            line_height_px: INPUT_HISTORY_APPROX_LINE_HEIGHT_PX * effective_font_ratio,
+            narrow_char_advance_px: INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX
+                * effective_font_ratio,
+            wide_char_advance_px: INPUT_HISTORY_WIDE_CHAR_ADVANCE_PX * effective_font_ratio,
+        }
+    }
+}
+
+/// Geometry used when the raw-tile history aggregate was last seeded.
+///
+/// The runtime intentionally does not retain the submitted text, but it must
+/// remember enough of the old conservative measurement to bound a later
+/// resize-induced rewrap before appending the next local echo.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct InputHistorySeedState {
+    line_height_px: f32,
+    narrow_char_advance_px: f32,
+    wide_char_advance_px: f32,
+    wrap_width_px: f32,
+}
+
+impl InputHistorySeedState {
+    fn new(metrics: InputHistorySeedMetrics, wrap_width_px: f32) -> Self {
+        Self {
+            line_height_px: metrics.line_height_px,
+            narrow_char_advance_px: metrics.narrow_char_advance_px,
+            wide_char_advance_px: metrics.wide_char_advance_px,
+            wrap_width_px,
+        }
+    }
+
+    /// Conservative physical-height multiplier for retained aggregate rows.
+    ///
+    /// For either glyph class, a prior estimated row can turn into at most
+    /// `ceil(advance_ratio * old_wrap_width / new_wrap_width)` new rows. The
+    /// ceiling is required because an old one-row logical line can cross a new
+    /// boundary even when the aggregate density ratio is fractional. Taking the
+    /// larger narrow/wide ratio protects mixed and CJK history without retaining
+    /// historical text; the compositor still applies the exact visual clamp.
+    fn conservative_rebase_multiplier(
+        self,
+        metrics: InputHistorySeedMetrics,
+        wrap_width_px: f32,
+    ) -> f32 {
+        let valid = self.line_height_px.is_finite()
+            && self.line_height_px > 0.0
+            && self.narrow_char_advance_px.is_finite()
+            && self.narrow_char_advance_px > 0.0
+            && self.wide_char_advance_px.is_finite()
+            && self.wide_char_advance_px > 0.0
+            && self.wrap_width_px.is_finite()
+            && self.wrap_width_px > 0.0
+            && wrap_width_px.is_finite()
+            && wrap_width_px > 0.0;
+        if !valid {
+            return 1.0;
+        }
+
+        let line_ratio = metrics.line_height_px / self.line_height_px;
+        let advance_ratio = (metrics.narrow_char_advance_px / self.narrow_char_advance_px)
+            .max(metrics.wide_char_advance_px / self.wide_char_advance_px);
+        let row_multiplier = (advance_ratio * self.wrap_width_px / wrap_width_px)
+            .ceil()
+            .max(1.0);
+        let multiplier = (line_ratio * row_multiplier).max(1.0);
+        if multiplier.is_finite() {
+            multiplier
+        } else {
+            1.0
+        }
+    }
+}
+
 /// Composer/history horizontal text margin (physical px) mirroring the
 /// compositor's `COMPOSER_TEXT_MARGIN` in
 /// `crates/tze_hud_compositor/src/renderer/tile_render.rs`, used to derive the
@@ -172,9 +290,13 @@ fn char_advance_px(c: char, narrow_advance_px: f32, wide_advance_px: f32) -> f32
 /// box at rest is one line plus symmetric vertical padding, mirroring
 /// `Compositor::composer_input_box` with `visible_lines == 1`; the result is
 /// floored at one line so the reference viewport is never zero or negative.
-fn input_history_band_height_px(tile_height_px: f32) -> f32 {
-    let composer_box_px = INPUT_HISTORY_APPROX_LINE_HEIGHT_PX + INPUT_COMPOSER_TEXT_MARGIN_PX * 2.0;
-    (tile_height_px - composer_box_px).max(INPUT_HISTORY_APPROX_LINE_HEIGHT_PX)
+fn input_history_band_height_px(tile_height_px: f32, line_height_px: f32) -> f32 {
+    // The compositor scales text-derived line height with the portal but keeps
+    // its 6px content inset in physical pixels.  Mirror that mixed-unit contract
+    // exactly so the conservative runtime seed reaches the visual tail.
+    let line_height_px = line_height_px.max(1.0);
+    let composer_box_px = line_height_px + INPUT_COMPOSER_TEXT_MARGIN_PX * 2.0;
+    (tile_height_px - composer_box_px).max(line_height_px)
 }
 
 /// Wrap width (physical px) the compositor word-wraps history at — the tile
@@ -1287,6 +1409,10 @@ impl WinitApp {
                 .get(&tile_id)
                 .map(|t| (t.bounds.width, t.bounds.height));
             if let Some((tile_width_px, tile_height_px)) = tile_bounds {
+                let metrics = InputHistorySeedMetrics::for_tile_font_scale(
+                    scene.tile_font_scale(tile_id),
+                    &self.state.global_tokens,
+                );
                 // Seed the scroll clamp against the history BAND (region top →
                 // composer-box top), NOT the whole tile, and against a
                 // conservative wrapped-visual-row OVER-estimate of the content
@@ -1304,7 +1430,8 @@ impl WinitApp {
                 // per-frame clamp is the visual authority, and it re-clamps the
                 // displayed position every frame regardless of this value's
                 // precision.
-                let band_height_px = input_history_band_height_px(tile_height_px);
+                let band_height_px =
+                    input_history_band_height_px(tile_height_px, metrics.line_height_px);
                 let wrap_width_px = input_history_wrap_width_px(tile_width_px);
                 // The compositor renders each entry as `viewer_echo_display_text`
                 // — the `HH:MM␠␠` timestamp prefix (present whenever
@@ -1321,22 +1448,36 @@ impl WinitApp {
                 let added_rows = approx_wrapped_visual_rows(
                     &seed_text,
                     wrap_width_px,
-                    INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX,
-                    INPUT_HISTORY_WIDE_CHAR_ADVANCE_PX,
+                    metrics.narrow_char_advance_px,
+                    metrics.wide_char_advance_px,
                 );
-                let added_height_px = added_rows as f32 * INPUT_HISTORY_APPROX_LINE_HEIGHT_PX;
-                let new_total_height_px = self
+                let added_height_px = added_rows as f32 * metrics.line_height_px;
+                let prior_seed_state = self.state.input_history_seed_states.get(&tile_id).copied();
+                let previous_total_height_px = self
                     .state
                     .input_processor
-                    .tile_total_content_height_px(tile_id)
-                    + added_height_px;
+                    .tile_total_content_height_px(tile_id);
+                // Existing raw-tile history was seeded in physical line units.
+                // We cannot rewrap retained raw entries here, so use their last
+                // conservative seed geometry to bound both a line-pitch change
+                // and a narrower-width reflow before adding the new entry.
+                let rebased_total_height_px = prior_seed_state
+                    .map(|prior| {
+                        previous_total_height_px
+                            * prior.conservative_rebase_multiplier(metrics, wrap_width_px)
+                    })
+                    .unwrap_or(previous_total_height_px);
+                let new_total_height_px = rebased_total_height_px + added_height_px;
                 self.state.input_processor.notify_tile_content_appended(
                     tile_id,
                     new_total_height_px,
                     band_height_px,
-                    INPUT_HISTORY_APPROX_LINE_HEIGHT_PX,
+                    metrics.line_height_px,
                     &mut scene,
                 );
+                self.state
+                    .input_history_seed_states
+                    .insert(tile_id, InputHistorySeedState::new(metrics, wrap_width_px));
                 self.state
                     .input_processor
                     .reset_tile_scroll_to_tail(tile_id, &mut scene);
@@ -1674,15 +1815,15 @@ impl WinitApp {
         PortalProjectionDrain::Completed { scene_changed }
     }
 
-    /// Remove stale entries from `portal_resize_states` for tiles that no
+    /// Remove stale per-tile resize and raw-history state for tiles that no
     /// longer exist in the scene.
     ///
     /// Called once per `about_to_wait` iteration.  Uses a two-phase approach:
     ///
     /// 1. **Eager drain** — drains `SceneGraph::recently_removed_tile_ids`
     ///    (populated by `remove_tile_and_nodes` on every `DeleteTile` mutation)
-    ///    and removes each returned ID from `portal_resize_states` immediately.
-    ///    This is O(removed) and requires only the scene lock.
+    ///    and removes each returned ID from both maps immediately. This is
+    ///    O(removed) and requires only the scene lock.
     ///
     /// 2. **Fallback sweep** — if `portal_resize_states` is still non-empty
     ///    after the drain (e.g. entries that predated the drain queue, or
@@ -1707,34 +1848,49 @@ impl WinitApp {
         let removed_ids = scene.drain_removed_tile_ids();
         let mut eagerly_removed = 0usize;
         for tile_id in removed_ids {
-            if self.state.portal_resize_states.remove(&tile_id).is_some() {
+            let resize_removed = self.state.portal_resize_states.remove(&tile_id).is_some();
+            let history_removed = self
+                .state
+                .input_history_seed_states
+                .remove(&tile_id)
+                .is_some();
+            if resize_removed || history_removed {
                 eagerly_removed += 1;
             }
         }
         if eagerly_removed > 0 {
             tracing::debug!(
                 removed = eagerly_removed,
-                remaining = self.state.portal_resize_states.len(),
-                "portal resize: eagerly pruned resize-state entries for removed tiles"
+                resize_remaining = self.state.portal_resize_states.len(),
+                history_remaining = self.state.input_history_seed_states.len(),
+                "portal resize: eagerly pruned stale per-tile state for removed tiles"
             );
         }
 
         // Phase 2: fallback sweep — catches any entries that slipped through
         // (e.g. tiles removed before the drain queue existed, or during a
         // prior lock-busy deferral).
-        if self.state.portal_resize_states.is_empty() {
+        if self.state.portal_resize_states.is_empty()
+            && self.state.input_history_seed_states.is_empty()
+        {
             return;
         }
-        let before = self.state.portal_resize_states.len();
+        let resize_before = self.state.portal_resize_states.len();
+        let history_before = self.state.input_history_seed_states.len();
         self.state
             .portal_resize_states
             .retain(|tile_id, _| scene.tiles.contains_key(tile_id));
-        let swept = before - self.state.portal_resize_states.len();
+        self.state
+            .input_history_seed_states
+            .retain(|tile_id, _| scene.tiles.contains_key(tile_id));
+        let swept = (resize_before - self.state.portal_resize_states.len())
+            + (history_before - self.state.input_history_seed_states.len());
         if swept > 0 {
             tracing::debug!(
                 removed = swept,
-                remaining = self.state.portal_resize_states.len(),
-                "portal resize: sweep-pruned stale resize-state entries for removed tiles"
+                resize_remaining = self.state.portal_resize_states.len(),
+                history_remaining = self.state.input_history_seed_states.len(),
+                "portal resize: sweep-pruned stale per-tile state for removed tiles"
             );
         }
     }
@@ -2071,6 +2227,7 @@ mod tests {
             consumed_command_keydowns: std::collections::HashSet::new(),
             local_composer_state: Arc::new(StdMutex::new(None)),
             viewer_echo_queue: Arc::new(StdMutex::new(Vec::new())),
+            input_history_seed_states: std::collections::HashMap::new(),
             focus_ring_owner_state: Arc::new(StdMutex::new(None)),
             resize_grip_hover_state: Arc::new(StdMutex::new(None)),
             composer_visual_layout: Arc::new(StdMutex::new(None)),
@@ -4038,16 +4195,325 @@ mod tests {
     /// collapse to zero for a tiny tile (hud-3y7va).
     #[test]
     fn input_history_band_height_under_estimates_tile_height() {
-        let band = input_history_band_height_px(300.0);
+        let band = input_history_band_height_px(300.0, INPUT_HISTORY_APPROX_LINE_HEIGHT_PX);
         assert!(
             band < 300.0,
             "band {band} must stay under the full tile height (composer box excluded)"
         );
         assert!(band > 0.0, "band {band} must be positive");
         assert_eq!(
-            input_history_band_height_px(5.0),
+            input_history_band_height_px(5.0, INPUT_HISTORY_APPROX_LINE_HEIGHT_PX),
             INPUT_HISTORY_APPROX_LINE_HEIGHT_PX,
             "a tiny tile floors the reference viewport at one line"
+        );
+        let scaled_line_height = INPUT_HISTORY_APPROX_LINE_HEIGHT_PX * 1.4;
+        assert!(
+            (input_history_band_height_px(300.0, scaled_line_height)
+                - (300.0 - scaled_line_height - INPUT_COMPOSER_TEXT_MARGIN_PX * 2.0))
+                .abs()
+                < 0.01,
+            "a resized band must scale its line but retain the fixed 6px inset on each side"
+        );
+    }
+
+    /// A whole-portal width grow also raises the viewer-local font scale.  The
+    /// raw-tile history seed must scale every text-derived metric with that
+    /// factor — line pitch, composer-box/band height, and narrow + full-width
+    /// advances — while retaining the compositor's fixed 6px inset on each
+    /// side.  Otherwise the tail seed falls below the compositor's exact
+    /// `real_max_scrollback` and the newest reply is not bottom-aligned on the
+    /// first resized frame (hud-t8c3h).
+    #[test]
+    fn resized_raw_history_tail_seed_scales_line_band_and_character_advances() {
+        const SCALE: f32 = 1.4;
+        const TILE_WIDTH_PX: f32 = 560.0;
+        const TILE_HEIGHT_PX: f32 = 300.0;
+
+        let (mut scene, _tab_id, tile_id, _composer_id, _control_id) = portal_scene_with_control();
+        {
+            let tile = scene
+                .tiles
+                .get_mut(&tile_id)
+                .expect("portal fixture must retain its tile");
+            tile.bounds.width = TILE_WIDTH_PX;
+            tile.bounds.height = TILE_HEIGHT_PX;
+        }
+        scene.set_tile_font_scale(tile_id, SCALE);
+        let (mut app, _rx) =
+            make_windowed_keyboard_test_app(scene, FocusManager::new(), InputProcessor::new());
+
+        // Mixed narrow + full-width text makes an unscaled 0.75em/1em estimate
+        // visibly under-count after the portal widens.  The prefix is included
+        // because `append_raw_tile_viewer_echo` always timestamps this path.
+        let text = format!("{}{}", "n".repeat(240), "字".repeat(120));
+        let seed_text = format!("{INPUT_HISTORY_TIMESTAMP_PREFIX_STANDIN}{text}");
+        let scaled_rows = approx_wrapped_visual_rows(
+            &seed_text,
+            input_history_wrap_width_px(TILE_WIDTH_PX),
+            INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX * SCALE,
+            INPUT_HISTORY_WIDE_CHAR_ADVANCE_PX * SCALE,
+        );
+        let unscaled_rows = approx_wrapped_visual_rows(
+            &seed_text,
+            input_history_wrap_width_px(TILE_WIDTH_PX),
+            INPUT_HISTORY_CONSERVATIVE_CHAR_ADVANCE_PX,
+            INPUT_HISTORY_WIDE_CHAR_ADVANCE_PX,
+        );
+        assert!(
+            scaled_rows > unscaled_rows,
+            "test setup: a widened portal must require scaled narrow and wide advances \
+             (scaled={scaled_rows}, unscaled={unscaled_rows})"
+        );
+
+        let scaled_line_height = INPUT_HISTORY_APPROX_LINE_HEIGHT_PX * SCALE;
+        let expected_total_height = scaled_rows as f32 * scaled_line_height;
+        // The compositor scales its text line/box but leaves the 6px content
+        // inset fixed, so the band subtracts `scaled_line + 2*6`, not a scaled
+        // 12px margin.
+        let expected_band_height = (TILE_HEIGHT_PX
+            - (scaled_line_height + INPUT_COMPOSER_TEXT_MARGIN_PX * 2.0))
+            .max(scaled_line_height);
+        let expected_tail_offset = (expected_total_height - expected_band_height).max(0.0);
+        assert!(
+            expected_tail_offset > 0.0,
+            "test setup: scaled history must overflow its scaled input-history band"
+        );
+
+        app.append_raw_tile_viewer_echo(tile_id, text);
+
+        let actual_total_height = app
+            .state
+            .input_processor
+            .tile_total_content_height_px(tile_id);
+        let (actual_offset, at_tail) = {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let scene = shared.scene.try_lock().unwrap();
+            (
+                scene.tile_scroll_offset_local(tile_id).1,
+                scene.tile_follow_tail_at_tail(tile_id),
+            )
+        };
+        assert!(
+            at_tail,
+            "a local submission must retain its follow-tail state"
+        );
+        assert!(
+            (actual_total_height - expected_total_height).abs() < 0.01,
+            "resized seed must charge scaled rows × scaled line height: \
+             actual={actual_total_height}, expected={expected_total_height}"
+        );
+        assert!(
+            (actual_offset - expected_tail_offset).abs() < 0.01,
+            "resized tail reset must use the scaled composer band with an unscaled 6px inset: \
+             actual={actual_offset}, expected={expected_tail_offset}"
+        );
+    }
+
+    /// The runtime's conservative seed must use the same *effective* history
+    /// font as the compositor, including the shared 9px/48px legibility clamp.
+    /// A raw multiplier below the floor would under-seed a shrunken portal;
+    /// above the ceiling it would drift from the rendered line pitch.
+    #[test]
+    fn input_history_seed_metrics_follow_portal_font_clamp() {
+        let tokens = std::collections::HashMap::new();
+        let min = InputHistorySeedMetrics::for_tile_font_scale(0.1, &tokens);
+        let max = InputHistorySeedMetrics::for_tile_font_scale(10.0, &tokens);
+        let min_font = tze_hud_scene::types::PORTAL_TEXT_MIN_FONT_PX_DEFAULT;
+        let max_font = tze_hud_scene::types::PORTAL_TEXT_MAX_FONT_PX_DEFAULT;
+
+        assert!(
+            (min.line_height_px - min_font * 1.4).abs() < 0.01
+                && (min.narrow_char_advance_px - min_font * 0.75).abs() < 0.01
+                && (min.wide_char_advance_px - min_font).abs() < 0.01,
+            "below the scale floor, every history metric must use the compositor's effective {min_font}px font: {min:?}"
+        );
+        assert!(
+            (max.line_height_px - max_font * 1.4).abs() < 0.01
+                && (max.narrow_char_advance_px - max_font * 0.75).abs() < 0.01
+                && (max.wide_char_advance_px - max_font).abs() < 0.01,
+            "above the scale ceiling, every history metric must use the compositor's effective {max_font}px font: {max:?}"
+        );
+
+        let profile_tokens = std::collections::HashMap::from([
+            (
+                tze_hud_scene::types::PORTAL_TEXT_MIN_FONT_PX_TOKEN.to_owned(),
+                "13".to_owned(),
+            ),
+            (
+                tze_hud_scene::types::PORTAL_TEXT_MAX_FONT_PX_TOKEN.to_owned(),
+                "17".to_owned(),
+            ),
+        ]);
+        let profile_max = InputHistorySeedMetrics::for_tile_font_scale(2.0, &profile_tokens);
+        assert!(
+            (profile_max.line_height_px - 17.0 * 1.4).abs() < 0.01
+                && (profile_max.narrow_char_advance_px - 17.0 * 0.75).abs() < 0.01
+                && (profile_max.wide_char_advance_px - 17.0).abs() < 0.01,
+            "history metrics must honor the same profile clamp tokens as the compositor: {profile_max:?}"
+        );
+    }
+
+    /// Existing raw-tile history is measured in physical pixels.  When the
+    /// portal is resized, a later local submission must rebase that retained
+    /// seed into the new effective line units before resetting to tail; adding
+    /// only the newest entry in resized units leaves the old rows short and
+    /// fails to reach the compositor's true tail (hud-t8c3h).
+    #[test]
+    fn resized_raw_history_rebases_existing_seed_before_tail_reset() {
+        const RESIZED_SCALE: f32 = 1.4;
+        const BASE_WIDTH_PX: f32 = 400.0;
+        const RESIZED_WIDTH_PX: f32 = 560.0;
+        const TILE_HEIGHT_PX: f32 = 300.0;
+
+        let (mut scene, _tab_id, tile_id, _composer_id, _control_id) = portal_scene_with_control();
+        scene.tiles.get_mut(&tile_id).unwrap().bounds.width = BASE_WIDTH_PX;
+        let (mut app, _rx) =
+            make_windowed_keyboard_test_app(scene, FocusManager::new(), InputProcessor::new());
+
+        let old_entries: Vec<String> = (0..4)
+            .map(|_| format!("{}{}", "n".repeat(200), "字".repeat(80)))
+            .collect();
+        for entry in &old_entries {
+            app.append_raw_tile_viewer_echo(tile_id, entry.clone());
+        }
+
+        {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let mut scene = shared.scene.try_lock().unwrap();
+            scene.tiles.get_mut(&tile_id).unwrap().bounds.width = RESIZED_WIDTH_PX;
+            scene.set_tile_font_scale(tile_id, RESIZED_SCALE);
+        }
+        let newest = format!("{}{}", "n".repeat(200), "字".repeat(80));
+        app.append_raw_tile_viewer_echo(tile_id, newest.clone());
+
+        let resized_metrics =
+            InputHistorySeedMetrics::for_tile_font_scale(RESIZED_SCALE, &app.state.global_tokens);
+        let wrap_width = input_history_wrap_width_px(RESIZED_WIDTH_PX);
+        let expected_total_height: f32 = old_entries
+            .iter()
+            .chain(std::iter::once(&newest))
+            .map(|entry| {
+                let prefixed = format!("{INPUT_HISTORY_TIMESTAMP_PREFIX_STANDIN}{entry}");
+                let rows = approx_wrapped_visual_rows(
+                    &prefixed,
+                    wrap_width,
+                    resized_metrics.narrow_char_advance_px,
+                    resized_metrics.wide_char_advance_px,
+                );
+                rows as f32 * resized_metrics.line_height_px
+            })
+            .sum();
+        let expected_band_height =
+            input_history_band_height_px(TILE_HEIGHT_PX, resized_metrics.line_height_px);
+        let expected_tail_offset = (expected_total_height - expected_band_height).max(0.0);
+
+        let actual_total_height = app
+            .state
+            .input_processor
+            .tile_total_content_height_px(tile_id);
+        let (actual_offset, at_tail) = {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let scene = shared.scene.try_lock().unwrap();
+            (
+                scene.tile_scroll_offset_local(tile_id).1,
+                scene.tile_follow_tail_at_tail(tile_id),
+            )
+        };
+        assert!(
+            at_tail,
+            "new local input must reset the resized history to tail"
+        );
+        assert!(
+            actual_total_height >= expected_total_height,
+            "existing history must be rebased into resized units before appending: \
+             actual={actual_total_height}, expected_at_least={expected_total_height}"
+        );
+        assert!(
+            actual_offset >= expected_tail_offset,
+            "tail reset must reach the resized compositor tail: \
+             actual={actual_offset}, expected_at_least={expected_tail_offset}"
+        );
+    }
+
+    /// A severe width shrink can force retained CJK rows to wrap several times
+    /// more even when the font itself is held at the compositor's minimum.
+    /// Rebasing only the physical line pitch loses that reflow, so the next
+    /// local echo must conservatively expand the old aggregate before tail reset.
+    #[test]
+    fn shrunk_clamped_raw_history_rebases_wrap_before_tail_reset() {
+        const BASE_WIDTH_PX: f32 = 1_000.0;
+        const SHRUNK_WIDTH_PX: f32 = 240.0;
+        const SHRUNK_SCALE: f32 = 0.24;
+        const TILE_HEIGHT_PX: f32 = 300.0;
+
+        let (mut scene, _tab_id, tile_id, _composer_id, _control_id) = portal_scene_with_control();
+        scene.tiles.get_mut(&tile_id).unwrap().bounds.width = BASE_WIDTH_PX;
+        let (mut app, _rx) =
+            make_windowed_keyboard_test_app(scene, FocusManager::new(), InputProcessor::new());
+
+        let old_entries: Vec<String> = (0..4).map(|_| "字".repeat(200)).collect();
+        for entry in &old_entries {
+            app.append_raw_tile_viewer_echo(tile_id, entry.clone());
+        }
+
+        {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let mut scene = shared.scene.try_lock().unwrap();
+            scene.tiles.get_mut(&tile_id).unwrap().bounds.width = SHRUNK_WIDTH_PX;
+            scene.set_tile_font_scale(tile_id, SHRUNK_SCALE);
+        }
+        let newest = "字".repeat(200);
+        app.append_raw_tile_viewer_echo(tile_id, newest.clone());
+
+        let metrics =
+            InputHistorySeedMetrics::for_tile_font_scale(SHRUNK_SCALE, &app.state.global_tokens);
+        assert!(
+            (metrics.wide_char_advance_px - tze_hud_scene::types::PORTAL_TEXT_MIN_FONT_PX_DEFAULT)
+                .abs()
+                < 0.01,
+            "test setup: the shrunken portal must be held at the 9px font floor"
+        );
+        let wrap_width = input_history_wrap_width_px(SHRUNK_WIDTH_PX);
+        let expected_total_height: f32 = old_entries
+            .iter()
+            .chain(std::iter::once(&newest))
+            .map(|entry| {
+                let prefixed = format!("{INPUT_HISTORY_TIMESTAMP_PREFIX_STANDIN}{entry}");
+                let rows = approx_wrapped_visual_rows(
+                    &prefixed,
+                    wrap_width,
+                    metrics.narrow_char_advance_px,
+                    metrics.wide_char_advance_px,
+                );
+                rows as f32 * metrics.line_height_px
+            })
+            .sum();
+        let expected_band_height =
+            input_history_band_height_px(TILE_HEIGHT_PX, metrics.line_height_px);
+        let expected_tail_offset = (expected_total_height - expected_band_height).max(0.0);
+
+        let actual_total_height = app
+            .state
+            .input_processor
+            .tile_total_content_height_px(tile_id);
+        let (actual_offset, at_tail) = {
+            let shared = app.state.shared_state.try_lock().unwrap();
+            let scene = shared.scene.try_lock().unwrap();
+            (
+                scene.tile_scroll_offset_local(tile_id).1,
+                scene.tile_follow_tail_at_tail(tile_id),
+            )
+        };
+        assert!(at_tail, "new local input must retain follow-tail state");
+        assert!(
+            actual_total_height >= expected_total_height,
+            "retained rows must be rebased for the shrunken wrap width: \
+             actual={actual_total_height}, expected_at_least={expected_total_height}"
+        );
+        assert!(
+            actual_offset >= expected_tail_offset,
+            "tail reset must reach the clamped-font shrunken history tail: \
+             actual={actual_offset}, expected_at_least={expected_tail_offset}"
         );
     }
 

@@ -1150,6 +1150,193 @@ async fn portal_resize_scales_runtime_authored_input_text_and_layout() {
     );
 }
 
+/// The first frame after a viewer-local resize must derive the composer fill,
+/// viewer-echo dividers, and text from one freshly measured wrapped layout.
+///
+/// Regression for the ordering bug where `build_frame_vertices` emitted the
+/// composer fill and echo dividers from the prior frame's layout, then the text
+/// encode path reflowed the same draft later in the frame.  The test deliberately
+/// leaves a six-line layout primed, applies a local resize scale that reflows the
+/// unchanged draft, and inspects the actual staged first-frame vertices.
+#[tokio::test]
+async fn repro_resize_first_frame_keeps_composer_chrome_aligned_with_wrapped_text() {
+    let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(400, 300).await);
+    compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+    let (mut scene, tile_id) = viewer_echo_test_scene();
+    let composer_id = scene.tiles[&tile_id]
+        .root_node
+        .expect("viewer-echo fixture must root the tile at its composer node");
+    const SURFACE_H: f32 = 500.0;
+    scene.tiles.get_mut(&tile_id).unwrap().bounds.height = SURFACE_H;
+    match &mut scene.nodes.get_mut(&composer_id).unwrap().data {
+        NodeData::HitRegion(region) => region.bounds.height = SURFACE_H,
+        other => panic!("viewer-echo fixture root must be a composer HitRegion, got {other:?}"),
+    }
+    compositor
+        .token_map
+        .insert("portal.composer.max_lines".to_owned(), "8".to_owned());
+
+    // At the base scale this draft occupies six wrapped rows.  Raising the
+    // viewer-local scale reflows the same bytes into a taller visible box; no
+    // adapter republish occurs between the two frames.
+    let draft = "resize reflow ".repeat(21);
+    let draft_len = draft.len();
+    compositor.local_composer = Some(LocalComposerState {
+        text: draft.clone(),
+        cursor_byte: draft_len,
+        selection_anchor: draft_len,
+        at_capacity: false,
+        node_id: composer_id,
+        placeholder: None,
+    });
+    compositor
+        .viewer_echoes
+        .append(tile_id, "first reply".to_owned(), 1);
+    compositor
+        .viewer_echoes
+        .append(tile_id, "second reply".to_owned(), 2);
+    compositor.markdown_tokens.separator_color = Some(Rgba::WHITE);
+    compositor.markdown_tokens.separator_thickness_px = 2.0;
+
+    compositor.prime_composer_scroll_offset(&scene);
+    compositor.prime_viewer_echo_layout(&scene);
+    let old_visible_lines = compositor.composer_layout.visible_lines;
+    assert_eq!(
+        old_visible_lines, 6.0,
+        "test setup: base layout must occupy six visible rows"
+    );
+
+    const RESIZED_SCALE: f32 = 1.5;
+    scene.set_tile_font_scale(tile_id, RESIZED_SCALE);
+    // `build_windowed_frame` is the actual first-frame staging path: it creates
+    // flat chrome geometry before it prepares the later text pass.
+    compositor.prime_markdown_cache(&scene);
+    compositor.prime_truncation_cache(&scene);
+    let frame = compositor.build_windowed_frame(&mut scene, 400, SURFACE_H as u32);
+
+    // The text preparation at the tail of `build_windowed_frame` has resolved
+    // the resized layout.  Capture its fresh geometry independently of the flat
+    // vertex staging buffer so the assertion catches a one-frame mismatch.
+    let fresh_layout = compositor.composer_layout;
+    assert_eq!(
+        fresh_layout.visible_lines, 8.0,
+        "test setup: resized layout must reflow to eight visible rows"
+    );
+    let region = Rect::new(0.0, 0.0, 400.0, SURFACE_H);
+    let composer_tokens = resolve_composer_overlay_tokens(&compositor.token_map);
+    let line_height_multiplier = crate::markdown::MarkdownTokens::default().line_height_multiplier;
+    let expected_box = Compositor::composer_input_box(
+        region,
+        composer_tokens.font_size_px * RESIZED_SCALE,
+        line_height_multiplier,
+        fresh_layout.visible_lines,
+        composer_tokens.anchor,
+        composer_tokens.content_inset_px,
+    );
+
+    // The staged composer fill is the exact flat-rect geometry presented in the
+    // first frame.  Its token color is unique in this minimal scene.
+    let composer_fill = [
+        composer_tokens.bg_r,
+        composer_tokens.bg_g,
+        composer_tokens.bg_b,
+        composer_tokens.bg_a,
+    ];
+    let fill_vertices = frame
+        .flat_rect_vertices()
+        .chunks_exact(6)
+        .find(|rect| rect.iter().all(|vertex| vertex.color == composer_fill))
+        .expect("first-frame composer fill must be staged");
+    let fill_bounds = rect_vertex_bounds(fill_vertices, 400.0, SURFACE_H);
+    assert_rect_close(
+        fill_bounds,
+        expected_box,
+        "first-frame composer fill must use the resized wrapped layout",
+    );
+
+    // The later text preparation must anchor both the draft and input history to
+    // that same input box, not merely update the fill on a subsequent frame.
+    let items = compositor.collect_text_items(&scene, 400.0, SURFACE_H);
+    let composer_text = items
+        .iter()
+        .find(|item| item.text.as_ref() == draft)
+        .expect("resized composer text must render");
+    let echo = find_echo(&items);
+    assert!(
+        (composer_text.clip_pixel_y - expected_box.y).abs() < 0.5,
+        "resized composer text clip must start at the same box top: text={}, box={}",
+        composer_text.clip_pixel_y,
+        expected_box.y
+    );
+    assert!(
+        (echo.pixel_y + echo.bounds_height - expected_box.y).abs() < 0.5,
+        "resized viewer echo must bottom-align to the same box top: echo_bottom={}, box={}",
+        echo.pixel_y + echo.bounds_height,
+        expected_box.y
+    );
+
+    let tile = scene
+        .tiles
+        .get(&tile_id)
+        .expect("fixture tile remains visible");
+    let expected_divider = compositor
+        .collect_viewer_echo_divider_rects(tile, &scene)
+        .into_iter()
+        .next()
+        .expect("two echo entries must produce a divider");
+    let sep_color = compositor
+        .markdown_tokens
+        .separator_color
+        .expect("default portal divider color must be enabled");
+    let expected_divider_color = compositor.gpu_color(sep_color);
+    let divider_vertices = frame
+        .flat_rect_vertices()
+        .chunks_exact(6)
+        .find(|rect| {
+            rect.iter()
+                .all(|vertex| vertex.color == expected_divider_color)
+        })
+        .expect("first-frame viewer-echo divider must be staged");
+    let divider_bounds = rect_vertex_bounds(divider_vertices, 400.0, SURFACE_H);
+    assert_rect_close(
+        divider_bounds,
+        expected_divider,
+        "first-frame viewer-echo divider must use the resized composer anchor",
+    );
+}
+
+fn rect_vertex_bounds(vertices: &[crate::pipeline::RectVertex], sw: f32, sh: f32) -> Rect {
+    assert_eq!(vertices.len(), 6, "a flat rect must contain two triangles");
+    let left = vertices
+        .iter()
+        .map(|vertex| (vertex.position[0] + 1.0) * sw * 0.5)
+        .fold(f32::INFINITY, f32::min);
+    let right = vertices
+        .iter()
+        .map(|vertex| (vertex.position[0] + 1.0) * sw * 0.5)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let top = vertices
+        .iter()
+        .map(|vertex| (1.0 - vertex.position[1]) * sh * 0.5)
+        .fold(f32::INFINITY, f32::min);
+    let bottom = vertices
+        .iter()
+        .map(|vertex| (1.0 - vertex.position[1]) * sh * 0.5)
+        .fold(f32::NEG_INFINITY, f32::max);
+    Rect::new(left, top, right - left, bottom - top)
+}
+
+fn assert_rect_close(actual: Rect, expected: Rect, message: &str) {
+    assert!(
+        (actual.x - expected.x).abs() < 0.5
+            && (actual.y - expected.y).abs() < 0.5
+            && (actual.width - expected.width).abs() < 0.5
+            && (actual.height - expected.height).abs() < 0.5,
+        "{message}: actual={actual:?}, expected={expected:?}"
+    );
+}
+
 // ── Viewer-echo wrap + newline rendering (hud-pncm3) ───────────────────────
 
 /// Build a portal tile rooted at a composer-input HitRegion spanning the tile,

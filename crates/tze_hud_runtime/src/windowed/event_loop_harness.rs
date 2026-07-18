@@ -146,6 +146,7 @@ impl WindowedRuntimeState {
             consumed_command_keydowns: HashSet::new(),
             local_composer_state: Arc::new(StdMutex::new(None)),
             viewer_echo_queue: Arc::new(StdMutex::new(Vec::new())),
+            input_history_seed_states: HashMap::new(),
             focus_ring_owner_state: Arc::new(StdMutex::new(None)),
             resize_grip_hover_state: Arc::new(StdMutex::new(None)),
             composer_visual_layout: Arc::new(StdMutex::new(None)),

@@ -550,6 +550,12 @@ struct WindowedRuntimeState {
     /// thread pushes the submitted text; the compositor drains it into its
     /// per-tile viewer-echo store and renders it above the composer strip.
     viewer_echo_queue: PortalViewerEchoQueue,
+    /// Last conservative geometry used for each raw-tile history seed. Retained
+    /// history is tracked in physical pixels by InputProcessor, so a later
+    /// whole-portal resize rebases its conservative tail estimate for both line
+    /// pitch and wrap capacity before adding the next local echo.
+    input_history_seed_states:
+        std::collections::HashMap<tze_hud_scene::SceneId, portal::InputHistorySeedState>,
     /// Shared handle carrying the current keyboard-focus owner to the compositor's
     /// chrome-layer ring pass (hud-k6yvb). Written each frame in `about_to_wait`
     /// from the active tab's `FocusManager` owner; the compositor draws the ring
@@ -3041,6 +3047,7 @@ impl WindowedRuntime {
             // compositor.  Separate Arc so it works before compositor is created.
             local_composer_state: Arc::new(StdMutex::new(None)),
             viewer_echo_queue: Arc::new(StdMutex::new(Vec::new())),
+            input_history_seed_states: std::collections::HashMap::new(),
             focus_ring_owner_state: Arc::new(StdMutex::new(None)),
             // Placeholder; replaced in resumed() with the compositor's Arc (hud-wgiys).
             resize_grip_hover_state: Arc::new(StdMutex::new(None)),
