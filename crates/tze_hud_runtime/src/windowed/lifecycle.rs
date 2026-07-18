@@ -779,14 +779,28 @@ pub(super) fn windowed_frame_needs_render(
     animation_inflight: bool,
     composer_needs_render: bool,
     benchmark_active: bool,
-    surface_recovered: bool,
+    surface_repaint_pending: bool,
 ) -> bool {
     benchmark_active
         || scene_changed
         || geometry_changed
         || animation_inflight
         || composer_needs_render
-        || surface_recovered
+        || surface_repaint_pending
+}
+
+/// Carry a recovered-surface repaint requirement until its first fresh submit.
+///
+/// A successful reconfigure can race with a temporarily held scene lock. The
+/// compositor must retain the repaint requirement across that lock miss (and
+/// across a failed subsequent acquire) so an unchanged scene does not strand a
+/// recovered swapchain without visible content.
+pub(super) const fn update_surface_repaint_pending(
+    was_pending: bool,
+    surface_recovered: bool,
+    frame_submitted: bool,
+) -> bool {
+    (was_pending || surface_recovered) && !frame_submitted
 }
 
 impl WindowedBenchmarkRunState {
@@ -2887,6 +2901,28 @@ mod tests {
         assert!(
             windowed_frame_needs_render(false, false, false, false, false, true),
             "a reconfigured surface needs one fresh frame even when scene state is unchanged"
+        );
+    }
+
+    #[test]
+    fn surface_repaint_requirement_survives_lock_miss_until_submit() {
+        let pending_after_recovery = update_surface_repaint_pending(false, true, false);
+        assert!(pending_after_recovery);
+        assert!(
+            windowed_frame_needs_render(false, false, false, false, false, pending_after_recovery),
+            "the recovered surface must request a fresh frame even for an unchanged scene"
+        );
+
+        let pending_after_lock_miss =
+            update_surface_repaint_pending(pending_after_recovery, false, false);
+        assert!(
+            pending_after_lock_miss,
+            "a scene-lock miss must not discard the recovered-surface repaint requirement"
+        );
+
+        assert!(
+            !update_surface_repaint_pending(pending_after_lock_miss, false, true),
+            "the repaint requirement clears only after a frame submits"
         );
     }
 

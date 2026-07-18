@@ -207,7 +207,8 @@ use self::lifecycle::{
     BENCHMARK_NO_PROGRESS_TIMEOUT, PendingInputLatencySamples, WindowedBenchmarkRunState,
     WindowedQuiescentEfficiencyRunState, begin_os_mouse_capture, detect_monitor_size,
     drain_pending_input_latency, end_os_mouse_capture, focus_window_for_text_input,
-    read_windows_clipboard_text, seed_windowed_benchmark_scene, windowed_frame_needs_render,
+    read_windows_clipboard_text, seed_windowed_benchmark_scene, update_surface_repaint_pending,
+    windowed_frame_needs_render,
 };
 pub use self::network::render_attach_info;
 use self::network::{
@@ -1453,6 +1454,10 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
                 // idle gate. Content caches stay gated on scene.version so the
                 // translate never re-primes them (hud-uyhpn).
                 let mut last_rendered_geometry_epoch: u64 = u64::MAX;
+                // A recovered swapchain needs a fresh submit even if the scene
+                // lock is briefly unavailable in the recovery iteration. Keep
+                // this debt until a frame actually submits.
+                let mut surface_repaint_pending = false;
                 // Benchmark progress is acknowledged by the main thread after
                 // `SurfaceTexture::present()`, not by a compositor-side attempt.
                 // Keep only the latest telemetry for the currently pending
@@ -1587,7 +1592,11 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
                         );
                         break;
                     }
-                    let surface_recovered = surface_recovery.reconfigured_surface();
+                    surface_repaint_pending = update_surface_repaint_pending(
+                        surface_repaint_pending,
+                        surface_recovery.reconfigured_surface(),
+                        false,
+                    );
 
                     // ── Stage 3: Mutation Intake ───────────────────────────
                     // (placeholder — real mutations come via gRPC session)
@@ -1697,7 +1706,7 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
                             compositor.has_inflight_animation(&scene),
                             composer_needs_render,
                             benchmark_state.is_some(),
-                            surface_recovered,
+                            surface_repaint_pending,
                         );
                         continue_at_cadence |= needs_render;
 
@@ -1810,6 +1819,11 @@ impl ApplicationHandler<RuntimeWakeEvent> for WinitApp {
                             }
                             let compositor_telemetry = present_outcome.telemetry;
                             let frame_submitted = compositor_telemetry.stage7_gpu_submit_us > 0;
+                            surface_repaint_pending = update_surface_repaint_pending(
+                                surface_repaint_pending,
+                                false,
+                                frame_submitted,
+                            );
                             let degradation_work_time_us =
                                 degradation_work_start.elapsed().as_micros() as u64;
 
