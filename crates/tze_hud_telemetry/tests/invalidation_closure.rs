@@ -6,8 +6,9 @@ use tze_hud_telemetry::{
     EfficiencyRuntimeIdentity, EfficiencyScenarioIdentity, EfficiencyViewport,
     FullSurfaceInvalidation, FullSurfaceInvalidationReason, InvalidationCategory,
     InvalidationClosure, InvalidationDependencyReason, NodeWorkItemId, PartialPresentCapability,
-    PixelRect, RenderPlanWorkItemId, TextureUploadActualWork, TextureUploadCategory,
-    TextureUploadWorkItemId,
+    PixelRect, RenderPlanWorkItemId, TRANSPARENT_OVERLAP_FIFTY_TILE_SCENARIO_NAME,
+    TRANSPARENT_OVERLAP_FIFTY_TILE_SCENARIO_VERSION, TextureUploadActualWork,
+    TextureUploadCategory, TextureUploadWorkItemId,
 };
 
 fn node(tile: &str, node: &str) -> NodeWorkItemId {
@@ -135,6 +136,118 @@ fn valid_one_node_artifact() -> ChangeEfficiencyArtifact {
     }
 }
 
+fn valid_transparent_overlap_artifact() -> ChangeEfficiencyArtifact {
+    let lower = node("lower-tile", "lower-node");
+    let upper = node("upper-tile", "upper-node");
+    let lower_damage = damage(
+        "lower-tile",
+        "lower-bounds",
+        PixelRect {
+            x: 40,
+            y: 100,
+            width: 400,
+            height: 240,
+        },
+    );
+    let upper_damage = damage(
+        "upper-tile",
+        "upper-overlap",
+        PixelRect {
+            x: 240,
+            y: 160,
+            width: 200,
+            height: 150,
+        },
+    );
+    let mut artifact = valid_one_node_artifact();
+    artifact.scenario = EfficiencyScenarioIdentity {
+        name: TRANSPARENT_OVERLAP_FIFTY_TILE_SCENARIO_NAME.into(),
+        version: TRANSPARENT_OVERLAP_FIFTY_TILE_SCENARIO_VERSION,
+    };
+    artifact.closure.layout = InvalidationCategory {
+        closure_items: vec![
+            ClosureWorkItem {
+                identity: lower.clone(),
+                dependency_reason: InvalidationDependencyReason::DirectChange,
+            },
+            ClosureWorkItem {
+                identity: upper.clone(),
+                dependency_reason: InvalidationDependencyReason::VisualOverlap,
+            },
+        ],
+        actual_work: vec![
+            ActualWorkItem {
+                identity: lower.clone(),
+                operations: 1,
+            },
+            ActualWorkItem {
+                identity: upper.clone(),
+                operations: 1,
+            },
+        ],
+    };
+    artifact.closure.raster = artifact.closure.layout.clone();
+    artifact.closure.render_encoding = InvalidationCategory {
+        closure_items: vec![
+            ClosureWorkItem {
+                identity: RenderPlanWorkItemId {
+                    tile_id: lower.tile_id.clone(),
+                    plan_id: "lower-retained-text".into(),
+                },
+                dependency_reason: InvalidationDependencyReason::DirectChange,
+            },
+            ClosureWorkItem {
+                identity: RenderPlanWorkItemId {
+                    tile_id: upper.tile_id.clone(),
+                    plan_id: "upper-retained-text".into(),
+                },
+                dependency_reason: InvalidationDependencyReason::VisualOverlap,
+            },
+        ],
+        actual_work: vec![
+            ActualWorkItem {
+                identity: RenderPlanWorkItemId {
+                    tile_id: lower.tile_id.clone(),
+                    plan_id: "lower-retained-text".into(),
+                },
+                operations: 1,
+            },
+            ActualWorkItem {
+                identity: RenderPlanWorkItemId {
+                    tile_id: upper.tile_id.clone(),
+                    plan_id: "upper-retained-text".into(),
+                },
+                operations: 1,
+            },
+        ],
+    };
+    artifact.closure.composition_damage = DamageCategory {
+        closure_items: vec![
+            ClosureWorkItem {
+                identity: lower_damage.clone(),
+                dependency_reason: InvalidationDependencyReason::DirectChange,
+            },
+            ClosureWorkItem {
+                identity: upper_damage.clone(),
+                dependency_reason: InvalidationDependencyReason::VisualOverlap,
+            },
+        ],
+        actual_work: vec![
+            ActualWorkItem {
+                identity: lower_damage,
+                operations: 1,
+            },
+            ActualWorkItem {
+                identity: upper_damage,
+                operations: 1,
+            },
+        ],
+    };
+    artifact.render_observation.scoped_render_encode_operations = 2;
+    artifact.encoded_draw_calls = 6;
+    artifact
+}
+
 #[test]
 fn canonical_one_node_change_in_fifty_tiles_is_non_certifying_without_runtime_accounting() {
     let report = valid_one_node_artifact().validate();
@@ -152,6 +265,113 @@ fn canonical_one_node_change_in_fifty_tiles_is_non_certifying_without_runtime_ac
     assert_eq!(report.texture_upload.uploaded_byte_count, 0);
     assert_eq!(report.render_encoding.actual_operation_count, 1);
     assert_eq!(report.composition_damage.damaged_pixel_area, 8_000);
+}
+
+#[test]
+fn transparent_overlap_change_requires_two_z_ordered_typed_members() {
+    let report = valid_transparent_overlap_artifact().validate();
+
+    assert!(!report.passed, "{report:#?}");
+    assert!(report.contract_satisfied, "{report:#?}");
+    assert_eq!(
+        report.status,
+        ChangeEfficiencyValidationStatus::PendingRuntimeInstrumentation,
+        "{report:#?}"
+    );
+    assert_eq!(report.layout.actual_operation_count, 2);
+    assert_eq!(report.raster.actual_operation_count, 2);
+    assert_eq!(report.render_encoding.actual_operation_count, 2);
+    assert_eq!(report.composition_damage.category.actual_operation_count, 2);
+}
+
+#[test]
+fn transparent_overlap_reserved_name_rejects_an_unknown_version() {
+    let mut artifact = valid_transparent_overlap_artifact();
+    artifact.scenario.version = TRANSPARENT_OVERLAP_FIFTY_TILE_SCENARIO_VERSION + 1;
+
+    let report = artifact.validate();
+
+    assert_eq!(
+        report.status,
+        ChangeEfficiencyValidationStatus::InvalidArtifact,
+        "{report:#?}"
+    );
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|violation| violation.contains("scenario version must be")),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn transparent_overlap_rejects_reversed_closure_work_and_glyph_uploads() {
+    let mut artifact = valid_transparent_overlap_artifact();
+    artifact.closure.raster.actual_work.reverse();
+    let report = artifact.validate();
+    assert_eq!(
+        report.status,
+        ChangeEfficiencyValidationStatus::InvalidArtifact,
+        "{report:#?}"
+    );
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|violation| violation.contains("z-ordered DirectChange and VisualOverlap raster")),
+        "{report:#?}"
+    );
+
+    let mut artifact = valid_transparent_overlap_artifact();
+    let glyph_upload = TextureUploadWorkItemId {
+        tile_id: "lower-tile".into(),
+        resource_id: "new-glyph-atlas-page".into(),
+    };
+    artifact.closure.texture_upload.closure_items = vec![ClosureWorkItem {
+        identity: glyph_upload.clone(),
+        dependency_reason: InvalidationDependencyReason::ResourceDependency,
+    }];
+    artifact.closure.texture_upload.actual_work = vec![TextureUploadActualWork {
+        identity: glyph_upload,
+        operations: 1,
+        uploaded_bytes: 512,
+    }];
+    let report = artifact.validate();
+    assert_eq!(
+        report.status,
+        ChangeEfficiencyValidationStatus::InvalidArtifact,
+        "{report:#?}"
+    );
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|violation| violation.contains("zero undeclared texture or glyph upload")),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn transparent_overlap_rejects_full_frame_encoder_work() {
+    let mut artifact = valid_transparent_overlap_artifact();
+    artifact.render_observation.full_surface_clear_operations = 1;
+    artifact.render_observation.full_frame_encode_operations = 1;
+
+    let report = artifact.validate();
+
+    assert_eq!(
+        report.status,
+        ChangeEfficiencyValidationStatus::InvalidArtifact,
+        "{report:#?}"
+    );
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|violation| violation.contains("full-surface clear")),
+        "{report:#?}"
+    );
 }
 
 #[test]

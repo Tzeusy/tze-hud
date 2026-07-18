@@ -1004,6 +1004,136 @@ mod tests {
     };
     use tze_hud_scene::{Capability, MutationBatch, SceneMutation};
 
+    fn retained_plain_text_node(content: &str, width: f32, height: f32) -> Node {
+        Node {
+            id: SceneId::new(),
+            children: vec![],
+            layout: Default::default(),
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: content.into(),
+                bounds: Rect::new(0.0, 0.0, width, height),
+                font_size_px: 18.0,
+                font_family: FontFamily::SystemSansSerif,
+                color: Rgba::WHITE,
+                background: None,
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Clip,
+                color_runs: Box::default(),
+            }),
+        }
+    }
+
+    async fn install_transparent_overlap_scene(
+        runtime: &HeadlessRuntime,
+        lower_content: &str,
+        with_intruding_idle_grip: bool,
+    ) -> (
+        Arc<Mutex<SceneGraph>>,
+        SceneId,
+        SceneId,
+        SceneId,
+        SceneId,
+        Vec<SceneId>,
+    ) {
+        let shared_state = runtime.shared_state().lock().await;
+        let scene_arc = Arc::clone(&shared_state.scene);
+        drop(shared_state);
+        let mut scene = scene_arc.lock().await;
+        let tab_id = scene
+            .create_tab("Transparent overlap", 0)
+            .expect("transparent overlap tab creation");
+        let lease_id = scene
+            .try_grant_lease_for_session_with_budget(
+                "transparent-overlap-agent",
+                SceneId::nil(),
+                60_000,
+                tze_hud_scene::lease::priority::PRIORITY_DEFAULT,
+                vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+                ResourceBudget {
+                    max_tiles: 50,
+                    ..ResourceBudget::default()
+                },
+            )
+            .expect("transparent overlap lease creation");
+
+        let mut control_tile_ids = Vec::with_capacity(48);
+        for index in 0..48 {
+            let column = index % 8;
+            let row = index / 8;
+            let bounds = if with_intruding_idle_grip && index == 0 {
+                // This tile only touches the lower tile at its bottom edge, so
+                // it is not a visual overlap contributor. Its idle grip extends
+                // four pixels upward into the lower tile's retained damage.
+                Rect::new(100.0, 340.0, 40.0, 50.0)
+            } else {
+                Rect::new(
+                    600.0 + (column * 48) as f32,
+                    10.0 + (row * 60) as f32,
+                    40.0,
+                    50.0,
+                )
+            };
+            let tile_id = scene
+                .create_tile(
+                    tab_id,
+                    "transparent-overlap-agent",
+                    lease_id,
+                    bounds,
+                    index as u32,
+                )
+                .expect("unrelated control tile creation");
+            let control_label = format!("C{index:02}");
+            scene
+                .set_tile_root(
+                    tile_id,
+                    retained_plain_text_node(&control_label, 40.0, 50.0),
+                )
+                .expect("unrelated control text root");
+            control_tile_ids.push(tile_id);
+        }
+
+        let lower_tile_id = scene
+            .create_tile(
+                tab_id,
+                "transparent-overlap-agent",
+                lease_id,
+                Rect::new(40.0, 100.0, 400.0, 240.0),
+                48,
+            )
+            .expect("opaque lower tile creation");
+        let lower_node = retained_plain_text_node(lower_content, 400.0, 240.0);
+        let lower_node_id = lower_node.id;
+        scene
+            .set_tile_root(lower_tile_id, lower_node)
+            .expect("opaque lower text root");
+
+        let upper_tile_id = scene
+            .create_tile(
+                tab_id,
+                "transparent-overlap-agent",
+                lease_id,
+                Rect::new(240.0, 160.0, 250.0, 150.0),
+                49,
+            )
+            .expect("transparent upper tile creation");
+        scene
+            .set_tile_root(upper_tile_id, retained_plain_text_node("OV", 250.0, 150.0))
+            .expect("transparent upper text root");
+        scene
+            .update_tile_opacity(upper_tile_id, 0.5, "transparent-overlap-agent")
+            .expect("transparent upper opacity");
+
+        drop(scene);
+        (
+            scene_arc,
+            lease_id,
+            lower_tile_id,
+            lower_node_id,
+            upper_tile_id,
+            control_tile_ids,
+        )
+    }
+
     #[tokio::test]
     async fn idle_efficiency_counters_follow_real_headless_gpu_operations() {
         let _runtime_guard = crate::test_support::lock_headless_runtime().await;
@@ -1043,6 +1173,328 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transparent_overlap_update_repaints_only_the_declared_z_ordered_closure() {
+        let _runtime_guard = crate::test_support::lock_headless_runtime().await;
+        let config = HeadlessConfig {
+            width: 1_000,
+            height: 500,
+            grpc_port: 0,
+            bind_all_interfaces: false,
+            psk: "transparent-overlap-efficiency-test".into(),
+            config_toml: None,
+        };
+        let pixel_width = config.width as usize;
+        let expected_pixel_bytes = pixel_width * config.height as usize * 4;
+        let mut runtime = HeadlessRuntime::new(HeadlessConfig {
+            width: config.width,
+            height: config.height,
+            grpc_port: config.grpc_port,
+            bind_all_interfaces: config.bind_all_interfaces,
+            psk: config.psk.clone(),
+            config_toml: config.config_toml.clone(),
+        })
+        .await
+        .expect("primary runtime init");
+        let (scene_arc, lease_id, lower_tile_id, lower_node_id, upper_tile_id, control_tile_ids) =
+            install_transparent_overlap_scene(&runtime, "AB", false).await;
+
+        // Seed the retained snapshot and glyph atlas from a real full frame.
+        runtime.render_frame().await;
+
+        {
+            let mut scene = scene_arc.lock().await;
+            let update = MutationBatch {
+                batch_id: SceneId::new(),
+                agent_namespace: "transparent-overlap-agent".into(),
+                mutations: vec![SceneMutation::UpdateNodeContent {
+                    tile_id: lower_tile_id,
+                    node_id: lower_node_id,
+                    // The same glyph inventory prevents an undeclared atlas upload.
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "BA".into(),
+                        bounds: Rect::new(0.0, 0.0, 400.0, 240.0),
+                        font_size_px: 18.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::WHITE,
+                        background: None,
+                        alignment: TextAlign::Start,
+                        overflow: TextOverflow::Clip,
+                        color_runs: Box::default(),
+                    }),
+                }],
+                timing_hints: None,
+                lease_id: Some(lease_id),
+            };
+            let update_result = scene.apply_batch(&update);
+            assert!(
+                update_result.applied,
+                "transparent-overlap update applies: {update_result:#?}"
+            );
+        }
+
+        // This independent runtime begins without a retained snapshot, so its
+        // post-update render is a fresh full-frame correctness reference.
+        let mut reference = HeadlessRuntime::new(config)
+            .await
+            .expect("reference runtime init");
+        let _ = install_transparent_overlap_scene(&reference, "BA", false).await;
+        reference.render_frame().await;
+        assert!(
+            reference
+                .compositor
+                .take_change_efficiency_capture()
+                .is_none(),
+            "fresh reference must use the established full renderer"
+        );
+        let reference_pixels = reference.read_pixels();
+        assert_eq!(
+            reference_pixels.len(),
+            expected_pixel_bytes,
+            "fresh full-frame reference must expose one RGBA value for every configured pixel"
+        );
+        drop(reference);
+
+        runtime.render_frame().await;
+        let retained_pixels = runtime.read_pixels();
+        assert_eq!(
+            retained_pixels.len(),
+            expected_pixel_bytes,
+            "retained path must expose one RGBA value for every configured pixel"
+        );
+        assert_eq!(
+            retained_pixels.len(),
+            reference_pixels.len(),
+            "the retained/reference pixel oracle must not silently truncate either readback"
+        );
+        let capture = runtime
+            .compositor
+            .take_change_efficiency_capture()
+            .expect("retained transparent-overlap capture after lower text update");
+        let artifact = capture.artifact();
+        let report = capture.validate();
+
+        assert!(report.passed, "{report:#?}");
+        assert_eq!(
+            artifact.scenario.name, "transparent_overlap_change_50_tiles",
+            "transparent overlap must use a distinct versioned scenario"
+        );
+        assert_eq!(artifact.scenario.version, 1);
+        assert_eq!(artifact.scene_tile_count, 50);
+        assert_eq!(report.layout.actual_operation_count, 2);
+        assert_eq!(report.raster.actual_operation_count, 2);
+        assert_eq!(report.texture_upload.category.actual_operation_count, 0);
+        assert_eq!(report.render_encoding.actual_operation_count, 2);
+        assert_eq!(artifact.render_observation.full_surface_clear_operations, 0);
+        assert_eq!(artifact.render_observation.full_frame_encode_operations, 0);
+        assert_eq!(
+            artifact.render_observation.scoped_render_encode_operations,
+            2
+        );
+        assert_eq!(
+            artifact.encoded_draw_calls, 6,
+            "two closure tiles each contribute background, text, and idle-grip work"
+        );
+
+        for category in [&artifact.closure.layout, &artifact.closure.raster] {
+            assert_eq!(category.closure_items.len(), 2);
+            assert_eq!(
+                category.closure_items[0].identity.tile_id,
+                lower_tile_id.to_string()
+            );
+            assert_eq!(
+                category.closure_items[0].dependency_reason,
+                tze_hud_telemetry::InvalidationDependencyReason::DirectChange
+            );
+            assert_eq!(
+                category.closure_items[1].identity.tile_id,
+                upper_tile_id.to_string()
+            );
+            assert_eq!(
+                category.closure_items[1].dependency_reason,
+                tze_hud_telemetry::InvalidationDependencyReason::VisualOverlap
+            );
+        }
+        assert_eq!(artifact.closure.render_encoding.closure_items.len(), 2);
+        assert_eq!(
+            artifact.closure.render_encoding.closure_items[0]
+                .identity
+                .tile_id,
+            lower_tile_id.to_string(),
+            "the lower contributor must encode before its z-higher overlap"
+        );
+        assert_eq!(
+            artifact.closure.render_encoding.closure_items[1]
+                .identity
+                .tile_id,
+            upper_tile_id.to_string(),
+            "the visual-overlap contributor must encode in z order"
+        );
+        assert_eq!(
+            artifact.closure.render_encoding.closure_items[1].dependency_reason,
+            tze_hud_telemetry::InvalidationDependencyReason::VisualOverlap
+        );
+
+        for control_tile_id in control_tile_ids {
+            let control_id = control_tile_id.to_string();
+            assert!(
+                artifact
+                    .closure
+                    .layout
+                    .closure_items
+                    .iter()
+                    .all(|item| item.identity.tile_id != control_id),
+                "unrelated control {control_id} entered layout closure"
+            );
+            assert!(
+                artifact
+                    .closure
+                    .raster
+                    .closure_items
+                    .iter()
+                    .all(|item| item.identity.tile_id != control_id),
+                "unrelated control {control_id} entered raster closure"
+            );
+            assert!(
+                artifact
+                    .closure
+                    .render_encoding
+                    .closure_items
+                    .iter()
+                    .all(|item| item.identity.tile_id != control_id),
+                "unrelated control {control_id} entered render closure"
+            );
+            assert!(
+                artifact
+                    .closure
+                    .composition_damage
+                    .closure_items
+                    .iter()
+                    .all(|item| item.identity.tile_id != control_id),
+                "unrelated control {control_id} entered damage closure"
+            );
+        }
+
+        let mut differing_pixels = 0usize;
+        let mut first_difference = None;
+        let mut difference_bounds: Option<(usize, usize, usize, usize)> = None;
+        let mut difference_rows = std::collections::BTreeMap::<usize, (usize, usize, usize)>::new();
+        for (pixel_index, (retained, reference)) in retained_pixels
+            .chunks_exact(4)
+            .zip(reference_pixels.chunks_exact(4))
+            .enumerate()
+        {
+            if retained != reference {
+                differing_pixels += 1;
+                let x = pixel_index % pixel_width;
+                let y = pixel_index / pixel_width;
+                difference_bounds = Some(match difference_bounds {
+                    Some((min_x, min_y, max_x, max_y)) => {
+                        (min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y))
+                    }
+                    None => (x, y, x, y),
+                });
+                difference_rows
+                    .entry(y)
+                    .and_modify(|(min_x, max_x, count)| {
+                        *min_x = (*min_x).min(x);
+                        *max_x = (*max_x).max(x);
+                        *count += 1;
+                    })
+                    .or_insert((x, x, 1));
+                first_difference.get_or_insert((
+                    pixel_index,
+                    [retained[0], retained[1], retained[2], retained[3]],
+                    [reference[0], reference[1], reference[2], reference[3]],
+                ));
+            }
+        }
+        assert!(
+            first_difference.is_none(),
+            "the retained z-ordered overlap repair must equal a fresh full-frame post-update render; \
+             first difference at pixel {first_difference:?}, bounds {difference_bounds:?}, \
+             rows {difference_rows:?}, of {differing_pixels} pixels"
+        );
+    }
+
+    #[tokio::test]
+    async fn transparent_overlap_rejects_nonclosure_idle_grip_that_crosses_damage() {
+        let _runtime_guard = crate::test_support::lock_headless_runtime().await;
+        let mut runtime = HeadlessRuntime::new(HeadlessConfig {
+            width: 1_000,
+            height: 500,
+            grpc_port: 0,
+            bind_all_interfaces: false,
+            psk: "transparent-overlap-intruding-grip-test".into(),
+            config_toml: None,
+        })
+        .await
+        .expect("runtime init");
+        let (scene_arc, lease_id, lower_tile_id, lower_node_id, _upper_tile_id, _control_tile_ids) =
+            install_transparent_overlap_scene(&runtime, "AB", true).await;
+
+        // Seed the private snapshot from the real full frame; the adjacent tile
+        // is allowed in the scene because its body does not overlap the lower
+        // tile. Only its chrome grip crosses the retained damage boundary.
+        runtime.render_frame().await;
+
+        {
+            let mut scene = scene_arc.lock().await;
+            let update = MutationBatch {
+                batch_id: SceneId::new(),
+                agent_namespace: "transparent-overlap-agent".into(),
+                mutations: vec![SceneMutation::UpdateNodeContent {
+                    tile_id: lower_tile_id,
+                    node_id: lower_node_id,
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "BA".into(),
+                        bounds: Rect::new(0.0, 0.0, 400.0, 240.0),
+                        font_size_px: 18.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::WHITE,
+                        background: None,
+                        alignment: TextAlign::Start,
+                        overflow: TextOverflow::Clip,
+                        color_runs: Box::default(),
+                    }),
+                }],
+                timing_hints: None,
+                lease_id: Some(lease_id),
+            };
+            assert!(
+                scene.apply_batch(&update).applied,
+                "intruding-grip update applies"
+            );
+        }
+
+        runtime.render_frame().await;
+
+        assert!(
+            runtime
+                .compositor
+                .take_change_efficiency_capture()
+                .is_none(),
+            "a non-closure grip crossing retained damage must fall back rather than certify"
+        );
+        let diagnostic = runtime
+            .compositor
+            .take_change_efficiency_diagnostic()
+            .expect("rejected retained change emits a structured diagnostic");
+        let report = diagnostic.validate();
+        assert_eq!(
+            report.status,
+            tze_hud_telemetry::ChangeEfficiencyValidationStatus::DiagnosticFullSurface,
+            "{report:#?}"
+        );
+        assert_eq!(
+            diagnostic
+                .full_surface_invalidation
+                .expect("full diagnostic metadata")
+                .reason,
+            tze_hud_telemetry::FullSurfaceInvalidationReason::UnsupportedRetainedSceneChange
+        );
+    }
+
+    #[tokio::test]
     async fn canonical_one_node_update_captures_only_retained_changed_tile_work() {
         let _runtime_guard = crate::test_support::lock_headless_runtime().await;
         let mut runtime = HeadlessRuntime::new(HeadlessConfig {
@@ -1079,12 +1531,22 @@ mod tests {
             for row in 0..5 {
                 for column in 0..10 {
                     let index = row * 10 + column;
+                    // Leave enough vertical clearance that the next row's
+                    // idle grip cannot enter this tile's scoped damage. The
+                    // retained proof is intentionally closure-only for chrome.
+                    let tile_width = 96.0;
+                    let tile_height = 92.0;
                     let tile_id = scene
                         .create_tile(
                             tab_id,
                             "change-efficiency-agent",
                             lease_id,
-                            Rect::new((column * 100) as f32, (row * 100) as f32, 100.0, 100.0),
+                            Rect::new(
+                                (column * 100) as f32,
+                                (row * 100) as f32,
+                                tile_width,
+                                tile_height,
+                            ),
                             index,
                         )
                         .expect("canonical tile creation");
@@ -1096,7 +1558,7 @@ mod tests {
                             // The update below preserves this glyph inventory,
                             // so an observed zero-upload capture is meaningful.
                             content: "AB".into(),
-                            bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                            bounds: Rect::new(0.0, 0.0, tile_width, tile_height),
                             font_size_px: 18.0,
                             font_family: FontFamily::SystemSansSerif,
                             color: Rgba::WHITE,
@@ -1134,7 +1596,7 @@ mod tests {
                     node_id: changed_node_id,
                     data: NodeData::TextMarkdown(TextMarkdownNode {
                         content: "BA".into(),
-                        bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                        bounds: Rect::new(0.0, 0.0, 96.0, 92.0),
                         font_size_px: 18.0,
                         font_family: FontFamily::SystemSansSerif,
                         color: Rgba::WHITE,
@@ -1257,7 +1719,7 @@ mod tests {
                     node_id: changed_node_id,
                     data: NodeData::TextMarkdown(TextMarkdownNode {
                         content: "AB".into(),
-                        bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                        bounds: Rect::new(0.0, 0.0, 96.0, 92.0),
                         font_size_px: 18.0,
                         font_family: FontFamily::SystemSansSerif,
                         color: Rgba::WHITE,
@@ -1321,7 +1783,7 @@ mod tests {
                     node_id: changed_node_id,
                     data: NodeData::TextMarkdown(TextMarkdownNode {
                         content: "AC".into(),
-                        bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                        bounds: Rect::new(0.0, 0.0, 96.0, 92.0),
                         font_size_px: 18.0,
                         font_family: FontFamily::SystemSansSerif,
                         color: Rgba::WHITE,

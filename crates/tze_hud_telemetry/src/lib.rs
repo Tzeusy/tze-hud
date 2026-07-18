@@ -33,8 +33,9 @@ pub use invalidation_closure::{
     FullSurfaceInvalidation, FullSurfaceInvalidationReason, InvalidationCategory,
     InvalidationClosure, InvalidationDependencyReason, NodeWorkItemId,
     ONE_NODE_FIFTY_TILE_SCENARIO_NAME, ONE_NODE_FIFTY_TILE_SCENARIO_VERSION,
-    PartialPresentCapability, PixelRect, RenderPlanWorkItemId, TextureUploadActualWork,
-    TextureUploadCategory, TextureUploadWorkItemId,
+    PartialPresentCapability, PixelRect, RenderPlanWorkItemId,
+    TRANSPARENT_OVERLAP_FIFTY_TILE_SCENARIO_NAME, TRANSPARENT_OVERLAP_FIFTY_TILE_SCENARIO_VERSION,
+    TextureUploadActualWork, TextureUploadCategory, TextureUploadWorkItemId,
 };
 pub use media_audit::{
     DegradationStep, DegradationTrigger, MediaAuditEvent, MediaCloseReason, MediaRejectCode,

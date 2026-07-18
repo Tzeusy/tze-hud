@@ -24,6 +24,11 @@ pub const CHANGE_EFFICIENCY_SCHEMA_VERSION: u32 = 2;
 pub const ONE_NODE_FIFTY_TILE_SCENARIO_NAME: &str = "one_node_change_50_tiles";
 /// Version of the canonical one-node, fifty-tile scenario.
 pub const ONE_NODE_FIFTY_TILE_SCENARIO_VERSION: u32 = 1;
+/// Stable name of the retained transparent-overlap, fifty-tile scenario.
+pub const TRANSPARENT_OVERLAP_FIFTY_TILE_SCENARIO_NAME: &str =
+    "transparent_overlap_change_50_tiles";
+/// Version of the retained transparent-overlap, fifty-tile scenario.
+pub const TRANSPARENT_OVERLAP_FIFTY_TILE_SCENARIO_VERSION: u32 = 1;
 
 /// Completion state declared by a change-efficiency measurement producer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -554,6 +559,14 @@ impl ChangeEfficiencyArtifact {
                 &composition_damage,
                 &mut violations,
             );
+            self.validate_transparent_overlap_scenario(
+                &layout,
+                &raster,
+                &texture_upload,
+                &render_encoding,
+                &composition_damage,
+                &mut violations,
+            );
         }
 
         let contract_satisfied = violations.is_empty() && !full_surface;
@@ -752,6 +765,204 @@ impl ChangeEfficiencyArtifact {
                     .push("canonical one-node texture upload operations exceed its closure".into());
             }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn validate_transparent_overlap_scenario(
+        &self,
+        layout: &ChangeEfficiencyCategoryReport,
+        raster: &ChangeEfficiencyCategoryReport,
+        texture_upload: &ChangeEfficiencyTextureUploadReport,
+        render_encoding: &ChangeEfficiencyCategoryReport,
+        composition_damage: &ChangeEfficiencyDamageReport,
+        violations: &mut Vec<String>,
+    ) {
+        if self.scenario.name != TRANSPARENT_OVERLAP_FIFTY_TILE_SCENARIO_NAME {
+            return;
+        }
+        if self.scenario.version != TRANSPARENT_OVERLAP_FIFTY_TILE_SCENARIO_VERSION {
+            violations.push(format!(
+                "transparent-overlap scenario version must be {TRANSPARENT_OVERLAP_FIFTY_TILE_SCENARIO_VERSION}, got {}",
+                self.scenario.version
+            ));
+            return;
+        }
+
+        if self.scene_tile_count != 50 {
+            violations.push(format!(
+                "transparent-overlap scenario must contain 50 tiles, got {}",
+                self.scene_tile_count
+            ));
+        }
+
+        let Some(lower) = self.closure.layout.closure_items.first() else {
+            violations.push(
+                "transparent-overlap scenario requires a directly changed lower layout item".into(),
+            );
+            return;
+        };
+        let Some(upper) = self.closure.layout.closure_items.get(1) else {
+            violations.push(
+                "transparent-overlap scenario requires a visual-overlap upper layout item".into(),
+            );
+            return;
+        };
+
+        if lower.dependency_reason != InvalidationDependencyReason::DirectChange
+            || upper.dependency_reason != InvalidationDependencyReason::VisualOverlap
+            || lower.identity.tile_id == upper.identity.tile_id
+            || self.closure.layout.closure_items.len() != 2
+            || !actual_node_work_is_z_ordered(
+                &self.closure.layout,
+                &lower.identity,
+                &upper.identity,
+            )
+            || layout.actual_operation_count != 2
+        {
+            violations.push(
+                "transparent-overlap scenario requires exactly one DirectChange lower layout item followed by one VisualOverlap upper item"
+                    .into(),
+            );
+        }
+
+        validate_transparent_overlap_node_category(
+            "raster",
+            &self.closure.raster,
+            &lower.identity,
+            &upper.identity,
+            raster,
+            violations,
+        );
+        validate_transparent_overlap_render_category(
+            &self.closure.render_encoding,
+            &lower.identity.tile_id,
+            &upper.identity.tile_id,
+            render_encoding,
+            violations,
+        );
+        validate_transparent_overlap_damage_category(
+            &self.closure.composition_damage,
+            &lower.identity.tile_id,
+            &upper.identity.tile_id,
+            composition_damage,
+            violations,
+        );
+
+        if texture_upload.category.closure_cardinality != 0
+            || texture_upload.category.actual_operation_count != 0
+            || texture_upload.uploaded_byte_count != 0
+        {
+            violations.push(
+                "transparent-overlap scenario requires zero undeclared texture or glyph upload work"
+                    .into(),
+            );
+        }
+
+        if self.render_observation.full_surface_clear_operations != 0
+            || self.render_observation.full_frame_encode_operations != 0
+            || self.render_observation.scoped_render_encode_operations != 2
+        {
+            violations.push(
+                "transparent-overlap scenario requires two scoped encodes and no full-surface clear or full-frame encode"
+                    .into(),
+            );
+        }
+    }
+}
+
+fn actual_node_work_is_z_ordered(
+    category: &InvalidationCategory<NodeWorkItemId>,
+    lower: &NodeWorkItemId,
+    upper: &NodeWorkItemId,
+) -> bool {
+    category.actual_work.len() == 2
+        && category.actual_work[0].identity == *lower
+        && category.actual_work[0].operations == 1
+        && category.actual_work[1].identity == *upper
+        && category.actual_work[1].operations == 1
+}
+
+fn validate_transparent_overlap_node_category(
+    category_name: &str,
+    category: &InvalidationCategory<NodeWorkItemId>,
+    lower: &NodeWorkItemId,
+    upper: &NodeWorkItemId,
+    report: &ChangeEfficiencyCategoryReport,
+    violations: &mut Vec<String>,
+) {
+    if category.closure_items.len() != 2
+        || category.closure_items[0].identity != *lower
+        || category.closure_items[0].dependency_reason != InvalidationDependencyReason::DirectChange
+        || category.closure_items[1].identity != *upper
+        || category.closure_items[1].dependency_reason
+            != InvalidationDependencyReason::VisualOverlap
+        || !actual_node_work_is_z_ordered(category, lower, upper)
+        || report.actual_operation_count != 2
+    {
+        violations.push(format!(
+            "transparent-overlap scenario requires z-ordered DirectChange and VisualOverlap {category_name} items"
+        ));
+    }
+}
+
+fn validate_transparent_overlap_render_category(
+    category: &InvalidationCategory<RenderPlanWorkItemId>,
+    lower_tile_id: &str,
+    upper_tile_id: &str,
+    report: &ChangeEfficiencyCategoryReport,
+    violations: &mut Vec<String>,
+) {
+    let expected = [
+        (lower_tile_id, InvalidationDependencyReason::DirectChange),
+        (upper_tile_id, InvalidationDependencyReason::VisualOverlap),
+    ];
+    let expected_len = expected.len();
+    let closure_is_expected = category.closure_items.len() == expected_len
+        && category
+            .closure_items
+            .iter()
+            .zip(expected)
+            .all(|(item, (tile_id, reason))| {
+                item.identity.tile_id == tile_id && item.dependency_reason == reason
+            });
+    let actual_is_expected = category.actual_work.len() == expected_len
+        && category
+            .actual_work
+            .iter()
+            .zip([lower_tile_id, upper_tile_id])
+            .all(|(item, tile_id)| item.identity.tile_id == tile_id && item.operations == 1);
+    if !closure_is_expected || !actual_is_expected || report.actual_operation_count != 2 {
+        violations.push(
+            "transparent-overlap scenario requires z-ordered DirectChange and VisualOverlap render-encoding items"
+                .into(),
+        );
+    }
+}
+
+fn validate_transparent_overlap_damage_category(
+    category: &DamageCategory,
+    lower_tile_id: &str,
+    upper_tile_id: &str,
+    report: &ChangeEfficiencyDamageReport,
+    violations: &mut Vec<String>,
+) {
+    let closure_is_expected = category.closure_items.len() == 2
+        && category.closure_items[0].identity.tile_id == lower_tile_id
+        && category.closure_items[0].dependency_reason
+            == InvalidationDependencyReason::DirectChange
+        && category.closure_items[1].identity.tile_id == upper_tile_id
+        && category.closure_items[1].dependency_reason
+            == InvalidationDependencyReason::VisualOverlap;
+    let actual_is_expected = category.actual_work.len() == 2
+        && category.actual_work[0].identity == category.closure_items[0].identity
+        && category.actual_work[0].operations == 1
+        && category.actual_work[1].identity == category.closure_items[1].identity
+        && category.actual_work[1].operations == 1;
+    if !closure_is_expected || !actual_is_expected || report.category.actual_operation_count != 2 {
+        violations.push(
+            "transparent-overlap scenario requires direct lower and visual-overlap upper damage members"
+                .into(),
+        );
     }
 }
 
