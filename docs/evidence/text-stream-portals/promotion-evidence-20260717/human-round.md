@@ -1,4 +1,21 @@
-# Track B — Human Keyboard Round (PENDING)
+# Track B — Human Keyboard Round (PARTIAL — session 2026-07-18 ~11:00 SGT)
+
+## Session 1 partial results
+
+- **Row 11 (reply loop): PASS on the wire** — five operator submissions (test/test test/
+  shot/…) each delivered through long-poll and acked; runtime delivery-state loop
+  verified end-to-end. Operator-side ✓✓ cue rendering not verbally confirmed.
+- **Scroll/geometry rows: FAIL — discovered hud-yrcev (P1)**: after operator
+  move/resize, backdrop quad covers only the top of the portal; composer region has no
+  background (floating caret bar, detached grip, missing header); typed draft likely
+  invisible. Screenshot `shots/kbr-scroll-background-bug.png`.
+- **Input-loss incident**: one substantive operator message ("backgrounds moving" report)
+  never reached the pending queue — most plausibly typed into the invisible composer
+  region above. Treat as consequence of hud-yrcev until disproven.
+- **hud-ccj2o corroborated live**: the projection was reaped mid-conversation twice in
+  ~10 minutes whenever the agent wasn't actively long-polling.
+- Remaining rows (1-10 detailed observations, Ctrl+= recovery experiment) not yet
+  reported — session 2 needed; portal re-attach restores full context via replay.
 
 Operator: fill one row per check from SESSION-PLAN.md Track B (rows 1-11) with
 observed result + pass/fail. Synthetic injection cannot cover these; the gate's
