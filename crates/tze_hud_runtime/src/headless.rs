@@ -1026,6 +1026,7 @@ mod tests {
     async fn install_transparent_overlap_scene(
         runtime: &HeadlessRuntime,
         lower_content: &str,
+        with_intruding_idle_grip: bool,
     ) -> (
         Arc<Mutex<SceneGraph>>,
         SceneId,
@@ -1059,17 +1060,25 @@ mod tests {
         for index in 0..48 {
             let column = index % 8;
             let row = index / 8;
+            let bounds = if with_intruding_idle_grip && index == 0 {
+                // This tile only touches the lower tile at its bottom edge, so
+                // it is not a visual overlap contributor. Its idle grip extends
+                // four pixels upward into the lower tile's retained damage.
+                Rect::new(100.0, 340.0, 40.0, 50.0)
+            } else {
+                Rect::new(
+                    600.0 + (column * 48) as f32,
+                    10.0 + (row * 60) as f32,
+                    40.0,
+                    50.0,
+                )
+            };
             let tile_id = scene
                 .create_tile(
                     tab_id,
                     "transparent-overlap-agent",
                     lease_id,
-                    Rect::new(
-                        600.0 + (column * 48) as f32,
-                        10.0 + (row * 60) as f32,
-                        40.0,
-                        50.0,
-                    ),
+                    bounds,
                     index as u32,
                 )
                 .expect("unrelated control tile creation");
@@ -1175,6 +1184,7 @@ mod tests {
             config_toml: None,
         };
         let pixel_width = config.width as usize;
+        let expected_pixel_bytes = pixel_width * config.height as usize * 4;
         let mut runtime = HeadlessRuntime::new(HeadlessConfig {
             width: config.width,
             height: config.height,
@@ -1186,7 +1196,7 @@ mod tests {
         .await
         .expect("primary runtime init");
         let (scene_arc, lease_id, lower_tile_id, lower_node_id, upper_tile_id, control_tile_ids) =
-            install_transparent_overlap_scene(&runtime, "AB").await;
+            install_transparent_overlap_scene(&runtime, "AB", false).await;
 
         // Seed the retained snapshot and glyph atlas from a real full frame.
         runtime.render_frame().await;
@@ -1227,7 +1237,7 @@ mod tests {
         let mut reference = HeadlessRuntime::new(config)
             .await
             .expect("reference runtime init");
-        let _ = install_transparent_overlap_scene(&reference, "BA").await;
+        let _ = install_transparent_overlap_scene(&reference, "BA", false).await;
         reference.render_frame().await;
         assert!(
             reference
@@ -1237,10 +1247,25 @@ mod tests {
             "fresh reference must use the established full renderer"
         );
         let reference_pixels = reference.read_pixels();
+        assert_eq!(
+            reference_pixels.len(),
+            expected_pixel_bytes,
+            "fresh full-frame reference must expose one RGBA value for every configured pixel"
+        );
         drop(reference);
 
         runtime.render_frame().await;
         let retained_pixels = runtime.read_pixels();
+        assert_eq!(
+            retained_pixels.len(),
+            expected_pixel_bytes,
+            "retained path must expose one RGBA value for every configured pixel"
+        );
+        assert_eq!(
+            retained_pixels.len(),
+            reference_pixels.len(),
+            "the retained/reference pixel oracle must not silently truncate either readback"
+        );
         let capture = runtime
             .compositor
             .take_change_efficiency_capture()
@@ -1392,6 +1417,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transparent_overlap_rejects_nonclosure_idle_grip_that_crosses_damage() {
+        let _runtime_guard = crate::test_support::lock_headless_runtime().await;
+        let mut runtime = HeadlessRuntime::new(HeadlessConfig {
+            width: 1_000,
+            height: 500,
+            grpc_port: 0,
+            bind_all_interfaces: false,
+            psk: "transparent-overlap-intruding-grip-test".into(),
+            config_toml: None,
+        })
+        .await
+        .expect("runtime init");
+        let (scene_arc, lease_id, lower_tile_id, lower_node_id, _upper_tile_id, _control_tile_ids) =
+            install_transparent_overlap_scene(&runtime, "AB", true).await;
+
+        // Seed the private snapshot from the real full frame; the adjacent tile
+        // is allowed in the scene because its body does not overlap the lower
+        // tile. Only its chrome grip crosses the retained damage boundary.
+        runtime.render_frame().await;
+
+        {
+            let mut scene = scene_arc.lock().await;
+            let update = MutationBatch {
+                batch_id: SceneId::new(),
+                agent_namespace: "transparent-overlap-agent".into(),
+                mutations: vec![SceneMutation::UpdateNodeContent {
+                    tile_id: lower_tile_id,
+                    node_id: lower_node_id,
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "BA".into(),
+                        bounds: Rect::new(0.0, 0.0, 400.0, 240.0),
+                        font_size_px: 18.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::WHITE,
+                        background: None,
+                        alignment: TextAlign::Start,
+                        overflow: TextOverflow::Clip,
+                        color_runs: Box::default(),
+                    }),
+                }],
+                timing_hints: None,
+                lease_id: Some(lease_id),
+            };
+            assert!(
+                scene.apply_batch(&update).applied,
+                "intruding-grip update applies"
+            );
+        }
+
+        runtime.render_frame().await;
+
+        assert!(
+            runtime
+                .compositor
+                .take_change_efficiency_capture()
+                .is_none(),
+            "a non-closure grip crossing retained damage must fall back rather than certify"
+        );
+        let diagnostic = runtime
+            .compositor
+            .take_change_efficiency_diagnostic()
+            .expect("rejected retained change emits a structured diagnostic");
+        let report = diagnostic.validate();
+        assert_eq!(
+            report.status,
+            tze_hud_telemetry::ChangeEfficiencyValidationStatus::DiagnosticFullSurface,
+            "{report:#?}"
+        );
+        assert_eq!(
+            diagnostic
+                .full_surface_invalidation
+                .expect("full diagnostic metadata")
+                .reason,
+            tze_hud_telemetry::FullSurfaceInvalidationReason::UnsupportedRetainedSceneChange
+        );
+    }
+
+    #[tokio::test]
     async fn canonical_one_node_update_captures_only_retained_changed_tile_work() {
         let _runtime_guard = crate::test_support::lock_headless_runtime().await;
         let mut runtime = HeadlessRuntime::new(HeadlessConfig {
@@ -1428,12 +1531,22 @@ mod tests {
             for row in 0..5 {
                 for column in 0..10 {
                     let index = row * 10 + column;
+                    // Leave enough vertical clearance that the next row's
+                    // idle grip cannot enter this tile's scoped damage. The
+                    // retained proof is intentionally closure-only for chrome.
+                    let tile_width = 96.0;
+                    let tile_height = 92.0;
                     let tile_id = scene
                         .create_tile(
                             tab_id,
                             "change-efficiency-agent",
                             lease_id,
-                            Rect::new((column * 100) as f32, (row * 100) as f32, 100.0, 100.0),
+                            Rect::new(
+                                (column * 100) as f32,
+                                (row * 100) as f32,
+                                tile_width,
+                                tile_height,
+                            ),
                             index,
                         )
                         .expect("canonical tile creation");
@@ -1445,7 +1558,7 @@ mod tests {
                             // The update below preserves this glyph inventory,
                             // so an observed zero-upload capture is meaningful.
                             content: "AB".into(),
-                            bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                            bounds: Rect::new(0.0, 0.0, tile_width, tile_height),
                             font_size_px: 18.0,
                             font_family: FontFamily::SystemSansSerif,
                             color: Rgba::WHITE,
@@ -1483,7 +1596,7 @@ mod tests {
                     node_id: changed_node_id,
                     data: NodeData::TextMarkdown(TextMarkdownNode {
                         content: "BA".into(),
-                        bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                        bounds: Rect::new(0.0, 0.0, 96.0, 92.0),
                         font_size_px: 18.0,
                         font_family: FontFamily::SystemSansSerif,
                         color: Rgba::WHITE,
@@ -1606,7 +1719,7 @@ mod tests {
                     node_id: changed_node_id,
                     data: NodeData::TextMarkdown(TextMarkdownNode {
                         content: "AB".into(),
-                        bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                        bounds: Rect::new(0.0, 0.0, 96.0, 92.0),
                         font_size_px: 18.0,
                         font_family: FontFamily::SystemSansSerif,
                         color: Rgba::WHITE,
@@ -1670,7 +1783,7 @@ mod tests {
                     node_id: changed_node_id,
                     data: NodeData::TextMarkdown(TextMarkdownNode {
                         content: "AC".into(),
-                        bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                        bounds: Rect::new(0.0, 0.0, 96.0, 92.0),
                         font_size_px: 18.0,
                         font_family: FontFamily::SystemSansSerif,
                         color: Rgba::WHITE,

@@ -468,8 +468,22 @@ impl Compositor {
         // so selecting only these already-declared closure tiles is equivalent to
         // that pass for the damaged pixels. Dynamic grip state is rejected by
         // `canonical_snapshot`; do not generalize this to arbitrary chrome.
-        let drag_handles: Vec<_> = self
-            .collect_drag_handle_entries(scene, width as f32, height as f32)
+        let all_drag_handles = self.collect_drag_handle_entries(scene, width as f32, height as f32);
+        // A grip straddles its tile's top edge, so a tile body outside the
+        // closure can still have chrome inside the scoped damage. This narrow
+        // lane repairs chrome only for declared closure tiles; decline rather
+        // than silently overwrite a non-closure grip fragment.
+        if all_drag_handles.iter().any(|entry| {
+            !change
+                .redraw_tiles
+                .iter()
+                .any(|tile| tile.tile_id == entry.element_id)
+                && pixel_rect_for_bounds(entry.bounds, width, height)
+                    .is_none_or(|bounds| pixel_rects_intersect(bounds, damage))
+        }) {
+            return None;
+        }
+        let drag_handles: Vec<_> = all_drag_handles
             .into_iter()
             .filter(|entry| {
                 change
@@ -1061,6 +1075,26 @@ fn pixel_rect_for_bounds(bounds: Rect, width: u32, height: u32) -> Option<PixelR
         height: bottom.checked_sub(top)?,
     };
     (pixel_rect.width > 0 && pixel_rect.height > 0).then_some(pixel_rect)
+}
+
+/// Whether two half-open pixel rectangles share any rasterized pixels.
+///
+/// Overflow is impossible for valid viewport rectangles, but returning `true`
+/// on malformed bounds keeps this proof-only retained path fail-closed.
+fn pixel_rects_intersect(first: PixelRect, second: PixelRect) -> bool {
+    let (Some(first_right), Some(first_bottom), Some(second_right), Some(second_bottom)) = (
+        first.x.checked_add(first.width),
+        first.y.checked_add(first.height),
+        second.x.checked_add(second.width),
+        second.y.checked_add(second.height),
+    ) else {
+        return true;
+    };
+
+    first.x < second_right
+        && first_right > second.x
+        && first.y < second_bottom
+        && first_bottom > second.y
 }
 
 fn one_item_category<T>(identity: T) -> InvalidationCategory<T>
