@@ -311,6 +311,137 @@ fn test_hit_test_uses_displayed_scroll_offset_during_animation() {
     );
 }
 
+/// A geometry-only portal surface keeps its derived composer interaction region
+/// tile-anchored. During a smoothed scroll, pointer mapping must use the same
+/// fixed-chrome classification as rendering rather than applying the displayed
+/// document scroll to the composer region.
+#[test]
+fn test_hit_test_keeps_geometry_only_portal_composer_fixed_after_resize_and_displayed_scroll() {
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab_id = scene.create_tab("Main", 0).unwrap();
+    let lease_id = scene.grant_lease(
+        "portal",
+        60_000,
+        vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+    );
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "portal",
+            lease_id,
+            Rect::new(100.0, 100.0, 500.0, 300.0),
+            1,
+        )
+        .unwrap();
+    scene
+        .register_tile_scroll_config(tile_id, TileScrollConfig::vertical())
+        .unwrap();
+
+    // Model a viewer-resized portal: the composer pane and its derived
+    // interaction region use the resized surface-local geometry.
+    scene
+        .update_tile_bounds(tile_id, Rect::new(100.0, 100.0, 700.0, 440.0), "portal")
+        .unwrap();
+    let composer_bounds = Rect::new(18.0, 272.0, 664.0, 150.0);
+    let document_bounds = Rect::new(30.0, 304.0, 640.0, 106.0);
+    let root_id = SceneId::new();
+    let document_id = SceneId::new();
+    let composer_id = SceneId::new();
+    scene
+        .set_tile_root_tree(
+            tile_id,
+            Node {
+                layout: Default::default(),
+                id: root_id,
+                children: vec![document_id, composer_id],
+                data: NodeData::SolidColor(SolidColorNode {
+                    color: Rgba::TRANSPARENT,
+                    bounds: Rect::new(0.0, 0.0, 700.0, 440.0),
+                    radius: None,
+                }),
+            },
+            vec![
+                Node {
+                    layout: Default::default(),
+                    id: document_id,
+                    children: vec![],
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "draft document content".to_string(),
+                        bounds: document_bounds,
+                        font_size_px: 16.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::WHITE,
+                        background: None,
+                        alignment: TextAlign::Start,
+                        overflow: TextOverflow::Clip,
+                        color_runs: Box::default(),
+                    }),
+                },
+                Node {
+                    layout: Default::default(),
+                    id: composer_id,
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: composer_bounds,
+                        interaction_id: "portal-composer".to_string(),
+                        accepts_focus: true,
+                        accepts_pointer: true,
+                        accepts_composer_input: true,
+                        ..Default::default()
+                    }),
+                },
+            ],
+        )
+        .unwrap();
+    scene
+        .set_portal_surface(
+            tile_id,
+            PortalSurface {
+                identity: PortalIdentity {
+                    session_id: "sess-portal".to_string(),
+                    display_name: "Claude".to_string(),
+                    peer_class: PortalPeerClass::ResidentLlm,
+                },
+                lifecycle: PortalLifecycleState::Active,
+                display_state: PortalDisplayState::Expanded,
+                // No part has a backing node: this is the resident adapter's
+                // geometry-only descriptor, whose pane chrome remains fixed.
+                parts: vec![
+                    PortalPart {
+                        kind: PortalPartKind::Composer,
+                        bounds: composer_bounds,
+                        node: None,
+                    },
+                    PortalPart {
+                        kind: PortalPartKind::Transcript,
+                        bounds: Rect::new(18.0, 52.0, 664.0, 202.0),
+                        node: None,
+                    },
+                ],
+            },
+            "portal",
+        )
+        .unwrap();
+
+    // The renderer is still displaying an intermediate scroll position. The
+    // fixed composer pane is visibly at y=272..422 tile-local, so a click near
+    // its bottom must resolve to its derived HitRegion rather than being shifted
+    // out of the pane by the displayed document scroll.
+    scene
+        .set_tile_scroll_offset_local(tile_id, 0.0, 220.0)
+        .unwrap();
+    scene.set_displayed_tile_scroll_offset(tile_id, 0.0, 140.0);
+    assert_eq!(
+        scene.hit_test(150.0, 500.0),
+        HitResult::NodeHit {
+            tile_id,
+            node_id: composer_id,
+            interaction_id: "portal-composer".to_string(),
+        },
+        "the resized geometry-only composer region must remain at its rendered fixed position"
+    );
+}
+
 #[test]
 fn test_hit_test_zone_regions_without_active_tab() {
     let mut scene = SceneGraph::new(1920.0, 1080.0);
