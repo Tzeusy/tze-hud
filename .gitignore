@@ -5,8 +5,9 @@
 **/*.pyc
 
 .env
-# Rust build artifacts
-/target/
+# Rust build artifacts (no trailing slash: also matches when this is a
+# symlink onto /data via scripts/worktree-add.sh, not just a real directory)
+/target
 
 # Worktrees
 .worktrees/

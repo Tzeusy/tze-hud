@@ -194,11 +194,13 @@ For **Rust code workers**, use `git worktree` on the **tze-hud repo itself**:
 
 ```bash
 # From mayor/rig/ (the tze-hud repo root):
-git worktree add .worktrees/agent-hud-XXXX -b agent/hud-XXXX
+scripts/worktree-add.sh .worktrees/agent-hud-XXXX -b agent/hud-XXXX
 # Worker operates in .worktrees/agent-hud-XXXX/
 ```
 
 **Do NOT** have workers `git checkout -b agent/...` directly in the main checkout — this leaves `mayor/rig/` on a non-main branch and blocks other workers.
+
+`scripts/worktree-add.sh` wraps `git worktree add` and symlinks the new worktree's `target/` to `/data/tze_hud-cargo-target/<name>/target` before any build runs, so Rust build output lands on `/data` (large, mostly empty) instead of `/` (tight). Falling back to plain `git worktree add` still works but leaves build output on `/`.
 
 # Notes to self
 
