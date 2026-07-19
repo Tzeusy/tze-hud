@@ -1,0 +1,32 @@
+{
+  "captured_utc": "2026-07-16T15:02:35.3312932Z",
+  "video_id": "O0FGCxkHM-U",
+  "enclosing_page": {
+    "scheme": "http",
+    "host": "127.0.0.1",
+    "port": "EPHEMERAL_PORT",
+    "path": "/youtube_source_evidence.html",
+    "http_200": true,
+    "request_count": 1,
+    "request_user_agent_family": "Chrome"
+  },
+  "iframe_api_url": "https://www.youtube.com/iframe_api",
+  "iframe_player_url_shape": "https://www.youtube.com/embed/VIDEO_ID?enablejsapi=1&origin=http://127.0.0.1:EPHEMERAL_PORT",
+  "direct_embed_attempted": false,
+  "terminal": "timeout",
+  "error_153_observed": false,
+  "player_ready_observed": false,
+  "player_playing_observed": false,
+  "events": [
+    {
+      "at_utc": "2026-07-16T15:02:00.7506751Z",
+      "event": "iframe_api_ready",
+      "value": "",
+      "referer": "loopback-enclosing-page"
+    }
+  ],
+  "interpretation": "enclosing-page browser path proved; player outcome indeterminate; operator visual gate required",
+  "chrome_profile_mode": "implicit-existing-default",
+  "chrome_launch_flags_added": [],
+  "profile_settings_actions": []
+}

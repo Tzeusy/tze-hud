@@ -1,0 +1,25 @@
+{
+  "captured_utc": "2026-07-16T15:04:22.2969601Z",
+  "chrome": {
+    "process_count": 55,
+    "browser_pid": 44056,
+    "browser_created_utc": "2026-07-13T01:03:31.2507490Z",
+    "profile_directory": "implicit-default",
+    "remote_debugging": false
+  },
+  "hud": {
+    "pid": 34996,
+    "created_utc": "2026-07-16T13:21:15.0136390Z",
+    "psk_argument_present": true,
+    "mcp_listener_count": 1,
+    "grpc_listener_count": 1
+  },
+  "gpu_lock": {
+    "exists": true,
+    "length": 111,
+    "last_write_utc": "2026-07-16T13:21:15.0378928Z",
+    "sha256": "F622E3ED93CD8126B85F2B3D09BDFC87B1C3960A28B3CF865183B5FAE5F18C5C"
+  },
+  "validation_task_exists": false,
+  "targeted_temp_artifacts_remaining": 0
+}
