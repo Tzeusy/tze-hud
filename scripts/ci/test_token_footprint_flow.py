@@ -2,6 +2,7 @@
 """Production-framing contract tests for the canonical token-footprint driver."""
 
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -93,6 +94,51 @@ class CanonicalFlowFramingTests(unittest.TestCase):
             [params["operation"] for _, params in captured],
             ["attach", "publish_output", "get_pending_input", "acknowledge_input"],
         )
+
+    def test_piggyback_candidate_turn_does_not_issue_an_explicit_poll(self):
+        portal_calls = []
+
+        def fake_portal_tool(method, params):
+            portal_calls.append((method, params.copy()))
+            if method == "portal_projection_attach":
+                return {"owner_token": "fixture-owner-token"}
+            if method == "portal_projection_publish":
+                return {
+                    "accepted": True,
+                    "pending_input": {
+                        "items": [
+                            {
+                                "input_id": "fixture-input-0001",
+                                "content": "Canonical HUD-originated input.",
+                            }
+                        ],
+                        "remaining_count": 0,
+                    },
+                }
+            if method == "portal_projection_get_pending_input":
+                raise AssertionError("candidate v2 must not issue an explicit poll")
+            if method == "portal_projection_acknowledge_input":
+                return {"accepted": True}
+            raise AssertionError(f"unexpected portal operation: {method}")
+
+        with (
+            mock.patch.object(flow, "MODE", flow.MODE_PIGGYBACK_CANDIDATE_V2),
+            mock.patch.object(flow, "transactions", []),
+            mock.patch.object(flow, "invoke_portal_tool", fake_portal_tool),
+            mock.patch.object(flow, "invoke_mcp_tool", return_value={"accepted": True}),
+            mock.patch.object(flow.sys, "stdout", io.StringIO()),
+        ):
+            flow.main()
+
+        self.assertEqual(
+            [method for method, _ in portal_calls],
+            [
+                "portal_projection_attach",
+                "portal_projection_publish",
+                "portal_projection_acknowledge_input",
+            ],
+        )
+        self.assertTrue(portal_calls[1][1]["expects_reply"])
 
 
 if __name__ == "__main__":
