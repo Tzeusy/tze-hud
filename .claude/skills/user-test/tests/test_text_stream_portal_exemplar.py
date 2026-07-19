@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib.util
+import json
 import math
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -265,6 +267,182 @@ class TextStreamPortalExemplarTests(unittest.TestCase):
         self.assertLess(hide_console, hide_window)
         self.assertLess(hide_window, settle_delay)
         self.assertLess(settle_delay, first_action)
+
+    def test_resize_hotkey_snapshot_plan_is_focused_and_has_no_gdi_actions(self) -> None:
+        plan = portal.build_resize_hotkey_snapshot_plan(120.0, 80.0)
+
+        self.assertEqual(tuple(plan), ("baseline", "grow", "shrink"))
+        self.assertEqual(
+            [action["label"] for action in plan["baseline"]],
+            ["focus-composer"],
+        )
+        self.assertEqual(
+            [action["label"] for action in plan["grow"]],
+            [
+                "focus-composer",
+                "settle-portal-keyboard-focus",
+                "resize-grow-ctrl-equal",
+            ],
+        )
+        self.assertEqual(
+            [action["label"] for action in plan["shrink"]],
+            [
+                "focus-composer",
+                "settle-portal-keyboard-focus",
+                "resize-shrink-ctrl-minus",
+            ],
+        )
+        self.assertEqual(plan["grow"][-1]["key_vk"], 0xBB)
+        self.assertEqual(plan["shrink"][-1]["key_vk"], 0xBD)
+        self.assertTrue(
+            all(
+                action["kind"] != "screenshot"
+                for stage_actions in plan.values()
+                for action in stage_actions
+            )
+        )
+
+    def test_resize_hotkey_snapshot_stage_scripts_have_one_console_prelude_and_no_gdi(self) -> None:
+        plan = portal.build_resize_hotkey_snapshot_plan(120.0, 80.0)
+
+        for stage, actions in plan.items():
+            with self.subTest(stage=stage):
+                script = portal.windows_diagnostic_input_script(actions)
+                self.assertEqual(
+                    script.count(
+                        "Add-Type -Name Win -Namespace Native -MemberDefinition"
+                    ),
+                    1,
+                )
+                self.assertEqual(script.count("[Native.Win]::GetConsoleWindow()"), 1)
+                self.assertEqual(script.count("[Native.Win]::ShowWindow($hudConsole, 0)"), 1)
+                self.assertNotIn("Capture-Screen", script)
+                self.assertNotIn("CopyFromScreen", script)
+                self.assertLess(
+                    script.index("Start-Sleep -Milliseconds 400"),
+                    script.index("diagnostic:"),
+                )
+                if stage != "baseline":
+                    focus = script.index("diagnostic:focus-composer")
+                    settle = script.index("diagnostic:settle-portal-keyboard-focus")
+                    chord = script.index("diagnostic:resize-")
+                    self.assertIn("Start-Sleep -Milliseconds 700", script)
+                    self.assertLess(focus, settle)
+                    self.assertLess(settle, chord)
+
+    def test_scene_snapshot_portal_bounds_selects_only_target_frame(self) -> None:
+        frame_id = uuid.UUID("00000000-0000-0000-0000-0000000000ab")
+        snapshot_json = json.dumps(
+            {
+                "tiles": {
+                    "unrelated": {
+                        "id": "00000000-0000-0000-0000-0000000000cd",
+                        "bounds": {"x": 1, "y": 2, "width": 3, "height": 4},
+                    },
+                    str(frame_id): {
+                        "id": str(frame_id),
+                        "bounds": {
+                            "x": 120.125,
+                            "y": 80.25,
+                            "width": 860.5,
+                            "height": 680.75,
+                        },
+                    },
+                }
+            }
+        )
+
+        bounds = portal.scene_snapshot_portal_bounds(snapshot_json, frame_id.bytes)
+
+        self.assertEqual(
+            bounds,
+            {"x": 120.1, "y": 80.2, "w": 860.5, "h": 680.8},
+        )
+
+    def test_scene_snapshot_resize_evidence_requires_grow_then_shrink(self) -> None:
+        before = {"x": 120.0, "y": 80.0, "w": 860.0, "h": 680.0}
+        grow = {"x": 120.0, "y": 80.0, "w": 980.0, "h": 800.0}
+        shrink = {"x": 120.0, "y": 80.0, "w": 740.0, "h": 560.0}
+
+        evidence = portal.assert_scene_snapshot_resize_bounds(before, grow, shrink)
+
+        self.assertTrue(evidence["passed"])
+        self.assertEqual(evidence["grow_delta"], {"dw": 120.0, "dh": 120.0})
+        self.assertEqual(evidence["shrink_delta"], {"dw": -240.0, "dh": -240.0})
+        with self.assertRaisesRegex(AssertionError, "Ctrl\\+Equal"):
+            portal.assert_scene_snapshot_resize_bounds(before, before, shrink)
+        with self.assertRaisesRegex(AssertionError, "Ctrl\\+Minus"):
+            portal.assert_scene_snapshot_resize_bounds(before, grow, grow)
+
+    def test_resize_hotkey_phase_records_redacted_protocol_geometry_only(self) -> None:
+        transcript: list[dict[str, object]] = []
+        input_actions: list[list[dict[str, object]]] = []
+        snapshot_labels: list[str] = []
+        snapshots = {
+            "baseline": {"x": 120.0, "y": 80.0, "w": 860.0, "h": 680.0},
+            "grow": {"x": 120.0, "y": 80.0, "w": 980.0, "h": 800.0},
+            "shrink": {"x": 120.0, "y": 80.0, "w": 740.0, "h": 560.0},
+        }
+
+        async def fake_input(_host: str, **kwargs: object) -> dict[str, object]:
+            input_actions.append(kwargs["actions"])  # type: ignore[arg-type]
+            return {"ok": True, "duration_s": 0.1, "stdout": "must-not-persist"}
+
+        async def fake_snapshot(
+            _target: str,
+            _psk: str,
+            _frame_tile_id: bytes,
+            *,
+            label: str,
+        ) -> dict[str, float]:
+            snapshot_labels.append(label)
+            return snapshots[label]
+
+        frame_id = uuid.UUID("00000000-0000-0000-0000-0000000000ab").bytes
+        with (
+            mock.patch.object(
+                portal, "run_windows_diagnostic_input", side_effect=fake_input
+            ),
+            mock.patch.object(
+                portal,
+                "capture_scene_snapshot_portal_bounds",
+                side_effect=fake_snapshot,
+            ),
+        ):
+            asyncio.run(
+                portal.run_resize_hotkey_phase(
+                    transcript,
+                    target="windows-host.example:50051",
+                    host="windows-host.example",
+                    user="admin-user",
+                    ssh_key="/tmp/no-key",
+                    psk="test-secret",
+                    frame_tile_id=frame_id,
+                    portal_x=120.0,
+                    portal_y=80.0,
+                    tab_width=1280.0,
+                    tab_height=800.0,
+                    timeout_s=1.0,
+                    connect_timeout_s=1.0,
+                    settle_s=0.0,
+                )
+            )
+
+        self.assertEqual(snapshot_labels, ["baseline", "grow", "shrink"])
+        self.assertEqual(len(input_actions), 3)
+        self.assertTrue(
+            all(
+                action["kind"] != "screenshot"
+                for actions in input_actions
+                for action in actions
+            )
+        )
+        serialized = json.dumps(transcript)
+        self.assertNotIn("must-not-persist", serialized)
+        self.assertNotIn("test-secret", serialized)
+        self.assertNotIn("CopyFromScreen", serialized)
+        self.assertIn('"source": "SceneSnapshot"', serialized)
+        self.assertIn('"passed": true', serialized)
 
     def test_legacy_resize_drivers_compose_one_console_hide_prelude(self) -> None:
         repo_root = Path(portal.__file__).resolve().parents[4]

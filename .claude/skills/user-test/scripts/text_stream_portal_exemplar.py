@@ -1190,38 +1190,195 @@ def build_diagnostic_input_plan(
     ]
 
 
-def build_resize_hotkey_plan(
+def build_resize_hotkey_snapshot_plan(
     portal_x: float,
     portal_y: float,
-    shot_prefix: str,
     *,
     grow_steps: int = 6,
     shrink_steps: int = 12,
-) -> list[dict[str, Any]]:
-    """Build an OS-input plan proving focus-scoped Ctrl +/- portal resize.
+    focus_settle_ms: int = 700,
+) -> dict[str, list[dict[str, Any]]]:
+    """Build staged OS input for authoritative Ctrl +/- resize validation.
 
-    Focuses the portal composer (composer focus == portal-surface focus, so the
-    resize dispatch's focus gate is satisfied), screenshots the baseline, grows
-    via Ctrl+Equal, screenshots, then shrinks past baseline via Ctrl+Minus and
-    screenshots. The before/after PNGs are the operator-visible proof for
-    hud-v4k1h (Ctrl resize hotkeys had no visible effect before PR #937's
-    physical-KeyCode resolution).
+    Every stage focuses the scrollable composer surface, which acquires both
+    Windows keyboard focus and the runtime focus-owner required by the resize
+    gate. The caller takes an ephemeral SceneSnapshot after each stage; no stage
+    contains a GDI capture action or persists a screenshot.
+
+    Refocusing before each chord keeps the proof valid even when Windows assigns
+    foreground ownership to a newly launched interactive diagnostic task.
     """
-    _, output_rect = portal_pane_rects()
-    # Focus the OUTPUT/transcript pane: the resize hotkey only fires when the
-    # focused tile carries a scroll config (runtime gate in
-    # apply_portal_resize_hotkey: tile_scroll_config(focused).is_some()), and
-    # in the raw-tile pilot the scroll config lives on the output body tile.
-    focus_x = portal_x + output_rect.x + output_rect.w / 2.0
-    focus_y = portal_y + output_rect.y + output_rect.h / 2.0
-    return [
-        {"kind": "click", "label": "focus-output-pane", "x": focus_x, "y": focus_y},
-        {"kind": "screenshot", "label": "resize-baseline", "path": f"{shot_prefix}-baseline.png"},
-        {"kind": "chord", "label": "resize-grow-ctrl-equal", "mod_vk": 0x11, "key_vk": 0xBB, "count": grow_steps},
-        {"kind": "screenshot", "label": "resize-grow", "path": f"{shot_prefix}-grow.png"},
-        {"kind": "chord", "label": "resize-shrink-ctrl-minus", "mod_vk": 0x11, "key_vk": 0xBD, "count": shrink_steps},
-        {"kind": "screenshot", "label": "resize-shrink", "path": f"{shot_prefix}-shrink.png"},
-    ]
+    input_rect, _ = portal_pane_rects()
+    composer_x = portal_x + input_rect.x + input_rect.w / 2.0
+    composer_y = portal_y + input_rect.y + min(input_rect.h - 10.0, 72.0)
+    focus_settle_ms = max(0, int(focus_settle_ms))
+
+    def focused_composer_actions() -> list[dict[str, Any]]:
+        return [
+            {
+                "kind": "click",
+                "label": "focus-composer",
+                "x": composer_x,
+                "y": composer_y,
+            },
+        ]
+
+    return {
+        "baseline": focused_composer_actions(),
+        "grow": [
+            *focused_composer_actions(),
+            {
+                "kind": "wait",
+                "label": "settle-portal-keyboard-focus",
+                "milliseconds": focus_settle_ms,
+            },
+            {
+                "kind": "chord",
+                "label": "resize-grow-ctrl-equal",
+                "mod_vk": 0x11,
+                "key_vk": 0xBB,
+                "count": max(1, int(grow_steps)),
+            },
+        ],
+        "shrink": [
+            *focused_composer_actions(),
+            {
+                "kind": "wait",
+                "label": "settle-portal-keyboard-focus",
+                "milliseconds": focus_settle_ms,
+            },
+            {
+                "kind": "chord",
+                "label": "resize-shrink-ctrl-minus",
+                "mod_vk": 0x11,
+                "key_vk": 0xBD,
+                "count": max(1, int(shrink_steps)),
+            },
+        ],
+    }
+
+
+def _scene_snapshot_rect(bounds: Any) -> Optional[dict[str, float]]:
+    """Normalize a snapshot rectangle without retaining the source snapshot."""
+    if not isinstance(bounds, dict):
+        return None
+    values = {
+        "x": bounds.get("x"),
+        "y": bounds.get("y"),
+        "w": bounds.get("width", bounds.get("w")),
+        "h": bounds.get("height", bounds.get("h")),
+    }
+    if not all(isinstance(value, (int, float)) for value in values.values()):
+        return None
+    if values["w"] <= 0 or values["h"] <= 0:
+        return None
+    return {key: round(float(value), 1) for key, value in values.items()}
+
+
+def scene_snapshot_portal_bounds(
+    snapshot_json: str,
+    frame_tile_id: bytes,
+) -> Optional[dict[str, float]]:
+    """Extract only the target frame bounds from a SceneSnapshot payload.
+
+    The full snapshot can contain other agents' scene content. This helper parses
+    it transiently, returns the four geometry values needed for validation, and
+    never writes or returns the raw payload.
+    """
+    try:
+        frame_id = str(uuid.UUID(bytes=frame_tile_id))
+        snapshot = json.loads(snapshot_json)
+    except (ValueError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(snapshot, dict):
+        return None
+    tiles = snapshot.get("tiles")
+    if not isinstance(tiles, dict):
+        return None
+
+    direct = tiles.get(frame_id)
+    if isinstance(direct, dict):
+        direct_rect = _scene_snapshot_rect(direct.get("bounds"))
+        if direct_rect is not None:
+            return direct_rect
+    for key, tile in tiles.items():
+        if not isinstance(tile, dict):
+            continue
+        observed_id = str(tile.get("id") or key)
+        if observed_id == frame_id:
+            return _scene_snapshot_rect(tile.get("bounds"))
+    return None
+
+
+def _snapshot_bounds_for_evidence(bounds: dict[str, float]) -> dict[str, float]:
+    try:
+        normalized = {key: round(float(bounds[key]), 1) for key in ("x", "y", "w", "h")}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AssertionError("SceneSnapshot frame bounds are incomplete") from exc
+    if normalized["w"] <= 0 or normalized["h"] <= 0:
+        raise AssertionError("SceneSnapshot frame bounds are not positive")
+    return normalized
+
+
+def assert_scene_snapshot_resize_bounds(
+    before: dict[str, float],
+    grow: dict[str, float],
+    shrink: dict[str, float],
+) -> dict[str, Any]:
+    """Assert the protocol-derived geometry proves Ctrl grow then shrink."""
+    before_bounds = _snapshot_bounds_for_evidence(before)
+    grow_bounds = _snapshot_bounds_for_evidence(grow)
+    shrink_bounds = _snapshot_bounds_for_evidence(shrink)
+    grow_delta = {
+        "dw": round(grow_bounds["w"] - before_bounds["w"], 1),
+        "dh": round(grow_bounds["h"] - before_bounds["h"], 1),
+    }
+    shrink_delta = {
+        "dw": round(shrink_bounds["w"] - grow_bounds["w"], 1),
+        "dh": round(shrink_bounds["h"] - grow_bounds["h"], 1),
+    }
+    if grow_delta["dw"] <= 0 or grow_delta["dh"] <= 0:
+        raise AssertionError("Ctrl+Equal did not grow SceneSnapshot portal bounds")
+    if shrink_delta["dw"] >= 0 or shrink_delta["dh"] >= 0:
+        raise AssertionError("Ctrl+Minus did not shrink SceneSnapshot portal bounds")
+    return {
+        "source": "SceneSnapshot",
+        "before": before_bounds,
+        "grow": grow_bounds,
+        "shrink": shrink_bounds,
+        "grow_delta": grow_delta,
+        "shrink_delta": shrink_delta,
+        "passed": True,
+    }
+
+
+async def capture_scene_snapshot_portal_bounds(
+    target: str,
+    psk: str,
+    frame_tile_id: bytes,
+    *,
+    label: str,
+) -> dict[str, float]:
+    """Observe one portal frame rectangle without persisting the raw snapshot."""
+    observer = HudClient(
+        target,
+        psk=psk,
+        agent_id=f"portal-resize-snapshot-{label}-{uuid.uuid4().hex[:8]}",
+        initial_subscriptions=["SCENE_TOPOLOGY"],
+    )
+    raw_snapshot: Optional[str] = None
+    try:
+        await observer.connect()
+        raw_snapshot = observer.scene_snapshot_json
+    finally:
+        with contextlib.suppress(Exception):
+            await observer.disconnect(graceful=True)
+    if not raw_snapshot:
+        raise RuntimeError("SceneSnapshot observer returned no snapshot")
+    bounds = scene_snapshot_portal_bounds(raw_snapshot, frame_tile_id)
+    if bounds is None:
+        raise RuntimeError(f"SceneSnapshot did not contain portal frame bounds for {label}")
+    return bounds
 
 
 def windows_diagnostic_input_script(
@@ -1329,21 +1486,24 @@ def windows_diagnostic_input_script(
         "  if ($sent -ne 4) { Write-Output ('diagnostic-warning:chord SendInput sent=' + $sent) }",
         "  Start-Sleep -Milliseconds 180",
         "}",
-        # Capture the composited primary screen (overlay over desktop) to a PNG.
-        # Runs in the interactive session so the layered overlay is included.
-        "function Capture-Screen([string]$path) {",
-        "  Add-Type -AssemblyName System.Drawing",
-        "  $b = $HudDiagnosticBounds",
-        "  $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height",
-        "  $g = [System.Drawing.Graphics]::FromImage($bmp)",
-        "  $g.CopyFromScreen($b.X, $b.Y, 0, 0, $bmp.Size)",
-        "  $dir = Split-Path -Parent $path",
-        "  if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }",
-        "  $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)",
-        "  $g.Dispose(); $bmp.Dispose()",
-        "  Start-Sleep -Milliseconds 120",
-        "}",
     ]
+    if any(action.get("kind") == "screenshot" for action in actions):
+        # Capture is retained for explicitly diagnostic callers only. Snapshot
+        # validation plans do not include this function or any GDI action.
+        lines.extend([
+            "function Capture-Screen([string]$path) {",
+            "  Add-Type -AssemblyName System.Drawing",
+            "  $b = $HudDiagnosticBounds",
+            "  $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height",
+            "  $g = [System.Drawing.Graphics]::FromImage($bmp)",
+            "  $g.CopyFromScreen($b.X, $b.Y, 0, 0, $bmp.Size)",
+            "  $dir = Split-Path -Parent $path",
+            "  if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }",
+            "  $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)",
+            "  $g.Dispose(); $bmp.Dispose()",
+            "  Start-Sleep -Milliseconds 120",
+            "}",
+        ])
     for action in actions:
         kind = str(action.get("kind", ""))
         if kind == "click":
@@ -1381,6 +1541,12 @@ def windows_diagnostic_input_script(
                 f"Write-Output {ps_single_quoted('diagnostic:' + str(action.get('label', 'text')))}",
                 f"Send-Text {ps_single_quoted(str(action.get('text', '')))}",
                 "Start-Sleep -Milliseconds 120",
+            ])
+        elif kind == "wait":
+            milliseconds = max(0, int(action.get("milliseconds", 0)))
+            lines.extend([
+                f"Write-Output {ps_single_quoted('diagnostic:' + str(action.get('label', 'wait')))}",
+                f"Start-Sleep -Milliseconds {milliseconds}",
             ])
         elif kind == "chord":
             mod_vk = int(action.get("mod_vk", 0x11))
@@ -5046,47 +5212,83 @@ async def run_diagnostic_input_phase(
 async def run_resize_hotkey_phase(
     transcript: list[dict[str, Any]],
     *,
+    target: str,
     host: str,
     user: str,
     ssh_key: str,
+    psk: str,
+    frame_tile_id: bytes,
     portal_x: float,
     portal_y: float,
     tab_width: float,
     tab_height: float,
     timeout_s: float,
     connect_timeout_s: float,
-    shot_prefix: str,
+    settle_s: float,
 ) -> None:
-    """Prove focus-scoped Ctrl +/- portal resize via OS keyboard injection.
+    """Prove focus-scoped Ctrl +/- resize with OS input plus SceneSnapshot.
 
-    Focuses the portal composer, then injects Ctrl+Equal (grow) and Ctrl+Minus
-    (shrink) through the real Windows input path, screenshotting baseline/grow/
-    shrink. The PNGs are the operator-visible proof for hud-v4k1h.
+    GDI ``CopyFromScreen`` cannot capture the transparent Vulkan overlay and is
+    therefore not acceptance evidence. This path sends real Windows input through
+    the canonical hidden-console injector, then observes only the portal frame
+    rectangle from independent resident-protocol SceneSnapshots.
     """
-    actions = build_resize_hotkey_plan(portal_x, portal_y, shot_prefix)
+    stages = build_resize_hotkey_snapshot_plan(portal_x, portal_y)
     emit_step_event(transcript, 6, "started", {
         "code": "resize-hotkey",
         "title": "Focus-scoped Ctrl +/- portal resize",
-        "action": "focus composer, then inject Ctrl+Equal (grow) and Ctrl+Minus (shrink) with screenshots",
-        "expected_visual": "portal grows on Ctrl+Equal and shrinks on Ctrl+Minus; PNGs capture the change",
-    }, host=host, user=user, action_labels=[a["label"] for a in actions])
-    result = await run_windows_diagnostic_input(
-        host,
-        user=user,
-        ssh_key=ssh_key,
-        actions=actions,
-        timeout_s=timeout_s,
-        connect_timeout_s=connect_timeout_s,
-        scene_width=tab_width,
-        scene_height=tab_height,
+        "action": "focus portal, inject Ctrl+Equal then Ctrl+Minus, and observe each state through SceneSnapshot",
+        "expected_visual": "protocol geometry records a positive grow delta followed by a negative shrink delta; no GDI capture is used as proof",
+    }, action_labels={stage: [action["label"] for action in actions] for stage, actions in stages.items()})
+
+    captured: dict[str, dict[str, float]] = {}
+    for stage in ("baseline", "grow", "shrink"):
+        actions = stages[stage]
+        result = await run_windows_diagnostic_input(
+            host,
+            user=user,
+            ssh_key=ssh_key,
+            actions=actions,
+            timeout_s=timeout_s,
+            connect_timeout_s=connect_timeout_s,
+            scene_width=tab_width,
+            scene_height=tab_height,
+        )
+        if not result.get("ok"):
+            emit_step_event(transcript, 6, "failed", {
+                "code": "resize-hotkey:os-input",
+                "title": "Focused Ctrl resize OS input failed",
+                "action": f"Windows injector did not complete the {stage} stage",
+                "expected_visual": "no protocol resize verdict is emitted after failed input",
+            }, stage=stage, action_labels=[action["label"] for action in actions])
+            raise RuntimeError(f"Windows Ctrl-resize input stage failed: {stage}")
+        await asyncio.sleep(max(0.0, settle_s))
+        captured[stage] = await capture_scene_snapshot_portal_bounds(
+            target,
+            psk,
+            frame_tile_id,
+            label=stage,
+        )
+        emit_step_event(transcript, 6, "checkpoint", {
+            "code": f"resize-hotkey:snapshot:{stage}",
+            "title": f"SceneSnapshot {stage} portal bounds",
+            "action": "extract only the focused portal frame rectangle from a transient resident-protocol snapshot",
+            "expected_visual": "redacted geometry is recorded without a screenshot or raw snapshot payload",
+        }, stage=stage, bounds=captured[stage],
+           input_duration_s=result.get("duration_s"),
+           action_labels=[action["label"] for action in actions])
+
+    evidence = assert_scene_snapshot_resize_bounds(
+        captured["baseline"],
+        captured["grow"],
+        captured["shrink"],
     )
-    status = "completed" if result.get("ok") else "failed"
-    emit_step_event(transcript, 6, status, {
+    emit_step_event(transcript, 6, "completed", {
         "code": "resize-hotkey",
         "title": "Focus-scoped Ctrl +/- portal resize",
-        "action": "Windows OS keyboard injector finished",
-        "expected_visual": "stdout lists screenshot paths; baseline→grow→shrink PNGs show the resize",
-    }, **result)
+        "action": "assert SceneSnapshot portal-bounds deltas after focused Windows Ctrl hotkeys",
+        "expected_visual": "grow and shrink both changed the authoritative portal geometry; screenshots are not evidence",
+    }, protocol_evidence=evidence)
 
 
 # ─── Gate phase runners (task 7.1) ────────────────────────────────────────────
@@ -5931,16 +6133,19 @@ async def run_scenario(args: argparse.Namespace) -> int:
                 )
                 await run_resize_hotkey_phase(
                     transcript,
+                    target=args.target,
                     host=target_host(args.target),
                     user=args.diagnostic_input_user,
                     ssh_key=args.diagnostic_input_ssh_key,
+                    psk=psk,
+                    frame_tile_id=tiles.frame,
                     portal_x=portal_x,
                     portal_y=portal_y,
                     tab_width=scene_width,
                     tab_height=scene_height,
                     timeout_s=args.diagnostic_input_timeout_s,
                     connect_timeout_s=args.diagnostic_input_connect_timeout_s,
-                    shot_prefix=args.resize_shot_prefix,
+                    settle_s=args.resize_hotkey_settle_s,
                 )
             elif phase == "markdown":
                 await run_markdown(
@@ -6284,7 +6489,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Comma-separated list of phases to run: "
             "baseline, scroll, streaming, rapid, soak, composer-smoke, diagnostic-input, "
-            "markdown, overflow, composer-edit, cadence, profile-swap, window-mgmt"
+            "resize-hotkey, markdown, overflow, composer-edit, cadence, profile-swap, window-mgmt"
         ),
     )
     p.add_argument(
@@ -6325,10 +6530,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--diagnostic-input-timeout-s", type=float, default=12.0)
     p.add_argument("--diagnostic-input-connect-timeout-s", type=float, default=5.0)
     p.add_argument(
-        "--resize-shot-prefix",
-        default="C:\\tze_hud\\resize-hotkey",
-        help="Windows path prefix for resize-hotkey phase screenshots "
-        "(<prefix>-baseline.png / -grow.png / -shrink.png)",
+        "--resize-hotkey-settle-s",
+        type=float,
+        default=1.0,
+        help="Seconds to wait after each focused Ctrl-resize OS-input stage before observing SceneSnapshot bounds",
     )
     # Gate phase args (task 7.1)
     p.add_argument(
