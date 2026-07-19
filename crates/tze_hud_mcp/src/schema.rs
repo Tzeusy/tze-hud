@@ -143,37 +143,28 @@ fn tool_descriptors() -> Vec<Value> {
             "Inject text into the active composer draft buffer.",
         ),
         // ── Portal projection tools (cooperative HUD self-projection) ─────────
-        tool::<PortalProjectionListParams>(
-            "portal_projection_list",
-            "List bounded, content-free summaries of the resident caller's projections.",
-        ),
-        tool::<PortalProjectionAttachParams>(
-            "portal_projection_attach",
-            "Attach a new cooperative projection session to the in-process authority.",
-        ),
+        tool::<PortalProjectionListParams>("portal_projection_list", "List caller projections."),
+        tool::<PortalProjectionAttachParams>("portal_projection_attach", "Attach a projection."),
         tool::<PortalProjectionPublishParams>(
             "portal_projection_publish",
-            "Append output text to an existing projection transcript.",
+            "Append projection output.",
         ),
         tool::<PortalProjectionPublishStatusParams>(
             "portal_projection_publish_status",
-            "Publish a lifecycle status to an existing projection session.",
+            "Set projection status.",
         ),
         tool::<PortalProjectionGetPendingInputParams>(
             "portal_projection_get_pending_input",
-            "Drain HUD-originated pending input for a projection session.",
+            "Get pending HUD input.",
         ),
         tool::<PortalProjectionAcknowledgeInputParams>(
             "portal_projection_acknowledge_input",
-            "Acknowledge a delivered input item for a projection session.",
+            "Acknowledge HUD input.",
         ),
-        tool::<PortalProjectionDetachParams>(
-            "portal_projection_detach",
-            "Detach a projection session, purging its private state.",
-        ),
+        tool::<PortalProjectionDetachParams>("portal_projection_detach", "Detach a projection."),
         tool::<PortalProjectionCleanupParams>(
             "portal_projection_cleanup",
-            "Cleanup a projection session via owner or operator authority.",
+            "Clean up a projection.",
         ),
     ]
 }
@@ -187,11 +178,10 @@ mod tests {
     /// the budget guards below lock in the token-efficiency work (hud-hzsgp) and
     /// catch a regression back toward the pre-slimming verbosity.
     ///
-    /// The `portal_projection_*` schemas — the projection self-attach surface —
-    /// were slimmed from ~9,336 to ~6,836 serialized bytes by removing per-field
-    /// doc-comment redundancy while keeping every property, enum value, default,
-    /// and bound. The budgets carry modest headroom for small future additions;
-    /// tighten or raise them deliberately (never to smuggle prose back in).
+    /// The `portal_projection_*` schemas are a standing token tax. The
+    /// calibrated ceilings (5,742 portal / 17,956 total bytes) ratchet only
+    /// downward: every intentional expansion needs a new measured, reviewed
+    /// ceiling rather than silent headroom.
     #[test]
     fn tools_list_stays_within_token_budget() {
         let list = tools_list_result();
@@ -208,14 +198,12 @@ mod tests {
             .sum();
 
         assert!(
-            portal_bytes <= 7_500,
-            "portal_projection_* tools/list bytes {portal_bytes} exceeds budget 7500 \
-             (pre-slimming was 9336); did a verbose field doc creep back in?"
+            portal_bytes <= 5_742,
+            "portal_projection_* tools/list bytes {portal_bytes} exceeds the 5742-byte ratchet"
         );
         assert!(
-            full_bytes <= 20_000,
-            "full tools/list bytes {full_bytes} exceeds budget 20000 \
-             (pre-slimming was 21549)"
+            full_bytes <= 17_956,
+            "full tools/list bytes {full_bytes} exceeds the 17956-byte ratchet"
         );
     }
 

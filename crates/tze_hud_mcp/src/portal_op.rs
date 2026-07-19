@@ -159,6 +159,34 @@ pub enum PortalOp {
         /// validation / auth failure.
         reply: tokio::sync::oneshot::Sender<Result<(), PortalOpRejection>>,
     },
+    /// Publish a question and immediately return the bounded next viewer turn.
+    ///
+    /// This is the internal transport shape for an MCP
+    /// `portal_projection_publish` request with `expects_reply: true`. The
+    /// runtime performs the ordinary output publish first, then delegates the
+    /// inbox delivery to the same authority path used by
+    /// [`PortalOp::GetPendingInput`]. It is deliberately a separate variant so
+    /// ordinary output publishes retain their compact unit acknowledgement.
+    PublishOutputWithPendingInput {
+        /// Projection identifier matching a prior successful `Attach`.
+        projection_id: String,
+        /// Owner token returned by the `Attach` response.
+        owner_token: String,
+        /// Text to append to the transcript.
+        output_text: String,
+        /// Optional logical-unit ID for idempotent replay detection.
+        logical_unit_id: Option<String>,
+        /// Optional output kind as a snake_case string.
+        output_kind: Option<String>,
+        /// Optional viewer-facing content classification as a snake_case string.
+        content_classification: Option<String>,
+        /// Optional coalesce key for the transcript unit.
+        coalesce_key: Option<String>,
+        /// One-shot response channel. A successful response contains the bounded
+        /// inbox batch returned by the same delivery-state path as
+        /// [`PortalOp::GetPendingInput`].
+        reply: tokio::sync::oneshot::Sender<Result<PendingInputBatch, PortalOpRejection>>,
+    },
     /// Publish a lifecycle status to an existing projection session.
     ///
     /// This is step 3 of the cooperative workflow and the only way the owning
@@ -314,7 +342,8 @@ pub struct ProjectionListBatch {
 pub struct PendingInputEntry {
     /// Stable identifier of this input item, used to acknowledge it later.
     pub input_id: String,
-    /// Projection identifier this input was submitted to.
+    /// Retained for driver-side correlation; the MCP caller supplied this scope.
+    #[serde(skip_serializing)]
     pub projection_id: String,
     /// Operator-submitted text.
     pub submission_text: String,
@@ -322,10 +351,20 @@ pub struct PendingInputEntry {
     pub submitted_at_wall_us: u64,
     /// Wall-clock µs when the input expires if not acknowledged.
     pub expires_at_wall_us: u64,
-    /// Delivery state as a snake_case string (`delivered`, `deferred`, ...).
+    /// Omitted when the delivered default applies.
+    #[serde(skip_serializing_if = "is_delivered")]
     pub delivery_state: String,
-    /// Viewer-facing content classification as a snake_case string.
+    /// Omitted when the safe private default applies.
+    #[serde(skip_serializing_if = "is_private")]
     pub content_classification: String,
+}
+
+fn is_delivered(value: &str) -> bool {
+    value == "delivered"
+}
+
+fn is_private(value: &str) -> bool {
+    value == "private"
 }
 
 /// Result of a [`PortalOp::GetPendingInput`] drain.
@@ -340,4 +379,55 @@ pub struct PendingInputBatch {
     pub remaining_count: usize,
     /// Total byte size of still-pending items that did not fit.
     pub remaining_bytes: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn pending_input_wire_omits_request_echoes_and_default_metadata() {
+        let entry = PendingInputEntry {
+            input_id: "input-1".to_string(),
+            projection_id: "projection-1".to_string(),
+            submission_text: "hello".to_string(),
+            submitted_at_wall_us: 1,
+            expires_at_wall_us: 2,
+            delivery_state: "delivered".to_string(),
+            content_classification: "private".to_string(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(entry).expect("pending input must serialize"),
+            json!({
+                "input_id": "input-1",
+                "submission_text": "hello",
+                "submitted_at_wall_us": 1,
+                "expires_at_wall_us": 2,
+            }),
+            "the MCP caller already supplied projection_id and delivered/private are defaults"
+        );
+    }
+
+    #[test]
+    fn pending_input_wire_keeps_nondefault_metadata() {
+        let entry = PendingInputEntry {
+            input_id: "input-1".to_string(),
+            projection_id: "projection-1".to_string(),
+            submission_text: "hello".to_string(),
+            submitted_at_wall_us: 1,
+            expires_at_wall_us: 2,
+            delivery_state: "deferred".to_string(),
+            content_classification: "household".to_string(),
+        };
+
+        let wire = serde_json::to_value(entry).expect("pending input must serialize");
+        assert_eq!(wire["delivery_state"], "deferred");
+        assert_eq!(wire["content_classification"], "household");
+        assert!(
+            wire.get("projection_id").is_none(),
+            "projection_id is request-scoped and must not be repeated per item"
+        );
+    }
 }

@@ -284,5 +284,123 @@ class CandidatePacketTests(unittest.TestCase):
             self.assertIn(flow["flow_fingerprint"], self.packet)
 
 
+class CombinedCandidatePacketTests(unittest.TestCase):
+    def setUp(self):
+        self.root = SCRIPT.parents[2]
+        self.candidate = json.loads(
+            (
+                self.root
+                / "scripts/ci/token_footprint_combined_candidate_v2_hud_veklx.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.v1 = json.loads(
+            (self.root / "scripts/ci/token_footprint_candidate_v1.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.packet = (
+            self.root
+            / "docs/reports/token_footprint_combined_candidate_v2_hud_veklx_20260717.md"
+        ).read_text(encoding="utf-8")
+
+    def test_combined_candidate_stays_fail_closed_without_owner_authority(self):
+        self.assertEqual(
+            self.candidate["approval"]["status"], "candidate_unapproved"
+        )
+        self.assertIsNone(self.candidate["approval"]["decision_reference"])
+        report = checker.compare(copy.deepcopy(self.candidate), self.candidate)
+        self.assertEqual(report["status"], "baseline_incompatible")
+        self.assertIn("owner-approved", " ".join(report["incompatibilities"]))
+        self.assertIn("candidate_unapproved", self.packet)
+        self.assertIn("decision_reference: null", self.packet)
+
+    def test_combined_packet_covers_every_measurement_and_owner_decision_input(self):
+        rows = re.findall(
+            r"^\| `([^`]+)` \| `([^`]+)` \| (\d+) \| (\d+) \| (\d+) \| "
+            r"(\d+) \| (\d+) \| (\d+) \|$",
+            self.packet,
+            flags=re.MULTILINE,
+        )
+        expected_rows = []
+        for flow_name, flow in self.candidate["flows"].items():
+            for operation_name, operation in flow["operations"].items():
+                expected_rows.append(
+                    (
+                        flow_name,
+                        operation_name,
+                        str(operation["request"]["bytes"]),
+                        str(operation["request"]["tokens"]),
+                        str(operation["response"]["bytes"]),
+                        str(operation["response"]["tokens"]),
+                        str(operation["total"]["bytes"]),
+                        str(operation["total"]["tokens"]),
+                    )
+                )
+        self.assertEqual(sorted(rows), sorted(expected_rows))
+
+        flow_rows = re.findall(
+            r"^\| `([^`]+)` \| (\d+) \| (\d+) \|$",
+            self.packet,
+            flags=re.MULTILINE,
+        )
+        expected_flows = sorted(
+            (name, str(flow["total"]["bytes"]), str(flow["total"]["tokens"]))
+            for name, flow in self.candidate["flows"].items()
+        )
+        self.assertEqual(sorted(flow_rows), expected_flows)
+
+        tokenizer = self.candidate["tokenizer"]
+        for identity in (
+            tokenizer["name"],
+            tokenizer["implementation"],
+            tokenizer["version"],
+            tokenizer["vocab_fingerprint"],
+            self.candidate["fixture_fingerprint"],
+            "5,742",
+            "17,956",
+        ):
+            self.assertIn(identity, self.packet)
+        for flow in self.candidate["flows"].values():
+            self.assertIn(f"Canonical flow version: `{flow['flow_version']}`", self.packet)
+            self.assertIn(flow["flow_fingerprint"], self.packet)
+
+        v1_portal = self.v1["flows"]["portal_projection"]["operations"]
+        candidate_portal = self.candidate["flows"]["portal_projection"]["operations"]
+        gross_poll = v1_portal["portal_projection_get_pending_input"]["total"]
+        v1_turn = {
+            metric: sum(
+                v1_portal[operation]["total"][metric]
+                for operation in (
+                    "portal_projection_publish",
+                    "portal_projection_get_pending_input",
+                    "portal_projection_acknowledge_input",
+                )
+            )
+            for metric in ("bytes", "tokens")
+        }
+        candidate_turn = {
+            metric: sum(
+                candidate_portal[operation]["total"][metric]
+                for operation in (
+                    "portal_projection_publish",
+                    "portal_projection_acknowledge_input",
+                )
+            )
+            for metric in ("bytes", "tokens")
+        }
+        net = {
+            metric: v1_turn[metric] - candidate_turn[metric]
+            for metric in ("bytes", "tokens")
+        }
+        self.assertIn(
+            f"Gross avoided poll: `{gross_poll['bytes']} bytes / {gross_poll['tokens']} tokens`",
+            self.packet,
+        )
+        self.assertIn(
+            f"Net canonical-turn saving: `{net['bytes']} bytes / {net['tokens']} tokens`",
+            self.packet,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

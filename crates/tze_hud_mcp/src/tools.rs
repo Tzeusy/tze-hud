@@ -2248,31 +2248,29 @@ pub async fn handle_portal_projection_list(
 /// Parameters for `portal_projection_attach`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionAttachParams {
-    /// Session id (max 128 bytes), unique among active projections. Reuse needs a matching `idempotency_key`.
+    /// Session id, max 128 bytes; reuse needs matching `idempotency_key`.
     pub projection_id: String,
-    /// Human-readable label (max 128 bytes).
+    /// Label, max 128 bytes.
     pub display_name: String,
-    /// Optional key for replay-safe re-attach after an interruption. A matching
-    /// authenticated replay returns a fresh owner token and invalidates the old
-    /// token without extending the original expiry deadline.
+    /// Replay key; matching attach rotates the owner token.
     #[serde(default)]
     pub idempotency_key: Option<String>,
-    /// Optional provider: `codex`|`claude`|`opencode`|`other` (default `other`).
+    /// `codex`|`claude`|`opencode`|`other`; default `other`.
     #[serde(default)]
     pub provider_kind: Option<String>,
-    /// Optional classification: `public`|`household`|`private`|`sensitive` (default `private`).
+    /// `public`|`household`|`private`|`sensitive`; default `private`.
     #[serde(default)]
     pub content_classification: Option<String>,
-    /// Optional workspace hint (e.g. project directory).
+    /// Workspace hint.
     #[serde(default)]
     pub workspace_hint: Option<String>,
-    /// Optional repository hint (e.g. repo URL or name).
+    /// Repository hint.
     #[serde(default)]
     pub repository_hint: Option<String>,
-    /// Optional icon profile hint for visual identity.
+    /// Icon-profile hint.
     #[serde(default)]
     pub icon_profile_hint: Option<String>,
-    /// Optional HUD target hint for multi-display routing.
+    /// HUD target hint.
     #[serde(default)]
     pub hud_target: Option<String>,
 }
@@ -2285,7 +2283,8 @@ pub struct PortalProjectionAttachResult {
     /// Owner token (only present on success). Required for
     /// subsequent `portal_projection_publish` calls.
     pub owner_token: Option<String>,
-    /// Human-readable status summary.
+    /// Empty successful summaries are omitted from MCP JSON.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub status_summary: String,
 }
 
@@ -2354,7 +2353,7 @@ pub(crate) async fn handle_portal_projection_attach_with_render_wake(
         Ok(Ok(token)) => Ok(PortalProjectionAttachResult {
             accepted: true,
             owner_token: Some(token),
-            status_summary: "projection attached".to_string(),
+            status_summary: String::new(),
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
             error_code: rejection.error_code,
@@ -2371,25 +2370,25 @@ pub(crate) async fn handle_portal_projection_attach_with_render_wake(
 /// Parameters for `portal_projection_publish`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionPublishParams {
-    /// Projection session id from attach.
+    /// Session id.
     pub projection_id: String,
-    /// Owner token from attach.
+    /// Owner token.
     pub owner_token: String,
-    /// Text to append to the transcript.
+    /// Append text.
     pub output_text: String,
-    /// Optional logical-unit id for idempotent dedup (max 128 bytes).
+    /// Dedup id, max 128 bytes.
     #[serde(default)]
     pub logical_unit_id: Option<String>,
-    /// Optional kind: `assistant` (default)|`tool`|`status`|`error`|`other`.
+    /// `assistant` (default)|`tool`|`status`|`error`|`other`.
     #[serde(default)]
     pub output_kind: Option<String>,
-    /// Optional classification: `public`|`household`|`private`|`sensitive` (default `private`).
+    /// `public`|`household`|`private`|`sensitive`; default `private`.
     #[serde(default)]
     pub content_classification: Option<String>,
-    /// Optional key; repeated publishes with the same key collapse in-place instead of appending.
+    /// Repeated matching key coalesces in-place.
     #[serde(default)]
     pub coalesce_key: Option<String>,
-    /// Optional; `true` marks this output as a question awaiting a viewer reply.
+    /// `true` awaits a viewer reply.
     #[serde(default)]
     pub expects_reply: Option<bool>,
 }
@@ -2399,8 +2398,26 @@ pub struct PortalProjectionPublishParams {
 pub struct PortalProjectionPublishResult {
     /// `true` when the authority accepted and queued the output for rendering.
     pub accepted: bool,
-    /// Human-readable status summary.
+    /// Empty successful summaries are omitted from MCP JSON.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub status_summary: String,
+    /// The bounded next viewer turn returned only for question publishes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_input: Option<PortalProjectionPublishPendingInput>,
+}
+
+/// Bounded pending-input payload piggybacked on a question publish response.
+///
+/// `remaining_bytes` deliberately stays internal to the authority's existing
+/// poll back-pressure logic. The LLM-facing piggyback only needs the delivered
+/// items and compact count needed to know whether to publish again for another
+/// turn.
+#[derive(Debug, Serialize)]
+pub struct PortalProjectionPublishPendingInput {
+    /// HUD-originated items delivered through the normal inbox state machine.
+    pub items: Vec<crate::portal_op::PendingInputEntry>,
+    /// Eligible items that did not fit the bounded piggyback response.
+    pub remaining_count: usize,
 }
 
 /// Publish output text to an existing projection session (hud-bq0gl.2).
@@ -2423,7 +2440,10 @@ pub struct PortalProjectionPublishResult {
 /// `expects_reply` (a.k.a. `Question`) is an optional bool signaling that this
 /// output is a question awaiting a viewer reply. Omitted/`false` is the exact
 /// pre-existing behavior (no rendered cue); `true` drives a minimal, ambient,
-/// token-styled cue on the portal (hud-jip0k). Backward-compatible opt-in.
+/// token-styled cue on the portal (hud-jip0k) and may piggyback the next
+/// bounded pending HUD input in `pending_input`. An empty inbox omits that
+/// field entirely, preserving the compact legacy acknowledgement response.
+/// Backward-compatible opt-in.
 ///
 /// Accepted `output_kind` values (snake_case): `assistant` (default), `tool`,
 /// `status`, `error`, `other`. Any other value is rejected with
@@ -2472,16 +2492,72 @@ pub(crate) async fn handle_portal_projection_publish_with_render_wake(
         )
     })?;
 
+    let PortalProjectionPublishParams {
+        projection_id,
+        owner_token,
+        output_text,
+        logical_unit_id,
+        output_kind,
+        content_classification,
+        coalesce_key,
+        expects_reply,
+    } = p;
+
+    if expects_reply == Some(true) {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tx.send(crate::portal_op::PortalOp::PublishOutputWithPendingInput {
+            projection_id,
+            owner_token,
+            output_text,
+            logical_unit_id,
+            output_kind,
+            content_classification,
+            coalesce_key,
+            reply: reply_tx,
+        })
+        .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
+
+        return match reply_rx.await {
+            Ok(Ok(batch)) => {
+                // No eligible turn is represented by an omitted field rather
+                // than an empty object. This preserves the exact compact
+                // acknowledgement wire shape for a question that races ahead
+                // of viewer input, while a non-empty or back-pressured batch
+                // remains explicit to the caller.
+                let pending_input = if batch.items.is_empty() && batch.remaining_count == 0 {
+                    None
+                } else {
+                    Some(PortalProjectionPublishPendingInput {
+                        items: batch.items,
+                        remaining_count: batch.remaining_count,
+                    })
+                };
+                Ok(PortalProjectionPublishResult {
+                    accepted: true,
+                    status_summary: String::new(),
+                    pending_input,
+                })
+            }
+            Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
+                error_code: rejection.error_code,
+                operation: "portal_projection_publish",
+            }),
+            Err(_) => Err(McpError::Internal(
+                "portal authority did not respond (channel dropped)".to_string(),
+            )),
+        };
+    }
+
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     tx.send(crate::portal_op::PortalOp::PublishOutput {
-        projection_id: p.projection_id,
-        owner_token: p.owner_token,
-        output_text: p.output_text,
-        logical_unit_id: p.logical_unit_id,
-        output_kind: p.output_kind,
-        content_classification: p.content_classification,
-        coalesce_key: p.coalesce_key,
-        expects_reply: p.expects_reply,
+        projection_id,
+        owner_token,
+        output_text,
+        logical_unit_id,
+        output_kind,
+        content_classification,
+        coalesce_key,
+        expects_reply,
         reply: reply_tx,
     })
     .map_err(|_| McpError::Internal("portal authority channel closed".to_string()))?;
@@ -2490,7 +2566,8 @@ pub(crate) async fn handle_portal_projection_publish_with_render_wake(
     match reply_rx.await {
         Ok(Ok(())) => Ok(PortalProjectionPublishResult {
             accepted: true,
-            status_summary: "output queued for portal rendering".to_string(),
+            status_summary: String::new(),
+            pending_input: None,
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
             error_code: rejection.error_code,
@@ -2507,13 +2584,13 @@ pub(crate) async fn handle_portal_projection_publish_with_render_wake(
 /// Parameters for `portal_projection_publish_status`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionPublishStatusParams {
-    /// Projection session id from attach.
+    /// Session id.
     pub projection_id: String,
-    /// Owner token from attach.
+    /// Owner token.
     pub owner_token: String,
-    /// Lifecycle: `attached`|`active`|`degraded`|`hud_unavailable`|`detached`|`cleanup_pending`|`expired`. No `waiting`/`blocked` — use `status_text`.
+    /// `attached`|`active`|`degraded`|`hud_unavailable`|`detached`|`cleanup_pending`|`expired`.
     pub lifecycle_state: String,
-    /// Optional status detail (bounded by the authority's `max_status_text_bytes`).
+    /// Bounded status detail.
     #[serde(default)]
     pub status_text: Option<String>,
 }
@@ -2523,11 +2600,11 @@ pub struct PortalProjectionPublishStatusParams {
 pub struct PortalProjectionPublishStatusResult {
     /// `true` when the authority accepted and applied the lifecycle state.
     pub accepted: bool,
-    /// Human-readable status summary.
+    /// Empty successful summaries are omitted from MCP JSON.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub status_summary: String,
-    /// The applied lifecycle state echoed back as a snake_case string — the
-    /// observable round-trip confirming the viewer-facing state the authority
-    /// now holds for this projection.
+    /// Retained for direct callers; the MCP caller supplied this value.
+    #[serde(skip_serializing)]
     pub lifecycle_state: String,
 }
 
@@ -2608,7 +2685,7 @@ pub(crate) async fn handle_portal_projection_publish_status_with_render_wake(
     match reply_rx.await {
         Ok(Ok(lifecycle_state)) => Ok(PortalProjectionPublishStatusResult {
             accepted: true,
-            status_summary: "lifecycle status applied".to_string(),
+            status_summary: String::new(),
             lifecycle_state,
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
@@ -2626,17 +2703,17 @@ pub(crate) async fn handle_portal_projection_publish_status_with_render_wake(
 /// Parameters for `portal_projection_get_pending_input`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionGetPendingInputParams {
-    /// Projection session id from attach.
+    /// Session id.
     pub projection_id: String,
-    /// Owner token from attach.
+    /// Owner token.
     pub owner_token: String,
-    /// Optional cap on items returned (clamped to the authority's `max_poll_items`).
+    /// Item cap, clamped to `max_poll_items`.
     #[serde(default)]
     pub max_items: Option<usize>,
-    /// Optional cap on response bytes (clamped to the authority's `max_poll_response_bytes`).
+    /// Byte cap, clamped to `max_poll_response_bytes`.
     #[serde(default)]
     pub max_bytes: Option<usize>,
-    /// Optional long-poll wait in ms (clamped to 30000); blocks until input arrives or elapses. Omit/`0` returns immediately.
+    /// Wait ms, max 30000; omit/`0` returns immediately.
     #[serde(default)]
     pub wait_ms: Option<u64>,
 }
@@ -2652,7 +2729,8 @@ pub struct PortalProjectionGetPendingInputResult {
     pub remaining_count: usize,
     /// Total byte size of still-pending items that did not fit.
     pub remaining_bytes: usize,
-    /// Human-readable status summary.
+    /// Empty successful summaries are omitted from MCP JSON.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub status_summary: String,
 }
 
@@ -2752,7 +2830,7 @@ pub(crate) async fn handle_portal_projection_get_pending_input_with_render_wake(
                 items: batch.items,
                 remaining_count: batch.remaining_count,
                 remaining_bytes: batch.remaining_bytes,
-                status_summary: "pending input returned".to_string(),
+                status_summary: String::new(),
             });
         }
 
@@ -2767,18 +2845,18 @@ pub(crate) async fn handle_portal_projection_get_pending_input_with_render_wake(
 /// Parameters for `portal_projection_acknowledge_input`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionAcknowledgeInputParams {
-    /// Projection session id from attach.
+    /// Session id.
     pub projection_id: String,
-    /// Owner token from attach.
+    /// Owner token.
     pub owner_token: String,
-    /// Input item id from a `get_pending_input` response.
+    /// Input id from `get_pending_input`.
     pub input_id: String,
     /// `handled`|`deferred`|`rejected`.
     pub ack_state: String,
-    /// Optional message recorded with the acknowledgement.
+    /// Acknowledgement detail.
     #[serde(default)]
     pub ack_message: Option<String>,
-    /// Optional re-delivery floor (wall-clock µs); valid only with `deferred`.
+    /// Re-delivery wall-clock µs; only with `deferred`.
     #[serde(default)]
     pub not_before_wall_us: Option<u64>,
 }
@@ -2788,7 +2866,8 @@ pub struct PortalProjectionAcknowledgeInputParams {
 pub struct PortalProjectionAcknowledgeInputResult {
     /// `true` when the authority accepted the acknowledgement.
     pub accepted: bool,
-    /// Human-readable status summary.
+    /// Empty successful summaries are omitted from MCP JSON.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub status_summary: String,
 }
 
@@ -2865,7 +2944,7 @@ pub(crate) async fn handle_portal_projection_acknowledge_input_with_render_wake(
     match reply_rx.await {
         Ok(Ok(())) => Ok(PortalProjectionAcknowledgeInputResult {
             accepted: true,
-            status_summary: "input acknowledged".to_string(),
+            status_summary: String::new(),
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
             error_code: rejection.error_code,
@@ -2882,11 +2961,11 @@ pub(crate) async fn handle_portal_projection_acknowledge_input_with_render_wake(
 /// Parameters for `portal_projection_detach`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionDetachParams {
-    /// Projection session id from attach.
+    /// Session id.
     pub projection_id: String,
-    /// Owner token from attach.
+    /// Owner token.
     pub owner_token: String,
-    /// Human-readable reason for the audit log.
+    /// Audit reason.
     pub reason: String,
 }
 
@@ -2895,7 +2974,8 @@ pub struct PortalProjectionDetachParams {
 pub struct PortalProjectionDetachResult {
     /// `true` when the authority accepted the detach.
     pub accepted: bool,
-    /// Human-readable status summary.
+    /// Empty successful summaries are omitted from MCP JSON.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub status_summary: String,
 }
 
@@ -2961,7 +3041,7 @@ pub(crate) async fn handle_portal_projection_detach_with_render_wake(
     match reply_rx.await {
         Ok(Ok(())) => Ok(PortalProjectionDetachResult {
             accepted: true,
-            status_summary: "projection detached and private state purged".to_string(),
+            status_summary: String::new(),
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
             error_code: rejection.error_code,
@@ -2978,17 +3058,17 @@ pub(crate) async fn handle_portal_projection_detach_with_render_wake(
 /// Parameters for `portal_projection_cleanup`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PortalProjectionCleanupParams {
-    /// Projection session id from attach.
+    /// Session id.
     pub projection_id: String,
     /// `owner` or `operator`.
     pub cleanup_authority: String,
-    /// Owner token (required when `cleanup_authority = owner`).
+    /// Owner token when authority is `owner`.
     #[serde(default)]
     pub owner_token: Option<String>,
-    /// Operator credential (required when `cleanup_authority = operator`).
+    /// Operator credential when authority is `operator`.
     #[serde(default)]
     pub operator_authority: Option<String>,
-    /// Human-readable reason for the audit log.
+    /// Audit reason.
     pub reason: String,
 }
 
@@ -2997,7 +3077,8 @@ pub struct PortalProjectionCleanupParams {
 pub struct PortalProjectionCleanupResult {
     /// `true` when the authority accepted the cleanup.
     pub accepted: bool,
-    /// Human-readable status summary.
+    /// Empty successful summaries are omitted from MCP JSON.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub status_summary: String,
 }
 
@@ -3098,7 +3179,7 @@ pub(crate) async fn handle_portal_projection_cleanup_with_render_wake(
     match reply_rx.await {
         Ok(Ok(())) => Ok(PortalProjectionCleanupResult {
             accepted: true,
-            status_summary: "projection cleanup accepted and private state purged".to_string(),
+            status_summary: String::new(),
         }),
         Ok(Err(rejection)) => Err(McpError::ProjectionRejected {
             error_code: rejection.error_code,
@@ -6435,6 +6516,196 @@ mod tests {
         assert_eq!(p.expects_reply, Some(true));
     }
 
+    /// hud-vconx: a question publish carries the next bounded viewer turn in
+    /// the same MCP response, eliminating the otherwise separate poll. The
+    /// input still comes from the driver/authority delivery path; this test
+    /// only pins the MCP transport result and its compact back-pressure count.
+    #[tokio::test]
+    async fn portal_publish_expects_reply_piggybacks_bounded_pending_input() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        let responder = tokio::spawn(async move {
+            match rx.recv().await.expect("publish op must be sent") {
+                crate::portal_op::PortalOp::PublishOutputWithPendingInput { reply, .. } => {
+                    reply
+                        .send(Ok(crate::portal_op::PendingInputBatch {
+                            items: vec![crate::portal_op::PendingInputEntry {
+                                input_id: "input-1".to_string(),
+                                projection_id: "p1".to_string(),
+                                submission_text: "Ship it".to_string(),
+                                submitted_at_wall_us: 10,
+                                expires_at_wall_us: 20,
+                                delivery_state: "delivered".to_string(),
+                                content_classification: "private".to_string(),
+                            }],
+                            remaining_count: 2,
+                            remaining_bytes: 17,
+                        }))
+                        .expect("publish reply must send");
+                }
+                other => panic!("unexpected portal op: {other:?}"),
+            }
+        });
+
+        let result = handle_portal_projection_publish(
+            json!({
+                "projection_id": "p1",
+                "owner_token": "t1",
+                "output_text": "Which release should I ship?",
+                "expects_reply": true
+            }),
+            Some(&tx),
+        )
+        .await
+        .expect("publish must succeed");
+        responder.await.expect("responder must finish");
+
+        let pending = result
+            .pending_input
+            .expect("question publishes must return the piggybacked inbox batch");
+        assert_eq!(pending.items.len(), 1);
+        assert_eq!(pending.items[0].input_id, "input-1");
+        assert_eq!(pending.remaining_count, 2);
+    }
+
+    #[tokio::test]
+    async fn portal_publish_piggyback_uses_the_dieted_compact_wire_shape() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        let responder = tokio::spawn(async move {
+            match rx.recv().await.expect("publish op must be sent") {
+                crate::portal_op::PortalOp::PublishOutputWithPendingInput { reply, .. } => {
+                    reply
+                        .send(Ok(crate::portal_op::PendingInputBatch {
+                            items: vec![crate::portal_op::PendingInputEntry {
+                                input_id: "input-1".to_string(),
+                                projection_id: "p1".to_string(),
+                                submission_text: "Ship it".to_string(),
+                                submitted_at_wall_us: 10,
+                                expires_at_wall_us: 20,
+                                delivery_state: "delivered".to_string(),
+                                content_classification: "private".to_string(),
+                            }],
+                            remaining_count: 2,
+                            remaining_bytes: 17,
+                        }))
+                        .expect("publish reply must send");
+                }
+                other => panic!("unexpected portal op: {other:?}"),
+            }
+        });
+
+        let result = handle_portal_projection_publish(
+            json!({
+                "projection_id": "p1",
+                "owner_token": "t1",
+                "output_text": "Which release should I ship?",
+                "expects_reply": true
+            }),
+            Some(&tx),
+        )
+        .await
+        .expect("publish must succeed");
+        responder.await.expect("responder must finish");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("publish result must serialize"),
+            json!({
+                "accepted": true,
+                "pending_input": {
+                    "items": [{
+                        "input_id": "input-1",
+                        "submission_text": "Ship it",
+                        "submitted_at_wall_us": 10,
+                        "expires_at_wall_us": 20,
+                    }],
+                    "remaining_count": 2,
+                }
+            }),
+            "the combined candidate must omit the fixed summary and each request/default echo"
+        );
+    }
+
+    /// An opted-in question with no eligible viewer turn keeps the publish
+    /// response byte-identical to the compact legacy acknowledgement. This
+    /// makes the empty piggyback overhead zero while preserving the ordinary
+    /// poll as the next action when input arrives later.
+    #[tokio::test]
+    async fn portal_publish_expects_reply_omits_empty_piggyback_payload() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        let responder = tokio::spawn(async move {
+            match rx.recv().await.expect("publish op must be sent") {
+                crate::portal_op::PortalOp::PublishOutputWithPendingInput { reply, .. } => {
+                    reply
+                        .send(Ok(crate::portal_op::PendingInputBatch {
+                            items: Vec::new(),
+                            remaining_count: 0,
+                            remaining_bytes: 0,
+                        }))
+                        .expect("publish reply must send");
+                }
+                other => panic!("unexpected portal op: {other:?}"),
+            }
+        });
+
+        let result = handle_portal_projection_publish(
+            json!({
+                "projection_id": "p1",
+                "owner_token": "t1",
+                "output_text": "Which release should I ship?",
+                "expects_reply": true
+            }),
+            Some(&tx),
+        )
+        .await
+        .expect("publish must succeed");
+        responder.await.expect("responder must finish");
+
+        assert!(result.pending_input.is_none());
+        let wire = serde_json::to_value(result).expect("publish result must serialize");
+        assert!(
+            wire.get("pending_input").is_none(),
+            "an empty question-publish piggyback must add no response field"
+        );
+    }
+
+    /// Non-question publishes retain the compact legacy response exactly: no
+    /// empty nested inbox object is serialized into every output update.
+    #[tokio::test]
+    async fn portal_publish_without_expects_reply_omits_pending_input() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::portal_op::PortalOp>();
+        let responder = tokio::spawn(async move {
+            match rx.recv().await.expect("publish op must be sent") {
+                crate::portal_op::PortalOp::PublishOutput {
+                    expects_reply,
+                    reply,
+                    ..
+                } => {
+                    assert_eq!(expects_reply, None);
+                    reply.send(Ok(())).expect("publish reply must send");
+                }
+                other => panic!("unexpected portal op: {other:?}"),
+            }
+        });
+
+        let result = handle_portal_projection_publish(
+            json!({
+                "projection_id": "p1",
+                "owner_token": "t1",
+                "output_text": "Ambient progress update"
+            }),
+            Some(&tx),
+        )
+        .await
+        .expect("publish must succeed");
+        responder.await.expect("responder must finish");
+
+        assert!(result.pending_input.is_none());
+        let wire = serde_json::to_value(result).expect("publish result must serialize");
+        assert!(
+            wire.get("pending_input").is_none(),
+            "non-opt-in publishes must not pay empty response overhead"
+        );
+    }
+
     #[tokio::test]
     async fn portal_list_rejects_caller_supplied_scope_or_credentials() {
         for params in [
@@ -6825,8 +7096,57 @@ mod tests {
         assert!(result.accepted);
         assert_eq!(
             result.lifecycle_state, "degraded",
-            "the applied lifecycle state must round-trip back to the MCP caller"
+            "the applied lifecycle state remains available to direct handler callers"
         );
+        assert_eq!(
+            serde_json::to_value(result).expect("status result must serialize"),
+            json!({ "accepted": true }),
+            "successful status responses must not echo the caller-supplied lifecycle state or a fixed summary"
+        );
+    }
+
+    #[test]
+    fn portal_success_results_omit_empty_status_summaries() {
+        let attach = PortalProjectionAttachResult {
+            accepted: true,
+            owner_token: Some("owner".to_string()),
+            status_summary: String::new(),
+        };
+        let pending = PortalProjectionGetPendingInputResult {
+            accepted: true,
+            items: Vec::new(),
+            remaining_count: 0,
+            remaining_bytes: 0,
+            status_summary: String::new(),
+        };
+        let acknowledged = PortalProjectionAcknowledgeInputResult {
+            accepted: true,
+            status_summary: String::new(),
+        };
+        let detached = PortalProjectionDetachResult {
+            accepted: true,
+            status_summary: String::new(),
+        };
+        let cleaned = PortalProjectionCleanupResult {
+            accepted: true,
+            status_summary: String::new(),
+        };
+
+        for result in [
+            serde_json::to_value(attach),
+            serde_json::to_value(pending),
+            serde_json::to_value(acknowledged),
+            serde_json::to_value(detached),
+            serde_json::to_value(cleaned),
+        ] {
+            assert!(
+                result
+                    .expect("success result must serialize")
+                    .get("status_summary")
+                    .is_none(),
+                "a fixed success summary is redundant MCP payload"
+            );
+        }
     }
 
     /// A `publish_status` authority rejection must surface as a structured
